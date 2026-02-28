@@ -21,7 +21,7 @@ REQUEST_TIMEOUT = 120          # seconds per LLM call (gpt-4o-mini is fast)
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_LABELING_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 300
+DEFAULT_CONCURRENCY = 150
 CONFIDENCE_THRESHOLD = 0.60
 
 # ─── Conversation Truncation (Pass 1) ───────────────────
@@ -57,7 +57,7 @@ CONSISTENCY_RULES = [
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_SCORING_MODEL = "gpt-4o-mini"
-DEFAULT_SCORING_CONCURRENCY = 300
+DEFAULT_SCORING_CONCURRENCY = 150
 
 VALUE_WEIGHTS = {
     "complexity": 0.25,
