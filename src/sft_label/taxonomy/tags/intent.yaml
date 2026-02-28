@@ -1,0 +1,87 @@
+# Intent tags - User's primary goal or motivation
+# Single-select: each query has exactly one primary intent
+# This determines the appropriate response style and depth
+
+- id: learn
+  name: Learn
+  category: Intent
+  description: >
+    User wants to understand a concept, technique, or codebase.
+    Response should be educational: explain why, provide context,
+    use analogies, and build understanding progressively.
+  aliases:
+  - understand
+  - teach-me
+  - how-does-it-work
+  examples:
+  - "How does the JavaScript event loop work?"
+  - "Explain Rust lifetimes to me, I come from C++"
+  - "What's the difference between processes and threads?"
+
+- id: build
+  name: Build
+  category: Intent
+  description: >
+    User wants to create new functionality or a new project.
+    Response should be implementation-focused: provide working code,
+    architecture decisions, and practical guidance.
+  aliases:
+  - create
+  - implement
+  - develop
+  - make
+  examples:
+  - "Build a REST API with authentication using FastAPI"
+  - "Create a Playwright E2E testing framework"
+  - "Implement Stripe payment integration in Next.js"
+
+- id: debug
+  name: Debug
+  category: Intent
+  description: >
+    User wants to find and fix a problem in existing code.
+    Response should be diagnostic: identify root cause, explain
+    what went wrong, and provide a targeted fix.
+  aliases:
+  - fix
+  - troubleshoot
+  - diagnose
+  - why-is-this-broken
+  examples:
+  - "This Rust code won't compile, lifetime errors everywhere"
+  - "My Spark job fails when upstream schema changes"
+  - "Memory leak in this Go service after running for 3 days"
+
+- id: review
+  name: Review
+  category: Intent
+  description: >
+    User wants feedback on existing code quality, architecture,
+    or approach. Response should be evaluative: identify issues,
+    suggest improvements, and assess trade-offs.
+  aliases:
+  - evaluate
+  - assess
+  - critique
+  - feedback
+  examples:
+  - "Review this PR for the payment module"
+  - "Is this database schema well-designed?"
+  - "What are the security issues in this code?"
+
+- id: decide
+  name: Decide
+  category: Intent
+  description: >
+    User wants help choosing between options or making a technical
+    decision. Response should be analytical: compare alternatives,
+    present trade-offs, and recommend based on context.
+  aliases:
+  - choose
+  - compare
+  - which-should-i-use
+  - trade-offs
+  examples:
+  - "PostgreSQL vs CockroachDB for multi-tenant SaaS?"
+  - "Should we use microservices or start with a monolith?"
+  - "Next.js vs Remix for our new frontend?"

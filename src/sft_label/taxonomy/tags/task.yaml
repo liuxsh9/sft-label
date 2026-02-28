@@ -1,0 +1,194 @@
+- id: api-design
+  name: API Design
+  category: Task
+  aliases:
+  - api-design
+  description: Design application programming interfaces. Define endpoints, request/response
+    formats, and API contracts.
+  source: curated-list, educational-sources
+- id: bug-fixing
+  name: Bug Fixing
+  category: Task
+  aliases:
+  - bug-fix
+  - fix-bug
+  - debugging-task
+  description: Fix bugs and errors in existing code. Identify root cause and correct
+    faulty logic or implementation.
+  source: task-expansion
+- id: code-completion
+  name: Code Completion
+  category: Task
+  aliases:
+  - completion
+  - autocomplete
+  description: Complete partial code or suggest next code snippets. Auto-complete
+    function calls, variable names, or code blocks.
+  source: curated-list
+- id: code-explanation
+  name: Code Explanation
+  category: Task
+  aliases:
+  - explanation
+  - explain
+  description: Explain how code works. Describe logic, algorithms, and implementation
+    details in natural language.
+  source: curated-list
+- id: code-optimization
+  name: Code Optimization
+  category: Task
+  aliases:
+  - optimization
+  - optimize
+  description: Optimize code for better performance, efficiency, or resource usage.
+    Improve algorithms and data structures.
+  source: curated-list
+- id: code-refactoring
+  name: Code Refactoring
+  category: Task
+  aliases:
+  - refactoring
+  - refactor
+  description: Restructure existing code without changing behavior. Improve code quality,
+    readability, and maintainability.
+  source: curated-list
+- id: code-review-task
+  name: Code Review Task
+  category: Task
+  aliases:
+  - code-review-task
+  - review
+  - peer-review
+  description: Review code and provide feedback. Identify issues, suggest improvements,
+    and ensure quality standards.
+  source: task-expansion
+- id: code-translation
+  name: Code Translation
+  category: Task
+  aliases:
+  - translation
+  - transpilation
+  description: Translate code from one programming language to another. Convert between
+    languages or paradigms.
+  source: curated-list
+- id: configuration
+  name: Configuration
+  category: Task
+  aliases:
+  - config
+  - configuration
+  description: Configure software settings, environment variables, or build tools.
+    Set up project configuration files.
+  source: curated-list
+- id: dependency-management
+  name: Dependency Management
+  category: Task
+  aliases:
+  - dependencies
+  description: Manage project dependencies and packages. Add, update, or remove external
+    libraries and versions.
+  source: curated-list
+- id: deployment
+  name: Deployment
+  category: Task
+  aliases:
+  - deploy
+  - deployment
+  description: Deploy applications to production or staging environments. Set up deployment
+    pipelines and infrastructure.
+  source: curated-list
+- id: documentation
+  name: Documentation
+  category: Task
+  aliases:
+  - docs
+  - documentation
+  description: Write documentation for code, APIs, or projects. Create README files,
+    API docs, or inline comments.
+  source: curated-list, educational-sources
+- id: error-handling-task
+  name: Error Handling Task
+  category: Task
+  aliases:
+  - error-handling-task
+  - add-error-handling
+  - exception-handling-task
+  - validation-task
+  description: Add error handling and validation to code. Implement try-catch blocks,
+    input validation, and graceful degradation.
+  source: task-expansion
+- id: feature-implementation
+  name: Feature Implementation
+  category: Task
+  aliases:
+  - feature-development
+  - implementation
+  - feature
+  description: Implement new features or functionality. Add new capabilities to existing
+    codebase.
+  source: task-expansion
+- id: logging
+  name: Logging
+  category: Task
+  aliases:
+  - logging
+  - add-logs
+  - instrumentation
+  description: Add logging statements and instrumentation to code. Insert log messages
+    for debugging and monitoring.
+  source: task-expansion
+- id: migration
+  name: Migration
+  category: Task
+  aliases:
+  - migration
+  - upgrade
+  description: Migrate code to newer versions, frameworks, or platforms. Upgrade dependencies
+    or refactor for compatibility.
+  source: curated-list
+- id: monitoring
+  name: Monitoring
+  category: Task
+  aliases:
+  - monitoring
+  - observability
+  description: Set up monitoring and observability for applications. Configure metrics,
+    alerts, and dashboards.
+  source: curated-list
+- id: performance-analysis
+  name: Performance Analysis
+  category: Task
+  aliases:
+  - profiling
+  - performance
+  description: Analyze and profile code performance. Identify bottlenecks, measure
+    execution time, and optimize resource usage.
+  source: curated-list
+- id: schema-design
+  name: Schema Design
+  category: Task
+  aliases:
+  - schema-design
+  - data-modeling
+  description: Design database schemas and data models. Define tables, relationships,
+    and constraints.
+  source: curated-list
+- id: security-audit
+  name: Security Audit
+  category: Task
+  aliases:
+  - security-audit
+  - vulnerability-scan
+  description: Audit code for security vulnerabilities. Scan for common security issues
+    and recommend fixes.
+  source: curated-list
+- id: testing-task
+  name: Testing Task
+  category: Task
+  aliases:
+  - testing-task
+  - write-tests-task
+  - test-writing
+  description: Write tests for code. Create unit tests, integration tests, or end-to-end
+    tests.
+  source: task-expansion

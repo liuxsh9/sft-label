@@ -1,0 +1,360 @@
+# Domain tags - Application domains and scenarios
+# Consolidated from 57 → 41 → 38 tags
+# v3.1 changes: merged mlops→machine-learning, observability→devops,
+# site-reliability-engineering→devops (kept as aliases)
+
+- id: api-development
+  name: API Development
+  category: Domain
+  description: Designing and building APIs for software integration
+  aliases:
+  - api-dev
+  - api-building
+
+- id: automation
+  name: Automation
+  category: Domain
+  description: Automating repetitive tasks and workflows
+  aliases:
+  - automation
+  - scripting
+
+- id: bioinformatics
+  name: Bioinformatics
+  category: Domain
+  description: Computational methods applied to biological data analysis including genomics and proteomics
+  aliases:
+  - bioinformatics
+  - computational-biology
+
+- id: blockchain
+  name: Blockchain
+  category: Domain
+  description: Distributed ledger technology, smart contracts, and decentralized applications
+  aliases:
+  - blockchain
+  - web3
+  - dapp
+  - smart-contracts
+  - defi
+
+- id: cli-tool
+  name: CLI Tool
+  category: Domain
+  description: Command-line interface tools and utilities
+  aliases:
+  - cli
+  - command-line
+
+- id: cloud-computing
+  name: Cloud Computing
+  category: Domain
+  description: Building and deploying applications on cloud platforms, including serverless and edge computing
+  aliases:
+  - cloud
+  - cloud-native
+  - serverless
+  - faas
+  - edge-computing
+
+- id: compiler-development
+  name: Compiler Development
+  category: Domain
+  description: Building compilers, interpreters, and language tooling
+  aliases:
+  - compiler
+  - language-tooling
+  - interpreter
+
+- id: compliance
+  name: Compliance
+  category: Domain
+  description: Ensuring applications meet regulatory requirements like GDPR, HIPAA, and SOC 2
+  aliases:
+  - compliance
+  - regulatory
+  - governance
+
+- id: computer-vision
+  name: Computer Vision
+  category: Domain
+  description: Image and video analysis using machine learning
+  aliases:
+  - cv
+  - image-processing
+  - vision
+
+- id: cybersecurity
+  name: Cybersecurity
+  category: Domain
+  description: Protecting systems and data from security threats
+  aliases:
+  - cybersec
+  - infosec
+  - appsec
+
+- id: data-engineering
+  name: Data Engineering
+  category: Domain
+  description: Building and maintaining data pipelines, ETL processes, warehouses, and data infrastructure
+  aliases:
+  - data-engineering
+  - data-pipelines
+  - etl
+  - data-integration
+  - dataops
+
+- id: data-science
+  name: Data Science
+  category: Domain
+  description: Extracting insights from data using statistical methods
+  aliases:
+  - data-science
+  - ds
+  - analytics
+
+- id: database-administration
+  name: Database Administration
+  category: Domain
+  description: Managing and optimizing database systems
+  aliases:
+  - dba
+  - database-admin
+
+- id: desktop-application
+  name: Desktop Application
+  category: Domain
+  description: Building native applications for desktop operating systems
+  aliases:
+  - desktop
+  - desktop-app
+  - gui-app
+
+- id: devops
+  name: DevOps
+  category: Domain
+  description: Practices combining software development and IT operations, including SRE, observability, and platform engineering
+  aliases:
+  - devops
+  - dev-ops
+  - platform-engineering
+  - sre
+  - site-reliability-engineering
+  - reliability-engineering
+  - o11y
+  - monitoring-systems
+
+- id: e-commerce
+  name: E-commerce
+  category: Domain
+  description: Building online shopping and payment systems
+  aliases:
+  - ecommerce
+  - online-store
+  - shopping
+
+- id: embedded-systems
+  name: Embedded Systems
+  category: Domain
+  description: Programming hardware devices with dedicated functions
+  aliases:
+  - embedded
+  - firmware
+
+- id: financial-technology
+  name: Financial Technology
+  category: Domain
+  description: Technology solutions for financial services
+  aliases:
+  - fintech
+  - finance
+
+- id: game-development
+  name: Game Development
+  category: Domain
+  description: Creating video games and interactive entertainment
+  aliases:
+  - gamedev
+  - game-dev
+  - gaming
+
+- id: geospatial
+  name: Geospatial
+  category: Domain
+  description: Geographic information systems and spatial data analysis
+  aliases:
+  - geospatial
+  - gis
+  - geographic-information-systems
+
+- id: graphics-and-xr
+  name: Graphics and XR
+  category: Domain
+  description: Computer graphics, rendering, shaders, augmented reality, and virtual reality
+  aliases:
+  - computer-graphics
+  - graphics
+  - 3d-graphics
+  - augmented-reality
+  - ar
+  - virtual-reality
+  - vr
+  - mixed-reality
+
+- id: healthcare-technology
+  name: Healthcare Technology
+  category: Domain
+  description: Technology solutions for healthcare and medical applications
+  aliases:
+  - healthtech
+  - medtech
+  - health-it
+
+- id: accessibility
+  name: Accessibility
+  category: Domain
+  description: Designing applications usable by people with disabilities following WCAG standards
+  aliases:
+  - accessibility
+  - a11y
+  - inclusive-design
+
+- id: internationalization
+  name: Internationalization
+  category: Domain
+  description: Designing applications to support multiple languages, locales, and cultural conventions
+  aliases:
+  - internationalization
+  - i18n
+  - localization
+  - l10n
+
+- id: iot
+  name: IoT
+  category: Domain
+  description: Internet of Things devices and connectivity
+  aliases:
+  - iot
+  - internet-of-things
+  - connected-devices
+
+- id: machine-learning
+  name: Machine Learning
+  category: Domain
+  description: Building systems that learn from data, including deep learning, neural networks, and ML operations (MLOps)
+  aliases:
+  - ml
+  - machine-learning
+  - deep-learning
+  - neural-networks
+  - mlops
+  - ml-ops
+
+- id: media-processing
+  name: Media Processing
+  category: Domain
+  description: Audio and video processing, encoding, streaming, and manipulation
+  aliases:
+  - audio-processing
+  - video-processing
+  - video-encoding
+  - video-streaming
+  - sound-processing
+
+- id: mobile-development
+  name: Mobile Development
+  category: Domain
+  description: Building applications for mobile devices
+  aliases:
+  - mobile
+  - mobile-dev
+  - mobile-app
+
+- id: natural-language-processing
+  name: Natural Language Processing
+  category: Domain
+  description: Processing and understanding human language with computers
+  aliases:
+  - nlp
+  - text-processing
+  - language-ai
+
+- id: network-programming
+  name: Network Programming
+  category: Domain
+  description: Building software that communicates over networks
+  aliases:
+  - networking
+  - network-dev
+  - socket-programming
+
+- id: operating-systems
+  name: Operating Systems
+  category: Domain
+  description: Developing operating system components and kernels
+  aliases:
+  - os
+  - kernel
+  - os-dev
+
+- id: real-time-systems
+  name: Real-time Systems
+  category: Domain
+  description: Systems with strict timing constraints requiring deterministic response times
+  aliases:
+  - real-time-systems
+  - rtos
+  - real-time
+
+- id: robotics
+  name: Robotics
+  category: Domain
+  description: Programming robots and autonomous systems
+  aliases:
+  - robotics
+  - robot
+  - ros
+
+- id: scientific-computing
+  name: Scientific Computing
+  category: Domain
+  description: Computational methods for scientific research, simulation, and numerical analysis
+  aliases:
+  - scientific
+  - hpc
+  - numerical-computing
+  - simulation
+
+- id: search-engineering
+  name: Search Engineering
+  category: Domain
+  description: Building and optimizing search systems including indexing, relevance tuning, and query processing
+  aliases:
+  - search-engineering
+  - information-retrieval
+
+- id: systems-programming
+  name: Systems Programming
+  category: Domain
+  description: Low-level programming for system software
+  aliases:
+  - systems
+  - low-level
+  - system-dev
+
+- id: web-backend
+  name: Web Backend
+  category: Domain
+  description: Server-side web application development
+  aliases:
+  - backend
+  - server-side
+
+- id: web-frontend
+  name: Web Frontend
+  category: Domain
+  description: Client-side web application development
+  aliases:
+  - frontend
+  - client-side
+  - ui-development

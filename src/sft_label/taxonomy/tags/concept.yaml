@@ -1,0 +1,331 @@
+# Concept tags - Programming concepts and knowledge areas
+# Consolidated from 106 → 25 tags
+# Sub-concepts are captured as aliases for detection purposes
+
+# === Fundamentals ===
+
+- id: control-flow
+  name: Control Flow
+  category: Concept
+  subcategory: Fundamentals
+  description: Program execution order including conditionals, loops, branching, and iteration
+  aliases:
+  - conditionals
+  - loops
+  - branching
+  - switch
+  - if-else
+
+- id: data-types
+  name: Data Types
+  category: Concept
+  subcategory: Fundamentals
+  description: Primitive and composite data types, type coercion, and type basics
+  aliases:
+  - types
+  - primitives
+  - strings
+  - numbers
+  - booleans
+
+- id: functions
+  name: Functions
+  category: Concept
+  subcategory: Fundamentals
+  description: Function definition, invocation, closures, lambdas, higher-order functions, and scope
+  aliases:
+  - closures
+  - lambda
+  - lambda-functions
+  - higher-order-functions
+  - callbacks
+  - scope
+  - hoisting
+
+- id: data-structures
+  name: Data Structures
+  category: Concept
+  subcategory: Fundamentals
+  description: Arrays, linked lists, hash tables, stacks, queues, trees, graphs, and heaps
+  aliases:
+  - arrays
+  - linked-lists
+  - hash-tables
+  - hash-map
+  - dictionary
+  - stacks
+  - queues
+  - trees
+  - graphs
+  - heaps
+
+- id: object-oriented-programming
+  name: Object-Oriented Programming
+  category: Concept
+  subcategory: Fundamentals
+  description: Classes, objects, encapsulation, inheritance, polymorphism, and abstraction
+  aliases:
+  - oop
+  - classes
+  - encapsulation
+  - inheritance
+  - polymorphism
+  - abstract-classes
+
+- id: functional-programming
+  name: Functional Programming
+  category: Concept
+  subcategory: Fundamentals
+  description: Pure functions, immutability, composition, monads, and declarative style
+  aliases:
+  - fp
+  - pure-functions
+  - immutability
+  - composition
+
+- id: recursion
+  name: Recursion
+  category: Concept
+  subcategory: Fundamentals
+  description: Self-referential function calls, base cases, and recursive problem decomposition
+  aliases:
+  - recursive
+  - tail-recursion
+
+# === Advanced ===
+
+- id: concurrency
+  name: Concurrency
+  category: Concept
+  subcategory: Advanced
+  description: Parallel execution, threads, processes, async/await, coroutines, synchronization primitives, and race conditions
+  aliases:
+  - parallelism
+  - threads
+  - thread-pools
+  - processes
+  - coroutines
+  - async-await
+  - asynchronous
+  - mutex
+  - semaphores
+  - deadlock
+  - race-conditions
+  - channels
+
+- id: memory-management
+  name: Memory Management
+  category: Concept
+  subcategory: Advanced
+  description: Stack vs heap, garbage collection, pointers, references, and memory layout
+  aliases:
+  - garbage-collection
+  - pointers
+  - references
+  - malloc
+  - free
+  - memory-leak
+  - stack-vs-heap
+
+- id: ownership
+  name: Ownership
+  category: Concept
+  subcategory: Advanced
+  description: Rust ownership model, borrow checker, lifetimes, and move semantics
+  language_scope:
+  - rust
+  aliases:
+  - borrow-checker
+  - lifetimes
+  - borrowing
+  - move-semantics
+
+- id: type-system
+  name: Type System
+  category: Concept
+  subcategory: Advanced
+  description: Generics, type inference, traits, interfaces, algebraic types, and type safety
+  aliases:
+  - generics
+  - type-inference
+  - traits
+  - interfaces
+  - option-types
+  - result-types
+  - algebraic-types
+  - type-classes
+
+- id: error-handling
+  name: Error Handling
+  category: Concept
+  subcategory: Advanced
+  description: Exception handling, error propagation, try/catch, Result/Option patterns
+  aliases:
+  - exception-handling
+  - try-catch
+  - error-propagation
+  - exceptions
+
+- id: metaprogramming
+  name: Metaprogramming
+  category: Concept
+  subcategory: Advanced
+  description: Reflection, macros, decorators, code generation, and compile-time programming
+  aliases:
+  - reflection
+  - macros
+  - decorators
+  - annotations
+  - code-generation-concept
+
+- id: algorithms
+  name: Algorithms
+  category: Concept
+  subcategory: Advanced
+  description: Algorithm design, complexity analysis, sorting, searching, dynamic programming, and greedy approaches
+  aliases:
+  - dynamic-programming
+  - dp
+  - greedy-algorithms
+  - sorting
+  - searching
+  - big-o
+  - complexity
+
+- id: iterators
+  name: Iterators
+  category: Concept
+  subcategory: Advanced
+  description: Iterators, generators, streams, and lazy evaluation patterns
+  aliases:
+  - generators
+  - streams
+  - lazy-evaluation
+  - yield
+
+# === Engineering ===
+
+- id: design-patterns
+  name: Design Patterns
+  category: Concept
+  subcategory: Engineering
+  description: GoF patterns, SOLID principles, dependency injection, and architectural patterns
+  aliases:
+  - factory-pattern
+  - singleton-pattern
+  - observer-pattern
+  - strategy-pattern
+  - dependency-injection
+  - solid-principles
+  - mvc
+  - mvvm
+
+- id: architecture
+  name: Architecture
+  category: Concept
+  subcategory: Engineering
+  description: System architecture including microservices, monolithic, event-driven, CQRS, and distributed systems
+  aliases:
+  - microservices
+  - monolithic-architecture
+  - event-driven-architecture
+  - cqrs
+  - cap-theorem
+  - load-balancing
+  - distributed-systems
+
+- id: testing
+  name: Testing
+  category: Concept
+  subcategory: Engineering
+  description: Unit testing, integration testing, TDD, mocking, code coverage, and test strategies
+  aliases:
+  - unit-testing
+  - integration-testing
+  - test-driven-development
+  - tdd
+  - code-coverage
+  - mocking
+  - end-to-end-testing
+
+- id: security
+  name: Security
+  category: Concept
+  subcategory: Engineering
+  description: Authentication, authorization, encryption, common vulnerabilities (XSS, CSRF, SQL injection), and secure coding
+  aliases:
+  - authentication
+  - authorization
+  - encryption
+  - sql-injection
+  - xss
+  - csrf
+  - oauth
+  - jwt
+
+- id: database-concepts
+  name: Database Concepts
+  category: Concept
+  subcategory: Engineering
+  description: Schema design, normalization, indexing, ACID properties, transactions, and query optimization
+  aliases:
+  - database-design
+  - normalization
+  - indexing
+  - acid-properties
+  - transactions
+  - query-optimization
+
+- id: api-protocols
+  name: API Protocols
+  category: Concept
+  subcategory: Engineering
+  description: REST, GraphQL, gRPC, WebSocket, and API design principles
+  aliases:
+  - rest-api
+  - graphql
+  - grpc
+  - websocket
+  - api-design-concept
+
+- id: caching
+  name: Caching
+  category: Concept
+  subcategory: Engineering
+  description: Caching strategies, cache invalidation, CDN, and memoization
+  aliases:
+  - cache-invalidation
+  - cdn
+  - memoization
+
+- id: version-control
+  name: Version Control
+  category: Concept
+  subcategory: Engineering
+  description: Git workflows, branching strategies, merge conflicts, and collaborative development
+  aliases:
+  - git-workflows
+  - branching-strategies
+  - merge-conflicts
+  - rebasing
+
+- id: ci-cd
+  name: CI/CD
+  category: Concept
+  subcategory: Engineering
+  description: Continuous integration, continuous deployment, build pipelines, and DevOps practices
+  aliases:
+  - continuous-integration
+  - continuous-deployment
+  - build-pipelines
+  - devops-practices
+
+- id: profiling
+  name: Profiling
+  category: Concept
+  subcategory: Engineering
+  description: Performance profiling, benchmarking, bottleneck analysis, and optimization techniques
+  aliases:
+  - performance-optimization
+  - benchmarking
+  - bottleneck-analysis

@@ -1,0 +1,98 @@
+# Capability Taxonomy Schema
+# Version: 2.0
+#
+# This file defines the structure of the capability taxonomy used for
+# labeling SFT training data. The taxonomy consists of 9 orthogonal
+# categories, each containing tags that describe specific capabilities.
+#
+# Category dimensions (each captures a different signal):
+#   Language  — what programming language(s) are involved
+#   Domain    — what application area / industry
+#   Concept   — what programming knowledge is needed
+#   Task      — what type of work is being done
+#   Constraint — what non-functional requirements apply
+#   Agentic   — what agent capabilities are needed
+#   Context   — what is the code scope / project context
+#   Difficulty — how hard is the coding challenge
+#   Intent    — what is the user trying to achieve
+#
+# Tag Schema:
+#   id: string           # Unique identifier (kebab-case)
+#   name: string         # Display name
+#   category: string     # Category this tag belongs to
+#   subcategory: string? # Subcategory (for hierarchical categories)
+#   description: string? # Brief description
+#   aliases: string[]?   # Alternative names for matching
+#   language_scope: string[]? # Applicable languages (for Concept tags)
+#   examples: string[]?  # Example query snippets
+#   related_tags: string[]? # Related tag IDs
+#   paradigm: string[]?  # Programming paradigms (for Language tags)
+#                        #   Values: imperative, functional, object-oriented, declarative,
+#                        #           logic, procedural, concurrent, event-driven
+#   typing: string?      # Type system (for Language tags)
+#                        #   Values: static, dynamic, gradual, duck, strong-static, weak-dynamic
+#   runtime: string?     # Execution model (for Language tags)
+#                        #   Values: compiled, interpreted, jit, transpiled, hybrid
+#   use_cases: string[]? # Primary use cases (for Language tags)
+#                        #   Values: web, systems, data-science, mobile, embedded, scripting,
+#                        #           devops, scientific, game-dev, blockchain, markup, config, build
+
+version: "2.0"
+
+categories:
+  - name: Language
+    description: Programming languages and markup/config formats
+    hierarchical: false
+    select_mode: multi
+
+  - name: Domain
+    description: Application domains and industry scenarios
+    hierarchical: false
+    select_mode: multi
+
+  - name: Concept
+    description: Programming concepts and knowledge areas required
+    hierarchical: true
+    select_mode: multi
+    subcategories:
+      - name: Fundamentals
+        description: Core programming concepts
+      - name: Advanced
+        description: Advanced programming concepts
+      - name: Engineering
+        description: Software engineering practices
+
+  - name: Task
+    description: Types of programming tasks being performed
+    hierarchical: false
+    select_mode: multi
+
+  - name: Constraint
+    description: Non-functional requirements and constraints
+    hierarchical: false
+    select_mode: multi
+
+  - name: Agentic
+    description: Agent capabilities and tool usage required
+    hierarchical: true
+    select_mode: multi
+    subcategories:
+      - name: Tool Actions
+        description: Primitive tool invocations (file ops, shell, search, etc.)
+      - name: Behavioral Patterns
+        description: Cognitive and coordination strategies (planning, iteration, etc.)
+
+  - name: Context
+    description: Code scope and project context
+    hierarchical: false
+    select_mode: single
+
+  - name: Difficulty
+    description: Coding difficulty level required to answer the query
+    hierarchical: false
+    select_mode: single
+
+  - name: Intent
+    description: User's primary goal or motivation
+    hierarchical: false
+    select_mode: single

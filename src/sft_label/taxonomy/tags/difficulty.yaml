@@ -1,0 +1,71 @@
+# Difficulty tags - Coding difficulty level
+# Single-select: each query has exactly one difficulty level
+# Definition: "the coding ability level required to produce a good answer"
+# (NOT the complexity of the question itself)
+
+- id: beginner
+  name: Beginner
+  category: Difficulty
+  description: >
+    Entry-level coding ability. Involves basic syntax, simple API calls,
+    standard library usage, and fundamental concept understanding.
+  aliases:
+  - easy
+  - introductory
+  - basic
+  examples:
+  - "How do I read a CSV file in Python?"
+  - "Write a function that reverses a string"
+  - "What's the difference between let and const in JavaScript?"
+  - "How do I create a simple HTML form?"
+  - "Write a for loop that prints numbers 1 to 10"
+
+- id: intermediate
+  name: Intermediate
+  category: Difficulty
+  description: >
+    Mid-level coding ability. Involves framework usage, common design patterns,
+    standard engineering practices, and multi-component coordination.
+  aliases:
+  - medium
+  - moderate
+  examples:
+  - "Build a React component with useState and useEffect"
+  - "Write a REST API endpoint with Express and validation"
+  - "Implement authentication with JWT tokens"
+  - "Set up a basic CI/CD pipeline with GitHub Actions"
+  - "Write unit tests for this service class using mocking"
+
+- id: advanced
+  name: Advanced
+  category: Difficulty
+  description: >
+    High-level coding ability. Involves performance optimization, complex
+    architecture design, deep debugging, multi-system integration,
+    and non-trivial algorithm design.
+  aliases:
+  - hard
+  - complex
+  examples:
+  - "Optimize this SQL query from 12s to under 500ms"
+  - "Design a schema evolution strategy for a data pipeline"
+  - "Fix this race condition in the connection pool"
+  - "Implement a custom Webpack plugin for code splitting"
+  - "Write a Solidity contract with reentrancy protection"
+
+- id: expert
+  name: Expert
+  category: Difficulty
+  description: >
+    Expert-level coding ability. Involves deep understanding of internals,
+    cutting-edge techniques, large-scale system design, and problems
+    requiring years of domain-specific experience.
+  aliases:
+  - very-hard
+  - specialist
+  examples:
+  - "Parallelize this Navier-Stokes solver with CUDA"
+  - "Design a distributed consensus protocol"
+  - "Implement a lock-free concurrent data structure"
+  - "Write a custom garbage collector for an embedded runtime"
+  - "Build a real-time multiplayer game server with rollback netcode"

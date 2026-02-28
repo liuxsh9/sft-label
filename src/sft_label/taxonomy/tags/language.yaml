@@ -1,0 +1,1046 @@
+- id: ada
+  name: Ada
+  category: Language
+  aliases:
+  - ada
+  source: TIOBE
+  paradigm:
+  - imperative
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - embedded
+- id: apl
+  name: APL
+  category: Language
+  aliases:
+  - apl
+  source: TIOBE
+  paradigm:
+  - functional
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scientific
+  - data-science
+- id: arkts
+  name: ArkTS
+  category: Language
+  aliases:
+  - arkts
+  - ark-ts
+  source: Business
+  paradigm:
+  - object-oriented
+  - functional
+  typing: static
+  runtime: jit
+  use_cases:
+  - mobile
+- id: ascendc
+  name: AscendC
+  category: Language
+  aliases:
+  - ascendc
+  - ascend-c
+  source: Business
+  paradigm:
+  - imperative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - scientific
+- id: assembly
+  name: Assembly
+  category: Language
+  aliases:
+  - asm
+  - assembly
+  source: TIOBE
+  paradigm:
+  - imperative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - embedded
+- id: bazel
+  name: Bazel
+  category: Language
+  aliases:
+  - bazel
+  - starlark
+  source: GitHub
+  paradigm:
+  - declarative
+  - functional
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - build
+- id: c
+  name: C
+  category: Language
+  aliases:
+  - c
+  source: TIOBE
+  paradigm:
+  - procedural
+  - imperative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - embedded
+- id: clojure
+  name: Clojure
+  category: Language
+  aliases:
+  - clojure
+  - clj
+  source: GitHub
+  paradigm:
+  - functional
+  typing: dynamic
+  runtime: jit
+  use_cases:
+  - web
+  - data-science
+- id: cmake
+  name: CMake
+  category: Language
+  aliases:
+  - cmake
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - build
+- id: cobol
+  name: COBOL
+  category: Language
+  aliases:
+  - cobol
+  source: TIOBE
+  paradigm:
+  - procedural
+  - imperative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+- id: cpp
+  name: C++
+  category: Language
+  aliases:
+  - cpp
+  - c++
+  - cxx
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - procedural
+  - functional
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - game-dev
+  - embedded
+- id: crystal
+  name: Crystal
+  category: Language
+  aliases:
+  - crystal
+  - cr
+  source: GitHub
+  paradigm:
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - web
+  - systems
+- id: csharp
+  name: C#
+  category: Language
+  aliases:
+  - csharp
+  - c-sharp
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - functional
+  typing: static
+  runtime: jit
+  use_cases:
+  - web
+  - game-dev
+  - mobile
+- id: css
+  name: CSS
+  category: Language
+  aliases:
+  - css
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+  - markup
+- id: dart
+  name: Dart
+  category: Language
+  aliases:
+  - dart
+  source: GitHub
+  paradigm:
+  - object-oriented
+  typing: strong-static
+  runtime: jit
+  use_cases:
+  - mobile
+  - web
+- id: dockerfile
+  name: Dockerfile
+  category: Language
+  aliases:
+  - dockerfile
+  - docker
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - devops
+  - config
+- id: dotenv
+  name: Dotenv
+  category: Language
+  aliases:
+  - dotenv
+  - env
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - config
+- id: ejs
+  name: EJS
+  category: Language
+  aliases:
+  - ejs
+  - embedded-js
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+- id: elixir
+  name: Elixir
+  category: Language
+  aliases:
+  - elixir
+  - ex
+  source: GitHub
+  paradigm:
+  - functional
+  - concurrent
+  typing: dynamic
+  runtime: jit
+  use_cases:
+  - web
+  - systems
+- id: erb
+  name: ERB
+  category: Language
+  aliases:
+  - erb
+  - embedded-ruby
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+- id: erlang
+  name: Erlang
+  category: Language
+  aliases:
+  - erlang
+  - erl
+  source: TIOBE
+  paradigm:
+  - functional
+  - concurrent
+  typing: dynamic
+  runtime: jit
+  use_cases:
+  - systems
+  - web
+- id: fortran
+  name: Fortran
+  category: Language
+  aliases:
+  - fortran
+  source: TIOBE
+  paradigm:
+  - procedural
+  - imperative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - scientific
+  - data-science
+- id: fsharp
+  name: F#
+  category: Language
+  aliases:
+  - fsharp
+  - f-sharp
+  source: GitHub
+  paradigm:
+  - functional
+  - object-oriented
+  typing: static
+  runtime: jit
+  use_cases:
+  - web
+  - data-science
+- id: go
+  name: Go
+  category: Language
+  aliases:
+  - golang
+  - go
+  source: TIOBE
+  paradigm:
+  - procedural
+  - concurrent
+  typing: strong-static
+  runtime: compiled
+  use_cases:
+  - systems
+  - web
+  - devops
+- id: gradle
+  name: Gradle
+  category: Language
+  aliases:
+  - gradle
+  - groovy-dsl
+  - kotlin-dsl
+  source: GitHub
+  paradigm:
+  - declarative
+  - imperative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - build
+- id: groovy
+  name: Groovy
+  category: Language
+  aliases:
+  - groovy
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - functional
+  typing: dynamic
+  runtime: jit
+  use_cases:
+  - web
+  - scripting
+  - build
+- id: handlebars
+  name: Handlebars
+  category: Language
+  aliases:
+  - handlebars
+  - hbs
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+- id: haskell
+  name: Haskell
+  category: Language
+  aliases:
+  - haskell
+  - hs
+  source: GitHub
+  paradigm:
+  - functional
+  typing: static
+  runtime: compiled
+  use_cases:
+  - web
+  - data-science
+- id: hcl
+  name: HCL
+  category: Language
+  aliases:
+  - hcl
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - devops
+  - config
+- id: html
+  name: HTML
+  category: Language
+  aliases:
+  - html
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+  - markup
+- id: ini
+  name: INI
+  category: Language
+  aliases:
+  - ini
+  - cfg
+  - conf
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - config
+- id: java
+  name: Java
+  category: Language
+  aliases:
+  - java
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  typing: static
+  runtime: jit
+  use_cases:
+  - web
+  - mobile
+  - systems
+- id: javascript
+  name: JavaScript
+  category: Language
+  aliases:
+  - js
+  - javascript
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - functional
+  - event-driven
+  typing: dynamic
+  runtime: hybrid
+  use_cases:
+  - web
+  - mobile
+  - scripting
+- id: jinja
+  name: Jinja
+  category: Language
+  aliases:
+  - jinja
+  - jinja2
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+  - scripting
+- id: json
+  name: JSON
+  category: Language
+  aliases:
+  - json
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: static
+  runtime: interpreted
+  use_cases:
+  - config
+  - web
+- id: julia
+  name: Julia
+  category: Language
+  aliases:
+  - julia
+  - jl
+  source: GitHub
+  paradigm:
+  - functional
+  - procedural
+  typing: dynamic
+  runtime: jit
+  use_cases:
+  - scientific
+  - data-science
+- id: kotlin
+  name: Kotlin
+  category: Language
+  aliases:
+  - kotlin
+  - kt
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - functional
+  typing: static
+  runtime: jit
+  use_cases:
+  - mobile
+  - web
+- id: latex
+  name: LaTeX
+  category: Language
+  aliases:
+  - latex
+  - tex
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: compiled
+  use_cases:
+  - markup
+  - scientific
+- id: liquid
+  name: Liquid
+  category: Language
+  aliases:
+  - liquid
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+- id: lisp
+  name: Lisp
+  category: Language
+  aliases:
+  - lisp
+  - common-lisp
+  source: TIOBE
+  paradigm:
+  - functional
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - data-science
+- id: lua
+  name: Lua
+  category: Language
+  aliases:
+  - lua
+  source: TIOBE
+  paradigm:
+  - procedural
+  - object-oriented
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - game-dev
+  - embedded
+- id: makefile
+  name: Makefile
+  category: Language
+  aliases:
+  - makefile
+  - make
+  - gnumake
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - build
+  - devops
+- id: markdown
+  name: Markdown
+  category: Language
+  aliases:
+  - markdown
+  - md
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - markup
+- id: matlab
+  name: MATLAB
+  category: Language
+  aliases:
+  - matlab
+  source: TIOBE
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scientific
+  - data-science
+- id: maven
+  name: Maven
+  category: Language
+  aliases:
+  - maven
+  - pom
+  - pom.xml
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: static
+  runtime: interpreted
+  use_cases:
+  - build
+- id: nginx-config
+  name: Nginx Config
+  category: Language
+  aliases:
+  - nginx-conf
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - config
+  - devops
+- id: nim
+  name: Nim
+  category: Language
+  aliases:
+  - nim
+  source: GitHub
+  paradigm:
+  - imperative
+  - functional
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - web
+- id: objective-c
+  name: Objective-C
+  category: Language
+  aliases:
+  - objc
+  - objective-c
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - mobile
+- id: ocaml
+  name: OCaml
+  category: Language
+  aliases:
+  - ocaml
+  source: GitHub
+  paradigm:
+  - functional
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - web
+  - systems
+- id: perl
+  name: Perl
+  category: Language
+  aliases:
+  - perl
+  - pl
+  source: TIOBE
+  paradigm:
+  - procedural
+  - object-oriented
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - web
+- id: php
+  name: PHP
+  category: Language
+  aliases:
+  - php
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+- id: powershell
+  name: PowerShell
+  category: Language
+  aliases:
+  - powershell
+  - ps1
+  source: GitHub
+  paradigm:
+  - object-oriented
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - devops
+- id: prolog
+  name: Prolog
+  category: Language
+  aliases:
+  - prolog
+  source: TIOBE
+  paradigm:
+  - logic
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scientific
+- id: properties
+  name: Properties
+  category: Language
+  aliases:
+  - properties
+  - props
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - config
+- id: python
+  name: Python
+  category: Language
+  aliases:
+  - py
+  - python3
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - procedural
+  - functional
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - data-science
+  - web
+  - scripting
+- id: r
+  name: R
+  category: Language
+  aliases:
+  - r
+  - r-lang
+  source: TIOBE
+  paradigm:
+  - functional
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - data-science
+  - scientific
+- id: racket
+  name: Racket
+  category: Language
+  aliases:
+  - racket
+  - rkt
+  source: GitHub
+  paradigm:
+  - functional
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - scientific
+- id: restructuredtext
+  name: reStructuredText
+  category: Language
+  aliases:
+  - restructuredtext
+  - rst
+  - rest
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - markup
+- id: ruby
+  name: Ruby
+  category: Language
+  aliases:
+  - ruby
+  - rb
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - web
+  - scripting
+- id: rust
+  name: Rust
+  category: Language
+  aliases:
+  - rust
+  - rs
+  source: GitHub
+  paradigm:
+  - functional
+  - procedural
+  typing: strong-static
+  runtime: compiled
+  use_cases:
+  - systems
+  - web
+  - embedded
+- id: scala
+  name: Scala
+  category: Language
+  aliases:
+  - scala
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - functional
+  typing: static
+  runtime: jit
+  use_cases:
+  - web
+  - data-science
+- id: scheme
+  name: Scheme
+  category: Language
+  aliases:
+  - scheme
+  - scm
+  source: GitHub
+  paradigm:
+  - functional
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - scientific
+- id: shell
+  name: Shell
+  category: Language
+  aliases:
+  - bash
+  - sh
+  - shell
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - devops
+- id: smalltalk
+  name: Smalltalk
+  category: Language
+  aliases:
+  - smalltalk
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+- id: solidity
+  name: Solidity
+  category: Language
+  aliases:
+  - solidity
+  - sol
+  source: GitHub
+  paradigm:
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - blockchain
+- id: sql
+  name: SQL
+  category: Language
+  aliases:
+  - sql
+  source: TIOBE
+  paradigm:
+  - declarative
+  typing: static
+  runtime: interpreted
+  use_cases:
+  - data-science
+  - web
+- id: swift
+  name: Swift
+  category: Language
+  aliases:
+  - swift
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - functional
+  typing: static
+  runtime: compiled
+  use_cases:
+  - mobile
+- id: toml
+  name: TOML
+  category: Language
+  aliases:
+  - toml
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: static
+  runtime: interpreted
+  use_cases:
+  - config
+- id: typescript
+  name: TypeScript
+  category: Language
+  aliases:
+  - ts
+  - typescript
+  source: GitHub
+  paradigm:
+  - object-oriented
+  - functional
+  typing: gradual
+  runtime: transpiled
+  use_cases:
+  - web
+  - mobile
+- id: verilog
+  name: Verilog
+  category: Language
+  aliases:
+  - verilog
+  - v
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - embedded
+  - systems
+- id: vhdl
+  name: VHDL
+  category: Language
+  aliases:
+  - vhdl
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - embedded
+  - systems
+- id: vyper
+  name: Vyper
+  category: Language
+  aliases:
+  - vyper
+  - vy
+  source: GitHub
+  paradigm:
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - blockchain
+- id: xml
+  name: XML
+  category: Language
+  aliases:
+  - xml
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: static
+  runtime: interpreted
+  use_cases:
+  - config
+  - markup
+- id: yaml
+  name: YAML
+  category: Language
+  aliases:
+  - yaml
+  - yml
+  source: GitHub
+  paradigm:
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - config
+  - devops
+- id: zig
+  name: Zig
+  category: Language
+  aliases:
+  - zig
+  source: GitHub
+  paradigm:
+  - imperative
+  typing: static
+  runtime: compiled
+  use_cases:
+  - systems
+  - embedded

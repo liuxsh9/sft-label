@@ -1,0 +1,164 @@
+# Constraint tags - Non-functional requirements and constraints
+# Consolidated from 24 → 17 tags
+# Removed: async (code pattern, not constraint), immutable (code style),
+#          gas-optimized (too niche), misra-c-compliant (too niche)
+
+- id: accessible
+  name: Accessible
+  category: Constraint
+  description: Output must follow accessibility standards (WCAG)
+  aliases:
+  - accessibility-constraint
+  - wcag
+
+- id: backward-compatible
+  name: Backward Compatible
+  category: Constraint
+  description: Changes must not break existing APIs or behavior
+  aliases:
+  - backward-compatibility
+  - backwards-compatible
+
+- id: deterministic
+  name: Deterministic
+  category: Constraint
+  description: Same inputs must produce same outputs every time
+  aliases:
+  - deterministic
+  - reproducible
+
+- id: fault-tolerant
+  name: Fault Tolerant
+  category: Constraint
+  description: System must handle failures gracefully without crashing
+  aliases:
+  - fault-tolerance
+  - resilient
+
+- id: gdpr-compliant
+  name: GDPR Compliant
+  category: Constraint
+  description: Must comply with EU General Data Protection Regulation
+  aliases:
+  - gdpr
+
+- id: hipaa-compliant
+  name: HIPAA Compliant
+  category: Constraint
+  description: Must comply with Health Insurance Portability and Accountability Act
+  aliases:
+  - hipaa
+
+- id: idempotent
+  name: Idempotent
+  category: Constraint
+  description: Repeated execution must produce the same result as single execution
+  aliases:
+  - idempotent
+  - idempotency
+
+- id: internationalized
+  name: Internationalized
+  category: Constraint
+  description: Output must support multiple languages and locales
+  aliases:
+  - i18n-constraint
+  - localized
+
+- id: lock-free
+  name: Lock Free
+  category: Constraint
+  description: No mutex, lock, or semaphore primitives allowed
+  aliases:
+  - lock-free
+  - lockless
+  - wait-free
+
+- id: no-dynamic-allocation
+  name: No Dynamic Allocation
+  category: Constraint
+  description: No heap allocation allowed (stack-only memory)
+  aliases:
+  - no-malloc
+  - static-memory
+
+- id: no-external-dependencies
+  name: No External Dependencies
+  category: Constraint
+  description: Must use only standard library, no third-party packages
+  aliases:
+  - no-deps
+  - zero-dependencies
+
+- id: no-recursion
+  name: No Recursion
+  category: Constraint
+  description: Must not use recursive function calls
+  aliases:
+  - no-recursion
+  - iterative-only
+
+- id: observable
+  name: Observable
+  category: Constraint
+  description: Must include logging, metrics, and/or tracing instrumentation
+  aliases:
+  - instrumented
+  - observable
+
+- id: pci-dss-compliant
+  name: PCI-DSS Compliant
+  category: Constraint
+  description: Must comply with Payment Card Industry Data Security Standard
+  aliases:
+  - pci-dss
+
+- id: performance-optimized
+  name: Performance Optimized
+  category: Constraint
+  description: Must meet specific performance targets (latency, throughput, memory)
+  aliases:
+  - high-performance
+  - low-latency
+  - memory-efficient
+  - optimized
+
+- id: portable
+  name: Portable
+  category: Constraint
+  description: Must work across multiple platforms or environments
+  aliases:
+  - portability
+  - cross-platform
+
+- id: scalable
+  name: Scalable
+  category: Constraint
+  description: Must handle growing load without architectural changes
+  aliases:
+  - scalability
+  - horizontal-scaling
+
+- id: stateless
+  name: Stateless
+  category: Constraint
+  description: No persistent state between function calls or requests
+  aliases:
+  - stateless
+  - no-state
+
+- id: thread-safe
+  name: Thread Safe
+  category: Constraint
+  description: Must be safe for concurrent access from multiple threads
+  aliases:
+  - thread-safe
+  - concurrency-safe
+
+- id: type-safe
+  name: Type Safe
+  category: Constraint
+  description: Must use strict typing with no unsafe casts or any types
+  aliases:
+  - type-safe
+  - strongly-typed

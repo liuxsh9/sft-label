@@ -1,0 +1,93 @@
+- id: greenfield
+  name: Greenfield
+  category: Context
+  aliases:
+  - greenfield
+  - new-project
+  description: New project starting from scratch with no existing codebase. Fresh start
+    without legacy constraints.
+  source: curated-list
+- id: legacy-code
+  name: Legacy Code
+  category: Context
+  aliases:
+  - legacy
+  - brownfield
+  description: Existing codebase that needs maintenance, refactoring, or understanding.
+    Brownfield development working with pre-existing code.
+  source: curated-list
+- id: module
+  name: Module
+  category: Context
+  aliases:
+  - module
+  - package
+  description: Module or package level code organization. Self-contained unit with
+    defined interfaces and dependencies.
+  source: curated-list
+- id: monorepo
+  name: Monorepo
+  category: Context
+  aliases:
+  - monorepo
+  - multi-project
+  description: Single repository containing multiple related projects or packages.
+    Shared tooling and dependencies across projects.
+  source: curated-list
+- id: multi-file
+  name: Multi-file
+  category: Context
+  aliases:
+  - multiple-files
+  - cross-file
+  description: Changes spanning multiple files. Cross-file refactoring, imports reorganization,
+    or coordinated modifications.
+  source: curated-list
+- id: repository
+  name: Repository
+  category: Context
+  aliases:
+  - repo
+  - repository-level
+  - codebase
+  description: Repository-wide operations affecting the entire codebase. Large-scale
+    refactoring, dependency upgrades, or project configuration.
+  source: curated-list
+- id: single-file
+  name: Single File
+  category: Context
+  aliases:
+  - file
+  - single-file
+  description: Complete file with imports and structure. May contain multiple functions,
+    classes, or top-level code in one file.
+  source: curated-list
+- id: single-function
+  name: Single Function
+  category: Context
+  aliases:
+  - function
+  - single-function
+  description: Complete, runnable function with signature and implementation. Self-contained
+    unit that can be executed independently.
+  source: curated-list
+- id: snippet
+  name: Snippet
+  category: Context
+  aliases:
+  - snippet
+  - code-snippet
+  - fragment
+  - example
+  description: Code fragment or snippet, smaller than a complete function, may lack
+    imports or full context. Common in documentation and tutorials.
+  source: context-expansion
+- id: with-dependencies
+  name: With Dependencies
+  category: Context
+  aliases:
+  - with-deps
+  - external-deps
+  description: Code that uses external dependencies or third-party libraries. Requires
+    package management and dependency resolution.
+  source: curated-list
