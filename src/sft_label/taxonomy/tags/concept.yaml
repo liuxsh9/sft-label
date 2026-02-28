@@ -1,5 +1,5 @@
 # Concept tags - Programming concepts and knowledge areas
-# Consolidated from 106 → 25 tags
+# Consolidated from 106 → 26 tags
 # Sub-concepts are captured as aliases for detection purposes
 
 # === Fundamentals ===
@@ -182,7 +182,7 @@
   name: Algorithms
   category: Concept
   subcategory: Advanced
-  description: Algorithm design, complexity analysis, sorting, searching, dynamic programming, and greedy approaches
+  description: Algorithm design and analysis including dynamic programming, greedy, graph theory, geometry, combinatorics, bit manipulation, string algorithms, sorting, searching, and backtracking
   aliases:
   - dynamic-programming
   - dp
@@ -191,6 +191,13 @@
   - searching
   - big-o
   - complexity
+  - graph-theory
+  - geometry
+  - combinatorics
+  - bit-manipulation
+  - string-algorithms
+  - backtracking
+  - divide-and-conquer
 
 - id: iterators
   name: Iterators
@@ -324,8 +331,18 @@
   name: Profiling
   category: Concept
   subcategory: Engineering
-  description: Performance profiling, benchmarking, bottleneck analysis, and optimization techniques
+  description: Understanding profiling tools (cProfile, perf, flame graphs), benchmarking methodology, and performance metrics interpretation
   aliases:
-  - performance-optimization
+  - performance-profiling
   - benchmarking
   - bottleneck-analysis
+
+- id: debugging
+  name: Debugging
+  category: Concept
+  subcategory: Engineering
+  description: Systematic debugging methodology including breakpoint debugging, stack trace analysis, bisect/isolation techniques, and logging-based diagnosis
+  aliases:
+  - debug-methodology
+  - breakpoint-debugging
+  - stack-trace-analysis

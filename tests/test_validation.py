@@ -31,7 +31,7 @@ class TestValidation:
 
     def test_tag_count_matches(self):
         report = run_validation()
-        assert report.stats["Total tags"] == 221
+        assert report.stats["Total tags"] == 223
 
 
 class TestValidationReport:

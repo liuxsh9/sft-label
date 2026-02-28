@@ -25,6 +25,16 @@
   description: Complete partial code or suggest next code snippets. Auto-complete
     function calls, variable names, or code blocks.
   source: curated-list
+- id: code-exploration
+  name: Code Exploration
+  category: Task
+  aliases:
+  - codebase-navigation
+  - code-navigation
+  description: Navigate and understand codebase structure. Find relevant files, trace
+    call chains, understand module relationships. Distinct from code-explanation (which
+    explains specific code logic).
+  source: data-driven
 - id: code-explanation
   name: Code Explanation
   category: Task

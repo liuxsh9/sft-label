@@ -376,6 +376,75 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result):
 # Validation
 # ─────────────────────────────────────────────────────────
 
+# Alias → canonical tag mapping.  Applied before pool validation so that
+# common LLM outputs (underscore variants, abbreviations, sub-topic names)
+# are silently resolved instead of becoming unmapped.
+TAG_ALIASES = {
+    # language
+    "c++": "cpp",
+    "c#": "csharp",
+    "f#": "fsharp",
+    # concept — algorithm sub-topics
+    "dynamic-programming": "algorithms",
+    "dp": "algorithms",
+    "graph-theory": "algorithms",
+    "geometry": "algorithms",
+    "combinatorics": "algorithms",
+    "bit-manipulation": "algorithms",
+    "string-manipulation": "algorithms",
+    "string-algorithms": "algorithms",
+    "mathematics": "algorithms",
+    "greedy": "algorithms",
+    "backtracking": "algorithms",
+    "divide-and-conquer": "algorithms",
+    # agentic — format variants
+    "execute_python_code": "code-execution",
+    "execute_python": "code-execution",
+    "execute_code": "code-execution",
+    "run_code": "code-execution",
+    "execute_bash": "bash-execution",
+    "run_bash": "bash-execution",
+    "shell_execution": "bash-execution",
+    # task
+    "test-creation": "testing-task",
+    "write-tests": "testing-task",
+    # domain
+    "security": "cybersecurity",
+}
+
+# Tags that belong to a DIFFERENT category — drop from the current dimension
+# and log a warning, but do NOT add to unmapped (they're valid, just misplaced).
+CROSS_CATEGORY_CORRECTIONS = {
+    "domain": {
+        # These are concepts or tasks, not domains
+        "algorithm", "algorithms", "data-structure", "data-structures",
+        "documentation", "debugging",
+    },
+}
+
+
+def _resolve_aliases(dim, values):
+    """Resolve aliases and deduplicate, preserving order.
+
+    Only applies alias mapping when the original value is NOT already
+    a valid tag in the target dimension's pool (e.g., concept:security
+    should stay as-is, not become "cybersecurity").
+    """
+    pool = TAG_POOLS.get(dim, set())
+    seen = set()
+    resolved = []
+    for v in values:
+        # Only map alias if the raw value is not already valid in this pool
+        canonical = v if v in pool else TAG_ALIASES.get(v, v)
+        # Cross-category correction: silently drop misplaced tags
+        if dim in CROSS_CATEGORY_CORRECTIONS and canonical in CROSS_CATEGORY_CORRECTIONS[dim]:
+            continue
+        if canonical not in seen:
+            seen.add(canonical)
+            resolved.append(canonical)
+    return resolved
+
+
 def validate_tags(result, call_name="call1"):
     issues = []
     unmapped = result.get("unmapped", [])
@@ -394,15 +463,19 @@ def validate_tags(result, call_name="call1"):
 
         pool = TAG_POOLS.get(dim, set())
         if dim in SINGLE_SELECT:
-            val = result[dim]
+            raw_val = result[dim]
+            val = raw_val if (not raw_val or raw_val in pool) else TAG_ALIASES.get(raw_val, raw_val)
             if val and val not in pool:
                 issues.append(f"{dim}: '{val}' not in pool")
                 unmapped.append({"dimension": dim, "value": val})
                 cleaned[dim] = ""
+            else:
+                cleaned[dim] = val
         else:
-            vals = result[dim] if isinstance(result[dim], list) else [result[dim]]
+            raw = result[dim] if isinstance(result[dim], list) else [result[dim]]
+            resolved = _resolve_aliases(dim, raw)
             valid = []
-            for v in vals:
+            for v in resolved:
                 if v in pool:
                     valid.append(v)
                 else:

@@ -53,7 +53,7 @@ What application area does this belong to?
 - cli-tool: Command-line tools
 - cloud-computing: Cloud platforms, serverless, edge
 - compiler-development: Compilers, interpreters, language tooling
-- cybersecurity: Security threats, pentesting, appsec
+- cybersecurity: Security engineering as an APPLICATION DOMAIN (pentesting, threat modeling, vulnerability research, appsec). For security KNOWLEDGE (auth, encryption, XSS), use concept:security instead
 - data-engineering: Data pipelines, ETL, warehouses
 - data-science: Statistical analysis, analytics
 - database-administration: Database management/optimization
@@ -83,6 +83,7 @@ Rules:
 - A query can span multiple domains (e.g., "SaaS payment" → web-backend + e-commerce + financial-technology)
 - Pure algorithm practice with no application context → empty
 - Prefer the most specific domain tag
+- "algorithm", "data-structure", "documentation" are NOT domains. Algorithm/DS practice → concept:algorithms or concept:data-structures, domain should be empty. Writing docs → task:documentation, not a domain.
 
 ### Task (multi-select)
 What type of work is being done?
@@ -90,6 +91,7 @@ What type of work is being done?
 - bug-fixing: Fix bugs, identify root cause
 - code-completion: Complete partial code
 - code-explanation: Explain how code works
+- code-exploration: Navigate and understand codebase structure, find relevant files, trace call chains (distinct from code-explanation which explains specific code logic)
 - code-optimization: Improve performance/efficiency (ONLY when user explicitly requests performance improvement, NOT for best practices or clean code)
 - code-refactoring: Restructure without changing behavior
 - code-review-task: Review code, provide feedback
@@ -138,7 +140,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 }
 
 Rules for output:
-- All tag values must be lowercase kebab-case IDs from the lists above
+- All tag values must be lowercase kebab-case IDs from the lists above. Use ONLY the exact tag IDs listed — do NOT use aliases, underscores, or variant names (e.g., use "algorithms" not "dynamic-programming", use "cpp" not "c++")
 - Multi-select fields are arrays (can be empty [])
 - Single-select fields are strings
 - confidence: 0.0-1.0 per dimension (how sure you are)
@@ -241,7 +243,7 @@ Advanced:
 - type-system: Generics, type inference, traits, interfaces, algebraic types
 - error-handling: Exceptions, try/catch, Result/Option patterns, error propagation
 - metaprogramming: Reflection, macros, decorators, code generation
-- algorithms: Algorithm design, complexity, sorting, searching, DP, greedy
+- algorithms: Algorithm design and analysis: dynamic programming (DP), greedy, graph theory, geometry, combinatorics, bit manipulation, string algorithms, sorting, searching, divide-and-conquer, backtracking
 - iterators: Generators, streams, lazy evaluation, yield
 
 Engineering:
@@ -254,7 +256,8 @@ Engineering:
 - caching: Cache strategies, invalidation, CDN, memoization
 - version-control: Git workflows, branching, merge conflicts
 - ci-cd: CI/CD pipelines, build automation, DevOps practices
-- profiling: Performance profiling, benchmarking, bottleneck analysis
+- profiling: Understanding profiling tools (cProfile, perf, flame graphs), benchmarking methodology, performance metrics interpretation
+- debugging: Systematic debugging methodology (breakpoint debugging, stack trace analysis, bisect/isolation, logging-based diagnosis). NOT the same as intent=debug; tag only when debugging TECHNIQUES are demonstrated or taught
 
 Rules:
 - Tag 1-3 concepts typically (the CORE knowledge areas), rarely more than 4
@@ -265,7 +268,9 @@ Rules:
 - **THRESHOLD for `data-structures`**: Tag ONLY when data structure choice or design is a meaningful focus (e.g., "implement a B-tree", "choose between array vs linked list", "tree traversal", OrderedDict for LRU). Do NOT tag when standard collections (list, dict, array) are merely used as containers.
 - **THRESHOLD for `design-patterns`**: Tag ONLY when the query explicitly discusses or implements a NAMED pattern (Factory, Observer, Strategy, DI, SOLID). General OOP structure or code organization does NOT warrant this tag.
 - **THRESHOLD for `error-handling`**: Tag ONLY when error handling is a non-trivial focus (custom error types, error propagation strategy, Result/Option). Boilerplate try/catch alone does NOT warrant this tag.
-- **THRESHOLD for `algorithms`**: Tag ONLY when algorithm design, complexity analysis, or a specific algorithm (DP, greedy, sorting algorithm) is a meaningful focus. Using a built-in sort() does NOT warrant this tag.
+- **THRESHOLD for `algorithms`**: Tag ONLY when algorithm design, complexity analysis, or a specific algorithm (DP, greedy, sorting algorithm) is a meaningful focus. Using a built-in sort() does NOT warrant this tag. Dynamic programming, graph theory, geometry, combinatorics, bit manipulation → all map to `algorithms`.
+- **THRESHOLD for `debugging`**: Tag ONLY when the response demonstrates or teaches debugging TECHNIQUES (systematic isolation, stack trace analysis, using debuggers, bisect strategy). Simply fixing a bug (intent=debug + task=bug-fixing) does NOT warrant this tag. "My sort() broke because of wrong key" → concept=[], NOT concept=debugging.
+- **error-handling vs other dimensions**: error-handling = KNOWLEDGE of error patterns (Result/Option, custom errors). Agent retrying on failure → agentic:error-recovery. User asking to add try/catch → task:error-handling-task. "Must handle failures gracefully" → constraint:fault-tolerant.
 - **Positive signals** — tag these concepts when you see:
   - Python decorators, macros, code generation, compiler plugins → `metaprogramming`
   - TTL cache, LRU eviction, memoization, CDN caching → `caching`
@@ -273,6 +278,8 @@ Rules:
   - Class hierarchy with inheritance, encapsulation, polymorphism → `object-oriented-programming`
   - Container security, RBAC, permissions, OAuth/JWT → `security`
   - WebSocket, REST API design, gRPC, JSON-RPC → `api-protocols`
+  - Dynamic programming, knapsack, graph BFS/DFS, geometry algorithms, combinatorics → `algorithms`
+  - Using pdb/gdb, systematic print-debugging, stack trace walkthrough, bisect isolation → `debugging`
 - Examples of correct mapping:
   - mutex/deadlock/race condition → `concurrency`
   - B-tree/hash table/linked list implementation → `data-structures`
@@ -294,6 +301,7 @@ Rules:
   - JS var/let/const scoping → do NOT tag `control-flow` or `functions` (basic syntax)
   - React useEffect / Vue watch → do NOT tag `functions` (framework API)
   - Bash for-loop script → do NOT tag `control-flow` (trivial shell scripting)
+  - intent=debug, simple fix like wrong parameter → do NOT tag `debugging` (no debugging methodology demonstrated)
 
 ### Agentic (multi-select)
 What tool actions and behavioral patterns does the AI agent USE in its response?
@@ -552,10 +560,10 @@ TAG_POOLS = {
         "concurrency", "memory-management", "ownership", "type-system", "error-handling",
         "metaprogramming", "algorithms", "iterators", "design-patterns", "architecture",
         "testing", "security", "database-concepts", "api-protocols", "caching",
-        "version-control", "ci-cd", "profiling"
+        "version-control", "ci-cd", "profiling", "debugging"
     },
     "task": {
-        "api-design", "bug-fixing", "code-completion", "code-explanation",
+        "api-design", "bug-fixing", "code-completion", "code-explanation", "code-exploration",
         "code-optimization", "code-refactoring", "code-review-task", "code-translation",
         "configuration", "dependency-management", "deployment", "documentation",
         "error-handling-task", "feature-implementation", "logging", "migration",
