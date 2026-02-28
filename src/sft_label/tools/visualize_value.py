@@ -14,16 +14,34 @@ from pathlib import Path
 
 
 def load_value_run(run_dir, scored_file="scored.json", stats_file="stats_value.json"):
-    """Load scored samples and value stats from a run directory."""
+    """Load scored samples and value stats from a run directory.
+
+    When scored_file is None (global/directory dashboard), automatically
+    collects samples from scored*.json files in subdirectories for histograms.
+    """
+    run_dir = Path(run_dir)
     samples = []
     if scored_file:
-        scored_path = Path(run_dir) / scored_file
+        scored_path = run_dir / scored_file
         if scored_path.exists():
             with open(scored_path, encoding="utf-8") as f:
                 samples = json.load(f)
+    else:
+        # Global mode: collect from subdirectory scored files
+        for pattern in ("*/scored*.json", "scored*.json"):
+            for p in sorted(run_dir.glob(pattern)):
+                if "summary" in p.name or "stats" in p.name:
+                    continue
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        samples.extend(data)
+                except (json.JSONDecodeError, OSError):
+                    continue
 
     stats = {}
-    stats_path = Path(run_dir) / stats_file
+    stats_path = run_dir / stats_file
     if stats_path.exists():
         with open(stats_path, encoding="utf-8") as f:
             stats = json.load(f)
