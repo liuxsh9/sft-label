@@ -45,6 +45,7 @@ def cmd_run(args):
             asyncio.run(run_scoring(
                 input_path=run_dir,
                 output_dir=run_dir,
+                tag_stats_path=getattr(args, "tag_stats", None),
                 config=config,
             ))
 
@@ -122,6 +123,8 @@ def main():
                             help="Disable low-confidence arbitration pass")
     run_parser.add_argument("--score", action="store_true",
                             help="Chain Pass 2 value scoring after labeling")
+    run_parser.add_argument("--tag-stats", type=str, default=None,
+                            help="Path to stats.json for Pass 2 rarity (used with --score)")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
