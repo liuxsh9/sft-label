@@ -1,0 +1,104 @@
+[
+  {
+    "id": "value-1-dp-slow-think",
+    "conversations": [
+      {"from": "human", "value": "请用 Python 实现 0/1 背包问题的动态规划解法，要求时间复杂度 O(nW)，并解释状态转移方程"},
+      {"from": "gpt", "value": "<think>\n让我分析这个问题。0/1背包问题是经典的动态规划问题。\n\n状态定义：dp[i][w] 表示考虑前i个物品，背包容量为w时的最大价值。\n\n状态转移：对于第i个物品，我们有两个选择：\n1. 不选：dp[i][w] = dp[i-1][w]\n2. 选（如果 w >= weights[i-1]）：dp[i][w] = dp[i-1][w-weights[i-1]] + values[i-1]\n\n取两者最大值。\n\n基础情况：dp[0][w] = 0 对所有 w\n\n空间优化：可以用一维数组，从右向左遍历避免覆盖。\n</think>\n\n## 0/1 背包问题 DP 解法\n\n### 状态转移方程\n\n```\ndp[i][w] = max(dp[i-1][w], dp[i-1][w-weights[i-1]] + values[i-1])  if w >= weights[i-1]\ndp[i][w] = dp[i-1][w]                                                otherwise\n```\n\n### 实现\n\n```python\ndef knapsack_01(W, weights, values):\n    n = len(weights)\n    dp = [[0]*(W+1) for _ in range(n+1)]\n    for i in range(1, n+1):\n        for w in range(W+1):\n            dp[i][w] = dp[i-1][w]\n            if w >= weights[i-1]:\n                dp[i][w] = max(dp[i][w], dp[i-1][w-weights[i-1]] + values[i-1])\n    return dp[n][W]\n```\n\n时间复杂度 O(nW)，空间复杂度 O(nW)，可优化为 O(W) 的一维版本。"}
+    ],
+    "labels": {
+      "intent": "build",
+      "language": ["python"],
+      "domain": [],
+      "task": ["feature-implementation"],
+      "difficulty": "advanced",
+      "concept": ["algorithms", "data-structures"],
+      "agentic": [],
+      "constraint": [],
+      "context": "snippet",
+      "confidence": {"intent": 0.95, "language": 0.99, "difficulty": 0.85},
+      "unmapped": []
+    }
+  },
+  {
+    "id": "value-2-simple-fast-think",
+    "conversations": [
+      {"from": "human", "value": "Python 里 list 和 tuple 有什么区别？"},
+      {"from": "gpt", "value": "**List vs Tuple 核心区别：**\n\n1. **可变性**：List 可变（mutable），Tuple 不可变（immutable）\n2. **语法**：`[1, 2, 3]` vs `(1, 2, 3)`\n3. **性能**：Tuple 略快，内存占用更小\n\n```python\n# List: 可增删改\nitems = [1, 2, 3]\nitems.append(4)\n\n# Tuple: 不可变\ncoords = (37.7, -122.4)\n```\n\n使用建议：数据会变用 List，不变用 Tuple。Tuple 可做字典 key（hashable）。"}
+    ],
+    "labels": {
+      "intent": "learn",
+      "language": ["python"],
+      "domain": [],
+      "task": ["code-explanation"],
+      "difficulty": "beginner",
+      "concept": ["data-types"],
+      "agentic": [],
+      "constraint": [],
+      "context": "snippet",
+      "confidence": {"intent": 0.99, "language": 0.99, "difficulty": 0.95},
+      "unmapped": []
+    }
+  },
+  {
+    "id": "value-3-agentic-debug",
+    "conversations": [
+      {"from": "human", "value": "我的 Python 脚本跑着跑着就 OOM 了，帮我查一下"},
+      {"from": "gpt", "value": "让我看看你的代码，先检查内存使用情况。"},
+      {"from": "tool", "value": "$ cat process_data.py\nimport pandas as pd\ndef process(files):\n    results = []\n    for f in files:\n        df = pd.read_csv(f)\n        results.append(df)\n    return pd.concat(results)"},
+      {"from": "gpt", "value": "<think>\n看到问题了。在循环里把所有 DataFrame 都 append 到 results 列表中，这意味着所有文件的数据都会同时存在于内存中。如果文件很多或很大，内存会持续增长直到 OOM。\n\n解决方案有几个：\n1. 用 chunked reading：pd.read_csv(f, chunksize=10000)\n2. 用 generator 而不是 list\n3. 用 dask 做 lazy loading\n4. 逐文件处理后合并\n\n最实际的方案是 chunked concat。\n</think>\n\n找到问题了。你在循环里把所有 DataFrame 都存到 results 列表中，全部加载到内存。\n\n修复方案：用 chunked reading：\n```python\ndef process(files):\n    chunks = []\n    for f in files:\n        for chunk in pd.read_csv(f, chunksize=10000):\n            chunks.append(chunk)\n    return pd.concat(chunks, ignore_index=True)\n```\n\n或者用 dask 做 lazy loading，适合更大的数据集。"}
+    ],
+    "labels": {
+      "intent": "debug",
+      "language": ["python"],
+      "domain": ["data-engineering"],
+      "task": ["bug-fixing"],
+      "difficulty": "intermediate",
+      "concept": ["memory-management", "debugging"],
+      "agentic": ["file-operations", "multi-step-reasoning"],
+      "constraint": [],
+      "context": "single-file",
+      "confidence": {"intent": 0.95, "language": 0.99, "difficulty": 0.85},
+      "unmapped": []
+    }
+  },
+  {
+    "id": "value-4-buggy-response",
+    "conversations": [
+      {"from": "human", "value": "实现一个线程安全的连接池，支持超时获取和自动回收"},
+      {"from": "gpt", "value": "```python\nimport threading\n\nclass ConnectionPool:\n    def __init__(self, max_size=10):\n        self.pool = []\n        self.lock = threading.Lock()\n        self.max_size = max_size\n\n    def get(self, timeout=None):\n        self.lock.acquire()\n        if self.pool:\n            conn = self.pool.pop()\n            self.lock.release()\n            return conn\n        self.lock.release()\n        return self._create()\n\n    def release(self, conn):\n        self.lock.acquire()\n        self.pool.append(conn)\n        self.lock.release()\n\n    def _create(self):\n        return object()\n```"}
+    ],
+    "labels": {
+      "intent": "build",
+      "language": ["python"],
+      "domain": ["web-backend"],
+      "task": ["feature-implementation"],
+      "difficulty": "advanced",
+      "concept": ["concurrency", "design-patterns"],
+      "agentic": [],
+      "constraint": ["thread-safe"],
+      "context": "single-file",
+      "confidence": {"intent": 0.90, "language": 0.99, "difficulty": 0.80},
+      "unmapped": []
+    }
+  },
+  {
+    "id": "value-5-pangu-cot",
+    "conversations": [
+      {"from": "human", "value": "用 Rust 实现一个高效的 LRU Cache"},
+      {"from": "gpt", "value": "[unused16]考虑用 HashMap + 双向链表实现 LRU Cache。\n\nRust 中的挑战：\n1. 双向链表在 Rust 中实现较复杂，因为需要多个可变引用\n2. 可以用 unsafe 或者 Rc<RefCell<>> 包装\n3. 更好的方案：用 std::collections::LinkedList 或 indexmap\n\n实际上最简单高效的是用 LinkedHashMap 或者直接用 IndexMap。\n\n但面试/练习场景应该手写，用 unsafe 指针实现。[unused17]\n\n```rust\nuse std::collections::HashMap;\nuse std::ptr;\n\nstruct Node {\n    key: i32,\n    value: i32,\n    prev: *mut Node,\n    next: *mut Node,\n}\n\nstruct LRUCache {\n    capacity: usize,\n    map: HashMap<i32, *mut Node>,\n    head: *mut Node,\n    tail: *mut Node,\n}\n\nimpl LRUCache {\n    fn new(capacity: usize) -> Self {\n        let head = Box::into_raw(Box::new(Node { key: 0, value: 0, prev: ptr::null_mut(), next: ptr::null_mut() }));\n        let tail = Box::into_raw(Box::new(Node { key: 0, value: 0, prev: head, next: ptr::null_mut() }));\n        unsafe { (*head).next = tail; }\n        LRUCache { capacity, map: HashMap::new(), head, tail }\n    }\n\n    fn get(&mut self, key: i32) -> i32 {\n        if let Some(&node) = self.map.get(&key) {\n            self.remove_node(node);\n            self.add_to_front(node);\n            unsafe { (*node).value }\n        } else {\n            -1\n        }\n    }\n}\n```\n\n使用 unsafe 指针实现双向链表，保证 O(1) 的 get/put 操作。"}
+    ],
+    "labels": {
+      "intent": "build",
+      "language": ["rust"],
+      "domain": [],
+      "task": ["feature-implementation"],
+      "difficulty": "expert",
+      "concept": ["data-structures", "memory-management", "ownership"],
+      "agentic": [],
+      "constraint": ["optimized"],
+      "context": "single-file",
+      "confidence": {"intent": 0.95, "language": 0.99, "difficulty": 0.90},
+      "unmapped": []
+    }
+  }
+]

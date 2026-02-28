@@ -25,6 +25,9 @@ import json
 from sft_label.config import (
     MAX_CONVERSATION_CHARS, TRUNCATION_HEAD_RATIO,
     TRUNCATION_LAST_RESPONSE_RATIO, TRUNCATION_PER_TURN_RATIO,
+    VALUE_TRUNCATION_BUDGET, VALUE_TRUNCATION_INSTRUCTION_RATIO,
+    VALUE_TRUNCATION_COT_RATIO, VALUE_TRUNCATION_RESPONSE_RATIO,
+    VALUE_TRUNCATION_FRAGMENT_COUNT,
 )
 
 
@@ -329,6 +332,220 @@ def truncate_conversations_for_labeling(conversations, max_total_chars=None,
         result.append(last_turn)
 
     return result, True
+
+
+# ─────────────────────────────────────────────────────────
+# Value scoring: thinking-mode detection & COT-preserving truncation
+# ─────────────────────────────────────────────────────────
+
+def detect_thinking_mode(conversations):
+    """Detect whether a sample uses slow-thinking (explicit COT) or fast-thinking.
+
+    Scans raw conversation text for <think>, <thinking>, or [unused16] markers.
+    Returns "slow" or "fast".
+    """
+    for turn in conversations:
+        val = turn.get("value", "")
+        if _SHAREGPT_COT_RE.search(val) or _PANGU_COT_RE.search(val):
+            return "slow"
+    return "fast"
+
+
+def extract_cot_content(conversations):
+    """Extract COT blocks from conversations without stripping them.
+
+    Returns:
+        cot_text: concatenated COT content (without tags)
+        cot_chars: total char count of COT content
+        conversations_without_cot: conversations with COT blocks removed from GPT turns
+    """
+    cot_parts = []
+    cleaned_convs = []
+
+    for turn in conversations:
+        val = turn.get("value", "")
+        if turn.get("from") == "gpt":
+            # Collect COT content
+            for match in _SHAREGPT_COT_RE.finditer(val):
+                # Strip the outer tags
+                inner = match.group()
+                inner = re.sub(r'^<(?:think|thinking)>', '', inner)
+                inner = re.sub(r'</(?:think|thinking)>$', '', inner)
+                cot_parts.append(inner.strip())
+            for match in _PANGU_COT_RE.finditer(val):
+                inner = match.group()
+                inner = inner.replace('[unused16]', '').replace('[unused17]', '')
+                cot_parts.append(inner.strip())
+            # Remove COT from the response
+            clean_val = strip_cot(val)
+            cleaned_convs.append({**turn, "value": clean_val})
+        else:
+            cleaned_convs.append(turn)
+
+    cot_text = "\n\n".join(cot_parts)
+    return cot_text, len(cot_text), cleaned_convs
+
+
+def truncate_with_fragments(text, budget, n_fragments=3, head_ratio=0.3, tail_ratio=0.3):
+    """Truncate text keeping head + evenly-spaced middle fragments + tail.
+
+    Each gap is annotated with position and omitted char count.
+    """
+    if len(text) <= budget:
+        return text
+
+    # Reserve space for markers (approx)
+    marker_template = "\n[... {} chars omitted, fragment at {}% ...]\n"
+    marker_overhead = len(marker_template.format("99999", "99")) * (n_fragments + 1)
+    usable = budget - marker_overhead
+    if usable < 200:
+        # Too small for fragment approach, fall back to head+tail
+        return _truncate_text(text, budget, keep_head_ratio=head_ratio)
+
+    head_chars = int(usable * head_ratio)
+    tail_chars = int(usable * tail_ratio)
+    mid_total = usable - head_chars - tail_chars
+    frag_size = mid_total // max(n_fragments, 1)
+
+    head = text[:head_chars]
+    tail = text[-tail_chars:] if tail_chars > 0 else ""
+
+    # Sample middle fragments at evenly-spaced positions
+    mid_start = head_chars
+    mid_end = len(text) - tail_chars
+    mid_range = mid_end - mid_start
+
+    fragments = []
+    if mid_range > 0 and n_fragments > 0:
+        for i in range(n_fragments):
+            # Position at (i+1)/(n+1) of the middle range
+            pos = mid_start + int((i + 1) * mid_range / (n_fragments + 1))
+            frag_start = max(mid_start, pos - frag_size // 2)
+            frag_end = min(mid_end, frag_start + frag_size)
+            pct = int(100 * (frag_start - 0) / len(text))
+            fragments.append((frag_start, frag_end, pct))
+
+    # Assemble
+    parts = [head]
+    prev_end = head_chars
+    for frag_start, frag_end, pct in fragments:
+        omitted = frag_start - prev_end
+        if omitted > 0:
+            parts.append(f"\n[... {omitted} chars omitted, fragment at {pct}% ...]\n")
+        parts.append(text[frag_start:frag_end])
+        prev_end = frag_end
+
+    # Gap before tail
+    omitted = (len(text) - tail_chars) - prev_end
+    if omitted > 0:
+        parts.append(f"\n[... {omitted} chars omitted ...]\n")
+    if tail:
+        parts.append(tail)
+
+    return "".join(parts)
+
+
+def truncate_for_scoring(conversations, thinking_mode, cot_text="",
+                         budget=None, instruction_ratio=None,
+                         cot_ratio=None, response_ratio=None,
+                         n_fragments=None):
+    """Orchestrate COT-preserving truncation for value scoring.
+
+    Budget allocation:
+      - Instruction (first human turn): 15%
+      - COT (slow thinking only): 45%
+      - Response (last GPT turn, COT stripped): 35%
+      - Meta is handled externally: 5%
+
+    For fast thinking (no COT), COT budget merges into response → 80% total.
+
+    Returns:
+        dict with keys: instruction, cot (or None), response, was_truncated,
+              original_instruction_chars, original_cot_chars, original_response_chars
+    """
+    if budget is None:
+        budget = VALUE_TRUNCATION_BUDGET
+    if instruction_ratio is None:
+        instruction_ratio = VALUE_TRUNCATION_INSTRUCTION_RATIO
+    if cot_ratio is None:
+        cot_ratio = VALUE_TRUNCATION_COT_RATIO
+    if response_ratio is None:
+        response_ratio = VALUE_TRUNCATION_RESPONSE_RATIO
+    if n_fragments is None:
+        n_fragments = VALUE_TRUNCATION_FRAGMENT_COUNT
+
+    # Content budget (exclude ~5% meta overhead)
+    content_budget = int(budget * 0.95)
+
+    # Extract instruction (first human turn) and response (last GPT turn)
+    instruction = ""
+    response = ""
+    for turn in conversations:
+        if turn.get("from") == "human" and not instruction:
+            instruction = turn.get("value", "")
+        if turn.get("from") == "gpt":
+            response = turn.get("value", "")  # keep updating to get last one
+
+    # For fast thinking, strip COT from response if any
+    if thinking_mode == "fast":
+        response_clean = response
+        cot_text_final = ""
+    else:
+        response_clean = strip_cot(response)
+        cot_text_final = cot_text
+
+    original_instruction_chars = len(instruction)
+    original_cot_chars = len(cot_text_final)
+    original_response_chars = len(response_clean)
+
+    total_original = original_instruction_chars + original_cot_chars + original_response_chars
+    was_truncated = total_original > content_budget
+
+    if not was_truncated:
+        return {
+            "instruction": instruction,
+            "cot": cot_text_final if thinking_mode == "slow" else None,
+            "response": response_clean,
+            "was_truncated": False,
+            "original_instruction_chars": original_instruction_chars,
+            "original_cot_chars": original_cot_chars,
+            "original_response_chars": original_response_chars,
+        }
+
+    # Allocate budgets
+    if thinking_mode == "slow" and cot_text_final:
+        instr_budget = int(content_budget * instruction_ratio)
+        cot_budget = int(content_budget * cot_ratio)
+        resp_budget = content_budget - instr_budget - cot_budget
+    else:
+        # Fast thinking: no COT, merge COT budget into response
+        instr_budget = int(content_budget * instruction_ratio)
+        cot_budget = 0
+        resp_budget = content_budget - instr_budget
+
+    # Truncate each section
+    trunc_instruction = _truncate_text(instruction, instr_budget) if len(instruction) > instr_budget else instruction
+
+    if thinking_mode == "slow" and cot_text_final and cot_budget > 0:
+        trunc_cot = truncate_with_fragments(cot_text_final, cot_budget, n_fragments=n_fragments)
+    else:
+        trunc_cot = None
+
+    if thinking_mode == "fast":
+        # For fast thinking, use fragment-based truncation on response too
+        trunc_response = truncate_with_fragments(response_clean, resp_budget, n_fragments=n_fragments)
+    else:
+        trunc_response = _truncate_text(response_clean, resp_budget) if len(response_clean) > resp_budget else response_clean
+
+    return {
+        "instruction": trunc_instruction,
+        "cot": trunc_cot,
+        "response": trunc_response,
+        "was_truncated": True,
+        "original_instruction_chars": original_instruction_chars,
+        "original_cot_chars": original_cot_chars,
+        "original_response_chars": original_response_chars,
+    }
 
 
 # ─────────────────────────────────────────────────────────

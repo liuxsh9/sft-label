@@ -5,7 +5,7 @@ All production settings extracted here for easy tuning.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # ─── LLM API ────────────────────────────────────────────
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://localhost:4000/v1")
@@ -35,6 +35,42 @@ SPARSE_GAP_MULTIPLIER = 1.4   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
 
+# ─── Value Scoring (Pass 2) ───────────────────────────
+VALUE_WEIGHTS = {
+    "complexity": 0.25,
+    "quality": 0.35,
+    "reasoning": 0.15,
+    "rarity": 0.25,
+}
+RARITY_WEIGHTS = {
+    "intent": 0.3,
+    "difficulty": 0.3,
+    "context": 0.5,
+    "language": 1.0,
+    "domain": 1.5,
+    "task": 1.0,
+    "concept": 2.0,
+    "agentic": 1.5,
+    "constraint": 1.0,
+}
+RARITY_COMBO_ALPHA = 0.7            # weight for tag IDF vs combo IDF
+VALUE_TRUNCATION_BUDGET = 20000     # total chars for scoring truncation
+VALUE_TRUNCATION_INSTRUCTION_RATIO = 0.15
+VALUE_TRUNCATION_COT_RATIO = 0.45
+VALUE_TRUNCATION_RESPONSE_RATIO = 0.35
+VALUE_TRUNCATION_META_RATIO = 0.05
+VALUE_TRUNCATION_FRAGMENT_COUNT = 3  # middle fragments for COT sampling
+
+KNOWN_FLAGS_POSITIVE = frozenset({
+    "excellent-explanation", "clean-code", "creative-solution",
+    "good-error-handling", "comprehensive-testing",
+})
+KNOWN_FLAGS_NEGATIVE = frozenset({
+    "has-bug", "security-issue", "outdated-practice",
+    "incomplete", "over-engineered", "incorrect-output", "poor-explanation",
+})
+KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
+
 # ─── Runtime-Overridable Config ──────────────────────
 @dataclass
 class PipelineConfig:
@@ -62,6 +98,11 @@ class PipelineConfig:
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP
     sparse_threshold: int = SPARSE_THRESHOLD
+    # Value scoring (Pass 2)
+    value_weights: dict = None  # defaults to VALUE_WEIGHTS
+    rarity_weights: dict = None  # defaults to RARITY_WEIGHTS
+    rarity_combo_alpha: float = RARITY_COMBO_ALPHA
+    value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
 
 
 # ─── Consistency Rules ──────────────────────────────────

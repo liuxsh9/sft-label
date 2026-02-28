@@ -19,7 +19,7 @@ def cmd_run(args):
 
     config = PipelineConfig(model=args.model, concurrency=args.concurrency)
     try:
-        asyncio.run(run(
+        stats = asyncio.run(run(
             input_path=args.input,
             output=args.output,
             resume=args.resume,
@@ -31,6 +31,20 @@ def cmd_run(args):
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         sys.exit(1)
+
+    # Continuous mode: run Pass 2 scoring after Pass 1
+    if getattr(args, "score", False) and stats:
+        run_dir = stats.get("run_dir")
+        if run_dir:
+            print("\n=== Starting Pass 2: Value Scoring ===\n")
+            from sft_label.scoring import run_scoring
+            asyncio.run(run_scoring(
+                input_path=run_dir,
+                output_dir=run_dir,
+                model=args.model,
+                concurrency=args.concurrency,
+                config=config,
+            ))
 
 
 def cmd_validate(args):
@@ -56,6 +70,26 @@ def cmd_export_review(args):
     export_main()
 
 
+def cmd_score(args):
+    """Run value scoring (Pass 2) on pre-labeled data."""
+    from sft_label.config import PipelineConfig
+    from sft_label.scoring import run_scoring
+
+    config = PipelineConfig(model=args.model, concurrency=args.concurrency)
+    try:
+        asyncio.run(run_scoring(
+            input_path=args.input,
+            tag_stats_path=getattr(args, "tag_stats", None),
+            model=args.model,
+            concurrency=args.concurrency,
+            limit=args.limit,
+            config=config,
+        ))
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="sft-label",
@@ -77,9 +111,23 @@ def main():
                             help="Max samples per file (0 = all)")
     run_parser.add_argument("--shuffle", action="store_true")
     run_parser.add_argument("--no-arbitration", action="store_true")
+    run_parser.add_argument("--score", action="store_true",
+                            help="Run Pass 2 value scoring after labeling")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
+
+    # --- score ---
+    score_parser = subparsers.add_parser("score",
+                                          help="Run value scoring (Pass 2) on pre-labeled data")
+    score_parser.add_argument("--input", type=str, required=True,
+                               help="Path to labeled.json or directory")
+    score_parser.add_argument("--tag-stats", type=str, default=None,
+                               help="Path to stats.json for rarity computation")
+    score_parser.add_argument("--model", type=str, default="gpt-4o-mini")
+    score_parser.add_argument("--concurrency", type=int, default=100)
+    score_parser.add_argument("--limit", type=int, default=0,
+                               help="Max samples to score (0 = all)")
 
     # --- export-review ---
     review_parser = subparsers.add_parser("export-review",
@@ -97,6 +145,8 @@ def main():
         cmd_run(args)
     elif args.command == "validate":
         cmd_validate(args)
+    elif args.command == "score":
+        cmd_score(args)
     elif args.command == "export-review":
         cmd_export_review(args)
 
