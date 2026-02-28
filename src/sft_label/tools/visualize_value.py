@@ -2,11 +2,11 @@
 Value Scoring Dashboard Generator
 
 Generates standalone HTML dashboards for Pass 2 value scoring results.
-Includes: Value Overview Cards, Score Distributions, Sub-score Breakdown,
-Value×Tag Cross-Analysis, Thinking Mode Analysis, Flag Analysis.
+When Pass 1 data (stats.json / labeled.json) is found in the same directory,
+the dashboard includes Pass 1 sections (tag distributions, confidence, coverage)
+at the top, with Pass 2 sections appended below.
 
-Global dashboard adds: File Ranking Table, Coverage Impact Analysis,
-Data Selection Simulator.
+Pass 1's standalone dashboard (dashboard.html) is unaffected.
 """
 
 import json
@@ -122,16 +122,46 @@ def compute_value_viz_data(samples, stats):
     return viz
 
 
+def _load_pass1_data(run_dir, is_global):
+    """Try to load Pass 1 viz data from the same run directory.
+
+    Returns viz_data dict or None if Pass 1 data is not available.
+    """
+    try:
+        from sft_label.tools.visualize_labels import load_run, compute_viz_data
+
+        if is_global:
+            p1_stats_file = "summary_stats.json"
+            p1_labeled_file = None
+        else:
+            p1_stats_file = "stats.json"
+            p1_labeled_file = "labeled.json"
+
+        p1_stats_path = run_dir / p1_stats_file
+        if not p1_stats_path.exists():
+            return None
+
+        p1_samples, p1_stats = load_run(
+            run_dir, labeled_file=p1_labeled_file, stats_file=p1_stats_file
+        )
+        if not p1_stats:
+            return None
+
+        return compute_viz_data(p1_samples, p1_stats)
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────
-# HTML Template
+# Combined HTML Template (Pass 1 + Pass 2)
 # ─────────────────────────────────────────────────────────
 
-VALUE_HTML_TEMPLATE = r"""<!DOCTYPE html>
+COMBINED_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SFT Value Scoring Dashboard</title>
+<title>SFT Labeling & Value Dashboard</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f7; color: #1d1d1f; }
@@ -157,6 +187,7 @@ h3 { font-size: 0.95em; font-weight: 600; margin: 0 0 10px; color: #374151; }
 .bar-track { flex: 1; height: 18px; background: #f3f4f6; border-radius: 3px; overflow: hidden; position: relative; }
 .bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
 .bar-val { min-width: 50px; text-align: right; padding-left: 6px; color: #6b7280; font-size: 0.82em; }
+.bar-count { width: 50px; text-align: right; font-size: 0.78em; color: #6b7280; padding-left: 6px; }
 
 .hist-row { display: flex; align-items: flex-end; gap: 2px; height: 100px; margin-top: 8px; }
 .hist-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; position: relative; }
@@ -183,19 +214,46 @@ tr:hover td { background: #f9fafb; }
 .pct-table { width: 100%; font-size: 0.82em; border-collapse: collapse; }
 .pct-table th { background: #f9fafb; padding: 6px 10px; text-align: center; font-weight: 600; border: 1px solid #e5e7eb; }
 .pct-table td { padding: 6px 10px; text-align: center; border: 1px solid #e5e7eb; }
+
+/* Pass 1 specific styles */
+.dim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+.dim-card { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.dim-card h3 { font-size: 0.95em; font-weight: 600; margin-bottom: 10px; display: flex; justify-content: space-between; }
+.dim-card h3 .badge { font-size: 0.75em; background: #f3f4f6; padding: 2px 8px; border-radius: 4px; font-weight: 500; color: #6b7280; }
+.conf-table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+.conf-table th { padding: 6px 8px; text-align: center; font-weight: 600; background: #f9fafb; }
+.conf-table td { padding: 5px 8px; text-align: center; border: 1px solid #f3f4f6; }
+.conf-cell { border-radius: 4px; padding: 3px 6px; font-weight: 500; }
+.cov-row { display: flex; align-items: center; margin-bottom: 6px; font-size: 0.82em; }
+.cov-label { width: 90px; font-weight: 500; }
+.cov-bar { flex: 1; height: 14px; background: #f3f4f6; border-radius: 3px; overflow: hidden; }
+.cov-fill { height: 100%; background: #3b82f6; border-radius: 3px; }
+.cov-text { width: 100px; text-align: right; font-size: 0.78em; color: #6b7280; }
+.cross-table { border-collapse: collapse; font-size: 0.82em; }
+.cross-table th, .cross-table td { padding: 6px 14px; text-align: center; border: 1px solid #e5e7eb; }
+.cross-table th { background: #f9fafb; font-weight: 600; }
+.cross-cell { border-radius: 4px; padding: 2px 8px; }
+.unused-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.unused-tag { font-size: 0.72em; background: #fef2f2; color: #991b1b; padding: 2px 6px; border-radius: 3px; }
+
+.pass-divider { border: none; border-top: 3px solid #e5e7eb; margin: 32px 0 24px; }
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>SFT Value Scoring Dashboard</h1>
+  <h1>SFT Labeling & Value Dashboard</h1>
   <div class="sub" id="subtitle"></div>
 </div>
-<div class="container" id="dashboard"></div>
+<div class="container">
+  <div id="pass1"></div>
+  <div id="dashboard"></div>
+</div>
 
 <script>
-const DATA = __DATA_PLACEHOLDER__;
+const DATA_P1 = __DATA_P1_PLACEHOLDER__;
+const DATA_P2 = __DATA_P2_PLACEHOLDER__;
 
-function pct(n, total) { return total > 0 ? (n / total * 100).toFixed(1) : '0.0'; }
+// ── Shared utilities ──
 function scoreColor(v) {
     if (v >= 8) return '#16a34a';
     if (v >= 6) return '#3b82f6';
@@ -203,6 +261,128 @@ function scoreColor(v) {
     return '#dc2626';
 }
 
+// ── Pass 1 rendering ──
+const P1_COLORS = {
+    intent: '#3b82f6', language: '#8b5cf6', domain: '#06b6d4', task: '#f59e0b',
+    difficulty: '#10b981', concept: '#ec4899', agentic: '#f97316', constraint: '#6366f1', context: '#14b8a6'
+};
+
+function confColor(v) {
+    if (v >= 0.9) return '#dcfce7';
+    if (v >= 0.8) return '#fef9c3';
+    if (v >= 0.7) return '#fed7aa';
+    return '#fecaca';
+}
+
+function renderPass1(d) {
+    const el = document.getElementById('pass1');
+    if (!d) return;
+
+    const ov = d.overview || {};
+    let html = '';
+
+    // Overview cards
+    html += '<div class="section"><h2>Labeling Overview</h2><div class="cards">';
+    html += [
+        ['Samples', d.total],
+        ['Success', ((ov.success_rate || 0) * 100).toFixed(1) + '%'],
+        ['Tokens', (ov.total_tokens || 0).toLocaleString()],
+        ['Arbitrated', ((ov.arbitrated_rate || 0) * 100).toFixed(1) + '%'],
+        ['Unmapped', ov.unmapped_unique || 0],
+    ].map(([l, v]) => `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
+    html += '</div></div>';
+
+    // Tag distributions
+    const distributions = d.distributions || {};
+    if (Object.keys(distributions).length > 0) {
+        html += '<div class="section"><h2>Tag Distributions</h2><div class="dim-grid">';
+        for (const dim of Object.keys(distributions)) {
+            const dist = distributions[dim];
+            const entries = Object.entries(dist).sort((a, b) => b[1] - a[1]);
+            const maxVal = entries.length ? entries[0][1] : 1;
+            const total = entries.reduce((s, e) => s + e[1], 0);
+            const color = P1_COLORS[dim] || '#6b7280';
+            let bars = entries.map(([tag, count]) => {
+                const pct = (count / maxVal * 100).toFixed(0);
+                return `<div class="bar-row">
+                    <div class="bar-label" title="${tag}">${tag}</div>
+                    <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+                    <div class="bar-count">${count} (${(count/total*100).toFixed(0)}%)</div>
+                </div>`;
+            }).join('');
+            html += `<div class="dim-card"><h3>${dim} <span class="badge">${entries.length} tags</span></h3>${bars}</div>`;
+        }
+        html += '</div></div>';
+    }
+
+    // Confidence summary
+    const confStats = d.confidence_stats || {};
+    const confDims = Object.keys(confStats);
+    if (confDims.length > 0) {
+        html += '<div class="section"><h2>Confidence Summary</h2><div class="panel">';
+        html += '<table class="conf-table"><tr><th>Dimension</th><th>Mean</th><th>Min</th><th>Max</th><th>Below Threshold</th></tr>';
+        for (const dim of confDims) {
+            const cs = confStats[dim];
+            html += `<tr>
+                <td style="font-weight:600">${dim}</td>
+                <td><span class="conf-cell" style="background:${confColor(cs.mean)}">${cs.mean.toFixed(3)}</span></td>
+                <td>${cs.min.toFixed(2)}</td><td>${cs.max.toFixed(2)}</td>
+                <td>${cs.below_threshold}</td>
+            </tr>`;
+        }
+        html += '</table></div></div>';
+    }
+
+    // Intent × Difficulty cross matrix
+    const cm = d.cross_matrix || {};
+    if (cm.rows && cm.rows.length > 0 && cm.cols && cm.cols.length > 0) {
+        html += '<div class="section"><h2>Intent &times; Difficulty</h2><div class="panel">';
+        html += '<table class="cross-table"><tr><th></th>';
+        cm.cols.forEach(c => html += `<th>${c}</th>`);
+        html += '<th>Total</th></tr>';
+        for (const row of cm.rows) {
+            html += `<tr><th>${row}</th>`;
+            let rowTotal = 0;
+            for (const col of cm.cols) {
+                const v = cm.data[`${row}|${col}`] || 0;
+                rowTotal += v;
+                const bg = v > 0 ? 'background:#3b82f622' : '';
+                html += `<td><span class="cross-cell" style="${bg}">${v || '-'}</span></td>`;
+            }
+            html += `<td style="font-weight:600">${rowTotal}</td></tr>`;
+        }
+        html += '</table></div></div>';
+    }
+
+    // Tag pool coverage
+    const coverage = d.coverage || {};
+    if (Object.keys(coverage).length > 0) {
+        html += '<div class="section"><h2>Tag Pool Coverage</h2><div class="panel">';
+        for (const dim of Object.keys(coverage)) {
+            const c = coverage[dim];
+            if (!c.pool_size) continue;
+            const pct = (c.rate * 100).toFixed(0);
+            html += `<div class="cov-row">
+                <div class="cov-label">${dim}</div>
+                <div class="cov-bar"><div class="cov-fill" style="width:${pct}%"></div></div>
+                <div class="cov-text">${c.used}/${c.pool_size} (${pct}%)</div>
+            </div>`;
+            if (c.unused.length && c.unused.length <= 20) {
+                html += `<div style="margin-left:90px;margin-bottom:8px"><div class="unused-tags">${c.unused.map(t => '<span class="unused-tag">' + t + '</span>').join('')}</div></div>`;
+            } else if (c.unused.length > 20) {
+                html += `<div style="margin-left:90px;margin-bottom:8px;font-size:0.75em;color:#991b1b">${c.unused.length} unused tags (expand dataset for better coverage)</div>`;
+            }
+        }
+        html += '</div></div>';
+    }
+
+    // Divider between Pass 1 and Pass 2
+    html += '<hr class="pass-divider">';
+
+    el.innerHTML = html;
+}
+
+// ── Pass 2 rendering ──
 function renderHistogram(containerId, bins, label, color) {
     const max = Math.max(...bins, 1);
     let html = `<h3>${label}</h3><div class="hist-row">`;
@@ -250,12 +430,10 @@ function renderBarChart(items, maxVal, color, limit) {
 const histColors = {'value_score': '#3b82f6', 'complexity_overall': '#ea580c', 'quality_overall': '#16a34a', 'reasoning_overall': '#9333ea', 'rarity_score': '#0891b2'};
 const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity'};
 
-function render() {
-    const d = DATA;
+function renderPass2() {
+    const d = DATA_P2;
     const o = d.overview || {};
     const el = document.getElementById('dashboard');
-    document.getElementById('subtitle').textContent =
-        `${o.total_scored || 0} scored samples` + (o.total_failed ? `, ${o.total_failed} failed` : '');
     let html = '';
 
     // === Section 1: Overview Cards ===
@@ -279,12 +457,10 @@ function render() {
         html += '<div class="section"><h2>Score Distributions</h2><div class="grid">';
         const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score'];
         if (hasHistograms) {
-            // Full histogram mode (have sample data)
             for (const [key, bins] of Object.entries(d.histograms)) {
                 html += `<div class="panel">${renderHistogram(key, bins, histLabels[key] || key, histColors[key] || '#3b82f6')}</div>`;
             }
         } else {
-            // Stats-only fallback: show percentile table
             for (const key of scoreKeys) {
                 const distInfo = d.score_distributions[key];
                 if (!distInfo) continue;
@@ -414,7 +590,14 @@ function sortTable(col) {
     rows.forEach(r => tbody.appendChild(r));
 }
 
-render();
+// ── Build subtitle and render ──
+const parts = [];
+if (DATA_P1) parts.push(`${DATA_P1.total} labeled`);
+parts.push(`${(DATA_P2.overview || {}).total_scored || 0} scored`);
+document.getElementById('subtitle').textContent = parts.join(' \u00b7 ');
+
+if (DATA_P1) renderPass1(DATA_P1);
+renderPass2();
 </script>
 </body>
 </html>"""
@@ -423,7 +606,11 @@ render();
 def generate_value_dashboard(run_dir, scored_file="scored.json",
                               stats_file="stats_value.json",
                               output_file="dashboard_value.html"):
-    """Generate a value scoring dashboard HTML file.
+    """Generate a combined labeling + value scoring dashboard HTML file.
+
+    Automatically discovers Pass 1 data (stats.json / labeled.json) in the
+    same directory and includes labeling sections at the top. Falls back to
+    Pass 2 only if Pass 1 data is not found.
 
     Works in two modes:
     - Per-file: scored_file + stats_file (full data with histograms)
@@ -431,10 +618,19 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
     """
     run_dir = Path(run_dir)
     samples, stats = load_value_run(run_dir, scored_file, stats_file)
-    viz_data = compute_value_viz_data(samples, stats)
+    viz_data_p2 = compute_value_viz_data(samples, stats)
 
-    html = VALUE_HTML_TEMPLATE.replace("__DATA_PLACEHOLDER__",
-                                        json.dumps(viz_data, ensure_ascii=False))
+    # Try to load Pass 1 data from the same directory
+    is_global = scored_file is None
+    viz_data_p1 = _load_pass1_data(run_dir, is_global)
+
+    html = COMBINED_HTML_TEMPLATE.replace(
+        "__DATA_P1_PLACEHOLDER__",
+        json.dumps(viz_data_p1, ensure_ascii=False) if viz_data_p1 else "null"
+    ).replace(
+        "__DATA_P2_PLACEHOLDER__",
+        json.dumps(viz_data_p2, ensure_ascii=False)
+    )
 
     out = run_dir / output_file
     out.write_text(html, encoding="utf-8")
