@@ -56,6 +56,11 @@ sft-label score --input labeled.json
 sft-label score --input labeled.json --tag-stats global_stats.json
 sft-label score --input results_dir/
 
+# Filter high-value samples from scored data
+sft-label filter --input scored.json --threshold 6.0
+sft-label filter --input results_dir/ --threshold 7.0
+sft-label filter --input scored.json --threshold 6.0 --include-unscored
+
 # Validate taxonomy
 sft-label validate
 

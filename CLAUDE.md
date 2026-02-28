@@ -27,6 +27,10 @@ LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data
 
 # Continuous mode with external rarity stats for Pass 2
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --tag-stats global_stats.json
+
+# Filter high-value samples from scored data
+uv run sft-label filter --input scored.json --threshold 6.0
+uv run sft-label filter --input results_dir/ --threshold 7.0 --include-unscored
 ```
 
 ## Architecture
@@ -60,7 +64,7 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 **Taxonomy data** is embedded as package data in `src/sft_label/taxonomy/`. Load via `_resources.py` (uses `importlib.resources`), not file paths.
 
 **Dual interface:**
-- CLI: `sft-label run|validate|score|export-review` (entry point in `cli.py`)
+- CLI: `sft-label run|validate|score|filter|export-review` (entry point in `cli.py`)
 - Library: `from sft_label import run, PipelineConfig`
 
 **Config layering:** Module-level constants in `config.py` serve as defaults. `PipelineConfig` dataclass allows runtime overrides. Environment variables `LITELLM_BASE` and `LITELLM_KEY` configure the LLM endpoint.
@@ -75,8 +79,9 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 | `src/sft_label/prompts.py` | Pass 1 system prompts, TAG_POOLS |
 | `src/sft_label/prompts_value.py` | Pass 2 scoring prompts, few-shot examples |
 | `src/sft_label/config.py` | All configuration constants + PipelineConfig |
-| `src/sft_label/cli.py` | CLI entry point (run, validate, score, export-review) |
+| `src/sft_label/cli.py` | CLI entry point (run, validate, score, filter, export-review) |
 | `src/sft_label/tools/visualize_value.py` | Pass 2 dashboard generation |
+| `src/sft_label/tools/filter_value.py` | Value-based sample filtering |
 
 ## Origin
 
