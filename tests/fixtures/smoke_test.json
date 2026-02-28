@@ -1,0 +1,42 @@
+[
+  {
+    "id": "smoke-1-dp-algorithm",
+    "conversations": [
+      {"from": "human", "value": "请用 Python 实现 0/1 背包问题的动态规划解法，要求时间复杂度 O(nW)"},
+      {"from": "gpt", "value": "```python\ndef knapsack_01(W, weights, values):\n    n = len(weights)\n    dp = [[0]*(W+1) for _ in range(n+1)]\n    for i in range(1, n+1):\n        for w in range(W+1):\n            dp[i][w] = dp[i-1][w]\n            if w >= weights[i-1]:\n                dp[i][w] = max(dp[i][w], dp[i-1][w-weights[i-1]] + values[i-1])\n    return dp[n][W]\n```\n\n时间复杂度 O(nW)，空间可优化为一维数组。"}
+    ]
+  },
+  {
+    "id": "smoke-2-agentic-debug",
+    "conversations": [
+      {"from": "human", "value": "我的 Python 脚本跑着跑着就 OOM 了，帮我查一下"},
+      {"from": "gpt", "value": "让我看看你的代码，先检查内存使用情况。"},
+      {"from": "tool", "value": "$ cat process_data.py\nimport pandas as pd\ndef process(files):\n    results = []\n    for f in files:\n        df = pd.read_csv(f)\n        results.append(df)\n    return pd.concat(results)"},
+      {"from": "gpt", "value": "找到问题了。你在循环里把所有 DataFrame 都存到 results 列表中，全部加载到内存。\n\n修复方案：用 generator + chunked concat：\n```python\ndef process(files):\n    chunks = []\n    for f in files:\n        for chunk in pd.read_csv(f, chunksize=10000):\n            chunks.append(chunk)\n    return pd.concat(chunks, ignore_index=True)\n```\n\n或者用 dask 做 lazy loading。"}
+    ]
+  },
+  {
+    "id": "smoke-3-code-exploration",
+    "conversations": [
+      {"from": "human", "value": "帮我看下这个项目的认证模块在哪里，怎么实现的"},
+      {"from": "gpt", "value": "我来搜索一下项目中的认证相关代码。"},
+      {"from": "tool", "value": "$ grep -r 'auth' src/ --include='*.py' -l\nsrc/auth/middleware.py\nsrc/auth/jwt_handler.py\nsrc/auth/permissions.py\nsrc/api/deps.py"},
+      {"from": "tool", "value": "$ cat src/auth/middleware.py\nfrom fastapi import Request\nfrom .jwt_handler import verify_token\n\nasync def auth_middleware(request: Request, call_next):\n    token = request.headers.get('Authorization', '').replace('Bearer ', '')\n    if not token:\n        return JSONResponse(status_code=401, content={'detail': 'Not authenticated'})\n    request.state.user = verify_token(token)\n    return await call_next(request)"},
+      {"from": "gpt", "value": "项目认证模块在 `src/auth/` 下，分三个文件：\n\n1. **middleware.py** — FastAPI 中间件，从 Authorization header 提取 JWT token\n2. **jwt_handler.py** — JWT 签发/验证\n3. **permissions.py** — 权限控制\n\n`src/api/deps.py` 是依赖注入入口，把认证集成到路由中。架构上是标准的 middleware + dependency injection 模式。"}
+    ]
+  },
+  {
+    "id": "smoke-4-security-concept",
+    "conversations": [
+      {"from": "human", "value": "如何防止 SQL 注入攻击？给我看看 Python 中的最佳实践"},
+      {"from": "gpt", "value": "SQL 注入防御的核心是**参数化查询**，永远不要拼接用户输入到 SQL 字符串。\n\n```python\n# 错误 - 容易被注入\ncursor.execute(f\"SELECT * FROM users WHERE name = '{user_input}'\")\n\n# 正确 - 参数化查询\ncursor.execute(\"SELECT * FROM users WHERE name = ?\", (user_input,))\n\n# SQLAlchemy ORM - 自动防注入\nuser = session.query(User).filter(User.name == user_input).first()\n```\n\n其他防御措施：输入验证、最小权限原则、使用 ORM。"}
+    ]
+  },
+  {
+    "id": "smoke-5-cpp-build",
+    "conversations": [
+      {"from": "human", "value": "用 C++ 实现一个线程安全的单例模式"},
+      {"from": "gpt", "value": "```cpp\n#include <mutex>\n\nclass Singleton {\npublic:\n    static Singleton& getInstance() {\n        static Singleton instance;  // C++11 保证线程安全\n        return instance;\n    }\n    Singleton(const Singleton&) = delete;\n    Singleton& operator=(const Singleton&) = delete;\nprivate:\n    Singleton() = default;\n};\n```\n\nC++11 的 Magic Static 保证了 `static` 局部变量的线程安全初始化，无需手动加锁。"}
+    ]
+  }
+]
