@@ -43,10 +43,13 @@ sft-label run --input data.json
 sft-label run --input data_dir/ --output results/
 
 # Resume interrupted run
-sft-label run --input data_dir/ --resume results/20250101_120000_gpt-4o-mini/
+sft-label run --input data_dir/ --resume data_dir-labeled-20250101_120000/
 
 # Continuous mode: Pass 1 + Pass 2 value scoring
 sft-label run --input data.json --score
+
+# Continuous mode with external rarity stats
+sft-label run --input data.json --score --tag-stats global_stats.json
 
 # Standalone value scoring (Pass 2)
 sft-label score --input labeled.json
