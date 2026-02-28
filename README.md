@@ -92,3 +92,7 @@ uv run sft-label validate
 
 - `LITELLM_BASE` — LLM proxy base URL (default: `http://localhost:4000/v1`)
 - `LITELLM_KEY` — API key for the LLM proxy
+
+## License
+
+[Apache License 2.0](LICENSE)
