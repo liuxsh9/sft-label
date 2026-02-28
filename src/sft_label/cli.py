@@ -4,6 +4,7 @@ CLI entry point for sft-label.
 Subcommands:
   sft-label run            — Run Pass 1 tag labeling (optionally + Pass 2)
   sft-label score          — Run Pass 2 value scoring on pre-labeled data
+  sft-label filter         — Filter scored data by value threshold
   sft-label validate       — Validate taxonomy definitions
   sft-label export-review  — Export labeled data to review CSV
 
@@ -91,6 +92,22 @@ def cmd_score(args):
         sys.exit(1)
 
 
+def cmd_filter(args):
+    """Filter scored data by value threshold."""
+    from sft_label.tools.filter_value import run_filter
+
+    try:
+        run_filter(
+            input_path=args.input,
+            threshold=args.threshold,
+            output_path=args.output,
+            include_unscored=args.include_unscored,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="sft-label",
@@ -153,6 +170,23 @@ def main():
     review_parser.add_argument("tool_args", nargs=argparse.REMAINDER,
                                help="Arguments passed to export_review tool")
 
+    # --- filter ---
+    filter_parser = subparsers.add_parser(
+        "filter",
+        help="Filter scored data by value threshold",
+        description="Select high-value samples from scored data. "
+                    "Filters by value_score >= threshold.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    filter_parser.add_argument("--input", type=str, required=True,
+                                help="Input scored file (.json/.jsonl) or directory")
+    filter_parser.add_argument("--threshold", type=float, required=True,
+                                help="Minimum value_score to retain")
+    filter_parser.add_argument("--output", type=str, default=None,
+                                help="Output file path (default: auto-generated alongside input)")
+    filter_parser.add_argument("--include-unscored", action="store_true",
+                                help="Keep samples without value scores (default: exclude)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -165,6 +199,8 @@ def main():
         cmd_validate(args)
     elif args.command == "score":
         cmd_score(args)
+    elif args.command == "filter":
+        cmd_filter(args)
     elif args.command == "export-review":
         cmd_export_review(args)
 

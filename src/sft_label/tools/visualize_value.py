@@ -76,7 +76,7 @@ def compute_value_viz_data(samples, stats):
             histograms[key] = bins
     viz["histograms"] = histograms
 
-    # Score distribution stats
+    # Score distribution stats (percentiles etc. from stats file)
     viz["score_distributions"] = dists
 
     # Sub-score means
@@ -116,62 +116,73 @@ VALUE_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>SFT Value Scoring Dashboard</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }
-h1 { font-size: 1.6em; margin-bottom: 8px; color: #fff; }
-h2 { font-size: 1.2em; margin: 24px 0 12px; color: #a0a8c0; border-bottom: 1px solid #2a2d3a; padding-bottom: 6px; }
-h3 { font-size: 1em; margin: 12px 0 8px; color: #8890a8; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f7; color: #1d1d1f; }
+.header { background: linear-gradient(135deg, #1d1d1f 0%, #2d3748 100%); color: white; padding: 20px 28px; }
+.header h1 { font-size: 1.4em; font-weight: 700; }
+.header .sub { font-size: 0.82em; color: #a1a1aa; margin-top: 4px; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.section { margin-bottom: 28px; }
+.section h2 { font-size: 1.1em; font-weight: 600; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #e5e7eb; }
+h3 { font-size: 0.95em; font-weight: 600; margin: 0 0 10px; color: #374151; }
 
-.cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-.card { background: #1a1d2e; border-radius: 8px; padding: 16px 20px; min-width: 140px; flex: 1; }
-.card .label { font-size: 0.75em; color: #666; text-transform: uppercase; letter-spacing: 1px; }
-.card .value { font-size: 1.8em; font-weight: 700; margin-top: 4px; }
-.card .sub { font-size: 0.8em; color: #666; margin-top: 2px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.card { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.card .label { font-size: 0.75em; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
+.card .value { font-size: 1.6em; font-weight: 700; margin-top: 4px; }
+.card .sub { font-size: 0.8em; color: #6b7280; margin-top: 2px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
-.panel { background: #1a1d2e; border-radius: 8px; padding: 16px; }
+.panel { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 
-.bar-row { display: flex; align-items: center; margin: 3px 0; font-size: 0.8em; }
-.bar-label { width: 120px; text-align: right; padding-right: 8px; color: #8890a8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bar-track { flex: 1; height: 18px; background: #252836; border-radius: 3px; overflow: hidden; position: relative; }
+.bar-row { display: flex; align-items: center; margin-bottom: 4px; font-size: 0.82em; }
+.bar-label { width: 130px; text-align: right; padding-right: 8px; color: #374151; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { flex: 1; height: 18px; background: #f3f4f6; border-radius: 3px; overflow: hidden; position: relative; }
 .bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
-.bar-val { min-width: 50px; text-align: right; padding-left: 6px; color: #888; font-size: 0.85em; }
+.bar-val { min-width: 50px; text-align: right; padding-left: 6px; color: #6b7280; font-size: 0.82em; }
 
 .hist-row { display: flex; align-items: flex-end; gap: 2px; height: 100px; margin-top: 8px; }
-.hist-bar { flex: 1; background: #4a6cf7; border-radius: 2px 2px 0 0; min-height: 2px; position: relative; }
+.hist-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; position: relative; }
 .hist-bar:hover { opacity: 0.8; }
-.hist-labels { display: flex; gap: 2px; font-size: 0.7em; color: #666; }
+.hist-labels { display: flex; gap: 2px; font-size: 0.7em; color: #6b7280; }
 .hist-labels span { flex: 1; text-align: center; }
 
-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-th { background: #252836; padding: 8px; text-align: left; cursor: pointer; user-select: none; }
-th:hover { background: #2e3248; }
-td { padding: 8px; border-top: 1px solid #252836; }
-tr:hover td { background: #1e2133; }
+table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+th { background: #f9fafb; padding: 8px; text-align: left; cursor: pointer; user-select: none; font-weight: 600; }
+th:hover { background: #f3f4f6; }
+td { padding: 8px; border-top: 1px solid #e5e7eb; }
+tr:hover td { background: #f9fafb; }
 
 .quad-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
-.quad { background: #252836; border-radius: 6px; padding: 12px; text-align: center; }
-.quad .q-label { font-size: 0.75em; color: #666; }
+.quad { background: #f3f4f6; border-radius: 6px; padding: 12px; text-align: center; }
+.quad .q-label { font-size: 0.75em; color: #6b7280; }
 .quad .q-value { font-size: 1.4em; font-weight: 700; margin-top: 4px; }
 
-.c-green { color: #4caf50; } .c-blue { color: #4a6cf7; } .c-orange { color: #ff9800; } .c-red { color: #f44336; }
-.c-purple { color: #9c27b0; } .c-cyan { color: #00bcd4; }
+.c-green { color: #16a34a; } .c-blue { color: #3b82f6; } .c-orange { color: #ea580c; } .c-red { color: #dc2626; }
+.c-purple { color: #9333ea; } .c-cyan { color: #0891b2; }
 
-.tag { display: inline-block; background: #252836; border-radius: 4px; padding: 2px 6px; font-size: 0.75em; margin: 1px; }
+.tag { display: inline-block; background: #f3f4f6; border-radius: 4px; padding: 2px 6px; font-size: 0.75em; margin: 1px; }
+
+.pct-table { width: 100%; font-size: 0.82em; border-collapse: collapse; }
+.pct-table th { background: #f9fafb; padding: 6px 10px; text-align: center; font-weight: 600; border: 1px solid #e5e7eb; }
+.pct-table td { padding: 6px 10px; text-align: center; border: 1px solid #e5e7eb; }
 </style>
 </head>
 <body>
-<h1>SFT Value Scoring Dashboard</h1>
-<div id="dashboard"></div>
+<div class="header">
+  <h1>SFT Value Scoring Dashboard</h1>
+  <div class="sub" id="subtitle"></div>
+</div>
+<div class="container" id="dashboard"></div>
 
 <script>
 const DATA = __DATA_PLACEHOLDER__;
 
 function pct(n, total) { return total > 0 ? (n / total * 100).toFixed(1) : '0.0'; }
 function scoreColor(v) {
-    if (v >= 8) return '#4caf50';
-    if (v >= 6) return '#4a6cf7';
-    if (v >= 4) return '#ff9800';
-    return '#f44336';
+    if (v >= 8) return '#16a34a';
+    if (v >= 6) return '#3b82f6';
+    if (v >= 4) return '#ea580c';
+    return '#dc2626';
 }
 
 function renderHistogram(containerId, bins, label, color) {
@@ -187,8 +198,22 @@ function renderHistogram(containerId, bins, label, color) {
     return html;
 }
 
+function renderPercentileTable(key, distInfo, color) {
+    const label = histLabels[key] || key;
+    const pcts = ['min', 'p10', 'p25', 'p50', 'p75', 'p90', 'max'];
+    const pctLabels = ['Min', 'P10', 'P25', 'P50', 'P75', 'P90', 'Max'];
+    let html = `<h3>${label}</h3>`;
+    html += `<div style="font-size:0.9em;margin-bottom:8px;color:#6b7280">Mean: <strong style="color:${scoreColor(distInfo.mean || 0)}">${(distInfo.mean || 0).toFixed(2)}</strong> &nbsp; Std: ${(distInfo.std || 0).toFixed(2)}</div>`;
+    html += '<table class="pct-table"><thead><tr>';
+    for (const pl of pctLabels) html += `<th>${pl}</th>`;
+    html += '</tr></thead><tbody><tr>';
+    for (const p of pcts) html += `<td>${(distInfo[p] != null ? distInfo[p].toFixed(1) : '-')}</td>`;
+    html += '</tr></tbody></table>';
+    return html;
+}
+
 function renderBarChart(items, maxVal, color, limit) {
-    if (!items || items.length === 0) return '<p style="color:#666">No data</p>';
+    if (!items || items.length === 0) return '<p style="color:#6b7280">No data</p>';
     const top = items.slice(0, limit || 15);
     const m = maxVal || Math.max(...top.map(x => x[1]), 1);
     let html = '';
@@ -204,14 +229,19 @@ function renderBarChart(items, maxVal, color, limit) {
     return html;
 }
 
+const histColors = {'value_score': '#3b82f6', 'complexity_overall': '#ea580c', 'quality_overall': '#16a34a', 'reasoning_overall': '#9333ea', 'rarity_score': '#0891b2'};
+const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity'};
+
 function render() {
     const d = DATA;
     const o = d.overview || {};
     const el = document.getElementById('dashboard');
+    document.getElementById('subtitle').textContent =
+        `${o.total_scored || 0} scored samples` + (o.total_failed ? `, ${o.total_failed} failed` : '');
     let html = '';
 
     // === Section 1: Overview Cards ===
-    html += '<h2>Value Overview</h2><div class="cards">';
+    html += '<div class="section"><h2>Value Overview</h2><div class="cards">';
     html += `<div class="card"><div class="label">Scored</div><div class="value">${o.total_scored || 0}</div><div class="sub">${o.total_failed || 0} failed</div></div>`;
     html += `<div class="card"><div class="label">Mean Value</div><div class="value" style="color:${scoreColor(o.mean_value)}">${(o.mean_value || 0).toFixed(1)}</div></div>`;
     html += `<div class="card"><div class="label">Mean Complexity</div><div class="value" style="color:${scoreColor(o.mean_complexity)}">${(o.mean_complexity || 0).toFixed(1)}</div></div>`;
@@ -219,49 +249,62 @@ function render() {
     html += `<div class="card"><div class="label">Median Rarity</div><div class="value" style="color:${scoreColor(o.median_rarity)}">${(o.median_rarity || 0).toFixed(1)}</div></div>`;
     const sel = d.selection_thresholds || {};
     if (sel.top_10pct) {
-        html += `<div class="card"><div class="label">Top 10%</div><div class="value c-green">${sel.top_10pct.count}</div><div class="sub">≥ ${sel.top_10pct.threshold}</div></div>`;
+        html += `<div class="card"><div class="label">Top 10%</div><div class="value c-green">${sel.top_10pct.count}</div><div class="sub">&ge; ${sel.top_10pct.threshold}</div></div>`;
     }
     html += `<div class="card"><div class="label">Tokens Used</div><div class="value">${((o.total_tokens || 0) / 1000).toFixed(0)}K</div></div>`;
-    html += '</div>';
+    html += '</div></div>';
 
     // === Section 2: Score Distributions ===
-    html += '<h2>Score Distributions</h2><div class="grid">';
-    const histColors = {'value_score': '#4a6cf7', 'complexity_overall': '#ff9800', 'quality_overall': '#4caf50', 'reasoning_overall': '#9c27b0', 'rarity_score': '#00bcd4'};
-    const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity'};
-    for (const [key, bins] of Object.entries(d.histograms || {})) {
-        html += `<div class="panel">${renderHistogram(key, bins, histLabels[key] || key, histColors[key] || '#4a6cf7')}</div>`;
+    const hasHistograms = Object.keys(d.histograms || {}).length > 0;
+    const hasDistStats = Object.keys(d.score_distributions || {}).length > 0;
+    if (hasHistograms || hasDistStats) {
+        html += '<div class="section"><h2>Score Distributions</h2><div class="grid">';
+        const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score'];
+        if (hasHistograms) {
+            // Full histogram mode (have sample data)
+            for (const [key, bins] of Object.entries(d.histograms)) {
+                html += `<div class="panel">${renderHistogram(key, bins, histLabels[key] || key, histColors[key] || '#3b82f6')}</div>`;
+            }
+        } else {
+            // Stats-only fallback: show percentile table
+            for (const key of scoreKeys) {
+                const distInfo = d.score_distributions[key];
+                if (!distInfo) continue;
+                html += `<div class="panel">${renderPercentileTable(key, distInfo, histColors[key] || '#3b82f6')}</div>`;
+            }
+        }
+        html += '</div></div>';
     }
-    html += '</div>';
 
     // === Section 3: Sub-score Breakdown ===
     const sub = d.sub_score_means || {};
     if (Object.keys(sub).length > 0) {
-        html += '<h2>Sub-score Breakdown</h2><div class="grid">';
+        html += '<div class="section"><h2>Sub-score Breakdown</h2><div class="grid">';
         for (const [dim, scores] of Object.entries(sub)) {
             const items = Object.entries(scores).map(([k, v]) => [k, v]);
-            html += `<div class="panel"><h3>${dim}</h3>${renderBarChart(items, 10, histColors[dim + '_overall'] || '#4a6cf7')}</div>`;
+            html += `<div class="panel"><h3>${dim}</h3>${renderBarChart(items, 10, histColors[dim + '_overall'] || '#3b82f6')}</div>`;
         }
-        html += '</div>';
+        html += '</div></div>';
     }
 
-    // === Section 4: Value × Tag Cross-Analysis ===
+    // === Section 4: Value x Tag Cross-Analysis ===
     const vbt = d.value_by_tag || {};
     if (Object.keys(vbt).length > 0) {
-        html += '<h2>Value × Tag Cross-Analysis</h2><div class="grid">';
-        const dimColors = {'difficulty': '#ff9800', 'intent': '#4a6cf7', 'domain': '#4caf50', 'concept': '#9c27b0', 'language': '#00bcd4', 'task': '#e91e63', 'agentic': '#ff5722', 'constraint': '#607d8b', 'context': '#795548'};
+        html += '<div class="section"><h2>Value &times; Tag Cross-Analysis</h2><div class="grid">';
+        const dimColors = {'difficulty': '#ea580c', 'intent': '#3b82f6', 'domain': '#16a34a', 'concept': '#9333ea', 'language': '#0891b2', 'task': '#db2777', 'agentic': '#ea580c', 'constraint': '#475569', 'context': '#78716c'};
         for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'language', 'task']) {
             const tags = vbt[dim];
             if (!tags || Object.keys(tags).length === 0) continue;
             const items = Object.entries(tags).map(([t, info]) => [t, info.mean, info.n]).sort((a, b) => b[1] - a[1]);
-            html += `<div class="panel"><h3>Value by ${dim}</h3>${renderBarChart(items, 10, dimColors[dim] || '#4a6cf7', 15)}</div>`;
+            html += `<div class="panel"><h3>Value by ${dim}</h3>${renderBarChart(items, 10, dimColors[dim] || '#3b82f6', 15)}</div>`;
         }
-        html += '</div>';
+        html += '</div></div>';
     }
 
     // === Section 5: Thinking Mode Analysis ===
     const tm = d.thinking_mode_stats || {};
     if (tm.slow || tm.fast) {
-        html += '<h2>Thinking Mode Analysis</h2><div class="grid">';
+        html += '<div class="section"><h2>Thinking Mode Analysis</h2><div class="grid">';
         html += '<div class="panel"><table><thead><tr><th></th><th>Slow Thinking</th><th>Fast Thinking</th></tr></thead><tbody>';
         const s = tm.slow || {}; const f = tm.fast || {};
         html += `<tr><td>Count</td><td>${s.count || 0}</td><td>${f.count || 0}</td></tr>`;
@@ -269,21 +312,21 @@ function render() {
         html += `<tr><td>Mean Quality</td><td>${(s.mean_quality || 0).toFixed(1)}</td><td>${(f.mean_quality || 0).toFixed(1)}</td></tr>`;
         html += `<tr><td>Mean Reasoning</td><td>${(s.mean_reasoning || 0).toFixed(1)}</td><td>${(f.mean_reasoning || 0).toFixed(1)}</td></tr>`;
         html += '</tbody></table></div>';
-        html += '</div>';
+        html += '</div></div>';
     }
 
     // === Section 6: Flag Analysis ===
     const flags = d.flag_counts || {};
     if (Object.keys(flags).length > 0) {
-        html += '<h2>Flag Analysis</h2><div class="grid">';
+        html += '<div class="section"><h2>Flag Analysis</h2><div class="grid">';
         const flagItems = Object.entries(flags).sort((a, b) => b[1] - a[1]);
         const maxFlag = Math.max(...flagItems.map(x => x[1]), 1);
         let flagHtml = '';
         for (const [flag, count] of flagItems) {
             const impact = (d.flag_value_impact || {})[flag];
-            const meanV = impact ? impact.mean_value.toFixed(1) : '?';
+            const meanV = impact && impact.mean_value != null ? impact.mean_value.toFixed(1) : '-';
             const isNeg = ['has-bug', 'security-issue', 'outdated-practice', 'incomplete', 'over-engineered', 'incorrect-output', 'poor-explanation'].includes(flag);
-            const color = isNeg ? '#f44336' : '#4caf50';
+            const color = isNeg ? '#dc2626' : '#16a34a';
             const w = (count / maxFlag * 100).toFixed(1);
             flagHtml += `<div class="bar-row">
                 <div class="bar-label" title="${flag}">${flag}</div>
@@ -291,27 +334,27 @@ function render() {
                 <div class="bar-val">${count} (avg: ${meanV})</div>
             </div>`;
         }
-        html += `<div class="panel"><h3>Flags (count & mean value)</h3>${flagHtml}</div>`;
-        html += '</div>';
+        html += `<div class="panel"><h3>Flags (count &amp; mean value)</h3>${flagHtml}</div>`;
+        html += '</div></div>';
     }
 
     // === Section 7: Coverage Impact (if available) ===
     const cov = d.coverage_at_thresholds || {};
     if (Object.keys(cov).length > 0) {
-        html += '<h2>Coverage Impact Analysis</h2>';
+        html += '<div class="section"><h2>Coverage Impact Analysis</h2>';
         html += '<div class="panel"><table><thead><tr><th>Threshold</th><th>Retained</th><th>%</th><th>Coverage</th><th>Tags Lost</th></tr></thead><tbody>';
         for (const [thresh, info] of Object.entries(cov).sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))) {
             const lost = (info.tags_lost || []).slice(0, 5).join(', ');
             const lostMore = (info.tags_lost || []).length > 5 ? ` +${info.tags_lost.length - 5} more` : '';
-            html += `<tr><td>≥ ${thresh}</td><td>${info.retained}</td><td>${(info.pct * 100).toFixed(1)}%</td><td>${(info.coverage * 100).toFixed(1)}%</td><td><span class="tag">${lost}${lostMore}</span></td></tr>`;
+            html += `<tr><td>&ge; ${thresh}</td><td>${info.retained}</td><td>${(info.pct * 100).toFixed(1)}%</td><td>${(info.coverage * 100).toFixed(1)}%</td><td><span class="tag">${lost}${lostMore}</span></td></tr>`;
         }
-        html += '</tbody></table></div>';
+        html += '</tbody></table></div></div>';
     }
 
     // === Section 8: File Ranking (global dashboard) ===
     const pfs = d.per_file_summary || [];
     if (pfs.length > 1) {
-        html += '<h2>File Ranking</h2>';
+        html += '<div class="section"><h2>File Ranking</h2>';
         html += '<div class="panel"><table id="file-table"><thead><tr>';
         html += '<th onclick="sortTable(0)">File</th><th onclick="sortTable(1)">Count</th><th onclick="sortTable(2)">Value</th><th onclick="sortTable(3)">Complexity</th><th onclick="sortTable(4)">Quality</th><th onclick="sortTable(5)">Rarity</th>';
         html += '</tr></thead><tbody>';
@@ -324,16 +367,16 @@ function render() {
                 <td>${(f.mean_rarity || 0).toFixed(1)}</td>
             </tr>`;
         }
-        html += '</tbody></table></div>';
+        html += '</tbody></table></div></div>';
     }
 
     // Weights used
     const w = d.weights_used || {};
     if (Object.keys(w).length > 0) {
-        html += '<h2>Configuration</h2><div class="panel">';
-        html += '<p style="color:#666;font-size:0.85em">Value Score = ';
-        html += Object.entries(w).map(([k, v]) => `${v}×${k}`).join(' + ');
-        html += '</p></div>';
+        html += '<div class="section"><h2>Configuration</h2><div class="panel">';
+        html += '<p style="color:#6b7280;font-size:0.85em">Value Score = ';
+        html += Object.entries(w).map(([k, v]) => `${v}&times;${k}`).join(' + ');
+        html += '</p></div></div>';
     }
 
     el.innerHTML = html;
