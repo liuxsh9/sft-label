@@ -13,17 +13,17 @@ LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
 
 # ─── Pipeline Defaults ──────────────────────────────────
 DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 100
-CONFIDENCE_THRESHOLD = 0.65
+DEFAULT_CONCURRENCY = 300
+CONFIDENCE_THRESHOLD = 0.60
 MAX_RETRIES = 3
-SAMPLE_MAX_RETRIES = 3             # sample-level retry on call failure
-REQUEST_TIMEOUT = 60           # seconds per LLM call (gpt-4o-mini is fast)
+SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
+REQUEST_TIMEOUT = 120          # seconds per LLM call (gpt-4o-mini is fast)
 
 # ─── Conversation Truncation ──────────────────────────
 MAX_CONVERSATION_CHARS = 20000   # total budget (~5K tokens); aggressive for fast labeling
-TRUNCATION_HEAD_RATIO = 0.30     # fraction of budget for first human turn (task context)
-TRUNCATION_LAST_RESPONSE_RATIO = 0.40  # fraction of budget for last gpt turn (labeling target)
-TRUNCATION_PER_TURN_RATIO = 0.30 # max fraction of budget for any single turn
+TRUNCATION_HEAD_RATIO = 0.35     # fraction of budget for first human turn (task context)
+TRUNCATION_LAST_RESPONSE_RATIO = 0.30  # fraction of budget for last gpt turn (labeling target)
+TRUNCATION_PER_TURN_RATIO = 0.35 # max fraction of budget for any single turn
 
 # ─── Directory Pipeline ────────────────────────────────
 DIR_PIPELINE_WATERMARK = 2.0   # load next file when in-flight < concurrency * watermark
@@ -31,7 +31,7 @@ DIR_PIPELINE_MAX_FILES = 5     # max files loaded in memory simultaneously
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
 SPARSE_FULL_LABEL_COUNT = 10   # first N slices always labeled
-SPARSE_GAP_MULTIPLIER = 1.2   # gap between labeled slices grows by this factor
+SPARSE_GAP_MULTIPLIER = 1.4   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
 
