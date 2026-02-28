@@ -11,15 +11,20 @@ from dataclasses import dataclass, field
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://localhost:4000/v1")
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
 
-# ─── Pipeline Defaults ──────────────────────────────────
-DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 300
-CONFIDENCE_THRESHOLD = 0.60
+# ─── Shared Defaults ────────────────────────────────────
 MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
 REQUEST_TIMEOUT = 120          # seconds per LLM call (gpt-4o-mini is fast)
 
-# ─── Conversation Truncation ──────────────────────────
+# ═══════════════════════════════════════════════════════════
+# Pass 1: Tag Labeling
+# ═══════════════════════════════════════════════════════════
+
+DEFAULT_LABELING_MODEL = "gpt-4o-mini"
+DEFAULT_CONCURRENCY = 300
+CONFIDENCE_THRESHOLD = 0.60
+
+# ─── Conversation Truncation (Pass 1) ───────────────────
 MAX_CONVERSATION_CHARS = 20000   # total budget (~5K tokens); aggressive for fast labeling
 TRUNCATION_HEAD_RATIO = 0.35     # fraction of budget for first human turn (task context)
 TRUNCATION_LAST_RESPONSE_RATIO = 0.30  # fraction of budget for last gpt turn (labeling target)
@@ -35,7 +40,25 @@ SPARSE_GAP_MULTIPLIER = 1.4   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
 
-# ─── Value Scoring (Pass 2) ───────────────────────────
+# ─── Consistency Rules ──────────────────────────────────
+CONSISTENCY_RULES = [
+    ("intent == 'learn' and len(agentic) > 3",
+     "Intent=learn but many agentic tags"),
+    ("intent == 'build' and 'feature-implementation' not in task and len(task) > 0",
+     "Intent=build but no feature-implementation in task"),
+    ("difficulty == 'beginner' and len(concept) > 3",
+     "Difficulty=beginner but many concepts"),
+    ("len(constraint) > 0 and difficulty == 'beginner'",
+     "Has constraints but difficulty=beginner"),
+]
+
+# ═══════════════════════════════════════════════════════════
+# Pass 2: Value Scoring
+# ═══════════════════════════════════════════════════════════
+
+DEFAULT_SCORING_MODEL = "gpt-4o-mini"
+DEFAULT_SCORING_CONCURRENCY = 300
+
 VALUE_WEIGHTS = {
     "complexity": 0.25,
     "quality": 0.35,
@@ -54,6 +77,8 @@ RARITY_WEIGHTS = {
     "constraint": 1.0,
 }
 RARITY_COMBO_ALPHA = 0.7            # weight for tag IDF vs combo IDF
+
+# ─── COT-Preserving Truncation (Pass 2) ─────────────────
 VALUE_TRUNCATION_BUDGET = 20000     # total chars for scoring truncation
 VALUE_TRUNCATION_INSTRUCTION_RATIO = 0.15
 VALUE_TRUNCATION_COT_RATIO = 0.45
@@ -71,7 +96,11 @@ KNOWN_FLAGS_NEGATIVE = frozenset({
 })
 KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 
-# ─── Runtime-Overridable Config ──────────────────────
+
+# ═══════════════════════════════════════════════════════════
+# Runtime-Overridable Config
+# ═══════════════════════════════════════════════════════════
+
 @dataclass
 class PipelineConfig:
     """Runtime-overridable pipeline configuration.
@@ -80,14 +109,17 @@ class PipelineConfig:
     direct imports from other modules (e.g. preprocessing.py).
     This dataclass lets library callers override any setting.
     """
+    # Shared
     litellm_base: str = LITELLM_BASE
     litellm_key: str = LITELLM_KEY
-    model: str = DEFAULT_MODEL
-    concurrency: int = DEFAULT_CONCURRENCY
-    confidence_threshold: float = CONFIDENCE_THRESHOLD
     max_retries: int = MAX_RETRIES
     sample_max_retries: int = SAMPLE_MAX_RETRIES
     request_timeout: int = REQUEST_TIMEOUT
+
+    # Pass 1: Tag Labeling
+    labeling_model: str = DEFAULT_LABELING_MODEL
+    concurrency: int = DEFAULT_CONCURRENCY
+    confidence_threshold: float = CONFIDENCE_THRESHOLD
     max_conversation_chars: int = MAX_CONVERSATION_CHARS
     truncation_head_ratio: float = TRUNCATION_HEAD_RATIO
     truncation_last_response_ratio: float = TRUNCATION_LAST_RESPONSE_RATIO
@@ -98,21 +130,11 @@ class PipelineConfig:
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP
     sparse_threshold: int = SPARSE_THRESHOLD
-    # Value scoring (Pass 2)
+
+    # Pass 2: Value Scoring
+    scoring_model: str = DEFAULT_SCORING_MODEL
+    scoring_concurrency: int = DEFAULT_SCORING_CONCURRENCY
     value_weights: dict = None  # defaults to VALUE_WEIGHTS
     rarity_weights: dict = None  # defaults to RARITY_WEIGHTS
     rarity_combo_alpha: float = RARITY_COMBO_ALPHA
     value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
-
-
-# ─── Consistency Rules ──────────────────────────────────
-CONSISTENCY_RULES = [
-    ("intent == 'learn' and len(agentic) > 3",
-     "Intent=learn but many agentic tags"),
-    ("intent == 'build' and 'feature-implementation' not in task and len(task) > 0",
-     "Intent=build but no feature-implementation in task"),
-    ("difficulty == 'beginner' and len(concept) > 3",
-     "Difficulty=beginner but many concepts"),
-    ("len(constraint) > 0 and difficulty == 'beginner'",
-     "Has constraints but difficulty=beginner"),
-]

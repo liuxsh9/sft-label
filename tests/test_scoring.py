@@ -765,7 +765,7 @@ class TestIntegrationScoring:
             json.dump(stats, f)
 
         config = PipelineConfig(
-            concurrency=5,
+            scoring_concurrency=5,
             sample_max_retries=2,
             request_timeout=60,
         )

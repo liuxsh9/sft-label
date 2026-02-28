@@ -28,7 +28,7 @@ from rich.progress import (
 )
 
 from sft_label.config import (
-    LITELLM_BASE, LITELLM_KEY, DEFAULT_MODEL, DEFAULT_CONCURRENCY,
+    LITELLM_BASE, LITELLM_KEY,
     MAX_RETRIES, SAMPLE_MAX_RETRIES, REQUEST_TIMEOUT,
     VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
@@ -649,25 +649,18 @@ def _create_progress():
 
 
 async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
-                      model=None, concurrency=None, limit=0,
-                      config=None):
+                      limit=0, config=None):
     """Run value scoring (Pass 2) on pre-labeled data.
 
     Args:
         input_path: Path to labeled.json or directory of labeled files
         output_dir: Where to write outputs (default: same directory as input)
         tag_stats_path: Path to stats.json for rarity computation
-        model: LLM model name
-        concurrency: Max concurrent scoring calls
         limit: Max samples to score (0 = all)
         config: PipelineConfig override
     """
     if config is None:
         config = PipelineConfig()
-    if model:
-        config.model = model
-    if concurrency:
-        config.concurrency = concurrency
 
     input_path = Path(input_path)
 
@@ -748,7 +741,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     normalize_rarity_scores(rarity_results)
 
     # Run LLM scoring
-    sem = asyncio.Semaphore(config.concurrency)
+    sem = asyncio.Semaphore(config.scoring_concurrency)
     all_monitors = [None] * total
     all_values = [None] * total
 
@@ -760,12 +753,12 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         proxy=None,
         trust_env=False,
         timeout=config.request_timeout,
-        limits=httpx.Limits(max_connections=config.concurrency + 10),
+        limits=httpx.Limits(max_connections=config.scoring_concurrency + 10),
     ) as client:
         async def score_task(idx):
             nonlocal scored_count, failed_count
             value, monitor = await score_one(
-                client, samples[idx], config.model, rarity_results[idx],
+                client, samples[idx], config.scoring_model, rarity_results[idx],
                 idx, total, sem, config=config,
             )
             all_values[idx] = value
@@ -820,7 +813,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     # Stats
     stats = compute_value_stats(samples, [m for m in all_monitors if m])
     stats["elapsed_seconds"] = round(elapsed, 1)
-    stats["model"] = config.model
+    stats["model"] = config.scoring_model
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -895,7 +888,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     if all_file_stats:
         summary = _merge_value_stats(all_file_stats)
         summary["elapsed_seconds"] = round(time.time() - batch_start, 1)
-        summary["model"] = config.model
+        summary["model"] = config.scoring_model
         summary["files_processed"] = len(all_file_stats)
 
         summary_path = output_dir / "summary_stats_value.json"

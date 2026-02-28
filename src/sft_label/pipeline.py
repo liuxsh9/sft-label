@@ -26,7 +26,7 @@ import random
 import sys
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, field, replace as dc_replace
+from dataclasses import dataclass, field
 
 import httpx
 from rich.progress import (
@@ -41,7 +41,7 @@ from sft_label.prompts import (
 from sft_label.preprocessing import preprocess, format_signals_for_prompt, normalize_and_slice, truncate_conversations_for_labeling, apply_sparse_sampling
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
-    DEFAULT_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
+    DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
     REQUEST_TIMEOUT,
     MAX_CONVERSATION_CHARS,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
@@ -1494,8 +1494,6 @@ async def run(
     *,
     output: str | Path | None = None,
     resume: str | Path | None = None,
-    model: str | None = None,
-    concurrency: int | None = None,
     limit: int = 0,
     shuffle: bool = False,
     enable_arbitration: bool = True,
@@ -1507,8 +1505,6 @@ async def run(
         input_path: Path to input file or directory.
         output: Output directory. None = sibling of input, "runs" = labeling/data/runs/.
         resume: Path to an existing run directory to resume from.
-        model: Override config.model.
-        concurrency: Override config.concurrency.
         limit: Max samples per file (0 = all).
         shuffle: Randomly shuffle samples before processing.
         enable_arbitration: Enable low-confidence arbitration pass.
@@ -1523,11 +1519,6 @@ async def run(
     """
     if config is None:
         config = PipelineConfig()
-    # Apply top-level overrides (copy to avoid mutating caller's config)
-    if model is not None or concurrency is not None:
-        config = dc_replace(config, **(
-            {k: v for k, v in [("model", model), ("concurrency", concurrency)] if v is not None}
-        ))
 
     # ── Resume mode ──────────────────────────────────────
     if resume:
@@ -1548,10 +1539,10 @@ async def run(
             with open(summary_path, "r", encoding="utf-8") as f:
                 prev_summary = json.load(f)
             _input_path = Path(prev_summary.get("input_path", str(input_path)))
-            _model = prev_summary.get("model", config.model)
+            _model = prev_summary.get("model", config.labeling_model)
         else:
             _input_path = Path(input_path)
-            _model = config.model
+            _model = config.labeling_model
 
         files = discover_input_files(_input_path)
         dir_files = [(a, r) for a, r in files if r is not None]
@@ -1607,7 +1598,7 @@ async def run(
     is_directory = _input_path.is_dir()
 
     # Determine output directory
-    run_dir = resolve_run_dir(config.model, str(output) if output is not None else None, _input_path)
+    run_dir = resolve_run_dir(config.labeling_model, str(output) if output is not None else None, _input_path)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     _concurrency = config.concurrency
@@ -1616,7 +1607,7 @@ async def run(
     print(f"SFT Auto-Labeling Pipeline (Concurrent)")
     print(f"{'='*80}")
     print(f"Input:       {_input_path} ({'directory, ' + str(len(files)) + ' files' if is_directory else 'single file'})")
-    print(f"Model:       {config.model}")
+    print(f"Model:       {config.labeling_model}")
     print(f"Run dir:     {run_dir}")
     print(f"Concurrency: {_concurrency}")
     print(f"Arbitration: {'disabled' if not enable_arbitration else f'enabled (threshold={config.confidence_threshold})'}")
@@ -1647,7 +1638,7 @@ async def run(
                 file_task = progress.add_task("Files", total=n, info="")
                 sample_task = progress.add_task("Samples", total=0, visible=False, info="starting...")
                 all_file_stats = await run_directory_pipeline(
-                    dir_files, run_dir, config.model, _concurrency,
+                    dir_files, run_dir, config.labeling_model, _concurrency,
                     checkpoint_path,
                     limit=limit, shuffle=shuffle,
                     progress=progress, file_task=file_task, sample_task=sample_task,
@@ -1656,7 +1647,7 @@ async def run(
                     config=config,
                 )
 
-        _write_global_summary(all_file_stats, run_dir, _input_path, config.model, _concurrency, batch_start)
+        _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start)
         summary_path = run_dir / "summary_stats.json"
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -1676,14 +1667,14 @@ async def run(
             with create_progress() as progress:
                 sample_task = progress.add_task("Labeling", total=None, info="starting...")
                 stats = await run_one_file(
-                    _input_path, run_dir, http_client, sem, config.model,
+                    _input_path, run_dir, http_client, sem, config.labeling_model,
                     enable_arbitration=enable_arbitration,
                     limit=limit, shuffle=shuffle,
                     progress=progress, sample_task=sample_task,
                     config=config,
                 )
 
-        stats["model"] = config.model
+        stats["model"] = config.labeling_model
         stats["concurrency"] = _concurrency
         stats["timestamp"] = datetime.now().isoformat()
         stats["run_dir"] = str(run_dir)
@@ -1702,7 +1693,7 @@ async def run(
 
 async def run_pipeline(args):
     """CLI entry point. Delegates to run()."""
-    config = PipelineConfig(model=args.model, concurrency=args.concurrency)
+    config = PipelineConfig(labeling_model=args.model, concurrency=args.concurrency)
     return await run(
         input_path=args.input,
         output=args.output,
@@ -1721,7 +1712,7 @@ def main():
                         help="Output directory: omit for sibling of input, or an explicit path")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from an existing run directory (reads checkpoint.json)")
-    parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
+    parser.add_argument("--model", type=str, default=DEFAULT_LABELING_MODEL)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--limit", type=int, default=0,
                         help="Max samples per file (0 = all). In directory mode, applies to each file independently")

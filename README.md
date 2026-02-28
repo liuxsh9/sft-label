@@ -22,7 +22,7 @@ export LITELLM_BASE="http://localhost:4000/v1"
 export LITELLM_KEY="your-key"
 
 # Pass 1: Tag labeling
-sft-label run --input data.json --model gpt-4o-mini --concurrency 50
+sft-label run --input data.json
 
 # Pass 2: Value scoring (standalone, on pre-labeled data)
 sft-label score --input labeled.json --tag-stats stats.json
@@ -37,7 +37,7 @@ sft-label run --input data.json --score
 
 ```bash
 # Run labeling pipeline (Pass 1)
-sft-label run --input data.json --model gpt-4o-mini --concurrency 50
+sft-label run --input data.json
 
 # Run on a directory
 sft-label run --input data_dir/ --output results/
@@ -51,7 +51,7 @@ sft-label run --input data.json --score
 # Standalone value scoring (Pass 2)
 sft-label score --input labeled.json
 sft-label score --input labeled.json --tag-stats global_stats.json
-sft-label score --input results_dir/ --concurrency 100
+sft-label score --input results_dir/
 
 # Validate taxonomy
 sft-label validate
@@ -67,7 +67,8 @@ import asyncio
 from sft_label import run, PipelineConfig
 
 config = PipelineConfig(
-    model="gpt-4o-mini",
+    labeling_model="gpt-4o-mini",
+    scoring_model="gpt-4o-mini",
     concurrency=50,
     litellm_base="http://localhost:4000/v1",
     litellm_key="your-key",
@@ -81,11 +82,15 @@ print(f"Labeled {stats['success']}/{stats['total_samples']} samples")
 # Standalone value scoring
 from sft_label.scoring import run_scoring
 
+config = PipelineConfig(
+    scoring_model="gpt-4o-mini",
+    scoring_concurrency=50,
+)
+
 stats = asyncio.run(run_scoring(
     input_path="labeled.json",
     tag_stats_path="stats.json",
-    model="gpt-4o-mini",
-    concurrency=50,
+    config=config,
 ))
 ```
 

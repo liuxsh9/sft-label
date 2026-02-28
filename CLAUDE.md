@@ -17,7 +17,7 @@ uv run pytest tests/test_scoring.py  # scoring tests only
 uv run sft-label validate
 
 # Run labeling pipeline (requires LITELLM_BASE and LITELLM_KEY env vars)
-LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --model gpt-4o-mini
+LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json
 
 # Run value scoring (Pass 2) on pre-labeled data
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label score --input labeled.json --tag-stats stats.json

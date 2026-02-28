@@ -2,9 +2,13 @@
 CLI entry point for sft-label.
 
 Subcommands:
-  sft-label run       — Run the labeling pipeline
-  sft-label validate  — Validate taxonomy definitions
-  sft-label export-review — Export labeled data to review CSV
+  sft-label run            — Run Pass 1 tag labeling (optionally + Pass 2)
+  sft-label score          — Run Pass 2 value scoring on pre-labeled data
+  sft-label validate       — Validate taxonomy definitions
+  sft-label export-review  — Export labeled data to review CSV
+
+Model and concurrency are configured in config.py (PipelineConfig),
+not via CLI flags. Override via library API if needed.
 """
 
 import argparse
@@ -17,7 +21,7 @@ def cmd_run(args):
     from sft_label.config import PipelineConfig
     from sft_label.pipeline import run
 
-    config = PipelineConfig(model=args.model, concurrency=args.concurrency)
+    config = PipelineConfig()
     try:
         stats = asyncio.run(run(
             input_path=args.input,
@@ -41,8 +45,6 @@ def cmd_run(args):
             asyncio.run(run_scoring(
                 input_path=run_dir,
                 output_dir=run_dir,
-                model=args.model,
-                concurrency=args.concurrency,
                 config=config,
             ))
 
@@ -75,13 +77,11 @@ def cmd_score(args):
     from sft_label.config import PipelineConfig
     from sft_label.scoring import run_scoring
 
-    config = PipelineConfig(model=args.model, concurrency=args.concurrency)
+    config = PipelineConfig()
     try:
         asyncio.run(run_scoring(
             input_path=args.input,
             tag_stats_path=getattr(args, "tag_stats", None),
-            model=args.model,
-            concurrency=args.concurrency,
             limit=args.limit,
             config=config,
         ))
@@ -98,36 +98,51 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # --- run ---
-    run_parser = subparsers.add_parser("run", help="Run the labeling pipeline")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run Pass 1 tag labeling pipeline",
+        description="Run the tag labeling pipeline (Pass 1). "
+                    "Optionally chain Pass 2 value scoring with --score.",
+        epilog="Model and concurrency are configured in config.py "
+               "(DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY). "
+               "Override via PipelineConfig in library mode.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     run_parser.add_argument("--input", type=str, required=True,
-                            help="Input file or directory")
+                            help="Input file (.json/.jsonl) or directory")
     run_parser.add_argument("--output", type=str, default=None,
-                            help="Output directory")
+                            help="Output directory (default: sibling of input)")
     run_parser.add_argument("--resume", type=str, default=None,
                             help="Resume from an existing run directory")
-    run_parser.add_argument("--model", type=str, default="gpt-4o-mini")
-    run_parser.add_argument("--concurrency", type=int, default=100)
     run_parser.add_argument("--limit", type=int, default=0,
-                            help="Max samples per file (0 = all)")
-    run_parser.add_argument("--shuffle", action="store_true")
-    run_parser.add_argument("--no-arbitration", action="store_true")
+                            help="Max samples per file, 0 = all (default: 0)")
+    run_parser.add_argument("--shuffle", action="store_true",
+                            help="Randomly shuffle samples before processing")
+    run_parser.add_argument("--no-arbitration", action="store_true",
+                            help="Disable low-confidence arbitration pass")
     run_parser.add_argument("--score", action="store_true",
-                            help="Run Pass 2 value scoring after labeling")
+                            help="Chain Pass 2 value scoring after labeling")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
 
     # --- score ---
-    score_parser = subparsers.add_parser("score",
-                                          help="Run value scoring (Pass 2) on pre-labeled data")
+    score_parser = subparsers.add_parser(
+        "score",
+        help="Run Pass 2 value scoring on pre-labeled data",
+        description="Run value scoring (Pass 2) on pre-labeled data. "
+                    "Computes complexity, quality, reasoning, and rarity scores.",
+        epilog="Model and concurrency are configured in config.py "
+               "(DEFAULT_SCORING_MODEL, DEFAULT_SCORING_CONCURRENCY). "
+               "Override via PipelineConfig in library mode.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     score_parser.add_argument("--input", type=str, required=True,
-                               help="Path to labeled.json or directory")
+                               help="Path to labeled.json or directory of labeled files")
     score_parser.add_argument("--tag-stats", type=str, default=None,
-                               help="Path to stats.json for rarity computation")
-    score_parser.add_argument("--model", type=str, default="gpt-4o-mini")
-    score_parser.add_argument("--concurrency", type=int, default=100)
+                               help="Path to stats.json for rarity (default: auto-discover)")
     score_parser.add_argument("--limit", type=int, default=0,
-                               help="Max samples to score (0 = all)")
+                               help="Max samples to score, 0 = all (default: 0)")
 
     # --- export-review ---
     review_parser = subparsers.add_parser("export-review",
