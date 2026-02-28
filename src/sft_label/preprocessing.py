@@ -102,10 +102,12 @@ def normalize_pangu(sample):
     - Maps roles (user→human, assistant→gpt)
     - Detects pseudo multi-turn (already a single training sample)
     - Preserves meta_prompt and tools in metadata
+    - Preserves raw COT text in metadata for Pass 2 scoring
     """
     data = sample.get("data", [])
     conversations = []
     is_pseudo_multiturn = False
+    cot_parts = []
 
     for turn in data:
         role = PANGU_ROLE_MAP.get(turn.get("role", ""), turn.get("role", ""))
@@ -114,6 +116,14 @@ def normalize_pangu(sample):
         # Detect pseudo multi-turn (don't expand, just strip tokens)
         if role == "human" and "[unused10]" in content:
             is_pseudo_multiturn = True
+
+        # Extract COT before stripping (for Pass 2 scoring)
+        if role == "gpt":
+            for match in _PANGU_COT_RE.finditer(content):
+                inner = match.group()
+                inner = inner.replace('[unused16]', '').replace('[unused17]', '')
+                if inner.strip():
+                    cot_parts.append(inner.strip())
 
         conversations.append({
             "from": role,
@@ -135,6 +145,9 @@ def normalize_pangu(sample):
         pangu_meta["tool_definitions"] = sample["tools"]
     pangu_meta["is_pseudo_multiturn"] = is_pseudo_multiturn
     pangu_meta["original_format"] = "pangu"
+    if cot_parts:
+        pangu_meta["thinking_mode"] = "slow"
+        pangu_meta["cot_text"] = "\n\n".join(cot_parts)
     normalized["metadata"] = {**normalized["metadata"], **pangu_meta}
 
     return normalized

@@ -361,6 +361,7 @@ async def score_one(http_client, sample, model, rarity_result,
     sample_id = sample.get("id", f"sample-{sample_idx}")
     conversations = sample.get("conversations", [])
     labels = sample.get("labels") or {}
+    metadata = sample.get("metadata") or {}
 
     monitor = {
         "sample_id": sample_id,
@@ -373,11 +374,17 @@ async def score_one(http_client, sample, model, rarity_result,
         "completion_tokens": 0,
     }
 
-    # Detect thinking mode from raw conversations
-    thinking_mode = detect_thinking_mode(conversations)
+    # Detect thinking mode: prefer metadata (Pangu COT stripped during Pass 1),
+    # fallback to scanning conversations (ShareGPT retains COT markers)
+    thinking_mode = metadata.get("thinking_mode") or detect_thinking_mode(conversations)
 
-    # Extract COT content
-    cot_text, cot_chars, convs_without_cot = extract_cot_content(conversations)
+    # Extract COT: prefer metadata.cot_text (preserved from Pangu preprocessing),
+    # fallback to extracting from conversations (ShareGPT)
+    saved_cot = metadata.get("cot_text", "")
+    if saved_cot:
+        cot_text = saved_cot
+    else:
+        cot_text, _, _ = extract_cot_content(conversations)
 
     # Truncate for scoring
     truncated = truncate_for_scoring(
@@ -762,8 +769,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     print(f"  Endpoint: {config.litellm_base}")
 
     async with httpx.AsyncClient(
-        proxy=None,
-        trust_env=False,
         timeout=config.request_timeout,
         limits=httpx.Limits(max_connections=config.scoring_concurrency + 10),
     ) as client:
