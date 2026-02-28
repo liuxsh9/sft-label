@@ -348,6 +348,9 @@ async def score_one(http_client, sample, model, rarity_result,
                     sample_idx, total, sem, config=None):
     """Score a single sample: truncate, call LLM, validate, compute value_score.
 
+    Retry loop is OUTSIDE the semaphore so failed/retrying samples don't block
+    other tasks from acquiring a slot (matching Pass 1's label_one pattern).
+
     Returns (value_dict, monitor_dict).
     """
     from sft_label.prompts_value import build_scoring_messages
@@ -396,9 +399,14 @@ async def score_one(http_client, sample, model, rarity_result,
         code_block_count=code_block_count,
     )
 
-    # LLM call with retry
-    async with sem:
-        for attempt in range(_max_retries):
+    # LLM call with retry — retry OUTSIDE semaphore
+    for attempt in range(_max_retries):
+        if attempt > 0:
+            # Backoff outside semaphore so slot is free for others
+            base_wait = 2 ** attempt * 2
+            await asyncio.sleep(base_wait + random.uniform(0, base_wait))
+
+        async with sem:
             monitor["attempts"] = attempt + 1
             parsed, raw, usage = await async_llm_call(
                 http_client, messages, model,
@@ -408,34 +416,34 @@ async def score_one(http_client, sample, model, rarity_result,
             monitor["prompt_tokens"] += usage.get("prompt_tokens", 0)
             monitor["completion_tokens"] += usage.get("completion_tokens", 0)
 
-            if parsed is None:
-                monitor["error"] = raw[:300] if raw else "null response"
-                if usage.get("non_retryable"):
-                    break
-                continue
+        if parsed is None:
+            monitor["error"] = raw[:300] if raw else "null response"
+            if usage.get("non_retryable"):
+                break
+            continue
 
-            score_result, issues = validate_score_response(parsed)
-            monitor["validation_issues"] = issues
+        score_result, issues = validate_score_response(parsed)
+        monitor["validation_issues"] = issues
 
-            if score_result is None:
-                monitor["error"] = "validation failed"
-                continue
+        if score_result is None:
+            monitor["error"] = "validation failed"
+            continue
 
-            # Success
-            value_score = compute_value_score(score_result, rarity_result, _weights)
+        # Success
+        value_score = compute_value_score(score_result, rarity_result, _weights)
 
-            value = {
-                "complexity": score_result.get("complexity"),
-                "quality": score_result.get("quality"),
-                "reasoning": score_result.get("reasoning"),
-                "rarity": rarity_result,
-                "flags": score_result.get("flags", []),
-                "thinking_mode": thinking_mode,
-                "value_score": value_score,
-                "confidence": score_result.get("confidence", 0.5),
-            }
-            monitor["status"] = "success"
-            return value, monitor
+        value = {
+            "complexity": score_result.get("complexity"),
+            "quality": score_result.get("quality"),
+            "reasoning": score_result.get("reasoning"),
+            "rarity": rarity_result,
+            "flags": score_result.get("flags", []),
+            "thinking_mode": thinking_mode,
+            "value_score": value_score,
+            "confidence": score_result.get("confidence", 0.5),
+        }
+        monitor["status"] = "success"
+        return value, monitor
 
     # All retries exhausted
     monitor["status"] = "failed"
@@ -747,7 +755,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     scored_count = 0
     failed_count = 0
+    first_error_logged = False
     start_time = time.time()
+
+    print(f"  Scoring: model={config.scoring_model} concurrency={config.scoring_concurrency} timeout={config.request_timeout}s")
+    print(f"  Endpoint: {config.litellm_base}")
 
     async with httpx.AsyncClient(
         proxy=None,
@@ -756,7 +768,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         limits=httpx.Limits(max_connections=config.scoring_concurrency + 10),
     ) as client:
         async def score_task(idx):
-            nonlocal scored_count, failed_count
+            nonlocal scored_count, failed_count, first_error_logged
             value, monitor = await score_one(
                 client, samples[idx], config.scoring_model, rarity_results[idx],
                 idx, total, sem, config=config,
@@ -767,6 +779,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                 scored_count += 1
             else:
                 failed_count += 1
+                if not first_error_logged and monitor:
+                    err = monitor.get("error", "unknown")
+                    print(f"  [!] First failure: sample={monitor.get('sample_id')} "
+                          f"attempts={monitor.get('attempts')} err={err[:200]}")
+                    first_error_logged = True
             return idx
 
         with _create_progress() as progress:
