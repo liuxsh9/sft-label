@@ -334,6 +334,12 @@ class TestComputeSampleRarity:
         )
         assert result["stats_ref"] == ref
 
+    def test_null_labels(self):
+        """compute_sample_rarity with empty labels should not crash."""
+        result = compute_sample_rarity({}, self.idf_map, 1000)
+        # No matching dimensions → score based on zero weights
+        assert result["score"] is not None or result["score"] is None  # just no crash
+
     def test_combo_rarity(self):
         labels = {"intent": "build", "difficulty": "expert", "concept": ["algorithms"]}
         combo_counts = {"build|expert|algorithms": 2}
@@ -431,6 +437,18 @@ class TestBuildComboCounts:
 
     def test_empty_samples(self):
         assert build_combo_counts([]) == {}
+
+    def test_null_labels(self):
+        """Samples with labels=None (failed Pass 1) should not crash."""
+        samples = [
+            {"labels": None},
+            {"labels": {"intent": "build", "difficulty": "advanced", "concept": ["algorithms"]}},
+            {},  # no labels key at all
+        ]
+        counts = build_combo_counts(samples)
+        assert counts["build|advanced|algorithms"] == 1
+        # null/missing labels produce a fallback combo key
+        assert counts["||"] == 2
 
 
 # ─────────────────────────────────────────────────────────

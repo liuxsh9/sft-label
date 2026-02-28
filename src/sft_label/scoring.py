@@ -156,7 +156,7 @@ def build_combo_counts(samples):
     """Build combo occurrence counts from labeled samples for combo rarity."""
     counts = {}
     for s in samples:
-        labels = s.get("labels", {})
+        labels = s.get("labels") or {}
         intent = labels.get("intent", "")
         difficulty = labels.get("difficulty", "")
         concepts = labels.get("concept", [])
@@ -357,7 +357,7 @@ async def score_one(http_client, sample, model, rarity_result,
 
     sample_id = sample.get("id", f"sample-{sample_idx}")
     conversations = sample.get("conversations", [])
-    labels = sample.get("labels", {})
+    labels = sample.get("labels") or {}
 
     monitor = {
         "sample_id": sample_id,
@@ -517,7 +517,7 @@ def compute_value_stats(scored_samples, all_monitors):
             vs = v.get("value_score")
             if vs is None:
                 continue
-            labels = s.get("labels", {})
+            labels = s.get("labels") or {}
             tags = labels.get(dim)
             if tags is None:
                 continue
@@ -582,7 +582,7 @@ def compute_value_stats(scored_samples, all_monitors):
         all_tags = set()
         retained_tags = set()
         for s in scored_samples:
-            labels = s.get("labels", {})
+            labels = s.get("labels") or {}
             for dim in tag_dims:
                 t = labels.get(dim)
                 if isinstance(t, list):
@@ -590,7 +590,7 @@ def compute_value_stats(scored_samples, all_monitors):
                 elif t:
                     all_tags.add(f"{dim}:{t}")
         for s in retained:
-            labels = s.get("labels", {})
+            labels = s.get("labels") or {}
             for dim in tag_dims:
                 t = labels.get(dim)
                 if isinstance(t, list):
@@ -727,7 +727,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     # Compute rarity for all samples
     rarity_results = []
     for s in samples:
-        labels = s.get("labels", {})
+        labels = s.get("labels") or {}
         rarity = compute_sample_rarity(
             labels, idf_map, total_stats_samples,
             rarity_weights=config.rarity_weights or RARITY_WEIGHTS,
