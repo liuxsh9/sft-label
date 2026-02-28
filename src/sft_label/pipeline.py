@@ -41,9 +41,8 @@ from sft_label.prompts import (
 from sft_label.preprocessing import preprocess, format_signals_for_prompt, normalize_and_slice, truncate_conversations_for_labeling, apply_sparse_sampling
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
-    DEFAULT_INPUT, DATA_DIR,
     DEFAULT_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
-    REQUEST_TIMEOUT, SAMPLE_TIMEOUT,
+    REQUEST_TIMEOUT,
     MAX_CONVERSATION_CHARS,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
     PipelineConfig,
@@ -213,9 +212,8 @@ def merge_stats(all_file_stats):
 def resolve_run_dir(model, output, input_path):
     """Determine the run output directory based on output setting.
 
-    Three modes:
+    Two modes:
       - None (default): sibling of input, auto-named <timestamp>_<model>/
-      - "runs": legacy behavior, DATA_DIR/runs/<timestamp>_<model>/
       - explicit path: use as-is (absolute or relative to cwd)
     """
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -227,13 +225,8 @@ def resolve_run_dir(model, output, input_path):
         parent = input_path.parent
         return parent / auto_name
 
-    output_str = str(output)
-    if output_str == "runs":
-        # Legacy: labeling/data/runs/
-        return DATA_DIR / "runs" / auto_name
-
     # Explicit path
-    return Path(output_str).resolve()
+    return Path(output).resolve()
 
 
 # ─────────────────────────────────────────────────────────
@@ -1092,7 +1085,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                     "sample_id": samples[i].get("id", f"sample-{i}"),
                     "source_file": str(input_path),
                     "status": m["status"] if m else "timeout",
-                    "error": (m.get("error", "") if m else f"exceeded {SAMPLE_TIMEOUT}s"),
+                    "error": (m.get("error", "") if m else "exceeded sample timeout"),
                     "error_response": (m.get("error_response", "")[:200] if m else ""),
                     "attempts": (m.get("sample_attempt", 0) + 1 if m else 0),
                 }
@@ -1650,9 +1643,9 @@ async def run_pipeline(args):
 
 def main():
     parser = argparse.ArgumentParser(description="SFT Auto-Labeling Pipeline (Concurrent)")
-    parser.add_argument("--input", type=str, default=str(DEFAULT_INPUT))
+    parser.add_argument("--input", type=str, required=True)
     parser.add_argument("--output", type=str, default=None,
-                        help="Output directory: omit for sibling of input, 'runs' for labeling/data/runs/, or an explicit path")
+                        help="Output directory: omit for sibling of input, or an explicit path")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from an existing run directory (reads checkpoint.json)")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
