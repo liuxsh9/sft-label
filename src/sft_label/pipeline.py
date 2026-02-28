@@ -209,24 +209,25 @@ def merge_stats(all_file_stats):
     return merged
 
 
-def resolve_run_dir(model, output, input_path):
+def resolve_run_dir(output, input_path):
     """Determine the run output directory based on output setting.
 
     Two modes:
-      - None (default): sibling of input, auto-named <timestamp>_<model>/
+      - None (default):
+        - Directory input: <parent>/<dir_name>-labeled-<timestamp>/
+        - Single file input: <parent>/<stem>-labeled-<timestamp>/
       - explicit path: use as-is (absolute or relative to cwd)
     """
+    if output is not None:
+        return Path(output).resolve()
+
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_short = model.replace("/", "-")
-    auto_name = f"{run_ts}_{model_short}"
-
-    if output is None:
-        # Default: sibling of input
-        parent = input_path.parent
-        return parent / auto_name
-
-    # Explicit path
-    return Path(output).resolve()
+    parent = input_path.parent
+    if input_path.is_dir():
+        name = input_path.resolve().name
+    else:
+        name = input_path.stem
+    return parent / f"{name}-labeled-{run_ts}"
 
 
 # ─────────────────────────────────────────────────────────
@@ -1598,7 +1599,7 @@ async def run(
     is_directory = _input_path.is_dir()
 
     # Determine output directory
-    run_dir = resolve_run_dir(config.labeling_model, str(output) if output is not None else None, _input_path)
+    run_dir = resolve_run_dir(str(output) if output is not None else None, _input_path)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     _concurrency = config.concurrency

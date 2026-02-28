@@ -848,8 +848,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         output_dir = input_dir
     output_dir = Path(output_dir)
 
-    # Find labeled files
+    # Find labeled files (flat or in per-file subdirs from directory pipeline)
     labeled_files = sorted(input_dir.glob("labeled*.json"))
+    if not labeled_files:
+        labeled_files = sorted(input_dir.glob("*/labeled*.json"))
     labeled_files = [f for f in labeled_files if not f.name.endswith(".jsonl")]
 
     if not labeled_files:
@@ -864,8 +866,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         if candidate.exists():
             tag_stats_path = str(candidate)
         else:
-            # Try first per-file stats
+            # Try per-file stats (flat or in subdirs)
             stats_files = sorted(input_dir.glob("stats*.json"))
+            if not stats_files:
+                stats_files = sorted(input_dir.glob("*/stats*.json"))
             stats_files = [f for f in stats_files if "value" not in f.name and "summary" not in f.name]
             if stats_files:
                 tag_stats_path = str(stats_files[0])
@@ -875,10 +879,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
     for labeled_file in labeled_files:
         prefix = labeled_file.stem.replace("labeled_", "").replace("labeled", "")
-        print(f"\n--- Scoring {labeled_file.name} ---")
+        # Write scored output alongside the labeled file (may be in a subdir)
+        file_output_dir = labeled_file.parent
+        print(f"\n--- Scoring {labeled_file.relative_to(input_dir)} ---")
 
         file_stats = await _run_scoring_file(
-            labeled_file, output_dir, tag_stats_path, limit, config,
+            labeled_file, file_output_dir, tag_stats_path, limit, config,
         )
         if file_stats:
             file_stats["file"] = labeled_file.name
