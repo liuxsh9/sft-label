@@ -1091,8 +1091,12 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     try:
         async with httpx.AsyncClient(
+            proxy=None,
             timeout=config.request_timeout,
-            limits=httpx.Limits(max_connections=config.scoring_concurrency + 10),
+            limits=httpx.Limits(
+                max_connections=config.scoring_concurrency + 10,
+                max_keepalive_connections=config.scoring_concurrency,
+            ),
         ) as client:
 
             # Chunk state tracking
@@ -1153,7 +1157,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 active_count = sum(1 for c in active_chunks.values()
                                    if c["done"] < c["total"])
                 while (not gen_exhausted
-                       and len(pending_futures) < config.scoring_concurrency * 2
+                       and len(pending_futures) < int(config.scoring_concurrency * config.dir_pipeline_watermark)
                        and active_count < max_active):
                     if load_next_scoring_chunk() is None:
                         break
@@ -1424,13 +1428,10 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load labeled data
+    # Load labeled data (only .json reaches here; .jsonl dispatched above)
     print(f"Loading labeled data from {input_path}...")
     with open(input_path, "r", encoding="utf-8") as f:
-        if input_path.suffix == ".jsonl":
-            samples = [json.loads(line) for line in f if line.strip()]
-        else:
-            samples = json.load(f)
+        samples = json.load(f)
 
     if limit > 0:
         samples = samples[:limit]
@@ -1499,8 +1500,12 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     print(f"  Endpoint: {config.litellm_base}")
 
     async with httpx.AsyncClient(
+        proxy=None,
         timeout=config.request_timeout,
-        limits=httpx.Limits(max_connections=config.scoring_concurrency + 10),
+        limits=httpx.Limits(
+            max_connections=config.scoring_concurrency + 10,
+            max_keepalive_connections=config.scoring_concurrency,
+        ),
     ) as client:
         async def score_task(idx):
             nonlocal scored_count, failed_count, first_error_logged
@@ -1774,7 +1779,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         print("  No tag stats found, rarity will be null")
 
     concurrency = config.scoring_concurrency
-    watermark = concurrency * 2
+    watermark = int(concurrency * config.dir_pipeline_watermark)
     max_active = config.dir_pipeline_max_files
     sem = asyncio.Semaphore(concurrency)
     pprint = print
@@ -1868,6 +1873,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     first_error_logged = False
 
     async with httpx.AsyncClient(
+        proxy=None,
         timeout=config.request_timeout,
         limits=httpx.Limits(
             max_connections=concurrency + 10,
@@ -1966,6 +1972,8 @@ def _merge_value_stats(file_stats_list):
         "total_scored": sum(s.get("total_scored", 0) for s in file_stats_list),
         "total_failed": sum(s.get("total_failed", 0) for s in file_stats_list),
         "total_llm_calls": sum(s.get("total_llm_calls", 0) for s in file_stats_list),
+        "total_prompt_tokens": sum(s.get("total_prompt_tokens", 0) for s in file_stats_list),
+        "total_completion_tokens": sum(s.get("total_completion_tokens", 0) for s in file_stats_list),
         "total_tokens": sum(s.get("total_tokens", 0) for s in file_stats_list),
     }
 
@@ -1978,13 +1986,88 @@ def _merge_value_stats(file_stats_list):
             "mean_complexity": s.get("score_distributions", {}).get("complexity_overall", {}).get("mean", 0),
             "mean_quality": s.get("score_distributions", {}).get("quality_overall", {}).get("mean", 0),
             "mean_rarity": s.get("score_distributions", {}).get("rarity_score", {}).get("mean", 0),
+            "mean_selection": s.get("score_distributions", {}).get("selection_score", {}).get("mean", 0),
         }
         for s in file_stats_list
     ]
 
-    # Merge score distributions (use weighted means)
-    for key in ("score_distributions", "thinking_mode_stats", "flag_counts"):
-        if file_stats_list and key in file_stats_list[0]:
-            merged[key] = file_stats_list[0][key]  # Simplified: use first file's stats as base
+    # Merge score distributions: weighted mean across files
+    all_dist_keys = set()
+    for s in file_stats_list:
+        all_dist_keys.update(s.get("score_distributions", {}).keys())
+    merged_distributions = {}
+    for key in all_dist_keys:
+        # Weighted merge: accumulate sum/count for mean, track min/max/percentiles
+        total_n = 0
+        total_sum = 0.0
+        global_min = float("inf")
+        global_max = float("-inf")
+        for s in file_stats_list:
+            dist = s.get("score_distributions", {}).get(key, {})
+            n = s.get("total_scored", 0)
+            if not dist or n == 0:
+                continue
+            mean = dist.get("mean", 0)
+            total_sum += mean * n
+            total_n += n
+            if "min" in dist:
+                global_min = min(global_min, dist["min"])
+            if "max" in dist:
+                global_max = max(global_max, dist["max"])
+        if total_n > 0:
+            merged_distributions[key] = {
+                "mean": round(total_sum / total_n, 2),
+                "min": global_min if global_min != float("inf") else 0,
+                "max": global_max if global_max != float("-inf") else 0,
+                "total_n": total_n,
+            }
+    merged["score_distributions"] = merged_distributions
+
+    # Merge thinking mode stats: sum counts, weighted means
+    merged_thinking = {"slow": {"count": 0, "sum_value": 0.0},
+                       "fast": {"count": 0, "sum_value": 0.0}}
+    for s in file_stats_list:
+        ts = s.get("thinking_mode_stats", {})
+        for mode in ("slow", "fast"):
+            ms = ts.get(mode, {})
+            n = ms.get("count", 0)
+            merged_thinking[mode]["count"] += n
+            merged_thinking[mode]["sum_value"] += ms.get("mean_value", 0) * n
+    merged["thinking_mode_stats"] = {
+        mode: {
+            "count": d["count"],
+            "mean_value": round(d["sum_value"] / max(d["count"], 1), 2),
+        }
+        for mode, d in merged_thinking.items()
+    }
+
+    # Merge flag counts: sum across files
+    merged_flags = {}
+    for s in file_stats_list:
+        for flag, count in s.get("flag_counts", {}).items():
+            merged_flags[flag] = merged_flags.get(flag, 0) + count
+    merged["flag_counts"] = dict(sorted(merged_flags.items(), key=lambda x: -x[1]))
+
+    # Merge value_by_tag: weighted mean across files
+    all_tag_dims = set()
+    for s in file_stats_list:
+        all_tag_dims.update(s.get("value_by_tag", {}).keys())
+    merged_by_tag = {}
+    for dim in all_tag_dims:
+        tag_accum = {}  # tag -> {sum, count}
+        for s in file_stats_list:
+            dim_data = s.get("value_by_tag", {}).get(dim, {})
+            for tag, info in dim_data.items():
+                if tag not in tag_accum:
+                    tag_accum[tag] = {"sum": 0.0, "count": 0}
+                n = info.get("n", 0)
+                tag_accum[tag]["sum"] += info.get("mean", 0) * n
+                tag_accum[tag]["count"] += n
+        merged_by_tag[dim] = {
+            t: {"mean": round(a["sum"] / max(a["count"], 1), 2), "n": a["count"]}
+            for t, a in sorted(tag_accum.items(),
+                                key=lambda x: -x[1]["sum"] / max(x[1]["count"], 1))
+        }
+    merged["value_by_tag"] = merged_by_tag
 
     return merged
