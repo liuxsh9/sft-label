@@ -33,6 +33,7 @@ from sft_label.config import (
     VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
+    SELECTION_INTRA_WEIGHT, SELECTION_MIN_GROUP_SIZE,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -342,6 +343,292 @@ def compute_value_score(score_result, rarity_result, weights=None):
 
 
 # ─────────────────────────────────────────────────────────
+# Selection score (intra-class quality ranking)
+# ─────────────────────────────────────────────────────────
+
+_SELECTION_DIMS = ["intent", "language", "domain", "concept", "task",
+                   "agentic", "constraint", "context", "difficulty"]
+
+
+def _extract_pure_quality(value_dict, quality_weights=None):
+    """Compute quality score without rarity from a value dict.
+
+    Uses the same VALUE_WEIGHTS but excludes rarity and renormalizes.
+    """
+    if quality_weights is None:
+        quality_weights = {k: v for k, v in VALUE_WEIGHTS.items() if k != "rarity"}
+
+    components = {}
+    c = value_dict.get("complexity", {})
+    if isinstance(c, dict) and c.get("overall") is not None:
+        components["complexity"] = c["overall"]
+    q = value_dict.get("quality", {})
+    if isinstance(q, dict) and q.get("overall") is not None:
+        components["quality"] = q["overall"]
+    r = value_dict.get("reasoning", {})
+    if isinstance(r, dict) and r.get("overall") is not None:
+        components["reasoning"] = r["overall"]
+
+    if not components:
+        return None
+
+    total_w = sum(quality_weights.get(k, 0) for k in components)
+    if total_w <= 0:
+        return None
+
+    return sum(quality_weights.get(k, 0) * v for k, v in components.items()) / total_w
+
+
+def compute_selection_scores(samples, rarity_weights=None,
+                              intra_weight=None, min_group_size=None,
+                              config=None):
+    """Compute intra-class quality rankings and selection scores.
+
+    Post-scoring pass (no LLM). For each tag in each dimension, ranks samples
+    by pure quality (quality without rarity) within the tag group, then fuses
+    across dimensions using rarity_weights.
+
+    Modifies samples in-place: adds selection_score and intra_class_rank to
+    each sample's value dict.
+
+    Args:
+        samples: list of sample dicts with 'value' and 'labels' fields
+        rarity_weights: per-dimension weights for fusion (default: RARITY_WEIGHTS)
+        intra_weight: weight for intra-class quality vs rarity (default: 0.75)
+        min_group_size: min samples per tag for percentile computation (default: 30)
+        config: PipelineConfig override
+    """
+    if rarity_weights is None:
+        rarity_weights = (config.rarity_weights if config and config.rarity_weights
+                          else RARITY_WEIGHTS)
+    if intra_weight is None:
+        intra_weight = (config.selection_intra_weight if config
+                        else SELECTION_INTRA_WEIGHT)
+    if min_group_size is None:
+        min_group_size = (config.selection_min_group_size if config
+                          else SELECTION_MIN_GROUP_SIZE)
+
+    quality_weights = {k: v for k, v in VALUE_WEIGHTS.items() if k != "rarity"}
+
+    # Step 1: Compute pure_quality for each sample
+    pure_qualities = []
+    for s in samples:
+        v = s.get("value")
+        if v:
+            pure_qualities.append(_extract_pure_quality(v, quality_weights))
+        else:
+            pure_qualities.append(None)
+
+    # Step 2: Per-dimension, per-tag quality percentile
+    dim_percentiles = [{} for _ in samples]  # [{dim: percentile}, ...]
+
+    for dim in _SELECTION_DIMS:
+        # Build tag -> list of (sample_idx, pure_quality)
+        tag_groups = {}
+        for i, s in enumerate(samples):
+            if pure_qualities[i] is None:
+                continue
+            labels = s.get("labels") or {}
+            tags = labels.get(dim)
+            if tags is None:
+                continue
+            if isinstance(tags, list):
+                for t in tags:
+                    tag_groups.setdefault(t, []).append((i, pure_qualities[i]))
+            else:
+                tag_groups.setdefault(tags, []).append((i, pure_qualities[i]))
+
+        # For each tag, compute percentiles
+        for tag, members in tag_groups.items():
+            if len(members) < min_group_size:
+                continue
+
+            sorted_members = sorted(members, key=lambda x: x[1])
+            n = len(sorted_members)
+            for rank, (idx, _pq) in enumerate(sorted_members):
+                percentile = rank / max(n - 1, 1)
+                # Multi-select: take min (conservative)
+                if dim in dim_percentiles[idx]:
+                    dim_percentiles[idx][dim] = min(dim_percentiles[idx][dim], percentile)
+                else:
+                    dim_percentiles[idx][dim] = percentile
+
+    # Step 3: Global percentile fallback for samples not in any large-enough group
+    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
+    global_percentiles = {}
+    if valid_pq:
+        sorted_global = sorted(valid_pq, key=lambda x: x[1])
+        n = len(sorted_global)
+        for rank, (idx, _pq) in enumerate(sorted_global):
+            global_percentiles[idx] = rank / max(n - 1, 1)
+
+    # Step 4: Weighted fusion across dimensions → intra_class_rank + selection_score
+    for i, s in enumerate(samples):
+        v = s.get("value")
+        if v is None:
+            continue
+
+        percs = dim_percentiles[i]
+
+        if percs:
+            weighted_sum = 0.0
+            weight_total = 0.0
+            for dim, pct in percs.items():
+                w = rarity_weights.get(dim, 1.0)
+                weighted_sum += w * pct
+                weight_total += w
+            if weight_total > 0:
+                fused = weighted_sum / weight_total  # 0-1
+                intra_class_rank = round(fused * 9 + 1, 1)
+            else:
+                intra_class_rank = None
+        else:
+            # Fallback: global percentile
+            if i in global_percentiles:
+                intra_class_rank = round(global_percentiles[i] * 9 + 1, 1)
+            else:
+                intra_class_rank = None
+
+        v["intra_class_rank"] = intra_class_rank
+
+        rarity_score = (v.get("rarity") or {}).get("score")
+        if intra_class_rank is not None:
+            if rarity_score is not None:
+                v["selection_score"] = round(
+                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 1)
+            else:
+                v["selection_score"] = intra_class_rank
+        else:
+            # Ultimate fallback: use value_score
+            v["selection_score"] = v.get("value_score")
+
+
+def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
+                                             intra_weight=None,
+                                             min_group_size=None, config=None):
+    """Compute selection scores from lightweight summary dicts (chunked mode).
+
+    Same algorithm as compute_selection_scores but works on summary dicts
+    instead of full sample dicts.
+
+    Args:
+        summaries: list of dicts with keys:
+            complexity_overall, quality_overall, reasoning_overall,
+            rarity_score, labels, value_score
+    Returns:
+        list of dicts: {selection_score, intra_class_rank} per summary
+    """
+    if rarity_weights is None:
+        rarity_weights = (config.rarity_weights if config and config.rarity_weights
+                          else RARITY_WEIGHTS)
+    if intra_weight is None:
+        intra_weight = (config.selection_intra_weight if config
+                        else SELECTION_INTRA_WEIGHT)
+    if min_group_size is None:
+        min_group_size = (config.selection_min_group_size if config
+                          else SELECTION_MIN_GROUP_SIZE)
+
+    quality_weights = {k: v for k, v in VALUE_WEIGHTS.items() if k != "rarity"}
+    total_qw = sum(quality_weights.values())
+
+    # Step 1: pure_quality from summary fields
+    pure_qualities = []
+    for s in summaries:
+        components = {}
+        if s.get("complexity_overall") is not None:
+            components["complexity"] = s["complexity_overall"]
+        if s.get("quality_overall") is not None:
+            components["quality"] = s["quality_overall"]
+        if s.get("reasoning_overall") is not None:
+            components["reasoning"] = s["reasoning_overall"]
+        if components:
+            tw = sum(quality_weights.get(k, 0) for k in components)
+            pq = sum(quality_weights.get(k, 0) * v for k, v in components.items()) / tw if tw > 0 else None
+        else:
+            pq = None
+        pure_qualities.append(pq)
+
+    # Step 2: Per-tag percentile
+    dim_percentiles = [{} for _ in summaries]
+
+    for dim in _SELECTION_DIMS:
+        tag_groups = {}
+        for i, s in enumerate(summaries):
+            if pure_qualities[i] is None:
+                continue
+            labels = s.get("labels") or {}
+            tags = labels.get(dim)
+            if tags is None:
+                continue
+            if isinstance(tags, list):
+                for t in tags:
+                    tag_groups.setdefault(t, []).append((i, pure_qualities[i]))
+            else:
+                tag_groups.setdefault(tags, []).append((i, pure_qualities[i]))
+
+        for tag, members in tag_groups.items():
+            if len(members) < min_group_size:
+                continue
+            sorted_members = sorted(members, key=lambda x: x[1])
+            n = len(sorted_members)
+            for rank, (idx, _pq) in enumerate(sorted_members):
+                percentile = rank / max(n - 1, 1)
+                if dim in dim_percentiles[idx]:
+                    dim_percentiles[idx][dim] = min(dim_percentiles[idx][dim], percentile)
+                else:
+                    dim_percentiles[idx][dim] = percentile
+
+    # Step 3: Global fallback
+    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
+    global_percentiles = {}
+    if valid_pq:
+        sorted_global = sorted(valid_pq, key=lambda x: x[1])
+        n = len(sorted_global)
+        for rank, (idx, _pq) in enumerate(sorted_global):
+            global_percentiles[idx] = rank / max(n - 1, 1)
+
+    # Step 4: Fusion
+    results = []
+    for i, s in enumerate(summaries):
+        percs = dim_percentiles[i]
+
+        if percs:
+            weighted_sum = 0.0
+            weight_total = 0.0
+            for dim, pct in percs.items():
+                w = rarity_weights.get(dim, 1.0)
+                weighted_sum += w * pct
+                weight_total += w
+            if weight_total > 0:
+                fused = weighted_sum / weight_total
+                intra_class_rank = round(fused * 9 + 1, 1)
+            else:
+                intra_class_rank = None
+        else:
+            if i in global_percentiles:
+                intra_class_rank = round(global_percentiles[i] * 9 + 1, 1)
+            else:
+                intra_class_rank = None
+
+        rarity_score = s.get("rarity_score")
+        if intra_class_rank is not None:
+            if rarity_score is not None:
+                selection_score = round(
+                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 1)
+            else:
+                selection_score = intra_class_rank
+        else:
+            selection_score = s.get("value_score")
+
+        results.append({
+            "selection_score": selection_score,
+            "intra_class_rank": intra_class_rank,
+        })
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────
 # Per-sample scoring
 # ─────────────────────────────────────────────────────────
 
@@ -503,6 +790,8 @@ def compute_value_stats(scored_samples, all_monitors):
 
     score_distributions = {
         "value_score": _percentiles(extract_scores("value_score")),
+        "selection_score": _percentiles(extract_scores("selection_score")),
+        "intra_class_rank": _percentiles(extract_scores("intra_class_rank")),
         "complexity_overall": _percentiles(extract_scores("complexity.overall")),
         "quality_overall": _percentiles(extract_scores("quality.overall")),
         "reasoning_overall": _percentiles(extract_scores("reasoning.overall")),
@@ -952,6 +1241,35 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     if failed_path.exists() and failed_path.stat().st_size == 0:
         failed_path.unlink()
 
+    # ── Compute selection scores from summaries ──
+    print("  Computing selection scores (intra-class ranking)...")
+    selection_results = compute_selection_scores_from_summaries(
+        score_summaries, config=config)
+
+    # Attach selection scores back to summaries (for stats computation)
+    for summary, sel in zip(score_summaries, selection_results):
+        summary["selection_score"] = sel["selection_score"]
+        summary["intra_class_rank"] = sel["intra_class_rank"]
+
+    # Re-stream scored.jsonl to attach selection_score and intra_class_rank
+    scored_path = output_dir / "scored.jsonl"
+    scored_tmp = output_dir / "scored.jsonl.tmp"
+    scored_idx = 0  # index into selection_results (only for samples with value)
+    with open(scored_path, "r", encoding="utf-8") as fin, \
+         open(scored_tmp, "w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            if sample.get("value"):
+                if scored_idx < len(selection_results):
+                    sample["value"]["selection_score"] = selection_results[scored_idx]["selection_score"]
+                    sample["value"]["intra_class_rank"] = selection_results[scored_idx]["intra_class_rank"]
+                    scored_idx += 1
+            fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    scored_tmp.rename(scored_path)
+
     # ── Compute stats from summaries ──
     stats = _compute_value_stats_from_summaries(score_summaries, all_monitors, total)
     stats["elapsed_seconds"] = round(elapsed, 1)
@@ -999,6 +1317,8 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
 
     score_distributions = {
         "value_score": _percentiles(_gather("value_score")),
+        "selection_score": _percentiles(_gather("selection_score")),
+        "intra_class_rank": _percentiles(_gather("intra_class_rank")),
         "complexity_overall": _percentiles(_gather("complexity_overall")),
         "quality_overall": _percentiles(_gather("quality_overall")),
         "reasoning_overall": _percentiles(_gather("reasoning_overall")),
@@ -1216,6 +1536,10 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     for i, s in enumerate(samples):
         if all_values[i]:
             s["value"] = all_values[i]
+
+    # Compute selection scores (intra-class quality ranking, no LLM)
+    print("  Computing selection scores (intra-class ranking)...")
+    compute_selection_scores(samples, config=config)
 
     # Write outputs
     scored_path = output_dir / "scored.json"

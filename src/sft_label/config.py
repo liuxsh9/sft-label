@@ -100,6 +100,10 @@ KNOWN_FLAGS_NEGATIVE = frozenset({
 })
 KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 
+# ─── Selection Score (Post-scoring, no LLM) ──────────
+SELECTION_INTRA_WEIGHT = 0.75      # weight for intra-class quality vs global rarity
+SELECTION_MIN_GROUP_SIZE = 30      # min samples per tag to compute intra-class percentile
+
 
 # ═══════════════════════════════════════════════════════════
 # Runtime-Overridable Config
@@ -144,3 +148,5 @@ class PipelineConfig:
     rarity_weights: dict = None  # defaults to RARITY_WEIGHTS
     rarity_combo_alpha: float = RARITY_COMBO_ALPHA
     value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
+    selection_intra_weight: float = SELECTION_INTRA_WEIGHT
+    selection_min_group_size: int = SELECTION_MIN_GROUP_SIZE
