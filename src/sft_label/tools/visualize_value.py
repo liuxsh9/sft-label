@@ -17,28 +17,59 @@ def load_value_run(run_dir, scored_file="scored.json", stats_file="stats_value.j
     """Load scored samples and value stats from a run directory.
 
     When scored_file is None (global/directory dashboard), automatically
-    collects samples from scored*.json files in subdirectories for histograms.
+    collects samples from scored*.json/jsonl files in subdirectories for histograms.
     """
     run_dir = Path(run_dir)
     samples = []
     if scored_file:
         scored_path = run_dir / scored_file
         if scored_path.exists():
-            with open(scored_path, encoding="utf-8") as f:
-                samples = json.load(f)
+            if scored_path.suffix == ".jsonl":
+                with open(scored_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                samples.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+            else:
+                with open(scored_path, encoding="utf-8") as f:
+                    samples = json.load(f)
     else:
         # Global mode: collect from subdirectory scored files
+        # Try .json first, fall back to .jsonl for dirs without .json
+        json_paths = {}  # parent_dir -> path
         for pattern in ("*/scored*.json", "scored*.json"):
             for p in sorted(run_dir.glob(pattern)):
-                if "summary" in p.name or "stats" in p.name:
+                if "summary" in p.name or "stats" in p.name or p.suffix == ".jsonl":
                     continue
-                try:
-                    with open(p, encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, list):
-                        samples.extend(data)
-                except (json.JSONDecodeError, OSError):
-                    continue
+                json_paths[p.parent] = p
+
+        jsonl_paths = {}
+        for pattern in ("*/scored*.jsonl", "scored*.jsonl"):
+            for p in sorted(run_dir.glob(pattern)):
+                if p.parent not in json_paths:
+                    jsonl_paths[p.parent] = p
+
+        for p in sorted(json_paths.values()):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    samples.extend(data)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        for p in sorted(jsonl_paths.values()):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            samples.append(json.loads(line))
+            except (json.JSONDecodeError, OSError):
+                continue
 
     stats = {}
     stats_path = run_dir / stats_file
@@ -73,7 +104,8 @@ def compute_value_viz_data(samples, stats):
 
     # Score distributions (histogram bins 1-10)
     score_keys = ["value_score", "complexity_overall", "quality_overall",
-                  "reasoning_overall", "rarity_score"]
+                  "reasoning_overall", "rarity_score", "selection_score",
+                  "intra_class_rank"]
     histograms = {}
     if samples:
         for key in score_keys:
@@ -85,6 +117,8 @@ def compute_value_viz_data(samples, stats):
                     val = v.get("value_score")
                 elif key == "rarity_score":
                     val = (v.get("rarity") or {}).get("score")
+                elif key in ("selection_score", "intra_class_rank"):
+                    val = v.get(key)
                 else:
                     dim, sub = key.rsplit("_", 1)
                     val = (v.get(dim) or {}).get(sub)
@@ -427,8 +461,8 @@ function renderBarChart(items, maxVal, color, limit) {
     return html;
 }
 
-const histColors = {'value_score': '#3b82f6', 'complexity_overall': '#ea580c', 'quality_overall': '#16a34a', 'reasoning_overall': '#9333ea', 'rarity_score': '#0891b2'};
-const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity'};
+const histColors = {'value_score': '#3b82f6', 'complexity_overall': '#ea580c', 'quality_overall': '#16a34a', 'reasoning_overall': '#9333ea', 'rarity_score': '#0891b2', 'selection_score': '#db2777', 'intra_class_rank': '#78716c'};
+const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity', 'selection_score': 'Selection Score', 'intra_class_rank': 'Intra-Class Rank'};
 
 function renderPass2() {
     const d = DATA_P2;
@@ -443,6 +477,10 @@ function renderPass2() {
     html += `<div class="card"><div class="label">Mean Complexity</div><div class="value" style="color:${scoreColor(o.mean_complexity)}">${(o.mean_complexity || 0).toFixed(1)}</div></div>`;
     html += `<div class="card"><div class="label">Mean Quality</div><div class="value" style="color:${scoreColor(o.mean_quality)}">${(o.mean_quality || 0).toFixed(1)}</div></div>`;
     html += `<div class="card"><div class="label">Median Rarity</div><div class="value" style="color:${scoreColor(o.median_rarity)}">${(o.median_rarity || 0).toFixed(1)}</div></div>`;
+    const selDist = (d.score_distributions || {}).selection_score || {};
+    if (selDist.mean) {
+        html += `<div class="card"><div class="label">Mean Selection</div><div class="value" style="color:${scoreColor(selDist.mean)}">${selDist.mean.toFixed(1)}</div></div>`;
+    }
     const sel = d.selection_thresholds || {};
     if (sel.top_10pct) {
         html += `<div class="card"><div class="label">Top 10%</div><div class="value c-green">${sel.top_10pct.count}</div><div class="sub">&ge; ${sel.top_10pct.threshold}</div></div>`;
@@ -455,7 +493,7 @@ function renderPass2() {
     const hasDistStats = Object.keys(d.score_distributions || {}).length > 0;
     if (hasHistograms || hasDistStats) {
         html += '<div class="section"><h2>Score Distributions</h2><div class="grid">';
-        const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score'];
+        const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score', 'selection_score', 'intra_class_rank'];
         if (hasHistograms) {
             for (const [key, bins] of Object.entries(d.histograms)) {
                 html += `<div class="panel">${renderHistogram(key, bins, histLabels[key] || key, histColors[key] || '#3b82f6')}</div>`;
@@ -550,7 +588,7 @@ function renderPass2() {
     if (pfs.length > 1) {
         html += '<div class="section"><h2>File Ranking</h2>';
         html += '<div class="panel"><table id="file-table"><thead><tr>';
-        html += '<th onclick="sortTable(0)">File</th><th onclick="sortTable(1)">Count</th><th onclick="sortTable(2)">Value</th><th onclick="sortTable(3)">Complexity</th><th onclick="sortTable(4)">Quality</th><th onclick="sortTable(5)">Rarity</th>';
+        html += '<th onclick="sortTable(0)">File</th><th onclick="sortTable(1)">Count</th><th onclick="sortTable(2)">Value</th><th onclick="sortTable(3)">Complexity</th><th onclick="sortTable(4)">Quality</th><th onclick="sortTable(5)">Rarity</th><th onclick="sortTable(6)">Selection</th>';
         html += '</tr></thead><tbody>';
         for (const f of pfs.sort((a, b) => (b.mean_value || 0) - (a.mean_value || 0))) {
             html += `<tr>
@@ -559,6 +597,7 @@ function renderPass2() {
                 <td>${(f.mean_complexity || 0).toFixed(1)}</td>
                 <td>${(f.mean_quality || 0).toFixed(1)}</td>
                 <td>${(f.mean_rarity || 0).toFixed(1)}</td>
+                <td style="color:${scoreColor(f.mean_selection || 0)}">${(f.mean_selection || 0).toFixed(1)}</td>
             </tr>`;
         }
         html += '</tbody></table></div></div>';

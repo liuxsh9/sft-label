@@ -6,7 +6,7 @@
 - id: api-development
   name: API Development
   category: Domain
-  description: Designing and building APIs for software integration
+  description: Designing and building APIs as the primary deliverable — REST/GraphQL design, API gateways, OpenAPI specs, versioning
   aliases:
   - api-dev
   - api-building
@@ -14,7 +14,7 @@
 - id: automation
   name: Automation
   category: Domain
-  description: Automating repetitive tasks and workflows
+  description: Workflow and task automation — cron jobs, scheduled pipelines, RPA, CI scripts, shell orchestration
   aliases:
   - automation
   - scripting
@@ -49,7 +49,7 @@
 - id: cloud-computing
   name: Cloud Computing
   category: Domain
-  description: Building and deploying applications on cloud platforms, including serverless and edge computing
+  description: Cloud-native capabilities — Lambda/Cloud Functions, S3/GCS, IAM, IaC (CDK/Pulumi), service mesh, multi-cloud
   aliases:
   - cloud
   - cloud-native
@@ -96,7 +96,7 @@
 - id: data-engineering
   name: Data Engineering
   category: Domain
-  description: Building and maintaining data pipelines, ETL processes, warehouses, and data infrastructure
+  description: Building and maintaining data infrastructure — ETL/ELT pipelines, data warehouses, lakehouses, orchestration (Airflow/Dagster), streaming (Kafka/Flink/Spark), schema evolution, data quality frameworks
   aliases:
   - data-engineering
   - data-pipelines
@@ -107,7 +107,7 @@
 - id: data-science
   name: Data Science
   category: Domain
-  description: Extracting insights from data using statistical methods
+  description: Exploratory data analysis, statistical modeling, data visualization, BI dashboards
   aliases:
   - data-science
   - ds
@@ -116,7 +116,7 @@
 - id: database-administration
   name: Database Administration
   category: Domain
-  description: Managing and optimizing database systems
+  description: DBA/operations — backup/restore, replication, cluster setup, user/permission management, storage engine tuning, capacity planning, migration between DB versions
   aliases:
   - dba
   - database-admin
@@ -133,7 +133,7 @@
 - id: devops
   name: DevOps
   category: Domain
-  description: Practices combining software development and IT operations, including SRE, observability, and platform engineering
+  description: CI/CD pipelines, deployment automation, infrastructure-as-code, monitoring/alerting setup, SRE practices
   aliases:
   - devops
   - dev-ops
@@ -147,7 +147,7 @@
 - id: e-commerce
   name: E-commerce
   category: Domain
-  description: Building online shopping and payment systems
+  description: Online retail platforms — product catalogs, shopping carts, checkout flows, order management
   aliases:
   - ecommerce
   - online-store
@@ -164,7 +164,7 @@
 - id: financial-technology
   name: Financial Technology
   category: Domain
-  description: Technology solutions for financial services
+  description: Financial services software — trading systems, banking platforms, payment processing infrastructure, risk modeling, portfolio management
   aliases:
   - fintech
   - finance
@@ -204,7 +204,7 @@
 - id: healthcare-technology
   name: Healthcare Technology
   category: Domain
-  description: Technology solutions for healthcare and medical applications
+  description: Healthcare software — EHR/EMR systems, medical imaging, clinical decision support, health data interoperability (HL7/FHIR)
   aliases:
   - healthtech
   - medtech
@@ -273,7 +273,7 @@
 - id: natural-language-processing
   name: Natural Language Processing
   category: Domain
-  description: Processing and understanding human language with computers
+  description: NLP/language AI — text classification, NER, sentiment analysis, machine translation, chatbots, LLM application development
   aliases:
   - nlp
   - text-processing
@@ -282,7 +282,7 @@
 - id: network-programming
   name: Network Programming
   category: Domain
-  description: Building software that communicates over networks
+  description: Low-level network programming — raw sockets, protocol implementation (TCP/UDP/QUIC), packet capture, custom network services
   aliases:
   - networking
   - network-dev
@@ -328,7 +328,7 @@
 - id: search-engineering
   name: Search Engineering
   category: Domain
-  description: Building and optimizing search systems including indexing, relevance tuning, and query processing
+  description: Building search infrastructure — custom indexing, relevance/ranking algorithms, query parsing
   aliases:
   - search-engineering
   - information-retrieval
@@ -336,7 +336,7 @@
 - id: systems-programming
   name: Systems Programming
   category: Domain
-  description: Low-level programming for system software
+  description: Low-level system software — memory allocators, custom runtimes, system utilities
   aliases:
   - systems
   - low-level

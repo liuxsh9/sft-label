@@ -1294,7 +1294,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     # Dashboard
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
-        generate_value_dashboard(output_dir, scored_file=None,
+        generate_value_dashboard(output_dir, scored_file="scored.jsonl",
                                  stats_file="stats_value.json",
                                  output_file="dashboard_value.html")
     except Exception as e:

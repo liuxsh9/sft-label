@@ -47,34 +47,34 @@ Rules:
 
 ### Domain (multi-select)
 What application area does this belong to?
-- api-development: Building APIs
-- automation: Automating tasks/workflows
+- api-development: Designing/building APIs as the PRIMARY deliverable — REST/GraphQL API design, API gateways, OpenAPI/Swagger specs, API versioning, rate-limiting middleware. A web app that exposes endpoints as part of its function → web-backend, not this
+- automation: Workflow/task automation — cron jobs, scheduled pipelines, RPA, CI scripts, shell orchestration. NOT just "a script that does something" — a one-off data-processing script belongs to whatever domain the data serves
 - blockchain: Smart contracts, DeFi, Web3
 - cli-tool: Command-line tools
-- cloud-computing: Cloud platforms, serverless, edge
+- cloud-computing: Cloud-NATIVE capabilities — Lambda/Cloud Functions, S3/GCS object storage, IAM policies, IaC (CDK/Pulumi), service mesh, multi-cloud. NOT simply deploying a web app to AWS/GCP — that's the app's own domain + devops
 - compiler-development: Compilers, interpreters, language tooling
 - cybersecurity: Security engineering as an APPLICATION DOMAIN (pentesting, threat modeling, vulnerability research, appsec). For security KNOWLEDGE (auth, encryption, XSS), use concept:security instead
-- data-engineering: Data pipelines, ETL, warehouses
-- data-science: Statistical analysis, analytics
-- database-administration: Database management/optimization
+- data-engineering: Data INFRASTRUCTURE — building ETL/ELT pipelines, data warehouses, lakehouses, orchestration (Airflow/Dagster/Prefect), streaming (Kafka/Flink/Spark Streaming), schema evolution, data quality frameworks. NOT simple file I/O, CSV parsing, or basic pandas/SQL queries — those are normal coding in whatever domain the data serves
+- data-science: Exploratory data analysis, statistical modeling, data visualization, BI dashboards. NOT training ML models (→ machine-learning) or building data pipelines (→ data-engineering)
+- database-administration: DBA/operations — backup/restore, replication, cluster setup, user/permission management, storage engine tuning, capacity planning, migration between DB versions. NOT writing SQL queries, using an ORM, or connecting to a database from application code — those belong to the application's domain (web-backend, api-development, etc.)
 - desktop-application: Native desktop apps
-- devops: CI/CD, SRE, platform engineering, observability
-- e-commerce: Online shopping, payment systems
+- devops: CI/CD pipelines, deployment automation, infrastructure-as-code, monitoring/alerting setup, SRE practices. NOT simply using Docker to containerize an app or writing a Dockerfile — that's normal development unless the FOCUS is on the deployment/operations workflow
+- e-commerce: Online retail platforms — product catalogs, shopping carts, checkout flows, order management. Adding a Stripe/PayPal button to any app does NOT make it e-commerce
 - embedded-systems: Firmware, hardware programming
-- financial-technology: Fintech applications
+- financial-technology: Financial services software — trading systems, banking platforms, payment processing infrastructure, risk modeling, portfolio management. NOT any app that handles money
 - game-development: Video games, interactive entertainment
 - graphics-and-xr: 3D graphics, AR/VR, shaders
-- healthcare-technology: Medical/health applications
+- healthcare-technology: Healthcare software — EHR/EMR systems, medical imaging, clinical decision support, health data interoperability (HL7/FHIR)
 - machine-learning: ML, deep learning, neural nets, MLOps
 - media-processing: Audio/video processing
 - mobile-development: Mobile apps (iOS, Android)
-- natural-language-processing: NLP, text processing
-- network-programming: Network/socket programming
+- natural-language-processing: NLP/language AI — text classification, NER, sentiment analysis, machine translation, chatbots, LLM application development. NOT basic string manipulation, regex, or text formatting
+- network-programming: Low-level network programming — raw sockets, protocol implementation (TCP/UDP/QUIC), packet capture, custom network services. NOT making HTTP API calls from application code — that's the app's own domain
 - operating-systems: OS/kernel development
 - real-time-systems: RTOS, strict timing constraints
 - scientific-computing: HPC, numerical methods, simulation
-- search-engineering: Search systems, information retrieval
-- systems-programming: Low-level system software
+- search-engineering: Building search infrastructure — custom indexing, relevance/ranking algorithms, query parsing. NOT simply calling a search API (Elasticsearch/Algolia) from application code
+- systems-programming: Low-level system software — memory allocators, custom runtimes, system utilities. NOT general C/C++/Rust programming — use only when the code targets system-level concerns
 - web-backend: Server-side web development
 - web-frontend: Client-side web development
 - (also: accessibility, bioinformatics, compliance, computer-vision, geospatial, internationalization, iot, robotics)
