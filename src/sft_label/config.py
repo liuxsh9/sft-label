@@ -32,7 +32,7 @@ TRUNCATION_PER_TURN_RATIO = 0.35 # max fraction of budget for any single turn
 
 # ─── Directory Pipeline ────────────────────────────────
 DIR_PIPELINE_WATERMARK = 2.0   # load next file when in-flight < concurrency * watermark
-DIR_PIPELINE_MAX_FILES = 30    # max files loaded in memory simultaneously
+DIR_PIPELINE_MAX_FILES = 40    # max files loaded in memory simultaneously
 
 # ─── Chunked JSONL Pipeline ──────────────────────────
 CHUNK_SIZE = 5000              # raw JSONL lines per chunk
