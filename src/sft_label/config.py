@@ -39,8 +39,8 @@ CHUNK_SIZE = 5000              # raw JSONL lines per chunk
 MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
-SPARSE_FULL_LABEL_COUNT = 10  # first N slices always labeled
-SPARSE_GAP_MULTIPLIER = 1.4   # gap between labeled slices grows by this factor
+SPARSE_FULL_LABEL_COUNT = 8   # first N slices always labeled
+SPARSE_GAP_MULTIPLIER = 1.3   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
 

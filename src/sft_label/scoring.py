@@ -715,6 +715,7 @@ async def score_one(http_client, sample, model, rarity_result,
 
         if parsed is None:
             monitor["error"] = raw[:300] if raw else "null response"
+            monitor["error_response"] = usage.get("error_response") or (raw[:500] if raw else "")
             if usage.get("non_retryable"):
                 break
             continue

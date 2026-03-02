@@ -603,7 +603,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     if call1_result is None:
                         monitor["status"] = "call1_failed"
                         monitor["error"] = usage1.get("error", "unknown")
-                        monitor["error_response"] = call1_raw[:500] if call1_raw else ""
+                        monitor["error_response"] = usage1.get("error_response") or (call1_raw[:500] if call1_raw else "")
                         if usage1.get("non_retryable"):
                             return sample_idx, None, monitor
                         if sample_attempt < _max_retries_sample:
@@ -627,7 +627,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 if call2_result is None:
                     monitor["status"] = "call2_failed"
                     monitor["error"] = usage2.get("error", "unknown")
-                    monitor["error_response"] = call2_raw[:500] if call2_raw else ""
+                    monitor["error_response"] = usage2.get("error_response") or (call2_raw[:500] if call2_raw else "")
                     if usage2.get("non_retryable"):
                         # Return partial results from Call 1
                         labels = {d: call1_cleaned.get(d) for d in ["intent", "language", "domain", "task", "difficulty"]}

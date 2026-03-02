@@ -861,7 +861,7 @@ def detect_keywords(text):
     return hits
 
 
-def generate_sparse_schedule(n, full_label_count=10, gap_multiplier=1.2, min_gap=2, threshold=12):
+def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=2, threshold=12):
     """Front-dense, back-sparse sampling schedule for pyramid slices.
 
     n <= threshold: label all (return [0..n-1])
@@ -885,7 +885,7 @@ def generate_sparse_schedule(n, full_label_count=10, gap_multiplier=1.2, min_gap
     return schedule
 
 
-def apply_sparse_sampling(samples, full_label_count=10, gap_multiplier=1.2, min_gap=2, threshold=12):
+def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, threshold=12):
     """Apply sparse sampling to multi-turn pyramid slices.
 
     Single-turn samples (no source_id or total_turns=1) are always labeled.
