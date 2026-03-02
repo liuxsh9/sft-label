@@ -842,11 +842,14 @@ def compute_value_stats(scored_samples, all_monitors):
     # Value by tag (mean value per tag per dimension)
     tag_dims = ["intent", "difficulty", "domain", "concept", "task", "agentic", "constraint", "context"]
     value_by_tag = {}
+    selection_by_tag = {}
     for dim in tag_dims:
         tag_values = {}  # {tag: [value_scores]}
+        tag_selections = {}  # {tag: [selection_scores]}
         for s in scored_samples:
             v = s.get("value", {})
             vs = v.get("value_score")
+            ss = v.get("selection_score")
             if vs is None:
                 continue
             labels = s.get("labels") or {}
@@ -856,11 +859,19 @@ def compute_value_stats(scored_samples, all_monitors):
             if isinstance(tags, list):
                 for t in tags:
                     tag_values.setdefault(t, []).append(vs)
+                    if ss is not None:
+                        tag_selections.setdefault(t, []).append(ss)
             else:
                 tag_values.setdefault(tags, []).append(vs)
+                if ss is not None:
+                    tag_selections.setdefault(tags, []).append(ss)
         value_by_tag[dim] = {
             t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
             for t, vs in sorted(tag_values.items(), key=lambda x: -sum(x[1]) / len(x[1]))
+        }
+        selection_by_tag[dim] = {
+            t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
+            for t, vs in sorted(tag_selections.items(), key=lambda x: -sum(x[1]) / len(x[1]))
         }
 
     # Thinking mode stats
@@ -955,6 +966,7 @@ def compute_value_stats(scored_samples, all_monitors):
         "histograms": histograms,
         "sub_score_means": sub_score_means,
         "value_by_tag": value_by_tag,
+        "selection_by_tag": selection_by_tag,
         "thinking_mode_stats": thinking_mode_stats,
         "flag_counts": dict(sorted(flag_counts.items(), key=lambda x: -x[1])),
         "flag_value_impact": flag_value_impact,
@@ -1408,14 +1420,17 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
             count = sum(1 for v in all_value_scores if v >= threshold)
             selection_thresholds[pct_label] = {"threshold": round(threshold, 1), "count": count}
 
-    # Value by tag
+    # Value and selection by tag
     tag_dims = ["intent", "difficulty", "domain", "concept", "task",
                 "agentic", "constraint", "context"]
     value_by_tag = {}
+    selection_by_tag = {}
     for dim in tag_dims:
         tag_values = {}
+        tag_selections = {}
         for s in summaries:
             vs = s.get("value_score")
+            ss = s.get("selection_score")
             if vs is None:
                 continue
             labels = s.get("labels") or {}
@@ -1425,11 +1440,19 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
             if isinstance(tags, list):
                 for t in tags:
                     tag_values.setdefault(t, []).append(vs)
+                    if ss is not None:
+                        tag_selections.setdefault(t, []).append(ss)
             else:
                 tag_values.setdefault(tags, []).append(vs)
+                if ss is not None:
+                    tag_selections.setdefault(tags, []).append(ss)
         value_by_tag[dim] = {
             t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
             for t, vs in sorted(tag_values.items(), key=lambda x: -sum(x[1]) / len(x[1]))
+        }
+        selection_by_tag[dim] = {
+            t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
+            for t, vs in sorted(tag_selections.items(), key=lambda x: -sum(x[1]) / len(x[1]))
         }
 
     # LLM usage
@@ -1447,6 +1470,7 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
         "score_distributions": score_distributions,
         "histograms": histograms,
         "value_by_tag": value_by_tag,
+        "selection_by_tag": selection_by_tag,
         "thinking_mode_stats": thinking_mode_stats,
         "flag_counts": dict(sorted(flag_counts.items(), key=lambda x: -x[1])),
         "flag_value_impact": flag_value_impact,
@@ -2137,5 +2161,27 @@ def _merge_value_stats(file_stats_list):
                                 key=lambda x: -x[1]["sum"] / max(x[1]["count"], 1))
         }
     merged["value_by_tag"] = merged_by_tag
+
+    # Merge selection_by_tag: same pattern as value_by_tag
+    all_sel_dims = set()
+    for s in file_stats_list:
+        all_sel_dims.update(s.get("selection_by_tag", {}).keys())
+    merged_sel_by_tag = {}
+    for dim in all_sel_dims:
+        tag_accum = {}
+        for s in file_stats_list:
+            dim_data = s.get("selection_by_tag", {}).get(dim, {})
+            for tag, info in dim_data.items():
+                if tag not in tag_accum:
+                    tag_accum[tag] = {"sum": 0.0, "count": 0}
+                n = info.get("n", 0)
+                tag_accum[tag]["sum"] += info.get("mean", 0) * n
+                tag_accum[tag]["count"] += n
+        merged_sel_by_tag[dim] = {
+            t: {"mean": round(a["sum"] / max(a["count"], 1), 2), "n": a["count"]}
+            for t, a in sorted(tag_accum.items(),
+                                key=lambda x: -x[1]["sum"] / max(x[1]["count"], 1))
+        }
+    merged["selection_by_tag"] = merged_sel_by_tag
 
     return merged

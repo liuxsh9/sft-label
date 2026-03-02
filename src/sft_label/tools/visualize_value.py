@@ -140,6 +140,9 @@ def compute_value_viz_data(samples, stats):
     # Value by tag (cross-analysis)
     viz["value_by_tag"] = stats.get("value_by_tag", {})
 
+    # Selection by tag (cross-analysis)
+    viz["selection_by_tag"] = stats.get("selection_by_tag", {})
+
     # Thinking mode
     viz["thinking_mode_stats"] = stats.get("thinking_mode_stats", {})
 
@@ -543,7 +546,52 @@ function renderPass2() {
         html += '</div></div>';
     }
 
-    // === Section 5: Thinking Mode Analysis ===
+    // === Section 5: Selection Analysis ===
+    const sbt = d.selection_by_tag || {};
+    if (Object.keys(sbt).length > 0) {
+        // 5a: Selection x Tag bar charts
+        html += '<div class="section"><h2>Selection &times; Tag Cross-Analysis</h2><div class="grid">';
+        const selDimColors = {'difficulty': '#ea580c', 'intent': '#3b82f6', 'domain': '#16a34a', 'concept': '#9333ea', 'task': '#db2777', 'agentic': '#ea580c'};
+        for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'task', 'agentic']) {
+            const tags = sbt[dim];
+            if (!tags || Object.keys(tags).length === 0) continue;
+            const items = Object.entries(tags).map(([t, info]) => [t, info.mean, info.n]).sort((a, b) => b[1] - a[1]);
+            html += `<div class="panel"><h3>Selection by ${dim}</h3>${renderBarChart(items, 10, selDimColors[dim] || '#db2777', 15)}</div>`;
+        }
+        html += '</div>';
+
+        // 5b: Value vs Selection comparison tables
+        html += '<h3 style="margin-top:16px;margin-bottom:12px;font-size:1em">Value vs Selection Comparison</h3>';
+        html += '<div style="font-size:0.78em;color:#6b7280;margin-bottom:12px">Delta = Selection - Value. Positive delta: rare tag with high intra-class quality. Negative delta: common tag, quality doesn\'t stand out within class.</div>';
+        html += '<div class="grid">';
+        for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'task']) {
+            const vtags = vbt[dim] || {};
+            const stags = sbt[dim] || {};
+            const allTags = new Set([...Object.keys(vtags), ...Object.keys(stags)]);
+            if (allTags.size === 0) continue;
+            const rows = [];
+            for (const tag of allTags) {
+                const vi = vtags[tag] || {};
+                const si = stags[tag] || {};
+                const mv = vi.mean || 0;
+                const ms = si.mean || 0;
+                const n = vi.n || si.n || 0;
+                rows.push({tag, mv, ms, delta: ms - mv, n});
+            }
+            rows.sort((a, b) => b.delta - a.delta);
+            let thtml = '<table style="font-size:0.82em"><thead><tr><th>Tag</th><th>Value</th><th>Selection</th><th>Delta</th><th>n</th></tr></thead><tbody>';
+            for (const r of rows) {
+                const dc = r.delta >= 0 ? '#16a34a' : '#dc2626';
+                const arrow = r.delta >= 0.3 ? ' &#9650;' : (r.delta <= -0.3 ? ' &#9660;' : '');
+                thtml += `<tr><td>${r.tag}</td><td style="color:${scoreColor(r.mv)}">${r.mv.toFixed(1)}</td><td style="color:${scoreColor(r.ms)}">${r.ms.toFixed(1)}</td><td style="color:${dc};font-weight:600">${r.delta >= 0 ? '+' : ''}${r.delta.toFixed(1)}${arrow}</td><td style="color:#6b7280">${r.n}</td></tr>`;
+            }
+            thtml += '</tbody></table>';
+            html += `<div class="panel"><h3>${dim}</h3>${thtml}</div>`;
+        }
+        html += '</div></div>';
+    }
+
+    // === Section 6: Thinking Mode Analysis ===
     const tm = d.thinking_mode_stats || {};
     if (tm.slow || tm.fast) {
         html += '<div class="section"><h2>Thinking Mode Analysis</h2><div class="grid">';
@@ -557,7 +605,7 @@ function renderPass2() {
         html += '</div></div>';
     }
 
-    // === Section 6: Flag Analysis ===
+    // === Section 7: Flag Analysis ===
     const flags = d.flag_counts || {};
     if (Object.keys(flags).length > 0) {
         html += '<div class="section"><h2>Flag Analysis</h2><div class="grid">';
@@ -580,7 +628,7 @@ function renderPass2() {
         html += '</div></div>';
     }
 
-    // === Section 7: Coverage Impact (if available) ===
+    // === Section 8: Coverage Impact (if available) ===
     const cov = d.coverage_at_thresholds || {};
     if (Object.keys(cov).length > 0) {
         html += '<div class="section"><h2>Coverage Impact Analysis</h2>';
@@ -593,7 +641,7 @@ function renderPass2() {
         html += '</tbody></table></div></div>';
     }
 
-    // === Section 8: File Ranking (global dashboard) ===
+    // === Section 9: File Ranking (global dashboard) ===
     const pfs = d.per_file_summary || [];
     if (pfs.length > 1) {
         html += '<div class="section"><h2>File Ranking</h2>';
