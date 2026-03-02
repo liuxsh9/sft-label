@@ -768,6 +768,16 @@ def _percentiles(values, pcts=(10, 25, 50, 75, 90)):
     return result
 
 
+def _histogram_bins(values):
+    """Compute histogram bins (1-10) from a list of numeric values."""
+    bins = [0] * 10
+    for v in values:
+        if isinstance(v, (int, float)) and 1 <= v <= 10:
+            idx = min(int(v) - 1, 9)
+            bins[idx] += 1
+    return bins
+
+
 def compute_value_stats(scored_samples, all_monitors):
     """Compute aggregate statistics for value scoring.
 
@@ -811,6 +821,9 @@ def compute_value_stats(scored_samples, all_monitors):
         "reasoning_overall": extract_scores("reasoning.overall"),
         "rarity_score": extract_scores("rarity.score"),
     }
+
+    # Histogram bins (1-10) for dashboard charts
+    histograms = {k: _histogram_bins(v) for k, v in _raw_scores.items()}
 
     # Sub-score means
     sub_score_means = {
@@ -939,6 +952,7 @@ def compute_value_stats(scored_samples, all_monitors):
         "total_tokens": total_prompt_tokens + total_completion_tokens,
         "score_distributions": score_distributions,
         "_raw_scores": _raw_scores,
+        "histograms": histograms,
         "sub_score_means": sub_score_means,
         "value_by_tag": value_by_tag,
         "thinking_mode_stats": thinking_mode_stats,
@@ -1345,6 +1359,12 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
         "rarity_score": _percentiles(_gather("rarity_score")),
     }
 
+    # Histogram bins (1-10) for dashboard charts
+    _hist_keys = ["value_score", "selection_score", "intra_class_rank",
+                  "complexity_overall", "quality_overall", "reasoning_overall",
+                  "rarity_score"]
+    histograms = {k: _histogram_bins(_gather(k)) for k in _hist_keys}
+
     # Thinking mode stats
     slow = [s for s in summaries if s.get("thinking_mode") == "slow"]
     fast = [s for s in summaries if s.get("thinking_mode") == "fast"]
@@ -1425,6 +1445,7 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
         "total_completion_tokens": total_completion_tokens,
         "total_tokens": total_prompt_tokens + total_completion_tokens,
         "score_distributions": score_distributions,
+        "histograms": histograms,
         "value_by_tag": value_by_tag,
         "thinking_mode_stats": thinking_mode_stats,
         "flag_counts": dict(sorted(flag_counts.items(), key=lambda x: -x[1])),
@@ -2055,6 +2076,16 @@ def _merge_value_stats(file_stats_list):
                     "total_n": total_n,
                 }
     merged["score_distributions"] = merged_distributions
+
+    # Merge histogram bins: sum across files
+    merged_histograms = {}
+    for s in file_stats_list:
+        for key, bins in s.get("histograms", {}).items():
+            if key not in merged_histograms:
+                merged_histograms[key] = [0] * 10
+            for i, v in enumerate(bins):
+                merged_histograms[key][i] += v
+    merged["histograms"] = merged_histograms
 
     # Merge thinking mode stats: sum counts, weighted means
     merged_thinking = {"slow": {"count": 0, "sum_value": 0.0, "sum_quality": 0.0, "sum_reasoning": 0.0},

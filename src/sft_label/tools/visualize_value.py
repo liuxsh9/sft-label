@@ -126,6 +126,9 @@ def compute_value_viz_data(samples, stats):
                     idx = min(int(val) - 1, 9)
                     bins[idx] += 1
             histograms[key] = bins
+    elif "histograms" in stats:
+        # Fallback: use pre-computed histogram bins from stats
+        histograms = stats["histograms"]
     viz["histograms"] = histograms
 
     # Score distribution stats (percentiles etc. from stats file)
@@ -417,9 +420,13 @@ function renderPass1(d) {
 }
 
 // ── Pass 2 rendering ──
-function renderHistogram(containerId, bins, label, color) {
+function renderHistogram(bins, label, color, distInfo) {
     const max = Math.max(...bins, 1);
-    let html = `<h3>${label}</h3><div class="hist-row">`;
+    let html = `<h3>${label}</h3>`;
+    if (distInfo && distInfo.mean != null) {
+        html += `<div style="font-size:0.9em;margin-bottom:8px;color:#6b7280">Mean: <strong style="color:${scoreColor(distInfo.mean)}">${distInfo.mean.toFixed(2)}</strong> &nbsp; Std: ${(distInfo.std || 0).toFixed(2)}</div>`;
+    }
+    html += '<div class="hist-row">';
     for (let i = 0; i < bins.length; i++) {
         const h = Math.max((bins[i] / max) * 100, 2);
         html += `<div class="hist-bar" style="height:${h}%;background:${color}" title="${i+1}: ${bins[i]}"></div>`;
@@ -495,8 +502,11 @@ function renderPass2() {
         html += '<div class="section"><h2>Score Distributions</h2><div class="grid">';
         const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score', 'selection_score', 'intra_class_rank'];
         if (hasHistograms) {
-            for (const [key, bins] of Object.entries(d.histograms)) {
-                html += `<div class="panel">${renderHistogram(key, bins, histLabels[key] || key, histColors[key] || '#3b82f6')}</div>`;
+            for (const key of scoreKeys) {
+                const bins = d.histograms[key];
+                if (!bins) continue;
+                const distInfo = (d.score_distributions || {})[key] || {};
+                html += `<div class="panel">${renderHistogram(bins, histLabels[key] || key, histColors[key] || '#3b82f6', distInfo)}</div>`;
             }
         } else {
             for (const key of scoreKeys) {
