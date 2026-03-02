@@ -19,6 +19,7 @@ from sft_label.preprocessing import (
     generate_sparse_schedule,
     apply_sparse_sampling,
     truncate_conversations_for_labeling,
+    to_pangu_pseudo_multiturn,
 )
 
 
@@ -285,3 +286,137 @@ class TestPanguFixtures:
         for s in samples:
             assert "conversations" in s
             assert len(s["conversations"]) > 0
+
+
+class TestToPanguPseudoMultiturn:
+    """Tests for to_pangu_pseudo_multiturn() conversion."""
+
+    def test_single_turn_no_cot(self):
+        """Single turn without COT → [unused16][unused17] prefix."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Write hello world"},
+                {"from": "gpt", "value": "print('hello')"},
+            ],
+            "metadata": {},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert len(result["data"]) == 2
+        assert result["data"][0]["role"] == "user"
+        assert result["data"][0]["content"] == "Write hello world"
+        assert result["data"][1]["role"] == "assistant"
+        assert result["data"][1]["content"] == "[unused16][unused17]print('hello')"
+
+    def test_single_turn_with_cot(self):
+        """Single turn with COT → COT restored between [unused16] and [unused17]."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Solve this"},
+                {"from": "gpt", "value": "The answer is 42"},
+            ],
+            "metadata": {"cot_text": "Let me think about this step by step"},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert result["data"][1]["content"] == (
+            "[unused16]Let me think about this step by step[unused17]The answer is 42"
+        )
+
+    def test_sliced_sample_no_cot_restored(self):
+        """Sliced sample (source_id present) → fast thinking, COT not restored."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Q1"},
+                {"from": "gpt", "value": "A1"},
+            ],
+            "metadata": {
+                "source_id": "original-123",
+                "cot_text": "This COT is from aggregation, not this turn",
+            },
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert result["data"][1]["content"] == "[unused16][unused17]A1"
+
+    def test_multi_turn_packing(self):
+        """Multi-turn → prior turns packed with separators and role labels."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Hello"},
+                {"from": "gpt", "value": "Hi there"},
+                {"from": "human", "value": "Write code"},
+                {"from": "gpt", "value": "Here's the code"},
+            ],
+            "metadata": {},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert len(result["data"]) == 2
+
+        user_content = result["data"][0]["content"]
+        # Prior turns should be packed
+        assert "用户：Hello /no_think" in user_content
+        assert "助手：[unused16][unused17]Hi there" in user_content
+        assert "[unused10][unused9]" in user_content
+        # Last user turn
+        assert "用户：Write code" in user_content
+        # Last assistant response
+        assert result["data"][1]["content"] == "[unused16][unused17]Here's the code"
+
+    def test_system_prompt_preserved(self):
+        """System prompt from metadata → meta_prompt in output."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Hi"},
+                {"from": "gpt", "value": "Hello"},
+            ],
+            "metadata": {"system_prompt": "You are a helpful assistant"},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert result["meta_prompt"] == "You are a helpful assistant"
+
+    def test_tools_preserved(self):
+        """Tool definitions from metadata → tools in output."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Search"},
+                {"from": "gpt", "value": "Found it"},
+            ],
+            "metadata": {"tool_definitions": '[{"name": "search"}]'},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert result["tools"] == '[{"name": "search"}]'
+
+    def test_empty_conversations(self):
+        """Empty conversations → empty output."""
+        sample = {"conversations": [], "metadata": {}}
+        result = to_pangu_pseudo_multiturn(sample)
+        assert result["data"] == []
+
+    def test_no_assistant_reply(self):
+        """Only human turns → just user message."""
+        sample = {
+            "conversations": [{"from": "human", "value": "Question?"}],
+            "metadata": {},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert len(result["data"]) == 1
+        assert result["data"][0]["role"] == "user"
+
+    def test_roundtrip_single_turn(self):
+        """Pangu → normalize → to_pangu preserves essential structure."""
+        original = {
+            "id": "test-1",
+            "data": [
+                {"role": "user", "content": "Explain Python"},
+                {"role": "assistant", "content": "[unused16]Let me think[unused17]Python is great"},
+            ],
+            "meta_prompt": "You are helpful",
+            "tools": "",
+        }
+        normalized = normalize_pangu(original)
+        reconstructed = to_pangu_pseudo_multiturn(normalized)
+
+        assert reconstructed["meta_prompt"] == "You are helpful"
+        assert len(reconstructed["data"]) == 2
+        # COT should be restored
+        assert "[unused16]Let me think[unused17]" in reconstructed["data"][1]["content"]
+        assert "Python is great" in reconstructed["data"][1]["content"]
+

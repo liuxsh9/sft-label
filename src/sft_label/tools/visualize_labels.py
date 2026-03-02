@@ -97,6 +97,7 @@ def compute_viz_data(samples, stats):
 
     return {
         "total": stats.get("total_samples", len(samples)) or len(samples),
+        "input_file": stats.get("input_file") or stats.get("input_path", ""),
         "distributions": distributions,
         "confidence_stats": stats.get("confidence_stats", {}),
         "conf_matrix": conf_matrix,
@@ -107,6 +108,8 @@ def compute_viz_data(samples, stats):
             "total_tokens": stats.get("total_tokens", 0),
             "arbitrated_rate": stats.get("arbitrated_rate", 0),
             "unmapped_unique": stats.get("unmapped_unique_count", 0),
+            "sparse_labeled": stats.get("sparse_labeled", 0),
+            "sparse_inherited": stats.get("sparse_inherited", 0),
         },
     }
 
@@ -189,18 +192,25 @@ function confColor(v) {
 
 function render() {
   const d = DATA;
+  const inputFile = d.input_file ? ` \u00b7 ${d.input_file}` : '';
   document.getElementById('subtitle').textContent =
-    `${d.total} samples`;
+    `${d.total} samples${inputFile}`;
 
   // Overview cards
   const ov = d.overview;
-  document.getElementById('overview').innerHTML = [
+  const cards = [
     ['Samples', d.total],
     ['Success', (ov.success_rate * 100).toFixed(1) + '%'],
     ['Tokens', ov.total_tokens.toLocaleString()],
     ['Arbitrated', (ov.arbitrated_rate * 100).toFixed(1) + '%'],
     ['Unmapped', ov.unmapped_unique],
-  ].map(([l, v]) => `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
+  ];
+  if (ov.sparse_inherited > 0) {
+    cards.push(['LLM Labeled', ov.sparse_labeled]);
+    cards.push(['Inherited', ov.sparse_inherited]);
+  }
+  document.getElementById('overview').innerHTML = cards
+    .map(([l, v]) => `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
 
   // Distributions
   const distHtml = [];

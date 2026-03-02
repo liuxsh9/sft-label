@@ -4,14 +4,34 @@ import json
 import pytest
 from pathlib import Path
 
-from sft_label.tools.filter_value import filter_samples, run_filter
+from sft_label.tools.filter_value import (
+    filter_samples, run_filter, matches_filter, FilterConfig,
+    _find_scored_files, _convert_to_training_format,
+)
 
 
 # ── Helpers ──
 
-def _scored(score):
+def _scored(score, **extra):
     """Create a sample with a given value_score."""
-    return {"id": f"s-{score}", "value": {"value_score": score}}
+    sample = {"id": f"s-{score}", "value": {"value_score": score}}
+    sample.update(extra)
+    return sample
+
+
+def _full_sample(score, labels=None, metadata=None, value_extra=None):
+    """Create a fully populated sample."""
+    sample = {
+        "id": f"full-{score}",
+        "conversations": [
+            {"from": "human", "value": "test question"},
+            {"from": "gpt", "value": "test answer"},
+        ],
+        "labels": labels or {},
+        "metadata": metadata or {},
+        "value": {"value_score": score, **(value_extra or {})},
+    }
+    return sample
 
 
 def _unscored():
@@ -19,7 +39,7 @@ def _unscored():
     return {"id": "unscored-1", "messages": []}
 
 
-# ── filter_samples ──
+# ── filter_samples (backward compat) ──
 
 class TestFilterSamples:
     def test_basic_threshold(self):
@@ -70,6 +90,136 @@ class TestFilterSamples:
         retained, dropped = filter_samples(samples, threshold=5.0)
         assert len(retained) == 0
         assert len(dropped) == 1
+
+
+# ── matches_filter ──
+
+class TestMatchesFilter:
+    def test_value_min(self):
+        config = FilterConfig(value_min=6.0)
+        assert matches_filter(_scored(7.0), config) is True
+        assert matches_filter(_scored(5.0), config) is False
+        assert matches_filter(_scored(6.0), config) is True
+
+    def test_selection_min(self):
+        config = FilterConfig(selection_min=5.0)
+        sample = _full_sample(7.0, value_extra={"selection_score": 6.0})
+        assert matches_filter(sample, config) is True
+        sample_low = _full_sample(7.0, value_extra={"selection_score": 3.0})
+        assert matches_filter(sample_low, config) is False
+
+    def test_thinking_mode(self):
+        config = FilterConfig(thinking_mode="slow")
+        sample_slow = _full_sample(7.0, value_extra={"thinking_mode": "slow"})
+        sample_fast = _full_sample(7.0, value_extra={"thinking_mode": "fast"})
+        assert matches_filter(sample_slow, config) is True
+        assert matches_filter(sample_fast, config) is False
+
+    def test_thinking_mode_from_metadata(self):
+        config = FilterConfig(thinking_mode="slow")
+        sample = _full_sample(7.0, metadata={"thinking_mode": "slow"})
+        assert matches_filter(sample, config) is True
+
+    def test_difficulty_filter(self):
+        config = FilterConfig(difficulty=["advanced", "expert"])
+        sample_adv = _full_sample(7.0, labels={"difficulty": "advanced"})
+        sample_beg = _full_sample(7.0, labels={"difficulty": "beginner"})
+        assert matches_filter(sample_adv, config) is True
+        assert matches_filter(sample_beg, config) is False
+
+    def test_include_tags_or_logic(self):
+        config = FilterConfig(include_tags=["domain:web", "domain:ml"])
+        sample_web = _full_sample(7.0, labels={"domain": ["web", "backend"]})
+        sample_ml = _full_sample(7.0, labels={"domain": ["ml"]})
+        sample_db = _full_sample(7.0, labels={"domain": ["database"]})
+        assert matches_filter(sample_web, config) is True
+        assert matches_filter(sample_ml, config) is True
+        assert matches_filter(sample_db, config) is False
+
+    def test_exclude_tags_or_logic(self):
+        config = FilterConfig(exclude_tags=["intent:fix-bug"])
+        sample_fix = _full_sample(7.0, labels={"intent": "fix-bug"})
+        sample_gen = _full_sample(7.0, labels={"intent": "generate"})
+        assert matches_filter(sample_fix, config) is False
+        assert matches_filter(sample_gen, config) is True
+
+    def test_exclude_inherited(self):
+        config = FilterConfig(exclude_inherited=True)
+        sample_inherited = _full_sample(7.0, labels={"inherited": True, "difficulty": "advanced"})
+        sample_normal = _full_sample(7.0, labels={"difficulty": "advanced"})
+        assert matches_filter(sample_inherited, config) is False
+        assert matches_filter(sample_normal, config) is True
+
+    def test_combined_criteria(self):
+        """AND logic between different criteria."""
+        config = FilterConfig(
+            value_min=6.0,
+            difficulty=["advanced", "expert"],
+            thinking_mode="slow",
+        )
+        # Meets all criteria
+        sample_good = _full_sample(7.0,
+                                    labels={"difficulty": "advanced"},
+                                    value_extra={"thinking_mode": "slow"})
+        assert matches_filter(sample_good, config) is True
+
+        # Fails value
+        sample_low = _full_sample(5.0,
+                                   labels={"difficulty": "advanced"},
+                                   value_extra={"thinking_mode": "slow"})
+        assert matches_filter(sample_low, config) is False
+
+        # Fails difficulty
+        sample_easy = _full_sample(7.0,
+                                    labels={"difficulty": "beginner"},
+                                    value_extra={"thinking_mode": "slow"})
+        assert matches_filter(sample_easy, config) is False
+
+    def test_unscored_handling(self):
+        config_no = FilterConfig(value_min=5.0)
+        config_yes = FilterConfig(value_min=5.0, include_unscored=True)
+        sample = _unscored()
+        assert matches_filter(sample, config_no) is False
+        assert matches_filter(sample, config_yes) is True
+
+    def test_verify_source(self, tmp_path):
+        source_path = tmp_path / "data.json"
+        source_path.touch()
+        config = FilterConfig(verify_source=str(source_path))
+        sample_match = _full_sample(7.0, metadata={"source_file": str(source_path)})
+        sample_wrong = _full_sample(7.0, metadata={"source_file": "/other/path.json"})
+        sample_none = _full_sample(7.0)
+        assert matches_filter(sample_match, config) is True
+        assert matches_filter(sample_wrong, config) is False
+        # No source_file metadata → not excluded (graceful handling)
+        assert matches_filter(sample_none, config) is True
+
+    def test_tag_without_dimension(self):
+        """Tag search without explicit dimension scans all dimensions."""
+        config = FilterConfig(include_tags=["python"])
+        sample = _full_sample(7.0, labels={"language": ["python", "javascript"]})
+        assert matches_filter(sample, config) is True
+
+    def test_no_criteria_passes_all(self):
+        """Empty config passes everything (no score-based criteria)."""
+        config = FilterConfig()
+        assert matches_filter(_scored(3.0), config) is True
+        assert matches_filter(_scored(9.0), config) is True
+
+
+# ── FilterConfig with filter_samples ──
+
+class TestFilterConfig:
+    def test_config_based_filter(self):
+        config = FilterConfig(value_min=6.0, difficulty=["expert"])
+        samples = [
+            _full_sample(7.0, labels={"difficulty": "expert"}),
+            _full_sample(8.0, labels={"difficulty": "beginner"}),
+            _full_sample(4.0, labels={"difficulty": "expert"}),
+        ]
+        retained, dropped = filter_samples(samples, config=config)
+        assert len(retained) == 1
+        assert retained[0]["value"]["value_score"] == 7.0
 
 
 # ── run_filter (integration) ──
@@ -144,3 +294,244 @@ class TestRunFilter:
         summary = run_filter(str(input_file), threshold=5.0)
         assert summary["total"] == 0
         assert summary["retained"] == 0
+
+
+# ── Directory mode (complex scenarios) ──
+
+class TestDirectoryModeComplex:
+    def test_mixed_json_jsonl(self, tmp_path):
+        """Directory with both .json and .jsonl scored files."""
+        (tmp_path / "scored_a.json").write_text(json.dumps([_scored(7.0), _scored(8.0)]))
+        with open(tmp_path / "scored_b.jsonl", "w") as f:
+            f.write(json.dumps(_scored(6.0)) + "\n")
+            f.write(json.dumps(_scored(9.0)) + "\n")
+
+        summary = run_filter(str(tmp_path), threshold=7.0)
+        assert summary["total"] == 4
+        assert summary["retained"] == 3  # 7.0, 8.0, 9.0
+
+    def test_nested_subdirectories(self, tmp_path):
+        """Scored files one level deep in subdirectories."""
+        sub1 = tmp_path / "run1"
+        sub1.mkdir()
+        (sub1 / "scored.json").write_text(json.dumps([_scored(7.0)]))
+
+        sub2 = tmp_path / "run2"
+        sub2.mkdir()
+        (sub2 / "scored_extra.jsonl").write_text(
+            json.dumps(_scored(5.0)) + "\n" + json.dumps(_scored(8.0)) + "\n"
+        )
+
+        summary = run_filter(str(tmp_path), threshold=6.0)
+        assert summary["total"] == 3
+        assert summary["retained"] == 2  # 7.0, 8.0
+
+    def test_ignores_non_scored_files(self, tmp_path):
+        """Only files matching scored* pattern are loaded."""
+        (tmp_path / "scored.json").write_text(json.dumps([_scored(7.0)]))
+        (tmp_path / "labeled.json").write_text(json.dumps([_scored(1.0)]))
+        (tmp_path / "other.json").write_text(json.dumps([_scored(1.0)]))
+
+        summary = run_filter(str(tmp_path), threshold=5.0)
+        assert summary["total"] == 1
+        assert summary["retained"] == 1
+
+    def test_directory_with_config(self, tmp_path):
+        """Multi-condition filtering across directory files."""
+        samples = [
+            _full_sample(7.0, labels={"difficulty": "expert"}),
+            _full_sample(8.0, labels={"difficulty": "beginner"}),
+            _full_sample(9.0, labels={"difficulty": "advanced"}),
+        ]
+        (tmp_path / "scored.json").write_text(json.dumps(samples))
+
+        config = FilterConfig(value_min=6.0, difficulty=["expert", "advanced"])
+        summary = run_filter(str(tmp_path), config=config)
+        assert summary["total"] == 3
+        assert summary["retained"] == 2  # 7.0 expert, 9.0 advanced
+
+    def test_directory_deduplicates_files(self, tmp_path):
+        """Same file shouldn't be loaded twice via different glob patterns."""
+        (tmp_path / "scored.json").write_text(json.dumps([_scored(7.0)]))
+        # scored.json matches both "scored*.json" at root level
+        summary = run_filter(str(tmp_path), threshold=5.0)
+        assert summary["total"] == 1
+
+    def test_directory_jsonl_streaming(self, tmp_path):
+        """Large JSONL file in directory mode - verify streaming works."""
+        n = 100
+        with open(tmp_path / "scored_large.jsonl", "w") as f:
+            for i in range(n):
+                score = float(i % 10 + 1)
+                f.write(json.dumps(_scored(score)) + "\n")
+
+        summary = run_filter(str(tmp_path), threshold=8.0)
+        assert summary["total"] == n
+        # Scores 8, 9, 10 → 3 out of 10, repeated 10 times
+        assert summary["retained"] == 30
+
+    def test_directory_empty_files(self, tmp_path):
+        """Directory with empty scored files."""
+        (tmp_path / "scored.json").write_text(json.dumps([]))
+        (tmp_path / "scored_b.json").write_text(json.dumps([_scored(7.0)]))
+
+        summary = run_filter(str(tmp_path), threshold=5.0)
+        assert summary["total"] == 1
+        assert summary["retained"] == 1
+
+
+# ── Training format output ──
+
+class TestTrainingFormat:
+    def test_training_format_sharegpt(self, tmp_path):
+        """Training format strips labels and scores for ShareGPT samples."""
+        samples = [
+            _full_sample(7.0, labels={"difficulty": "advanced"}),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(value_min=5.0, output_format="training")
+        summary = run_filter(str(input_file), config=config)
+
+        jsonl_path = Path(summary["output_jsonl"])
+        assert jsonl_path.exists()
+
+        with open(jsonl_path) as f:
+            result = json.loads(f.readline())
+        assert "id" in result
+        assert "conversations" in result
+        assert "labels" not in result
+        assert "value" not in result
+
+    def test_training_format_pangu(self, tmp_path):
+        """Training format converts Pangu samples back to pseudo-multiturn."""
+        sample = _full_sample(7.0,
+                               labels={"difficulty": "advanced"},
+                               metadata={"original_format": "pangu"})
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps([sample]))
+
+        config = FilterConfig(value_min=5.0, output_format="training")
+        summary = run_filter(str(input_file), config=config)
+
+        jsonl_path = Path(summary["output_jsonl"])
+        with open(jsonl_path) as f:
+            result = json.loads(f.readline())
+        assert "data" in result
+        assert "id" in result
+
+    def test_scored_format_keeps_all_data(self, tmp_path):
+        """Default 'scored' format preserves everything."""
+        sample = _full_sample(7.0, labels={"difficulty": "advanced"})
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps([sample]))
+
+        summary = run_filter(str(input_file), threshold=5.0)
+        out_json = Path(summary["output_json"])
+        with open(out_json) as f:
+            result = json.load(f)[0]
+        assert "labels" in result
+        assert "value" in result
+
+
+# ── find_scored_files ──
+
+class TestFindScoredFiles:
+    def test_finds_jsonl_in_directory(self, tmp_path):
+        (tmp_path / "scored.jsonl").touch()
+        (tmp_path / "scored_extra.json").touch()
+        files = _find_scored_files(tmp_path)
+        assert len(files) == 2
+
+    def test_single_file(self, tmp_path):
+        f = tmp_path / "my_data.json"
+        f.touch()
+        files = _find_scored_files(f)
+        assert files == [f]
+
+    def test_nonexistent_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            _find_scored_files(tmp_path / "nonexistent")
+
+
+# ── Source verification ──
+
+class TestSourceVerification:
+    def test_verify_source_in_summary(self, tmp_path):
+        source_path = tmp_path / "original.json"
+        source_path.touch()
+        samples = [
+            _full_sample(7.0, metadata={"source_file": str(source_path)}),
+            _full_sample(8.0, metadata={"source_file": "/other/file.json"}),
+            _full_sample(9.0),  # no source_file
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(verify_source=str(source_path))
+        summary = run_filter(str(input_file), config=config)
+
+        # Only the matched + no-metadata samples should be retained
+        assert summary["retained"] == 2  # matched + no metadata
+        assert "verify_source" in summary
+
+
+# ── Inherited samples ──
+
+class TestInheritedSamples:
+    def test_inherited_included_by_default(self, tmp_path):
+        samples = [
+            _full_sample(7.0, labels={"difficulty": "advanced", "inherited": True}),
+            _full_sample(8.0, labels={"difficulty": "advanced"}),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(value_min=6.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 2
+        assert summary["inherited_retained"] == 1
+
+    def test_inherited_excluded(self, tmp_path):
+        samples = [
+            _full_sample(7.0, labels={"difficulty": "advanced", "inherited": True}),
+            _full_sample(8.0, labels={"difficulty": "advanced"}),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(value_min=6.0, exclude_inherited=True)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 1
+
+
+# ── Output path generation ──
+
+class TestOutputPathGeneration:
+    def test_auto_name_with_value_min(self, tmp_path):
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps([_scored(7.0)]))
+
+        config = FilterConfig(value_min=6.0)
+        summary = run_filter(str(input_file), config=config)
+        assert "v6" in Path(summary["output_json"]).name
+
+    def test_auto_name_with_difficulty(self, tmp_path):
+        sample = _full_sample(7.0, labels={"difficulty": "expert"})
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps([sample]))
+
+        config = FilterConfig(difficulty=["expert"])
+        summary = run_filter(str(input_file), config=config)
+        assert "expert" in Path(summary["output_json"]).name
+
+    def test_training_format_outputs_jsonl(self, tmp_path):
+        sample = _full_sample(7.0)
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps([sample]))
+
+        config = FilterConfig(value_min=5.0, output_format="training")
+        summary = run_filter(str(input_file), config=config)
+        assert summary["output_jsonl"].endswith(".jsonl")
+        assert summary["output_json"] is None

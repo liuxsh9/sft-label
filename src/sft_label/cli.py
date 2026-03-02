@@ -93,15 +93,44 @@ def cmd_score(args):
 
 
 def cmd_filter(args):
-    """Filter scored data by value threshold."""
-    from sft_label.tools.filter_value import run_filter
+    """Filter scored data by value threshold and other criteria."""
+    from sft_label.tools.filter_value import run_filter, FilterConfig
+
+    # Build FilterConfig from CLI args
+    config = FilterConfig(
+        value_min=args.value_min if args.value_min is not None else args.threshold,
+        selection_min=args.selection_min,
+        include_tags=[t.strip() for t in args.include_tags.split(",") if t.strip()] if args.include_tags else [],
+        exclude_tags=[t.strip() for t in args.exclude_tags.split(",") if t.strip()] if args.exclude_tags else [],
+        difficulty=[d.strip() for d in args.difficulty.split(",") if d.strip()] if args.difficulty else [],
+        thinking_mode=args.thinking_mode,
+        exclude_inherited=args.exclude_inherited,
+        include_unscored=args.include_unscored,
+        output_format=args.output_format,
+        verify_source=args.verify_source,
+    )
+
+    # Validate: at least one criterion must be set
+    has_criterion = any([
+        config.value_min is not None,
+        config.selection_min is not None,
+        config.include_tags,
+        config.exclude_tags,
+        config.difficulty,
+        config.thinking_mode,
+        config.exclude_inherited,
+        config.verify_source,
+    ])
+    if not has_criterion and not config.include_unscored:
+        print("Error: At least one filter criterion is required "
+              "(e.g. --value-min, --selection-min, --difficulty, etc.)")
+        sys.exit(1)
 
     try:
         run_filter(
             input_path=args.input,
-            threshold=args.threshold,
             output_path=args.output,
-            include_unscored=args.include_unscored,
+            config=config,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -173,19 +202,38 @@ def main():
     # --- filter ---
     filter_parser = subparsers.add_parser(
         "filter",
-        help="Filter scored data by value threshold",
+        help="Filter scored data by value and other criteria",
         description="Select high-value samples from scored data. "
-                    "Filters by value_score >= threshold.",
+                    "Supports multi-condition filtering and training format output.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     filter_parser.add_argument("--input", type=str, required=True,
                                 help="Input scored file (.json/.jsonl) or directory")
-    filter_parser.add_argument("--threshold", type=float, required=True,
+    filter_parser.add_argument("--value-min", type=float, default=None,
                                 help="Minimum value_score to retain")
+    filter_parser.add_argument("--threshold", type=float, default=None,
+                                help="Alias for --value-min (backward compat)")
+    filter_parser.add_argument("--selection-min", type=float, default=None,
+                                help="Minimum selection_score to retain")
+    filter_parser.add_argument("--include-tags", type=str, default=None,
+                                help="Require at least one of these tags (comma-separated, 'dim:tag' format)")
+    filter_parser.add_argument("--exclude-tags", type=str, default=None,
+                                help="Exclude samples with any of these tags (comma-separated, 'dim:tag' format)")
+    filter_parser.add_argument("--difficulty", type=str, default=None,
+                                help="Allowed difficulty levels (comma-separated, e.g. 'advanced,expert')")
+    filter_parser.add_argument("--thinking-mode", type=str, choices=["slow", "fast"], default=None,
+                                help="Filter by thinking mode (slow or fast)")
+    filter_parser.add_argument("--exclude-inherited", action="store_true",
+                                help="Exclude samples with inherited labels")
     filter_parser.add_argument("--output", type=str, default=None,
                                 help="Output file path (default: auto-generated alongside input)")
     filter_parser.add_argument("--include-unscored", action="store_true",
                                 help="Keep samples without value scores (default: exclude)")
+    filter_parser.add_argument("--format", type=str, choices=["scored", "training"],
+                                default="scored", dest="output_format",
+                                help="Output format: 'scored' (with labels) or 'training' (training-ready)")
+    filter_parser.add_argument("--verify-source", type=str, default=None,
+                                help="Only retain samples from this source file path")
 
     args = parser.parse_args()
 

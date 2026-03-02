@@ -92,6 +92,7 @@ def compute_value_viz_data(samples, stats):
     viz["overview"] = {
         "total_scored": total_scored,
         "total_failed": total_failed,
+        "input_file": stats.get("input_file") or stats.get("input_path", ""),
         "mean_value": dists.get("value_score", {}).get("mean", 0),
         "mean_complexity": dists.get("complexity_overall", {}).get("mean", 0),
         "mean_quality": dists.get("quality_overall", {}).get("mean", 0),
@@ -560,9 +561,9 @@ function renderPass2() {
         }
         html += '</div>';
 
-        // 5b: Value vs Selection comparison tables
+        // 5b: Value vs Selection comparison tables — rank-based
         html += '<h3 style="margin-top:16px;margin-bottom:12px;font-size:1em">Value vs Selection Comparison</h3>';
-        html += '<div style="font-size:0.78em;color:#6b7280;margin-bottom:12px">Delta = Selection - Value. Positive delta: rare tag with high intra-class quality. Negative delta: common tag, quality doesn\'t stand out within class.</div>';
+        html += '<div style="font-size:0.78em;color:#6b7280;margin-bottom:12px">Rank = position by mean score within each metric (1=highest). Shift = value rank − selection rank. Positive shift: tag ranks higher in selection (strong intra-class quality). Negative: ranks lower (common tag, not standing out within class).</div>';
         html += '<div class="grid">';
         for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'task']) {
             const vtags = vbt[dim] || {};
@@ -576,14 +577,24 @@ function renderPass2() {
                 const mv = vi.mean || 0;
                 const ms = si.mean || 0;
                 const n = vi.n || si.n || 0;
-                rows.push({tag, mv, ms, delta: ms - mv, n});
+                rows.push({tag, mv, ms, n});
             }
-            rows.sort((a, b) => b.delta - a.delta);
-            let thtml = '<table style="font-size:0.82em"><thead><tr><th>Tag</th><th>Value</th><th>Selection</th><th>Delta</th><th>n</th></tr></thead><tbody>';
+            // Compute ranks (1 = highest score)
+            const byValue = [...rows].sort((a, b) => b.mv - a.mv);
+            const bySelection = [...rows].sort((a, b) => b.ms - a.ms);
+            const vRank = {}; byValue.forEach((r, i) => vRank[r.tag] = i + 1);
+            const sRank = {}; bySelection.forEach((r, i) => sRank[r.tag] = i + 1);
             for (const r of rows) {
-                const dc = r.delta >= 0 ? '#16a34a' : '#dc2626';
-                const arrow = r.delta >= 0.3 ? ' &#9650;' : (r.delta <= -0.3 ? ' &#9660;' : '');
-                thtml += `<tr><td>${r.tag}</td><td style="color:${scoreColor(r.mv)}">${r.mv.toFixed(1)}</td><td style="color:${scoreColor(r.ms)}">${r.ms.toFixed(1)}</td><td style="color:${dc};font-weight:600">${r.delta >= 0 ? '+' : ''}${r.delta.toFixed(1)}${arrow}</td><td style="color:#6b7280">${r.n}</td></tr>`;
+                r.vr = vRank[r.tag];
+                r.sr = sRank[r.tag];
+                r.shift = r.vr - r.sr; // positive = ranks higher in selection
+            }
+            rows.sort((a, b) => b.shift - a.shift);
+            let thtml = '<table style="font-size:0.82em"><thead><tr><th>Tag</th><th>Value</th><th>V.Rank</th><th>Selection</th><th>S.Rank</th><th>Shift</th><th>n</th></tr></thead><tbody>';
+            for (const r of rows) {
+                const sc = r.shift > 0 ? '#16a34a' : (r.shift < 0 ? '#dc2626' : '#6b7280');
+                const arrow = r.shift > 0 ? ' &#9650;' : (r.shift < 0 ? ' &#9660;' : '');
+                thtml += `<tr><td>${r.tag}</td><td style="color:${scoreColor(r.mv)}">${r.mv.toFixed(1)}</td><td style="color:#6b7280">#${r.vr}</td><td style="color:${scoreColor(r.ms)}">${r.ms.toFixed(1)}</td><td style="color:#6b7280">#${r.sr}</td><td style="color:${sc};font-weight:600">${r.shift > 0 ? '+' : ''}${r.shift}${arrow}</td><td style="color:#6b7280">${r.n}</td></tr>`;
             }
             thtml += '</tbody></table>';
             html += `<div class="panel"><h3>${dim}</h3>${thtml}</div>`;
@@ -691,6 +702,8 @@ function sortTable(col) {
 const parts = [];
 if (DATA_P1) parts.push(`${DATA_P1.total} labeled`);
 parts.push(`${(DATA_P2.overview || {}).total_scored || 0} scored`);
+const inputFile = (DATA_P2.overview || {}).input_file || (DATA_P1 && DATA_P1.input_file) || '';
+if (inputFile) parts.push(inputFile);
 document.getElementById('subtitle').textContent = parts.join(' \u00b7 ');
 
 if (DATA_P1) renderPass1(DATA_P1);

@@ -708,8 +708,15 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
         return sample_idx, None, monitor
 
 
-def compute_stats(all_monitors, all_labels):
-    """Compute aggregate statistics."""
+def compute_stats(all_monitors, all_labels, inherit_map=None):
+    """Compute aggregate statistics.
+
+    When inherit_map is provided, inherited samples are:
+    - Counted toward success (if non-None) and total_samples
+    - Excluded from tag_distributions, confidence_stats, cross_matrix
+      (to avoid inflating tag counts from duplicated labels)
+    - Reported separately as sparse_labeled / sparse_inherited
+    """
     total = len(all_monitors)
     success = sum(1 for m in all_monitors if m["status"] == "success")
     total_calls = sum(m["llm_calls"] for m in all_monitors)
@@ -717,11 +724,13 @@ def compute_stats(all_monitors, all_labels):
     total_ct = sum(m["total_completion_tokens"] for m in all_monitors)
     arbitrated = sum(1 for m in all_monitors if m["arbitrated"])
 
+    inherited_indices = set(inherit_map.keys()) if inherit_map else set()
+
     distributions = {}
     for dim in ["intent", "language", "domain", "concept", "task", "agentic", "constraint", "context", "difficulty"]:
         dist = {}
-        for labels in all_labels:
-            if labels is None:
+        for idx, labels in enumerate(all_labels):
+            if labels is None or idx in inherited_indices:
                 continue
             val = labels.get(dim, [])
             if isinstance(val, list):
@@ -732,8 +741,8 @@ def compute_stats(all_monitors, all_labels):
         distributions[dim] = dict(sorted(dist.items(), key=lambda x: -x[1]))
 
     all_unmapped = {}
-    for labels in all_labels:
-        if labels is None:
+    for idx, labels in enumerate(all_labels):
+        if labels is None or idx in inherited_indices:
             continue
         for item in labels.get("unmapped", []):
             key = f"{item.get('dimension', '?')}:{item.get('value', '?')}" if isinstance(item, dict) else str(item)
@@ -741,7 +750,9 @@ def compute_stats(all_monitors, all_labels):
 
     conf_stats = {}
     for dim in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
-        scores = [l["confidence"][dim] for l in all_labels if l and "confidence" in l and isinstance(l["confidence"].get(dim), (int, float))]
+        scores = [l["confidence"][dim] for idx, l in enumerate(all_labels)
+                  if l and idx not in inherited_indices
+                  and "confidence" in l and isinstance(l["confidence"].get(dim), (int, float))]
         if scores:
             conf_stats[dim] = {
                 "mean": round(sum(scores) / len(scores), 3),
@@ -753,8 +764,8 @@ def compute_stats(all_monitors, all_labels):
 
     # Intent × Difficulty cross matrix
     cross = {}
-    for labels in all_labels:
-        if labels is None:
+    for idx, labels in enumerate(all_labels):
+        if labels is None or idx in inherited_indices:
             continue
         intent = labels.get("intent", "?")
         diff = labels.get("difficulty", "?")
@@ -886,6 +897,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     # Attach labels to samples
     for idx, sample in enumerate(samples):
         sample["labels"] = all_labels[idx]
+        sample.setdefault("metadata", {})["source_file"] = str(collector.abs_path)
         if all_monitors[idx]:
             sample["labeling_monitor"] = {
                 "llm_calls": all_monitors[idx]["llm_calls"],
@@ -949,7 +961,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
 
     # Compute and write stats
     valid_monitors = [m for m in all_monitors if m is not None]
-    stats = compute_stats(valid_monitors, all_labels)
+    stats = compute_stats(valid_monitors, all_labels, inherit_map=collector.inherit_map)
     stats["input_file"] = str(collector.abs_path)
     sparse_inherited = len(collector.inherit_map)
     if sparse_inherited > 0:
@@ -1082,7 +1094,14 @@ class StatsAccumulator:
         self.sparse_inherited = 0
 
     def update(self, all_labels, all_monitors, inherit_map=None):
-        """Ingest one chunk's labels and monitors."""
+        """Ingest one chunk's labels and monitors.
+
+        Inherited samples (from inherit_map) are counted toward total/success
+        but excluded from tag_distributions, confidence, and cross_matrix
+        to avoid inflating counts from duplicated labels.
+        """
+        inherited_indices = set(inherit_map.keys()) if inherit_map else set()
+
         for m in all_monitors:
             if m is None:
                 continue
@@ -1102,8 +1121,8 @@ class StatsAccumulator:
                 d = lc["dim"]
                 self.low_conf_freq[d] = self.low_conf_freq.get(d, 0) + 1
 
-        for labels in all_labels:
-            if labels is None:
+        for idx, labels in enumerate(all_labels):
+            if labels is None or idx in inherited_indices:
                 continue
             for dim in self.DIMS:
                 val = labels.get(dim, [])
@@ -1236,6 +1255,7 @@ def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
     # Attach labels to samples
     for idx, sample in enumerate(samples):
         sample["labels"] = all_labels[idx]
+        sample.setdefault("metadata", {})["source_file"] = str(input_path)
         if all_monitors[idx]:
             sample["labeling_monitor"] = {
                 "llm_calls": all_monitors[idx]["llm_calls"],
@@ -1592,6 +1612,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     # Attach labels to samples
     for idx, sample in enumerate(samples):
         sample["labels"] = all_labels[idx]
+        sample.setdefault("metadata", {})["source_file"] = str(input_path)
         if all_monitors[idx]:
             sample["labeling_monitor"] = {
                 "llm_calls": all_monitors[idx]["llm_calls"],
@@ -1652,7 +1673,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     # Compute and write stats
     valid_monitors = [m for m in all_monitors if m is not None]
-    stats = compute_stats(valid_monitors, all_labels)
+    stats = compute_stats(valid_monitors, all_labels, inherit_map=inherit_map)
     stats["total_elapsed_seconds"] = round(file_elapsed, 1)
     stats["input_file"] = str(input_path)
     if sparse_inherited > 0:

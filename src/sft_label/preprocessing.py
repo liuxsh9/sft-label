@@ -145,6 +145,9 @@ def normalize_pangu(sample):
         pangu_meta["tool_definitions"] = sample["tools"]
     pangu_meta["is_pseudo_multiturn"] = is_pseudo_multiturn
     pangu_meta["original_format"] = "pangu"
+    if is_pseudo_multiturn:
+        # Preserve raw Pangu data for faithful training format reconstruction
+        pangu_meta["raw_pangu_data"] = sample.get("data", [])
     if cot_parts:
         pangu_meta["thinking_mode"] = "slow"
         pangu_meta["cot_text"] = "\n\n".join(cot_parts)
@@ -186,16 +189,25 @@ def normalize_and_slice(sample):
     # Build one sample per slice
     results = []
     base_id = normalized.get("id", "")
+    base_meta = normalized.get("metadata", {})
     for i, conv_slice in enumerate(slices):
+        slice_meta = {
+            **base_meta,
+            "source_id": base_id,
+            "turn_index": i + 1,
+            "total_turns": len(slices),
+        }
+        # Per-slice thinking mode: don't inherit the whole-conversation
+        # thinking_mode/cot_text since sliced COT is not attributable
+        # to individual turns. Mark as "fast" so Pass 2 doesn't try to
+        # evaluate COT quality on content that has no visible COT.
+        slice_meta["thinking_mode"] = "fast"
+        slice_meta.pop("cot_text", None)
+
         s = {
             "id": f"{base_id}_t{i+1}",
             "conversations": conv_slice,
-            "metadata": {
-                **normalized.get("metadata", {}),
-                "source_id": base_id,
-                "turn_index": i + 1,
-                "total_turns": len(slices),
-            },
+            "metadata": slice_meta,
         }
         results.append(s)
 
@@ -209,6 +221,106 @@ def normalize_sample(sample):
     if fmt == "pangu":
         return normalize_pangu(sample)
     return sample
+
+
+def to_pangu_pseudo_multiturn(sample):
+    """Convert a normalized ShareGPT-format sample back to Pangu pseudo-multi-turn training format.
+
+    Takes a labeled/scored sample and reconstructs the Pangu training format:
+    - Prior turns packed into the user message with [unused10][unused9] separators
+    - Human turns in prior context get /no_think suffix
+    - GPT turns in prior context get 助手：[unused16][unused17] prefix
+    - Role labels (用户：, 助手：) added
+    - COT restored for non-sliced samples with cot_text
+
+    For pseudo-multiturn samples (already packed before normalization),
+    uses raw_pangu_data from metadata for faithful reconstruction.
+
+    Returns dict with {"data": [...], "meta_prompt": ..., "tools": ...}
+    """
+    conversations = sample.get("conversations", [])
+    metadata = sample.get("metadata", {})
+
+    if not conversations:
+        return {"data": [], "meta_prompt": "", "tools": ""}
+
+    # Pseudo-multiturn: use raw data directly if available
+    if metadata.get("is_pseudo_multiturn") and metadata.get("raw_pangu_data"):
+        return {
+            "data": metadata["raw_pangu_data"],
+            "meta_prompt": metadata.get("system_prompt", ""),
+            "tools": metadata.get("tool_definitions", ""),
+        }
+
+    # Find last assistant reply and its preceding human turn
+    last_reply_idx = None
+    for i in range(len(conversations) - 1, -1, -1):
+        if conversations[i].get("from") == "gpt":
+            last_reply_idx = i
+            break
+
+    if last_reply_idx is None:
+        # No assistant reply — return as-is in Pangu format
+        return {
+            "data": [{"role": "user", "content": conversations[0].get("value", "")}],
+            "meta_prompt": metadata.get("system_prompt", ""),
+            "tools": metadata.get("tool_definitions", ""),
+        }
+
+    # Find the human turn preceding the last reply
+    last_user_idx = None
+    for i in range(last_reply_idx - 1, -1, -1):
+        if conversations[i].get("from") == "human":
+            last_user_idx = i
+            break
+
+    # Pack prior turns (before last_user_idx) into a single string
+    prior_parts = []
+    prior_end = last_user_idx if last_user_idx is not None else last_reply_idx
+    for i in range(prior_end):
+        turn = conversations[i]
+        role = turn.get("from", "")
+        content = turn.get("value", "")
+        if role == "human":
+            prior_parts.append(f"用户：{content} /no_think")
+        elif role == "gpt":
+            prior_parts.append(f"助手：[unused16][unused17]{content}")
+        elif role == "tool":
+            prior_parts.append(content)
+
+    # Build user content
+    last_user_content = ""
+    if last_user_idx is not None:
+        last_user_content = conversations[last_user_idx].get("value", "")
+
+    if prior_parts:
+        packed_prior = "[unused10][unused9]".join(prior_parts)
+        user_content = f"{packed_prior}[unused10][unused9]用户：{last_user_content}"
+    else:
+        user_content = last_user_content
+
+    # Build last assistant content
+    response = conversations[last_reply_idx].get("value", "")
+    is_sliced = "source_id" in metadata
+    cot_text = metadata.get("cot_text", "")
+
+    if cot_text and not is_sliced:
+        # Restore COT for non-sliced samples
+        assistant_content = f"[unused16]{cot_text}[unused17]{response}"
+    else:
+        # Fast thinking (no COT or sliced sample)
+        assistant_content = f"[unused16][unused17]{response}"
+
+    result = {
+        "data": [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_content},
+        ],
+        "meta_prompt": metadata.get("system_prompt", ""),
+        "tools": metadata.get("tool_definitions", ""),
+    }
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────
