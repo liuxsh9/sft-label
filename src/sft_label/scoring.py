@@ -19,7 +19,7 @@ import asyncio
 import random
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from rich.progress import (
@@ -1597,8 +1597,117 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     return stats
 
 
+@dataclass
+class _ScoringFileCollector:
+    """Track per-file scoring results for cross-file scoring pipeline."""
+    file_idx: int
+    labeled_path: Path
+    output_dir: Path
+    samples: list
+    rarity_results: list
+    total: int
+    stats_source: str = None
+    idf_map: dict = field(default_factory=dict)
+    total_stats_samples: int = 0
+    stats_ref_info: dict = None
+    done: int = 0
+    ok: int = 0
+    fail: int = 0
+    values: list = field(default_factory=list)
+    monitors: list = field(default_factory=list)
+    completed: bool = False
+
+    def __post_init__(self):
+        self.values = [None] * self.total
+        self.monitors = [None] * self.total
+
+
+def _flush_scoring_file(collector, config, pprint=print):
+    """Write all scoring outputs for a completed file and release memory.
+
+    Returns the stats dict.
+    """
+    samples = collector.samples
+    all_values = collector.values
+    all_monitors = collector.monitors
+    output_dir = collector.output_dir
+    total = collector.total
+
+    # Attach value to samples
+    for i, s in enumerate(samples):
+        if all_values[i]:
+            s["value"] = all_values[i]
+
+    # Compute selection scores (intra-class quality ranking, no LLM)
+    compute_selection_scores(samples, config=config)
+
+    # Write outputs
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    scored_path = output_dir / "scored.json"
+    with open(scored_path, "w", encoding="utf-8") as f:
+        json.dump(samples, f, ensure_ascii=False, indent=2)
+
+    scored_jsonl_path = output_dir / "scored.jsonl"
+    with open(scored_jsonl_path, "w", encoding="utf-8") as f:
+        for s in samples:
+            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    monitor_path = output_dir / "monitor_value.jsonl"
+    with open(monitor_path, "w", encoding="utf-8") as f:
+        for m in all_monitors:
+            if m:
+                f.write(json.dumps(m, ensure_ascii=False) + "\n")
+
+    failed_samples = [s for i, s in enumerate(samples) if all_values[i] is None]
+    if failed_samples:
+        failed_path = output_dir / "failed_value.jsonl"
+        with open(failed_path, "w", encoding="utf-8") as f:
+            for s in failed_samples:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    valid_monitors = [m for m in all_monitors if m]
+    stats = compute_value_stats(samples, valid_monitors)
+    stats["model"] = config.scoring_model
+    stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
+    stats["rarity_config"] = {
+        "stats_ref": collector.stats_source,
+        "total_samples_in_distribution": collector.total_stats_samples,
+        "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
+        "combo_alpha": config.rarity_combo_alpha,
+    }
+
+    stats_path = output_dir / "stats_value.json"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+
+    try:
+        from sft_label.tools.visualize_value import generate_value_dashboard
+        generate_value_dashboard(output_dir, scored_file="scored.json",
+                                 stats_file="stats_value.json",
+                                 output_file="dashboard_value.html")
+    except Exception:
+        pass
+
+    pprint(f"  ✓ {collector.labeled_path.name}: "
+           f"{collector.ok}/{total} scored, {collector.fail} failed")
+
+    # Release memory
+    collector.samples = None
+    collector.values = None
+    collector.monitors = None
+    collector.rarity_results = None
+    collector.completed = True
+
+    return stats
+
+
 async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, config):
-    """Score all labeled files in a directory."""
+    """Score all labeled files in a directory with cross-file parallelism.
+
+    Uses watermark-based file loading (same pattern as Pass 1's
+    run_directory_pipeline) to keep the semaphore saturated across files.
+    """
     input_dir = Path(input_dir)
     if output_dir is None:
         output_dir = input_dir
@@ -1644,26 +1753,191 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             if stats_files:
                 tag_stats_path = str(stats_files[0])
 
-    all_file_stats = []
+    # Load global tag stats once (shared across all files)
+    global_idf_map = {}
+    global_total_stats_samples = 0
+    global_stats_ref_info = None
+
+    if tag_stats_path:
+        distributions, global_total_stats_samples, ts = load_tag_stats(tag_stats_path)
+        if distributions:
+            global_idf_map = compute_tag_idf(distributions, global_total_stats_samples)
+            global_stats_ref_info = {
+                "source": str(tag_stats_path),
+                "total_samples": global_total_stats_samples,
+                "timestamp": ts or datetime.now().isoformat(),
+            }
+            print(f"  Tag stats: {tag_stats_path} (N={global_total_stats_samples})")
+        else:
+            print(f"  Warning: {tag_stats_path} has no tag_distributions, rarity will be null")
+    else:
+        print("  No tag stats found, rarity will be null")
+
+    concurrency = config.scoring_concurrency
+    watermark = concurrency * 2
+    max_active = config.dir_pipeline_max_files
+    sem = asyncio.Semaphore(concurrency)
+    pprint = print
+
+    print(f"  Scoring: model={config.scoring_model} concurrency={concurrency}")
+    print(f"  Endpoint: {config.litellm_base}")
+
     batch_start = time.time()
 
-    for labeled_file in labeled_files:
-        prefix = labeled_file.stem.replace("labeled_", "").replace("labeled", "")
-        # Write scored output alongside the labeled file (may be in a subdir)
-        file_output_dir = labeled_file.parent
-        print(f"\n--- Scoring {labeled_file.relative_to(input_dir)} ---")
-
-        file_stats = await _run_scoring_file(
-            labeled_file, file_output_dir, tag_stats_path, limit, config,
+    # --- Helper: wrap score_one with file/sample tracking ---
+    async def _tagged_score(client, sample, rarity_result, file_idx, sample_idx,
+                            total_in_file):
+        value, monitor = await score_one(
+            client, sample, config.scoring_model, rarity_result,
+            sample_idx, total_in_file, sem, config=config,
         )
-        if file_stats:
-            file_stats["file"] = labeled_file.name
-            all_file_stats.append(file_stats)
+        return file_idx, sample_idx, value, monitor
+
+    # --- Load a file and submit its tasks ---
+    def load_and_submit(file_idx, labeled_path, client, pending_futures):
+        # Load samples
+        with open(labeled_path, "r", encoding="utf-8") as f:
+            if labeled_path.suffix == ".jsonl":
+                samples = [json.loads(line) for line in f if line.strip()]
+            else:
+                samples = json.load(f)
+        if limit > 0:
+            samples = samples[:limit]
+        total = len(samples)
+
+        # Per-file rarity: use global stats but per-file combo counts
+        combo_counts = build_combo_counts(samples) if global_idf_map else None
+        rarity_results = []
+        for s in samples:
+            labels = s.get("labels") or {}
+            rarity = compute_sample_rarity(
+                labels, global_idf_map, global_total_stats_samples,
+                rarity_weights=config.rarity_weights or RARITY_WEIGHTS,
+                combo_alpha=config.rarity_combo_alpha,
+                combo_counts=combo_counts,
+                stats_ref_info=global_stats_ref_info,
+            )
+            rarity_results.append(rarity)
+        normalize_rarity_scores(rarity_results)
+
+        file_output_dir = labeled_path.parent
+        collector = _ScoringFileCollector(
+            file_idx=file_idx,
+            labeled_path=labeled_path,
+            output_dir=file_output_dir,
+            samples=samples,
+            rarity_results=rarity_results,
+            total=total,
+            stats_source=str(tag_stats_path) if tag_stats_path else None,
+            idf_map=global_idf_map,
+            total_stats_samples=global_total_stats_samples,
+            stats_ref_info=global_stats_ref_info,
+        )
+
+        pprint(f"  [{file_idx+1}/{len(labeled_files)}] {labeled_path.name}: "
+               f"{total} samples, rarity computed")
+
+        # Submit scoring tasks
+        for i in range(total):
+            fut = asyncio.ensure_future(
+                _tagged_score(client, samples[i], rarity_results[i],
+                              file_idx, i, total)
+            )
+            pending_futures.add(fut)
+
+        return collector
+
+    # --- Try to load more files if below watermark ---
+    def maybe_load_more(pending_futures, collectors, next_to_load, client):
+        active_count = sum(1 for c in collectors.values() if not c.completed)
+        while (next_to_load < len(labeled_files)
+               and len(pending_futures) < watermark
+               and active_count < max_active):
+            labeled_path = labeled_files[next_to_load]
+            c = load_and_submit(next_to_load, labeled_path, client, pending_futures)
+            collectors[c.file_idx] = c
+            next_to_load += 1
+            active_count += 1
+        return next_to_load
+
+    # --- Main watermark-driven loop ---
+    collectors = {}
+    pending_futures = set()
+    all_file_stats = []
+    next_to_load = 0
+    first_error_logged = False
+
+    async with httpx.AsyncClient(
+        timeout=config.request_timeout,
+        limits=httpx.Limits(
+            max_connections=concurrency + 10,
+            max_keepalive_connections=concurrency,
+        ),
+    ) as client:
+        with _create_progress() as progress:
+            file_task = progress.add_task("Files", total=len(labeled_files), info="")
+            sample_task = progress.add_task("Scoring", total=0, visible=True, info="loading...")
+            pprint = progress.console.print
+
+            # Initial load
+            next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
+
+            # Update total for progress bar
+            total_samples = sum(c.total for c in collectors.values())
+            progress.update(sample_task, total=total_samples)
+
+            while pending_futures:
+                done, pending_futures = await asyncio.wait(
+                    pending_futures, return_when=asyncio.FIRST_COMPLETED)
+
+                for fut in done:
+                    file_idx, sample_idx, value, monitor = fut.result()
+                    c = collectors[file_idx]
+
+                    if 0 <= sample_idx < c.total:
+                        c.values[sample_idx] = value
+                        c.monitors[sample_idx] = monitor
+
+                    c.done += 1
+                    if value:
+                        c.ok += 1
+                    else:
+                        c.fail += 1
+                        if not first_error_logged and monitor:
+                            err = monitor.get("error", "unknown")
+                            pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
+                            first_error_logged = True
+
+                    total_ok = sum(cc.ok for cc in collectors.values())
+                    total_fail = sum(cc.fail for cc in collectors.values())
+                    progress.update(sample_task, advance=1,
+                                    info=f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]")
+
+                    # Check if file is fully done
+                    if c.done >= c.total and not c.completed:
+                        stats = _flush_scoring_file(c, config, pprint=pprint)
+                        stats["file"] = c.labeled_path.name
+                        all_file_stats.append(stats)
+                        progress.update(file_task, advance=1)
+
+                # After processing batch, check if we should load more files
+                prev_load = next_to_load
+                next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
+                # Update sample progress total if new files loaded
+                if next_to_load > prev_load:
+                    new_total = sum(c.total for c in collectors.values())
+                    progress.update(sample_task, total=new_total)
+
+                active_names = [c.labeled_path.name for c in collectors.values()
+                                if not c.completed]
+                progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
+
+    elapsed = time.time() - batch_start
 
     # Write global summary
     if all_file_stats:
         summary = _merge_value_stats(all_file_stats)
-        summary["elapsed_seconds"] = round(time.time() - batch_start, 1)
+        summary["elapsed_seconds"] = round(elapsed, 1)
         summary["model"] = config.scoring_model
         summary["files_processed"] = len(all_file_stats)
 
@@ -1681,7 +1955,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         except Exception as e:
             print(f"  Warning: global dashboard generation failed: {e}")
 
-        print(f"\nAll files scored. Summary: {summary_path}")
+        print(f"\nAll files scored in {elapsed:.1f}s. Summary: {summary_path}")
 
     return summary if all_file_stats else {}
 
