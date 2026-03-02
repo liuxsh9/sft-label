@@ -987,35 +987,22 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
 
     success = stats["success"]
     total_tokens = stats["total_tokens"]
-    pprint(f"  ✓ {success}/{total} success, {total_tokens:,} tokens")
 
-    # Print failure details — batch into single print to avoid progress bar flicker
+    # Print failure details — collapsed single-line summary
     failed_count = len(failed_indices)
     if failed_count > 0:
-        lines = []
         failed_monitors = [all_monitors[i] for i in failed_indices if all_monitors[i] and all_monitors[i]["status"] != "success"]
         error_groups = {}
         for m in failed_monitors:
             err_type = m["status"]
-            error_groups.setdefault(err_type, []).append(m)
-        lines.append(f"  ✗ {failed_count} failed:")
-        for err_type, monitors in sorted(error_groups.items()):
-            lines.append(f"    [{err_type}] ×{len(monitors)}")
-            for m in monitors[:3]:
-                sid = m.get("sample_id", "?")
-                err = m.get("error", "")
-                resp = m.get("error_response", "")
-                attempts = m.get("sample_attempt", 0) + 1
-                detail = err[:120]
-                if resp and resp != err:
-                    detail += f" | response: {resp[:80]}"
-                lines.append(f"      {sid} (attempt {attempts}): {detail}")
-            if len(monitors) > 3:
-                lines.append(f"      ... and {len(monitors) - 3} more")
+            error_groups[err_type] = error_groups.get(err_type, 0) + 1
         timeout_count = sum(1 for i, m in enumerate(all_monitors) if m is None and i not in inherited_indices)
         if timeout_count > 0:
-            lines.append(f"    [no_result] ×{timeout_count}")
-        pprint("\n".join(lines))
+            error_groups["no_result"] = timeout_count
+        err_parts = [f"{t}×{n}" for t, n in sorted(error_groups.items())]
+        rel_name = getattr(collector, 'rel_path', None)
+        file_label = str(rel_name) if rel_name else "file"
+        pprint(f"  ✗ {file_label}: {failed_count} failed [{', '.join(err_parts)}]")
 
     # Update checkpoint
     if checkpoint_path:
@@ -1760,7 +1747,6 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     for i, (abs_path, rel_path) in enumerate(dir_files):
         rel_str = str(rel_path)
         if rel_str in completed_set:
-            pprint(f"[File {i+1:3d}/{len(dir_files)}] {rel_str} — SKIPPED (completed)")
             # Load existing stats for summary
             file_out_dir = run_dir / rel_path.with_suffix("")
             prefix = rel_path.stem
@@ -1788,7 +1774,6 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         file_out_dir = run_dir / rel_path.with_suffix("")
         prefix = rel_path.stem
 
-        pprint(f"[File {orig_idx+1:3d}/{len(dir_files)}] {rel_str}")
         samples, n_raw = iter_samples_from_file(
             abs_path, limit=limit, shuffle=shuffle)
 
@@ -1802,10 +1787,6 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
         label_count = len(label_indices)
         sparse_inherited = len(inherit_map)
-        if sparse_inherited > 0:
-            pprint(f"  ({n_raw} conversations → {len(samples)} samples, sparse: {label_count} labeled + {sparse_inherited} inherited)")
-        else:
-            pprint(f"  ({n_raw} conversations → {len(samples)} samples)")
 
         collector = FileCollector(
             file_idx=orig_idx,
@@ -2059,14 +2040,7 @@ async def run(
         completed = set(ckpt.get("completed", []))
         _concurrency = config.concurrency
 
-        print(f"{'='*80}")
-        print(f"SFT Auto-Labeling Pipeline — RESUME")
-        print(f"{'='*80}")
-        print(f"Run dir:     {run_dir}")
-        print(f"Model:       {_model}")
-        print(f"Completed:   {len(completed)}/{len(dir_files)} files")
-        print(f"Concurrency: {_concurrency}")
-        print(f"{'='*80}\n")
+        print(f"Pipeline RESUME | {run_dir} | model={_model} concurrency={_concurrency} | {len(completed)}/{len(dir_files)} files done")
 
         batch_start = time.time()
 
@@ -2110,16 +2084,10 @@ async def run(
 
     _concurrency = config.concurrency
 
-    print(f"{'='*80}")
-    print(f"SFT Auto-Labeling Pipeline (Concurrent)")
-    print(f"{'='*80}")
-    print(f"Input:       {_input_path} ({'directory, ' + str(len(files)) + ' files' if is_directory else 'single file'})")
-    print(f"Model:       {config.labeling_model}")
-    print(f"Run dir:     {run_dir}")
-    print(f"Concurrency: {_concurrency}")
-    print(f"Arbitration: {'disabled' if not enable_arbitration else f'enabled (threshold={config.confidence_threshold})'}")
-    print(f"Started:     {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*80}\n")
+    _arb = "off" if not enable_arbitration else f"threshold={config.confidence_threshold}"
+    _src = f"directory, {len(files)} files" if is_directory else "single file"
+    print(f"Pipeline | {_input_path} ({_src}) | model={config.labeling_model} concurrency={_concurrency} arb={_arb}")
+    print(f"  run_dir={run_dir}")
 
     if is_directory:
         # ── Directory mode: cross-file pipeline ──

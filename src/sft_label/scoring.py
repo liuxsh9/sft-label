@@ -1057,14 +1057,12 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 "total_samples": total_stats_samples,
                 "timestamp": ts or datetime.now().isoformat(),
             }
-            print(f"  Tag stats loaded from {stats_source} (N={total_stats_samples})")
         else:
             print(f"  Warning: {stats_source} has no tag_distributions, rarity will be null")
     else:
         print("  No tag stats found, rarity will be null")
 
     # ── Pass A: Compute rarity (stream, no LLM) ──
-    print(f"  Pass A: Computing rarity from {input_path}...")
     raw_rarities = []
     combo_counts = {}
     sample_count = 0
@@ -1110,11 +1108,9 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     normalize_rarity_scores(raw_rarities)
     total = len(raw_rarities)
-    print(f"  {total} samples, rarity computed")
 
     # ── Pass B: Chunked LLM scoring ──
-    print(f"  Pass B: LLM scoring model={config.scoring_model} concurrency={config.scoring_concurrency}")
-    print(f"  Endpoint: {config.litellm_base}")
+    print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency}")
 
     sem = asyncio.Semaphore(config.scoring_concurrency)
     scored_count = 0
@@ -1287,7 +1283,6 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         failed_path.unlink()
 
     # ── Compute selection scores from summaries ──
-    print("  Computing selection scores (intra-class ranking)...")
     selection_results = compute_selection_scores_from_summaries(
         score_summaries, config=config)
 
@@ -1502,7 +1497,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     if limit > 0:
         samples = samples[:limit]
     total = len(samples)
-    print(f"  {total} samples loaded")
 
     # Load tag stats for rarity
     stats_ref_info = None
@@ -1530,7 +1524,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                 "timestamp": ts or datetime.now().isoformat(),
             }
             combo_counts = build_combo_counts(samples)
-            print(f"  Tag stats loaded from {stats_source} (N={total_stats_samples})")
         else:
             print(f"  Warning: {stats_source} has no tag_distributions, rarity will be null")
     else:
@@ -1562,8 +1555,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     first_error_logged = False
     start_time = time.time()
 
-    print(f"  Scoring: model={config.scoring_model} concurrency={config.scoring_concurrency} timeout={config.request_timeout}s")
-    print(f"  Endpoint: {config.litellm_base}")
+    print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency}")
 
     async with httpx.AsyncClient(
         proxy=None,
@@ -1609,7 +1601,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             s["value"] = all_values[i]
 
     # Compute selection scores (intra-class quality ranking, no LLM)
-    print("  Computing selection scores (intra-class ranking)...")
     compute_selection_scores(samples, config=config)
 
     # Write outputs
@@ -1764,9 +1755,6 @@ def _flush_scoring_file(collector, config, pprint=print):
     except Exception:
         pass
 
-    pprint(f"  ✓ {collector.labeled_path.name}: "
-           f"{collector.ok}/{total} scored, {collector.fail} failed")
-
     # Release memory
     collector.samples = None
     collector.values = None
@@ -1842,7 +1830,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 "total_samples": global_total_stats_samples,
                 "timestamp": ts or datetime.now().isoformat(),
             }
-            print(f"  Tag stats: {tag_stats_path} (N={global_total_stats_samples})")
         else:
             print(f"  Warning: {tag_stats_path} has no tag_distributions, rarity will be null")
     else:
@@ -1855,7 +1842,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     pprint = print
 
     print(f"  Scoring: model={config.scoring_model} concurrency={concurrency}")
-    print(f"  Endpoint: {config.litellm_base}")
 
     batch_start = time.time()
 
@@ -1908,9 +1894,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             total_stats_samples=global_total_stats_samples,
             stats_ref_info=global_stats_ref_info,
         )
-
-        pprint(f"  [{file_idx+1}/{len(labeled_files)}] {labeled_path.name}: "
-               f"{total} samples, rarity computed")
 
         # Submit scoring tasks
         for i in range(total):

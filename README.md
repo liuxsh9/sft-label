@@ -57,9 +57,11 @@ sft-label score --input labeled.json --tag-stats global_stats.json
 sft-label score --input results_dir/
 
 # Filter high-value samples from scored data
-sft-label filter --input scored.json --threshold 6.0
-sft-label filter --input results_dir/ --threshold 7.0
-sft-label filter --input scored.json --threshold 6.0 --include-unscored
+sft-label filter --input scored.json --value-min 6.0
+sft-label filter --input scored.json --value-min 6 --difficulty advanced,expert
+sft-label filter --input scored.json --selection-min 7.0 --exclude-inherited
+sft-label filter --input run_dir/ --value-min 7 --format training
+sft-label filter --input scored.json --value-min 6 --thinking-mode slow
 
 # Validate taxonomy
 sft-label validate
@@ -116,12 +118,19 @@ Input (ShareGPT JSON / Pangu JSONL)
   │   ├─ Arbitration (optional): re-run low-confidence dimensions
   │   └─ Output: labeled.json + stats.json + dashboard.html
   │
-  └─ Pass 2: Value Scoring (scoring.py)
-      ├─ Rarity computation: tag IDF + combo rarity from tag distributions
-      ├─ COT-preserving truncation: head + middle fragments + tail
-      ├─ LLM scoring: complexity, quality, reasoning (1 call per sample)
-      ├─ Weighted aggregation: value_score = Σ(weight × dimension)
-      └─ Output: scored.json + stats_value.json + dashboard_value.html
+  ├─ Pass 2: Value Scoring (scoring.py)
+  │   ├─ Rarity computation: tag IDF + combo rarity from tag distributions
+  │   ├─ COT-preserving truncation: head + middle fragments + tail
+  │   ├─ LLM scoring: complexity, quality, reasoning (1 call per sample)
+  │   ├─ Weighted aggregation: value_score = Σ(weight × dimension)
+  │   ├─ Selection score: intra-class quality ranking + global rarity
+  │   └─ Output: scored.json + stats_value.json + dashboard_value.html
+  │
+  └─ Pass 3: Filtering & Selection (tools/filter_value.py)
+      ├─ Multi-condition: value_min, selection_min, difficulty, thinking_mode
+      ├─ Tag filtering: include_tags / exclude_tags (dim:tag format)
+      ├─ Source control: exclude_inherited, verify_source
+      └─ Output formats: scored (preserves metadata) or training (stripped)
 ```
 
 ## Taxonomy (Pass 1)
@@ -152,6 +161,7 @@ Each sample receives multi-dimensional scores (1-10):
 | Rarity      | tag IDF, combo rarity (computed, no LLM) | 0.25 |
 
 Additional outputs per sample:
+- `selection_score`: Intra-class quality percentile × global rarity (0.75/0.25 weight), for data selection
 - `flags`: Qualitative markers (e.g., `has-bug`, `excellent-explanation`, `clean-code`)
 - `thinking_mode`: Auto-detected `slow` (explicit COT) or `fast` (inline reasoning)
 - `confidence`: Model confidence in its assessment (0-1)
@@ -177,12 +187,29 @@ Additional outputs per sample:
 - Coverage Impact Analysis (tag retention at different thresholds)
 - File Ranking Table (global dashboard, sortable)
 
+## Filtering (Pass 3)
+
+Multi-condition sample selection with AND logic between criteria, OR within tag lists:
+
+| Criterion | Flag | Example |
+|-----------|------|---------|
+| Value score | `--value-min` | `--value-min 6.0` |
+| Selection score | `--selection-min` | `--selection-min 7.0` |
+| Difficulty | `--difficulty` | `--difficulty advanced,expert` |
+| Thinking mode | `--thinking-mode` | `--thinking-mode slow` |
+| Include tags | `--include-tags` | `--include-tags domain:security,task:debugging` |
+| Exclude tags | `--exclude-tags` | `--exclude-tags concept:basic-io` |
+| Exclude inherited | `--exclude-inherited` | Drops sparse-sampled inherited labels |
+| Source verification | `--verify-source` | `--verify-source original.json` |
+| Output format | `--format` | `scored` (default) or `training` (stripped) |
+
 ## Development
 
 ```bash
 uv sync --extra dev
-uv run pytest
-uv run sft-label validate
+uv run pytest                          # all tests
+uv run pytest tests/test_e2e_mock.py   # e2e tests (mocked LLM)
+uv run sft-label validate              # validate taxonomy
 ```
 
 ## Environment Variables

@@ -41,7 +41,7 @@ def cmd_run(args):
     if getattr(args, "score", False) and stats:
         run_dir = stats.get("run_dir")
         if run_dir:
-            print("\n=== Starting Pass 2: Value Scoring ===\n")
+            print("\n── Pass 2: Value Scoring ──\n")
             from sft_label.scoring import run_scoring
             asyncio.run(run_scoring(
                 input_path=run_dir,
