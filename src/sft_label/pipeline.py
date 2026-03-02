@@ -45,6 +45,7 @@ from sft_label.config import (
     REQUEST_TIMEOUT,
     MAX_CONVERSATION_CHARS,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
+    CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     PipelineConfig,
 )
 
@@ -1005,6 +1006,469 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     return stats
 
 
+# ─────────────────────────────────────────────────────────
+# Chunked JSONL pipeline (memory-bounded for large files)
+# ─────────────────────────────────────────────────────────
+
+def iter_chunks_from_jsonl(path, chunk_size, limit=0):
+    """Yield lists of parsed JSONL records, at most chunk_size per yield.
+
+    Each yielded list contains raw parsed dicts (one per line).
+    Respects limit (total raw lines cap, 0 = unlimited).
+    """
+    count = 0
+    chunk = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            chunk.append(json.loads(line))
+            count += 1
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+            if limit > 0 and count >= limit:
+                break
+    if chunk:
+        yield chunk
+
+
+class StatsAccumulator:
+    """Incremental version of compute_stats() for chunked processing.
+
+    Accumulates results chunk-by-chunk and produces the same dict structure
+    as compute_stats() via finalize().
+    """
+
+    DIMS = ["intent", "language", "domain", "concept", "task",
+            "agentic", "constraint", "context", "difficulty"]
+
+    def __init__(self):
+        self.total = 0
+        self.success = 0
+        self.total_calls = 0
+        self.total_pt = 0
+        self.total_ct = 0
+        self.arbitrated = 0
+        self.validation_issue_count = 0
+        self.consistency_warning_count = 0
+
+        self.distributions = {dim: {} for dim in self.DIMS}
+        self.unmapped = {}
+        self.cross_matrix = {}
+
+        # Confidence: sum/count/min/max per dim for running mean
+        self.conf_acc = {}
+
+        # Low-confidence frequency
+        self.low_conf_freq = {}
+
+        # Sparse tracking
+        self.sparse_labeled = 0
+        self.sparse_inherited = 0
+
+    def update(self, all_labels, all_monitors, inherit_map=None):
+        """Ingest one chunk's labels and monitors."""
+        for m in all_monitors:
+            if m is None:
+                continue
+            self.total += 1
+            if m["status"] == "success":
+                self.success += 1
+            self.total_calls += m["llm_calls"]
+            self.total_pt += m["total_prompt_tokens"]
+            self.total_ct += m["total_completion_tokens"]
+            if m["arbitrated"]:
+                self.arbitrated += 1
+            if m["validation_issues"]:
+                self.validation_issue_count += 1
+            if m["consistency_warnings"]:
+                self.consistency_warning_count += 1
+            for lc in m.get("low_confidence_dims", []):
+                d = lc["dim"]
+                self.low_conf_freq[d] = self.low_conf_freq.get(d, 0) + 1
+
+        for labels in all_labels:
+            if labels is None:
+                continue
+            for dim in self.DIMS:
+                val = labels.get(dim, [])
+                if isinstance(val, list):
+                    for v in val:
+                        self.distributions[dim][v] = self.distributions[dim].get(v, 0) + 1
+                elif val:
+                    self.distributions[dim][val] = self.distributions[dim].get(val, 0) + 1
+            # Unmapped
+            for item in labels.get("unmapped", []):
+                key = f"{item.get('dimension', '?')}:{item.get('value', '?')}" if isinstance(item, dict) else str(item)
+                self.unmapped[key] = self.unmapped.get(key, 0) + 1
+            # Confidence
+            conf = labels.get("confidence")
+            if isinstance(conf, dict):
+                for dim in self.DIMS:
+                    score = conf.get(dim)
+                    if isinstance(score, (int, float)):
+                        if dim not in self.conf_acc:
+                            self.conf_acc[dim] = {"sum": 0.0, "count": 0, "min": score, "max": score, "below": 0}
+                        acc = self.conf_acc[dim]
+                        acc["sum"] += score
+                        acc["count"] += 1
+                        acc["min"] = min(acc["min"], score)
+                        acc["max"] = max(acc["max"], score)
+                        if score < CONFIDENCE_THRESHOLD:
+                            acc["below"] += 1
+            # Cross matrix
+            intent = labels.get("intent", "?")
+            diff = labels.get("difficulty", "?")
+            key = f"{intent}|{diff}"
+            self.cross_matrix[key] = self.cross_matrix.get(key, 0) + 1
+
+        # Count inherited samples toward total (they have labels but no monitor)
+        if inherit_map:
+            inherited_indices = set(inherit_map.keys())
+            inherited_ok = sum(1 for i in inherited_indices if i < len(all_labels) and all_labels[i] is not None)
+            self.sparse_inherited += len(inherit_map)
+            self.total += len(inherit_map)
+            self.success += inherited_ok
+
+    def set_sparse_labeled(self, count):
+        """Track total sparse-labeled count across chunks."""
+        self.sparse_labeled += count
+
+    def finalize(self):
+        """Produce the same dict structure as compute_stats()."""
+        # Sort distributions
+        sorted_dist = {}
+        for dim in self.DIMS:
+            sorted_dist[dim] = dict(sorted(self.distributions[dim].items(), key=lambda x: -x[1]))
+
+        conf_stats = {}
+        for dim, acc in self.conf_acc.items():
+            n = acc["count"]
+            if n > 0:
+                conf_stats[dim] = {
+                    "mean": round(acc["sum"] / n, 3),
+                    "min": round(acc["min"], 3),
+                    "max": round(acc["max"], 3),
+                    "below_threshold": acc["below"],
+                    "count": n,
+                }
+
+        total = self.total
+        result = {
+            "total_samples": total,
+            "success": self.success,
+            "failed": total - self.success,
+            "success_rate": round(self.success / max(total, 1), 4),
+            "total_llm_calls": self.total_calls,
+            "avg_calls_per_sample": round(self.total_calls / max(total, 1), 2),
+            "total_prompt_tokens": self.total_pt,
+            "total_completion_tokens": self.total_ct,
+            "total_tokens": self.total_pt + self.total_ct,
+            "arbitrated_count": self.arbitrated,
+            "arbitrated_rate": round(self.arbitrated / max(total, 1), 4),
+            "validation_issue_count": self.validation_issue_count,
+            "consistency_warning_count": self.consistency_warning_count,
+            "unmapped_tags": dict(sorted(self.unmapped.items(), key=lambda x: -x[1])),
+            "unmapped_unique_count": len(self.unmapped),
+            "confidence_stats": conf_stats,
+            "low_confidence_frequency": dict(sorted(self.low_conf_freq.items(), key=lambda x: -x[1])),
+            "tag_distributions": sorted_dist,
+            "cross_matrix": self.cross_matrix,
+        }
+        if self.sparse_inherited > 0:
+            result["sparse_labeled"] = self.sparse_labeled
+            result["sparse_inherited"] = self.sparse_inherited
+
+        return result
+
+
+@dataclass
+class ChunkCollector:
+    """Track per-chunk labeling results for chunked JSONL pipeline."""
+    chunk_idx: int
+    samples: list
+    label_count: int = 0
+    inherit_map: dict = field(default_factory=dict)
+    done: int = 0
+    ok: int = 0
+    fail: int = 0
+    labels: list = field(default_factory=list)
+    monitors: list = field(default_factory=list)
+    completed: bool = False
+    sample_id_offset: int = 0  # global offset for sample IDs
+
+    def __post_init__(self):
+        n = len(self.samples)
+        self.labels = [None] * n
+        self.monitors = [None] * n
+
+
+def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
+                 input_path, pprint=print):
+    """Finalize a completed chunk: inherit, attach labels, write, release memory."""
+    samples = chunk.samples
+    all_labels = chunk.labels
+    all_monitors = chunk.monitors
+
+    # Inherit labels for sparse-sampled slices
+    for unlabeled_idx, source_idx in chunk.inherit_map.items():
+        if all_labels[source_idx] is not None:
+            inherited = dict(all_labels[source_idx])
+            inherited["inherited"] = True
+            inherited["inherited_from"] = samples[source_idx].get("id")
+            all_labels[unlabeled_idx] = inherited
+
+    # Attach labels to samples
+    for idx, sample in enumerate(samples):
+        sample["labels"] = all_labels[idx]
+        if all_monitors[idx]:
+            sample["labeling_monitor"] = {
+                "llm_calls": all_monitors[idx]["llm_calls"],
+                "arbitrated": all_monitors[idx]["arbitrated"],
+                "validation_issues": all_monitors[idx]["validation_issues"],
+                "consistency_warnings": all_monitors[idx]["consistency_warnings"],
+            }
+
+    # Write labeled samples (append)
+    for sample in samples:
+        out_labeled.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    # Write monitors (append)
+    for m in all_monitors:
+        if m:
+            out_monitor.write(json.dumps(m, ensure_ascii=False) + "\n")
+
+    # Write failed samples
+    inherited_indices = set(chunk.inherit_map.keys())
+    for i, l in enumerate(all_labels):
+        if l is None and i not in inherited_indices:
+            s = dict(samples[i])
+            s.pop("labels", None)
+            s.pop("labeling_monitor", None)
+            out_failed.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    # Update stats accumulator
+    stats_acc.update(all_labels, all_monitors, inherit_map=chunk.inherit_map)
+    stats_acc.set_sparse_labeled(chunk.label_count)
+
+    # Release memory
+    chunk.samples = None
+    chunk.labels = None
+    chunk.monitors = None
+    chunk.completed = True
+
+
+async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
+                                 enable_arbitration=True, limit=0, shuffle=False,
+                                 progress=None, sample_task=None, config=None):
+    """Chunked JSONL labeling: watermark-based processing for large files.
+
+    Processes JSONL files in chunks to bound memory usage. Each chunk is
+    independently: read → slice → sparse sample → label → inherit → write.
+
+    Output: labeled.jsonl, monitor.jsonl, failed_samples.jsonl, stats.json, dashboard.html
+    (No labeled.json — too large to hold in memory for JSON serialization)
+    """
+    input_path = Path(input_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pprint = progress.console.print if progress else print
+
+    chunk_size = config.chunk_size if config else CHUNK_SIZE
+    max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
+    concurrency = config.concurrency if config else DEFAULT_CONCURRENCY
+    watermark = int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK))
+
+    _sparse_kw = {}
+    if config:
+        _sparse_kw = dict(full_label_count=config.sparse_full_label_count,
+                          gap_multiplier=config.sparse_gap_multiplier,
+                          min_gap=config.sparse_min_gap,
+                          threshold=config.sparse_threshold)
+
+    stats_acc = StatsAccumulator()
+    chunk_gen = iter_chunks_from_jsonl(input_path, chunk_size, limit=limit)
+
+    # Open output file handles
+    out_labeled = open(output_dir / "labeled.jsonl", "w", encoding="utf-8")
+    out_monitor = open(output_dir / "monitor.jsonl", "w", encoding="utf-8")
+    out_failed = open(output_dir / "failed_samples.jsonl", "w", encoding="utf-8")
+
+    try:
+        # --- Helper: wrap label_one with chunk tracking ---
+        async def _tagged_label(coro, chunk_idx, sample_idx):
+            _, labels, monitor = await coro
+            return chunk_idx, sample_idx, labels, monitor
+
+        # --- Load a chunk and submit its tasks ---
+        chunks_loaded = 0
+        global_sample_offset = 0
+
+        def load_next_chunk(pending_futures):
+            nonlocal chunks_loaded, global_sample_offset
+            try:
+                raw_records = next(chunk_gen)
+            except StopIteration:
+                return None
+
+            # Normalize and slice
+            samples = []
+            for raw in raw_records:
+                samples.extend(normalize_and_slice(raw))
+            del raw_records
+
+            # Assign global IDs
+            for i, s in enumerate(samples):
+                if not s.get("id"):
+                    s["id"] = f"sample-{global_sample_offset + i:06d}"
+
+            # Sparse sampling
+            label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
+            label_count = len(label_indices)
+            sparse_inherited = len(inherit_map)
+
+            chunk_idx = chunks_loaded
+            chunks_loaded_val = chunks_loaded
+            chunks_loaded_display = chunks_loaded + 1
+
+            collector = ChunkCollector(
+                chunk_idx=chunk_idx,
+                samples=samples,
+                label_count=label_count,
+                inherit_map=inherit_map,
+                sample_id_offset=global_sample_offset,
+            )
+
+            global_sample_offset += len(samples)
+
+            if sparse_inherited > 0:
+                pprint(f"  [chunk {chunks_loaded_display}] {len(samples)} samples "
+                       f"(sparse: {label_count} labeled + {sparse_inherited} inherited)")
+            else:
+                pprint(f"  [chunk {chunks_loaded_display}] {len(samples)} samples")
+
+            # Update progress bar
+            if progress and sample_task is not None:
+                current_total = progress.tasks[sample_task].total or 0
+                progress.update(sample_task, total=current_total + label_count, visible=True)
+
+            # Submit tasks (shuffled)
+            submit_order = list(label_indices)
+            random.shuffle(submit_order)
+            for idx in submit_order:
+                coro = label_one(
+                    http_client, samples[idx], model, idx, len(samples), sem,
+                    enable_arbitration=enable_arbitration,
+                    config=config,
+                )
+                fut = asyncio.ensure_future(_tagged_label(coro, chunk_idx, idx))
+                pending_futures.add(fut)
+
+            chunks_loaded += 1  # noqa: F841 (nonlocal assignment)
+            return collector
+
+        # --- Try to load more chunks if below watermark ---
+        def maybe_load_more(pending_futures, collectors):
+            active_count = sum(1 for c in collectors.values() if not c.completed)
+            loaded = []
+            while (len(pending_futures) < watermark
+                   and active_count < max_active):
+                c = load_next_chunk(pending_futures)
+                if c is None:
+                    break
+                collectors[c.chunk_idx] = c
+                loaded.append(c)
+                active_count += 1
+            return loaded
+
+        # --- Main watermark-driven loop ---
+        collectors = {}
+        pending_futures = set()
+
+        if progress and sample_task is not None:
+            progress.update(sample_task, total=0, completed=0, visible=True, info="loading...")
+
+        # Initial load
+        maybe_load_more(pending_futures, collectors)
+
+        file_start = time.time()
+
+        while pending_futures:
+            done, pending_futures = await asyncio.wait(
+                pending_futures, return_when=asyncio.FIRST_COMPLETED)
+
+            for fut in done:
+                chunk_idx, sample_idx, labels, monitor = fut.result()
+                c = collectors[chunk_idx]
+
+                if 0 <= sample_idx < len(c.labels):
+                    c.labels[sample_idx] = labels
+                    c.monitors[sample_idx] = monitor
+
+                c.done += 1
+                if labels:
+                    c.ok += 1
+                else:
+                    c.fail += 1
+
+                if progress and sample_task is not None:
+                    info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [chunk {c.chunk_idx + 1}]"
+                    progress.update(sample_task, advance=1, info=info)
+
+                # Check if chunk is fully done
+                if c.done >= c.label_count and not c.completed:
+                    _flush_chunk(c, out_labeled, out_monitor, out_failed,
+                                 stats_acc, input_path, pprint=pprint)
+                    pprint(f"  [chunk {c.chunk_idx + 1}] ✓ {c.ok} ok, {c.fail} fail — flushed")
+
+            # After processing batch, check if we should load more chunks
+            maybe_load_more(pending_futures, collectors)
+
+        # Handle chunks with 0 labels (all inherited)
+        for c in collectors.values():
+            if not c.completed and c.label_count == 0:
+                _flush_chunk(c, out_labeled, out_monitor, out_failed,
+                             stats_acc, input_path, pprint=pprint)
+
+        file_elapsed = time.time() - file_start
+
+    finally:
+        out_labeled.close()
+        out_monitor.close()
+        out_failed.close()
+
+    # Remove empty failed file
+    failed_path = output_dir / "failed_samples.jsonl"
+    if failed_path.exists() and failed_path.stat().st_size == 0:
+        failed_path.unlink()
+
+    # Finalize and write stats
+    stats = stats_acc.finalize()
+    stats["total_elapsed_seconds"] = round(file_elapsed, 1)
+    stats["input_file"] = str(input_path)
+    stats["chunked"] = True
+    stats["chunk_size"] = chunk_size
+    stats["chunks_processed"] = chunks_loaded
+
+    with open(output_dir / "stats.json", "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+
+    # Dashboard (stats-only mode — no labeled.json)
+    try:
+        from sft_label.tools.visualize_labels import generate_dashboard
+        generate_dashboard(output_dir, labeled_file=None,
+                           stats_file="stats.json", output_file="dashboard.html")
+    except Exception:
+        pass
+
+    pprint(f"  ✓ {stats['success']}/{stats['total_samples']} success, "
+           f"{file_elapsed:.1f}s, {stats['total_tokens']:,} tokens")
+
+    return stats
+
+
 async def run_one_file(input_path, output_dir, http_client, sem, model,
                        enable_arbitration=True, limit=0, shuffle=False,
                        file_prefix=None, progress=None, sample_task=None,
@@ -1014,6 +1478,14 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     file_prefix: if set, output files are named e.g. labeled_<prefix>.json
                  instead of labeled.json (avoids name collisions in batch mode).
     """
+    # Dispatch to chunked pipeline for JSONL files (memory-bounded)
+    if str(input_path).endswith(".jsonl") and not file_prefix:
+        return await _run_one_file_chunked(
+            input_path, output_dir, http_client, sem, model,
+            enable_arbitration=enable_arbitration, limit=limit, shuffle=shuffle,
+            progress=progress, sample_task=sample_task, config=config,
+        )
+
     # Load input — streaming for JSONL
     samples, n_raw = iter_samples_from_file(input_path, limit=limit, shuffle=shuffle)
 

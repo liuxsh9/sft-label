@@ -32,6 +32,7 @@ from sft_label.config import (
     MAX_RETRIES, SAMPLE_MAX_RETRIES, REQUEST_TIMEOUT,
     VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
+    CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -686,9 +687,418 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
         return await _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config)
 
 
+async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
+                                     limit, config):
+    """Score a JSONL labeled file in chunks to bound memory.
+
+    Two-pass approach:
+      Pass A (lightweight, no LLM): Stream through JSONL to compute rarity.
+      Pass B (chunked, watermark LLM): Read chunks, attach pre-computed rarity,
+             run LLM scoring, write scored JSONL incrementally.
+    """
+    from sft_label.pipeline import iter_chunks_from_jsonl
+
+    input_path = Path(input_path)
+    if output_dir is None:
+        output_dir = input_path.parent
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    chunk_size = config.chunk_size if config else CHUNK_SIZE
+    max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
+
+    # ── Load tag stats for rarity ──
+    stats_ref_info = None
+    idf_map = {}
+    total_stats_samples = 0
+
+    if tag_stats_path is None:
+        candidate = input_path.parent / "stats.json"
+        if candidate.exists():
+            tag_stats_path = str(candidate)
+
+    stats_source = tag_stats_path
+    if stats_source:
+        distributions, total_stats_samples, ts = load_tag_stats(stats_source)
+        if distributions:
+            idf_map = compute_tag_idf(distributions, total_stats_samples)
+            stats_ref_info = {
+                "source": str(stats_source),
+                "total_samples": total_stats_samples,
+                "timestamp": ts or datetime.now().isoformat(),
+            }
+            print(f"  Tag stats loaded from {stats_source} (N={total_stats_samples})")
+        else:
+            print(f"  Warning: {stats_source} has no tag_distributions, rarity will be null")
+    else:
+        print("  No tag stats found, rarity will be null")
+
+    # ── Pass A: Compute rarity (stream, no LLM) ──
+    print(f"  Pass A: Computing rarity from {input_path}...")
+    raw_rarities = []
+    combo_counts = {}
+    sample_count = 0
+    with open(input_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            labels = sample.get("labels") or {}
+            # Build combo counts on the fly
+            intent = labels.get("intent", "")
+            difficulty = labels.get("difficulty", "")
+            concepts = labels.get("concept", [])
+            combo_key = f"{intent}|{difficulty}|{','.join(sorted(concepts[:3]))}"
+            combo_counts[combo_key] = combo_counts.get(combo_key, 0) + 1
+            sample_count += 1
+            del sample
+            if limit > 0 and sample_count >= limit:
+                break
+
+    # Second lightweight pass to compute per-sample rarity (needs combo_counts)
+    sample_idx = 0
+    with open(input_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            labels = sample.get("labels") or {}
+            rarity = compute_sample_rarity(
+                labels, idf_map, total_stats_samples,
+                rarity_weights=config.rarity_weights or RARITY_WEIGHTS,
+                combo_alpha=config.rarity_combo_alpha,
+                combo_counts=combo_counts,
+                stats_ref_info=stats_ref_info,
+            )
+            raw_rarities.append(rarity)
+            del sample
+            sample_idx += 1
+            if limit > 0 and sample_idx >= limit:
+                break
+
+    normalize_rarity_scores(raw_rarities)
+    total = len(raw_rarities)
+    print(f"  {total} samples, rarity computed")
+
+    # ── Pass B: Chunked LLM scoring ──
+    print(f"  Pass B: LLM scoring model={config.scoring_model} concurrency={config.scoring_concurrency}")
+    print(f"  Endpoint: {config.litellm_base}")
+
+    sem = asyncio.Semaphore(config.scoring_concurrency)
+    scored_count = 0
+    failed_count = 0
+    first_error_logged = False
+    start_time = time.time()
+
+    # Lightweight per-sample summaries for final stats
+    score_summaries = []  # list of dicts: {value_score, complexity, quality, reasoning, rarity, flags, thinking_mode, labels}
+    all_monitors = []
+
+    out_scored = open(output_dir / "scored.jsonl", "w", encoding="utf-8")
+    out_monitor = open(output_dir / "monitor_value.jsonl", "w", encoding="utf-8")
+    out_failed = open(output_dir / "failed_value.jsonl", "w", encoding="utf-8")
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=config.request_timeout,
+            limits=httpx.Limits(max_connections=config.scoring_concurrency + 10),
+        ) as client:
+
+            # Chunk state tracking
+            global_offset = 0
+            active_chunks = {}  # chunk_idx -> {samples, pending_count, done_samples, offset}
+            pending_futures = set()
+            chunk_gen = iter_chunks_from_jsonl(input_path, chunk_size, limit=limit)
+            chunks_loaded = 0
+            gen_exhausted = False
+
+            async def _tagged_score(idx, chunk_idx, sample, rarity_result):
+                nonlocal scored_count, failed_count, first_error_logged
+                value, monitor = await score_one(
+                    client, sample, config.scoring_model, rarity_result,
+                    idx, total, sem, config=config,
+                )
+                return chunk_idx, idx, value, monitor, sample
+
+            def load_next_scoring_chunk():
+                nonlocal chunks_loaded, global_offset, gen_exhausted
+                try:
+                    raw_records = next(chunk_gen)
+                except StopIteration:
+                    gen_exhausted = True
+                    return None
+
+                # These are already-labeled samples from the JSONL
+                samples = []
+                for raw in raw_records:
+                    samples.append(raw)
+
+                chunk_idx = chunks_loaded
+                offset = global_offset
+                global_offset += len(samples)
+                chunks_loaded += 1
+
+                active_chunks[chunk_idx] = {
+                    "samples": samples,
+                    "offset": offset,
+                    "total": len(samples),
+                    "done": 0,
+                    "values": [None] * len(samples),
+                    "monitors": [None] * len(samples),
+                }
+
+                # Submit scoring tasks
+                for i, sample in enumerate(samples):
+                    abs_idx = offset + i
+                    rarity_result = raw_rarities[abs_idx] if abs_idx < len(raw_rarities) else {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
+                    fut = asyncio.ensure_future(
+                        _tagged_score(abs_idx, chunk_idx, sample, rarity_result)
+                    )
+                    pending_futures.add(fut)
+
+                return chunk_idx
+
+            def maybe_load_more_scoring():
+                active_count = sum(1 for c in active_chunks.values()
+                                   if c["done"] < c["total"])
+                while (not gen_exhausted
+                       and len(pending_futures) < config.scoring_concurrency * 2
+                       and active_count < max_active):
+                    if load_next_scoring_chunk() is None:
+                        break
+                    active_count += 1
+
+            def flush_scoring_chunk(chunk_idx):
+                nonlocal scored_count, failed_count
+                chunk_data = active_chunks[chunk_idx]
+                for i, sample in enumerate(chunk_data["samples"]):
+                    value = chunk_data["values"][i]
+                    monitor = chunk_data["monitors"][i]
+
+                    if value:
+                        sample["value"] = value
+                        scored_count += 1
+                        # Summary for final stats
+                        score_summaries.append({
+                            "value_score": value.get("value_score"),
+                            "complexity_overall": (value.get("complexity") or {}).get("overall"),
+                            "quality_overall": (value.get("quality") or {}).get("overall"),
+                            "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
+                            "rarity_score": (value.get("rarity") or {}).get("score"),
+                            "flags": value.get("flags", []),
+                            "thinking_mode": value.get("thinking_mode"),
+                            "labels": sample.get("labels"),
+                        })
+                    else:
+                        failed_count += 1
+                        out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+                    out_scored.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+                    if monitor:
+                        all_monitors.append(monitor)
+                        out_monitor.write(json.dumps(monitor, ensure_ascii=False) + "\n")
+
+                # Release
+                chunk_data["samples"] = None
+                chunk_data["values"] = None
+                chunk_data["monitors"] = None
+
+            with _create_progress() as progress:
+                task = progress.add_task("Scoring", total=total, info="")
+
+                # Initial load
+                maybe_load_more_scoring()
+
+                while pending_futures:
+                    done, pending_futures = await asyncio.wait(
+                        pending_futures, return_when=asyncio.FIRST_COMPLETED)
+
+                    for fut in done:
+                        chunk_idx, abs_idx, value, monitor, _ = fut.result()
+                        chunk_data = active_chunks[chunk_idx]
+                        local_idx = abs_idx - chunk_data["offset"]
+
+                        chunk_data["values"][local_idx] = value
+                        chunk_data["monitors"][local_idx] = monitor
+                        chunk_data["done"] += 1
+
+                        if not value and not first_error_logged and monitor:
+                            err = monitor.get("error", "unknown")
+                            print(f"  [!] First failure: sample={monitor.get('sample_id')} "
+                                  f"attempts={monitor.get('attempts')} err={err[:200]}")
+                            first_error_logged = True
+
+                        progress.update(task, advance=1,
+                                        info=f"ok={scored_count + (1 if value else 0)} fail={failed_count + (0 if value else 1)}")
+
+                        # Check if chunk is done
+                        if chunk_data["done"] >= chunk_data["total"]:
+                            flush_scoring_chunk(chunk_idx)
+
+                    maybe_load_more_scoring()
+
+    finally:
+        out_scored.close()
+        out_monitor.close()
+        out_failed.close()
+
+    elapsed = time.time() - start_time
+
+    # Remove empty failed file
+    failed_path = output_dir / "failed_value.jsonl"
+    if failed_path.exists() and failed_path.stat().st_size == 0:
+        failed_path.unlink()
+
+    # ── Compute stats from summaries ──
+    stats = _compute_value_stats_from_summaries(score_summaries, all_monitors, total)
+    stats["elapsed_seconds"] = round(elapsed, 1)
+    stats["model"] = config.scoring_model
+    stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
+    stats["rarity_config"] = {
+        "stats_ref": str(stats_source) if stats_source else None,
+        "total_samples_in_distribution": total_stats_samples,
+        "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
+        "combo_alpha": config.rarity_combo_alpha,
+    }
+    stats["chunked"] = True
+
+    stats_path = output_dir / "stats_value.json"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+
+    # Dashboard
+    try:
+        from sft_label.tools.visualize_value import generate_value_dashboard
+        generate_value_dashboard(output_dir, scored_file=None,
+                                 stats_file="stats_value.json",
+                                 output_file="dashboard_value.html")
+    except Exception as e:
+        print(f"  Warning: dashboard generation failed: {e}")
+
+    print(f"\nScoring complete: {scored_count}/{total} scored, {failed_count} failed")
+    print(f"  Time: {elapsed:.1f}s | Output: {output_dir}")
+
+    return stats
+
+
+def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
+    """Compute value stats from lightweight per-sample summaries.
+
+    Produces the same structure as compute_value_stats but without needing
+    all scored samples in memory.
+    """
+    total_scored = len(summaries)
+    total_failed = sum(1 for m in all_monitors if m.get("status") == "failed")
+
+    # Score distributions
+    def _gather(key):
+        return [s[key] for s in summaries if s.get(key) is not None]
+
+    score_distributions = {
+        "value_score": _percentiles(_gather("value_score")),
+        "complexity_overall": _percentiles(_gather("complexity_overall")),
+        "quality_overall": _percentiles(_gather("quality_overall")),
+        "reasoning_overall": _percentiles(_gather("reasoning_overall")),
+        "rarity_score": _percentiles(_gather("rarity_score")),
+    }
+
+    # Thinking mode stats
+    slow = [s for s in summaries if s.get("thinking_mode") == "slow"]
+    fast = [s for s in summaries if s.get("thinking_mode") == "fast"]
+    thinking_mode_stats = {
+        "slow": {
+            "count": len(slow),
+            "mean_value": round(sum(s.get("value_score", 0) or 0 for s in slow) / max(len(slow), 1), 2),
+        },
+        "fast": {
+            "count": len(fast),
+            "mean_value": round(sum(s.get("value_score", 0) or 0 for s in fast) / max(len(fast), 1), 2),
+        },
+    }
+
+    # Flag counts
+    flag_counts = {}
+    flag_value_sums = {}
+    for s in summaries:
+        for f in s.get("flags", []):
+            flag_counts[f] = flag_counts.get(f, 0) + 1
+            flag_value_sums.setdefault(f, []).append(s.get("value_score", 0) or 0)
+
+    flag_value_impact = {
+        f: {"mean_value": round(sum(vs) / len(vs), 2), "count": len(vs)}
+        for f, vs in flag_value_sums.items()
+    }
+
+    # Selection thresholds
+    all_value_scores = sorted([s["value_score"] for s in summaries
+                                if s.get("value_score") is not None])
+    n_vs = len(all_value_scores)
+    selection_thresholds = {}
+    for pct_label, pct in [("top_10pct", 90), ("top_25pct", 75), ("top_50pct", 50)]:
+        if n_vs > 0:
+            idx = min(int(n_vs * pct / 100), n_vs - 1)
+            threshold = all_value_scores[idx]
+            count = sum(1 for v in all_value_scores if v >= threshold)
+            selection_thresholds[pct_label] = {"threshold": round(threshold, 1), "count": count}
+
+    # Value by tag
+    tag_dims = ["intent", "difficulty", "domain", "concept", "task",
+                "agentic", "constraint", "context"]
+    value_by_tag = {}
+    for dim in tag_dims:
+        tag_values = {}
+        for s in summaries:
+            vs = s.get("value_score")
+            if vs is None:
+                continue
+            labels = s.get("labels") or {}
+            tags = labels.get(dim)
+            if tags is None:
+                continue
+            if isinstance(tags, list):
+                for t in tags:
+                    tag_values.setdefault(t, []).append(vs)
+            else:
+                tag_values.setdefault(tags, []).append(vs)
+        value_by_tag[dim] = {
+            t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
+            for t, vs in sorted(tag_values.items(), key=lambda x: -sum(x[1]) / len(x[1]))
+        }
+
+    # LLM usage
+    total_llm_calls = sum(m.get("llm_calls", 0) for m in all_monitors)
+    total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in all_monitors)
+    total_completion_tokens = sum(m.get("completion_tokens", 0) for m in all_monitors)
+
+    return {
+        "total_scored": total_scored,
+        "total_failed": total_failed,
+        "total_llm_calls": total_llm_calls,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_tokens": total_prompt_tokens + total_completion_tokens,
+        "score_distributions": score_distributions,
+        "value_by_tag": value_by_tag,
+        "thinking_mode_stats": thinking_mode_stats,
+        "flag_counts": dict(sorted(flag_counts.items(), key=lambda x: -x[1])),
+        "flag_value_impact": flag_value_impact,
+        "selection_thresholds": selection_thresholds,
+    }
+
+
 async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config):
     """Score a single labeled file."""
     input_path = Path(input_path)
+
+    # Dispatch to chunked pipeline for JSONL files (memory-bounded)
+    if input_path.suffix == ".jsonl":
+        return await _run_scoring_file_chunked(
+            input_path, output_dir, tag_stats_path, limit, config,
+        )
+
     if output_dir is None:
         output_dir = input_path.parent
     output_dir = Path(output_dir)
@@ -870,14 +1280,26 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         output_dir = input_dir
     output_dir = Path(output_dir)
 
-    # Find labeled files (flat or in per-file subdirs from directory pipeline)
+    # Find labeled files (flat, one-level subdirs, or deeply nested)
+    # Try progressively deeper searches; also include .jsonl files
     labeled_files = sorted(input_dir.glob("labeled*.json"))
     if not labeled_files:
         labeled_files = sorted(input_dir.glob("*/labeled*.json"))
-    labeled_files = [f for f in labeled_files if not f.name.endswith(".jsonl")]
+    if not labeled_files:
+        # Deep nesting: recursive glob
+        labeled_files = sorted(input_dir.glob("**/labeled*.json"))
+    # Separate .json and .jsonl: prefer .json if both exist in same dir
+    json_files = [f for f in labeled_files if not f.name.endswith(".jsonl")]
+    jsonl_files = [f for f in labeled_files if f.name.endswith(".jsonl")]
+    # For dirs that only have .jsonl (chunked pipeline output), include them
+    json_dirs = {f.parent for f in json_files}
+    for jl in jsonl_files:
+        if jl.parent not in json_dirs:
+            json_files.append(jl)
+    labeled_files = sorted(json_files)
 
     if not labeled_files:
-        print(f"No labeled*.json files found in {input_dir}")
+        print(f"No labeled*.json/jsonl files found in {input_dir}")
         return {}
 
     print(f"Found {len(labeled_files)} labeled files in {input_dir}")
@@ -888,10 +1310,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         if candidate.exists():
             tag_stats_path = str(candidate)
         else:
-            # Try per-file stats (flat or in subdirs)
+            # Try per-file stats (flat, one-level, or recursive)
             stats_files = sorted(input_dir.glob("stats*.json"))
             if not stats_files:
                 stats_files = sorted(input_dir.glob("*/stats*.json"))
+            if not stats_files:
+                stats_files = sorted(input_dir.glob("**/stats*.json"))
             stats_files = [f for f in stats_files if "value" not in f.name and "summary" not in f.name]
             if stats_files:
                 tag_stats_path = str(stats_files[0])

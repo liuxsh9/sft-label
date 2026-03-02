@@ -32,10 +32,14 @@ TRUNCATION_PER_TURN_RATIO = 0.35 # max fraction of budget for any single turn
 
 # ─── Directory Pipeline ────────────────────────────────
 DIR_PIPELINE_WATERMARK = 2.0   # load next file when in-flight < concurrency * watermark
-DIR_PIPELINE_MAX_FILES = 5     # max files loaded in memory simultaneously
+DIR_PIPELINE_MAX_FILES = 30    # max files loaded in memory simultaneously
+
+# ─── Chunked JSONL Pipeline ──────────────────────────
+CHUNK_SIZE = 5000              # raw JSONL lines per chunk
+MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
-SPARSE_FULL_LABEL_COUNT = 10   # first N slices always labeled
+SPARSE_FULL_LABEL_COUNT = 10  # first N slices always labeled
 SPARSE_GAP_MULTIPLIER = 1.4   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
@@ -126,6 +130,8 @@ class PipelineConfig:
     truncation_per_turn_ratio: float = TRUNCATION_PER_TURN_RATIO
     dir_pipeline_watermark: float = DIR_PIPELINE_WATERMARK
     dir_pipeline_max_files: int = DIR_PIPELINE_MAX_FILES
+    chunk_size: int = CHUNK_SIZE
+    max_active_chunks: int = MAX_ACTIVE_CHUNKS
     sparse_full_label_count: int = SPARSE_FULL_LABEL_COUNT
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP
