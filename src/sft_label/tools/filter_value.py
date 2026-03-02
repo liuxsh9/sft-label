@@ -10,6 +10,8 @@ Usage via CLI:
   sft-label filter --input run_dir/ --value-min 7 --format training
 """
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
