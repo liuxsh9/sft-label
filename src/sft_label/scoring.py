@@ -1319,6 +1319,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     stats = _compute_value_stats_from_summaries(score_summaries, all_monitors, total)
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
+    stats["input_file"] = str(input_path)
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -1640,6 +1641,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     stats = compute_value_stats(samples, [m for m in all_monitors if m])
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
+    stats["input_file"] = str(input_path)
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -1740,6 +1742,7 @@ def _flush_scoring_file(collector, config, pprint=print):
     valid_monitors = [m for m in all_monitors if m]
     stats = compute_value_stats(samples, valid_monitors)
     stats["model"] = config.scoring_model
+    stats["input_file"] = str(collector.labeled_path)
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": collector.stats_source,
@@ -2012,6 +2015,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         summary = _merge_value_stats(all_file_stats)
         summary["elapsed_seconds"] = round(elapsed, 1)
         summary["model"] = config.scoring_model
+        summary["input_path"] = str(input_dir)
         summary["files_processed"] = len(all_file_stats)
 
         summary_path = output_dir / "summary_stats_value.json"

@@ -30,7 +30,9 @@ LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data
 
 # Filter high-value samples from scored data
 uv run sft-label filter --input scored.json --threshold 6.0
-uv run sft-label filter --input results_dir/ --threshold 7.0 --include-unscored
+uv run sft-label filter --input scored.json --value-min 6 --difficulty advanced,expert
+uv run sft-label filter --input run_dir/ --value-min 7 --format training
+uv run sft-label filter --input scored.json --value-min 6 --exclude-inherited --thinking-mode slow
 ```
 
 ## Architecture
@@ -51,15 +53,26 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 4. **Validation** — `validate_score_response()` checks all fields, converts types, tracks unknown flags
 5. **Aggregation** — weighted composite `value_score`, aggregate statistics, dashboard generation
 
+**Pass 3: Filtering & Selection** (in `tools/filter_value.py`):
+- Multi-condition filtering: `value_min`, `selection_min`, `include_tags`/`exclude_tags`, `difficulty`, `thinking_mode`, `exclude_inherited`, `verify_source`
+- Criteria use AND logic between different types, OR logic within tag lists
+- Output formats: `scored` (preserves labels/scores) or `training` (training-ready, strips metadata)
+- Training output for Pangu-original data uses `to_pangu_pseudo_multiturn()` in `preprocessing.py` to reconstruct the pseudo-multi-turn format with `[unused*]` tokens
+- `FilterConfig` dataclass, `matches_filter()` for per-sample checks, `filter_samples()` for batch
+
 **Key design decisions:**
 - Two LLM calls per sample in Pass 1 (not one) because Call 2 needs Call 1 results as context
 - `TAG_POOLS` in `prompts.py` define the valid tag set — the LLM's output is validated against these pools; out-of-pool tags become "unmapped"
 - Single-select dimensions: intent, difficulty, context. Multi-select: everything else
 - Directory mode uses watermark-based loading (`DIR_PIPELINE_WATERMARK`) to keep concurrency saturated across files
-- Sparse sampling: for multi-turn slices from the same conversation, only a subset gets LLM-labeled; the rest inherit labels from their nearest labeled slice
+- Sparse sampling: for multi-turn slices from the same conversation, only a subset gets LLM-labeled; the rest inherit labels from their nearest labeled slice. Inherited samples are excluded from tag distributions and confidence stats to avoid inflating counts.
+- Multi-turn slices get `thinking_mode="fast"` and `cot_text` removed (since COT is stripped during slicing), preventing misleading scoring in Pass 2
 - Pass 2 uses COT-preserving truncation (unlike Pass 1 which strips COT) because COT quality is a key scoring dimension
 - Rarity is computed from tag IDF (not LLM), normalized to 1-10 via percentile mapping
 - Value score = 0.25×complexity + 0.35×quality + 0.15×reasoning + 0.25×rarity (configurable)
+- Selection score = 0.75×intra_class_rank + 0.25×rarity (per-tag percentile, structurally different from value_score)
+- Pangu pseudo-multiturn reconstruction (`to_pangu_pseudo_multiturn`) uses `raw_pangu_data` saved during normalization for roundtrip fidelity; falls back to algorithmic reconstruction for sliced/modified samples
+- `source_file` metadata is added to each sample during labeling to enable downstream source verification in filtering
 
 **Taxonomy data** is embedded as package data in `src/sft_label/taxonomy/`. Load via `_resources.py` (uses `importlib.resources`), not file paths.
 
@@ -68,6 +81,8 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 - Library: `from sft_label import run, PipelineConfig`
 
 **Config layering:** Module-level constants in `config.py` serve as defaults. `PipelineConfig` dataclass allows runtime overrides. Environment variables `LITELLM_BASE` and `LITELLM_KEY` configure the LLM endpoint.
+
+**Python version:** Requires >=3.9. Use `from __future__ import annotations` in any file using `X | Y` type union syntax (e.g., `float | None`).
 
 ## Key Files
 
@@ -80,8 +95,9 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 | `src/sft_label/prompts_value.py` | Pass 2 scoring prompts, few-shot examples |
 | `src/sft_label/config.py` | All configuration constants + PipelineConfig |
 | `src/sft_label/cli.py` | CLI entry point (run, validate, score, filter, export-review) |
-| `src/sft_label/tools/visualize_value.py` | Pass 2 dashboard generation |
-| `src/sft_label/tools/filter_value.py` | Value-based sample filtering |
+| `src/sft_label/tools/filter_value.py` | Multi-condition sample filtering + training format output |
+| `src/sft_label/tools/visualize_labels.py` | Pass 1 label dashboard generation |
+| `src/sft_label/tools/visualize_value.py` | Pass 2 score dashboard generation |
 
 ## Origin
 

@@ -105,8 +105,7 @@ def compute_value_viz_data(samples, stats):
 
     # Score distributions (histogram bins 1-10)
     score_keys = ["value_score", "complexity_overall", "quality_overall",
-                  "reasoning_overall", "rarity_score", "selection_score",
-                  "intra_class_rank"]
+                  "reasoning_overall", "rarity_score", "selection_score"]
     histograms = {}
     if samples:
         for key in score_keys:
@@ -143,6 +142,19 @@ def compute_value_viz_data(samples, stats):
 
     # Selection by tag (cross-analysis)
     viz["selection_by_tag"] = stats.get("selection_by_tag", {})
+
+    # Selection vs Value 2D histogram (from samples)
+    sv_heatmap = {}
+    for s in samples:
+        v = s.get("value", {})
+        vs = v.get("value_score")
+        ss = v.get("selection_score")
+        if isinstance(vs, (int, float)) and isinstance(ss, (int, float)) and 1 <= vs <= 10 and 1 <= ss <= 10:
+            v_bin = max(1, min(int(vs), 10))
+            s_bin = max(1, min(int(ss), 10))
+            key = f"{v_bin}|{s_bin}"
+            sv_heatmap[key] = sv_heatmap.get(key, 0) + 1
+    viz["selection_vs_value"] = sv_heatmap
 
     # Thinking mode
     viz["thinking_mode_stats"] = stats.get("thinking_mode_stats", {})
@@ -209,7 +221,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .header { background: linear-gradient(135deg, #1d1d1f 0%, #2d3748 100%); color: white; padding: 20px 28px; }
 .header h1 { font-size: 1.4em; font-weight: 700; }
 .header .sub { font-size: 0.82em; color: #a1a1aa; margin-top: 4px; }
-.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.container { max-width: 1800px; margin: 0 auto; padding: 20px; }
 .section { margin-bottom: 28px; }
 .section h2 { font-size: 1.1em; font-weight: 600; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #e5e7eb; }
 h3 { font-size: 0.95em; font-weight: 600; margin: 0 0 10px; color: #374151; }
@@ -277,6 +289,17 @@ tr:hover td { background: #f9fafb; }
 .unused-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .unused-tag { font-size: 0.72em; background: #fef2f2; color: #991b1b; padding: 2px 6px; border-radius: 3px; }
 
+.bars-compact .bar-row { margin-bottom: 2px; font-size: 0.76em; }
+.bars-compact .bar-track { height: 14px; }
+.bars-compact .bar-label { width: 110px; }
+.bars-compact .bar-val { font-size: 0.76em; }
+.bars-compact .bar-row:nth-child(even) { background: #fafbfc; border-radius: 3px; }
+
+.heatmap-table { border-collapse: collapse; font-size: 0.72em; width: 100%; table-layout: fixed; }
+.heatmap-table th, .heatmap-table td { padding: 3px 2px; text-align: center; border: 1px solid #e5e7eb; overflow: hidden; }
+.heatmap-table th { background: #f9fafb; font-weight: 600; }
+.heatmap-table th:first-child { width: 24px; }
+
 .pass-divider { border: none; border-top: 3px solid #e5e7eb; margin: 32px 0 24px; }
 </style>
 </head>
@@ -301,6 +324,28 @@ function scoreColor(v) {
     if (v >= 4) return '#ea580c';
     return '#dc2626';
 }
+
+function groupDims(dims, dataByDim, threshold) {
+    // Group small dims (≤threshold tags) into pairs sharing one panel
+    const groups = [];
+    let pending = null;
+    for (const dim of dims) {
+        const data = dataByDim[dim];
+        if (!data || Object.keys(data).length === 0) continue;
+        if (Object.keys(data).length <= threshold) {
+            if (pending) { groups.push([pending, dim]); pending = null; }
+            else { pending = dim; }
+        } else {
+            if (pending) { groups.push([pending]); pending = null; }
+            groups.push([dim]);
+        }
+    }
+    if (pending) groups.push([pending]);
+    return groups;
+}
+
+const PANEL_SEP = '<div style="margin:14px 0 10px;border-top:1px solid #e5e7eb"></div>';
+const TAG_BADGE = (n) => `<span style="font-size:0.78em;color:#6b7280;font-weight:400">(${n} tags)</span>`;
 
 // ── Pass 1 rendering ──
 const P1_COLORS = {
@@ -336,22 +381,22 @@ function renderPass1(d) {
     // Tag distributions
     const distributions = d.distributions || {};
     if (Object.keys(distributions).length > 0) {
-        html += '<div class="section"><h2>Tag Distributions</h2><div class="dim-grid">';
-        for (const dim of Object.keys(distributions)) {
-            const dist = distributions[dim];
-            const entries = Object.entries(dist).sort((a, b) => b[1] - a[1]);
-            const maxVal = entries.length ? entries[0][1] : 1;
-            const total = entries.reduce((s, e) => s + e[1], 0);
-            const color = P1_COLORS[dim] || '#6b7280';
-            let bars = entries.map(([tag, count]) => {
-                const pct = (count / maxVal * 100).toFixed(0);
-                return `<div class="bar-row">
-                    <div class="bar-label" title="${tag}">${tag}</div>
-                    <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
-                    <div class="bar-count">${count} (${(count/total*100).toFixed(0)}%)</div>
-                </div>`;
-            }).join('');
-            html += `<div class="dim-card"><h3>${dim} <span class="badge">${entries.length} tags</span></h3>${bars}</div>`;
+        html += '<div class="section"><h2>Tag Distributions</h2><div class="grid">';
+        const prefOrder = ['intent', 'difficulty', 'context', 'language', 'domain', 'concept', 'task', 'agentic', 'constraint'];
+        const allDims = prefOrder.filter(d => distributions[d]);
+        for (const d of Object.keys(distributions)) { if (!allDims.includes(d)) allDims.push(d); }
+        const groups = groupDims(allDims, distributions, 10);
+        for (const group of groups) {
+            html += '<div class="panel">';
+            group.forEach((dim, g) => {
+                if (g > 0) html += PANEL_SEP;
+                const entries = Object.entries(distributions[dim]).sort((a, b) => b[1] - a[1]);
+                const total = entries.reduce((s, e) => s + e[1], 0);
+                const color = P1_COLORS[dim] || '#6b7280';
+                const items = entries.map(([tag, count]) => [tag, count, `(${(count/total*100).toFixed(0)}%)`]);
+                html += `<h3>${dim} ${TAG_BADGE(items.length)}</h3>${renderBarChart(items, null, color)}`;
+            });
+            html += '</div>';
         }
         html += '</div></div>';
     }
@@ -457,23 +502,59 @@ function renderPercentileTable(key, distInfo, color) {
 
 function renderBarChart(items, maxVal, color, limit) {
     if (!items || items.length === 0) return '<p style="color:#6b7280">No data</p>';
-    const top = items.slice(0, limit || 15);
-    const m = maxVal || Math.max(...top.map(x => x[1]), 1);
-    let html = '';
-    for (const [label, value, extra] of top) {
+    const shown = limit ? items.slice(0, limit) : items;
+    const m = maxVal || Math.max(...shown.map(x => x[1]), 1);
+    const dense = shown.length > 20;
+    let html = dense ? '<div class="bars-compact">' : '';
+    for (const [label, value, extra] of shown) {
         const w = (value / m * 100).toFixed(1);
-        const extraStr = extra ? ` (n=${extra})` : '';
+        const valStr = typeof value === 'number' ? (value % 1 === 0 ? String(value) : value.toFixed(1)) : String(value);
+        const extraStr = extra != null ? (typeof extra === 'number' ? ` (n=${extra})` : ` ${extra}`) : '';
         html += `<div class="bar-row">
             <div class="bar-label" title="${label}">${label}</div>
             <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${color}"></div></div>
-            <div class="bar-val">${typeof value === 'number' ? value.toFixed(1) : value}${extraStr}</div>
+            <div class="bar-val">${valStr}${extraStr}</div>
         </div>`;
     }
+    if (dense) html += '</div>';
     return html;
 }
 
-const histColors = {'value_score': '#3b82f6', 'complexity_overall': '#ea580c', 'quality_overall': '#16a34a', 'reasoning_overall': '#9333ea', 'rarity_score': '#0891b2', 'selection_score': '#db2777', 'intra_class_rank': '#78716c'};
-const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity', 'selection_score': 'Selection Score', 'intra_class_rank': 'Intra-Class Rank'};
+function renderHeatmap(data) {
+    const bins = Array.from({length: 10}, () => Array(10).fill(0));
+    let maxCount = 0;
+    for (const [key, count] of Object.entries(data)) {
+        const [v, s] = key.split('|').map(Number);
+        if (v >= 1 && v <= 10 && s >= 1 && s <= 10) {
+            bins[s-1][v-1] = count;
+            maxCount = Math.max(maxCount, count);
+        }
+    }
+    let html = '<div style="display:flex;align-items:center;gap:8px">';
+    html += '<div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:0.78em;color:#6b7280;font-weight:600">Selection Score</div>';
+    html += '<div>';
+    html += '<table class="heatmap-table"><thead><tr><th></th>';
+    for (let i = 1; i <= 10; i++) html += `<th>${i}</th>`;
+    html += '</tr></thead><tbody>';
+    for (let s = 9; s >= 0; s--) {
+        html += `<tr><th>${s+1}</th>`;
+        for (let v = 0; v < 10; v++) {
+            const count = bins[s][v];
+            const intensity = maxCount > 0 ? count / maxCount : 0;
+            const bg = count > 0 ? `rgba(124, 58, 237, ${0.08 + intensity * 0.85})` : '#f9fafb';
+            const tc = intensity > 0.5 ? 'white' : '#374151';
+            html += `<td style="background:${bg};color:${tc}">${count || ''}</td>`;
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += '<div style="text-align:center;font-size:0.78em;color:#6b7280;font-weight:600;margin-top:4px">Value Score</div>';
+    html += '</div></div>';
+    return html;
+}
+
+const histColors = {'value_score': '#3b82f6', 'complexity_overall': '#ea580c', 'quality_overall': '#16a34a', 'reasoning_overall': '#9333ea', 'rarity_score': '#0891b2', 'selection_score': '#db2777'};
+const histLabels = {'value_score': 'Value Score', 'complexity_overall': 'Complexity', 'quality_overall': 'Quality', 'reasoning_overall': 'Reasoning', 'rarity_score': 'Rarity', 'selection_score': 'Selection Score'};
 
 function renderPass2() {
     const d = DATA_P2;
@@ -504,7 +585,7 @@ function renderPass2() {
     const hasDistStats = Object.keys(d.score_distributions || {}).length > 0;
     if (hasHistograms || hasDistStats) {
         html += '<div class="section"><h2>Score Distributions</h2><div class="grid">';
-        const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score', 'selection_score', 'intra_class_rank'];
+        const scoreKeys = ['value_score', 'complexity_overall', 'quality_overall', 'reasoning_overall', 'rarity_score', 'selection_score'];
         if (hasHistograms) {
             for (const key of scoreKeys) {
                 const bins = d.histograms[key];
@@ -538,108 +619,84 @@ function renderPass2() {
     if (Object.keys(vbt).length > 0) {
         html += '<div class="section"><h2>Value &times; Tag Cross-Analysis</h2><div class="grid">';
         const dimColors = {'difficulty': '#ea580c', 'intent': '#3b82f6', 'domain': '#16a34a', 'concept': '#9333ea', 'language': '#0891b2', 'task': '#db2777', 'agentic': '#ea580c', 'constraint': '#475569', 'context': '#78716c'};
-        for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'language', 'task']) {
-            const tags = vbt[dim];
-            if (!tags || Object.keys(tags).length === 0) continue;
-            const items = Object.entries(tags).map(([t, info]) => [t, info.mean, info.n]).sort((a, b) => b[1] - a[1]);
-            html += `<div class="panel"><h3>Value by ${dim}</h3>${renderBarChart(items, 10, dimColors[dim] || '#3b82f6', 15)}</div>`;
+        const vGroups = groupDims(['difficulty', 'intent', 'domain', 'concept', 'language', 'task'], vbt, 10);
+        for (const group of vGroups) {
+            html += '<div class="panel">';
+            group.forEach((dim, g) => {
+                if (g > 0) html += PANEL_SEP;
+                const items = Object.entries(vbt[dim]).map(([t, info]) => [t, info.mean, info.n]).sort((a, b) => b[1] - a[1]);
+                html += `<h3>Value by ${dim} ${TAG_BADGE(items.length)}</h3>${renderBarChart(items, 10, dimColors[dim] || '#3b82f6')}`;
+            });
+            html += '</div>';
         }
         html += '</div></div>';
     }
 
-    // === Section 5: Selection Analysis ===
+    // === Section 5: Analysis (heatmap + thinking mode + flags) ===
+    const svh = d.selection_vs_value || {};
+    const tm = d.thinking_mode_stats || {};
+    const flags = d.flag_counts || {};
+    if (Object.keys(svh).length > 0 || tm.slow || tm.fast || Object.keys(flags).length > 0) {
+        html += '<div class="section"><h2>Analysis</h2><div class="grid">';
+
+        if (Object.keys(svh).length > 0) {
+            html += '<div class="panel"><h3>Selection &times; Value</h3>';
+            html += renderHeatmap(svh);
+            html += '</div>';
+        }
+
+        if (tm.slow || tm.fast) {
+            html += '<div class="panel"><h3>Thinking Mode</h3>';
+            html += '<table><thead><tr><th></th><th>Slow</th><th>Fast</th></tr></thead><tbody>';
+            const s = tm.slow || {}; const f = tm.fast || {};
+            html += `<tr><td>Count</td><td>${s.count || 0}</td><td>${f.count || 0}</td></tr>`;
+            html += `<tr><td>Value</td><td style="color:${scoreColor(s.mean_value)}">${(s.mean_value || 0).toFixed(1)}</td><td style="color:${scoreColor(f.mean_value)}">${(f.mean_value || 0).toFixed(1)}</td></tr>`;
+            html += `<tr><td>Quality</td><td>${(s.mean_quality || 0).toFixed(1)}</td><td>${(f.mean_quality || 0).toFixed(1)}</td></tr>`;
+            html += `<tr><td>Reasoning</td><td>${(s.mean_reasoning || 0).toFixed(1)}</td><td>${(f.mean_reasoning || 0).toFixed(1)}</td></tr>`;
+            html += '</tbody></table></div>';
+        }
+
+        if (Object.keys(flags).length > 0) {
+            const flagItems = Object.entries(flags).sort((a, b) => b[1] - a[1]);
+            const maxFlag = Math.max(...flagItems.map(x => x[1]), 1);
+            let flagHtml = '';
+            for (const [flag, count] of flagItems) {
+                const impact = (d.flag_value_impact || {})[flag];
+                const meanV = impact && impact.mean_value != null ? impact.mean_value.toFixed(1) : '-';
+                const isNeg = ['has-bug', 'security-issue', 'outdated-practice', 'incomplete', 'over-engineered', 'incorrect-output', 'poor-explanation'].includes(flag);
+                const color = isNeg ? '#dc2626' : '#16a34a';
+                const w = (count / maxFlag * 100).toFixed(1);
+                flagHtml += `<div class="bar-row">
+                    <div class="bar-label" title="${flag}">${flag}</div>
+                    <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${color}"></div></div>
+                    <div class="bar-val">${count} (avg: ${meanV})</div>
+                </div>`;
+            }
+            html += `<div class="panel"><h3>Flags</h3>${flagHtml}</div>`;
+        }
+
+        html += '</div></div>';
+    }
+
+    // === Section 6: Selection × Tag ===
     const sbt = d.selection_by_tag || {};
     if (Object.keys(sbt).length > 0) {
-        // 5a: Selection x Tag bar charts
-        html += '<div class="section"><h2>Selection &times; Tag Cross-Analysis</h2><div class="grid">';
+        html += '<div class="section"><h2>Selection &times; Tag</h2><div class="grid">';
         const selDimColors = {'difficulty': '#ea580c', 'intent': '#3b82f6', 'domain': '#16a34a', 'concept': '#9333ea', 'task': '#db2777', 'agentic': '#ea580c'};
-        for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'task', 'agentic']) {
-            const tags = sbt[dim];
-            if (!tags || Object.keys(tags).length === 0) continue;
-            const items = Object.entries(tags).map(([t, info]) => [t, info.mean, info.n]).sort((a, b) => b[1] - a[1]);
-            html += `<div class="panel"><h3>Selection by ${dim}</h3>${renderBarChart(items, 10, selDimColors[dim] || '#db2777', 15)}</div>`;
-        }
-        html += '</div>';
-
-        // 5b: Value vs Selection comparison tables — rank-based
-        html += '<h3 style="margin-top:16px;margin-bottom:12px;font-size:1em">Value vs Selection Comparison</h3>';
-        html += '<div style="font-size:0.78em;color:#6b7280;margin-bottom:12px">Rank = position by mean score within each metric (1=highest). Shift = value rank − selection rank. Positive shift: tag ranks higher in selection (strong intra-class quality). Negative: ranks lower (common tag, not standing out within class).</div>';
-        html += '<div class="grid">';
-        for (const dim of ['difficulty', 'intent', 'domain', 'concept', 'task']) {
-            const vtags = vbt[dim] || {};
-            const stags = sbt[dim] || {};
-            const allTags = new Set([...Object.keys(vtags), ...Object.keys(stags)]);
-            if (allTags.size === 0) continue;
-            const rows = [];
-            for (const tag of allTags) {
-                const vi = vtags[tag] || {};
-                const si = stags[tag] || {};
-                const mv = vi.mean || 0;
-                const ms = si.mean || 0;
-                const n = vi.n || si.n || 0;
-                rows.push({tag, mv, ms, n});
-            }
-            // Compute ranks (1 = highest score)
-            const byValue = [...rows].sort((a, b) => b.mv - a.mv);
-            const bySelection = [...rows].sort((a, b) => b.ms - a.ms);
-            const vRank = {}; byValue.forEach((r, i) => vRank[r.tag] = i + 1);
-            const sRank = {}; bySelection.forEach((r, i) => sRank[r.tag] = i + 1);
-            for (const r of rows) {
-                r.vr = vRank[r.tag];
-                r.sr = sRank[r.tag];
-                r.shift = r.vr - r.sr; // positive = ranks higher in selection
-            }
-            rows.sort((a, b) => b.shift - a.shift);
-            let thtml = '<table style="font-size:0.82em"><thead><tr><th>Tag</th><th>Value</th><th>V.Rank</th><th>Selection</th><th>S.Rank</th><th>Shift</th><th>n</th></tr></thead><tbody>';
-            for (const r of rows) {
-                const sc = r.shift > 0 ? '#16a34a' : (r.shift < 0 ? '#dc2626' : '#6b7280');
-                const arrow = r.shift > 0 ? ' &#9650;' : (r.shift < 0 ? ' &#9660;' : '');
-                thtml += `<tr><td>${r.tag}</td><td style="color:${scoreColor(r.mv)}">${r.mv.toFixed(1)}</td><td style="color:#6b7280">#${r.vr}</td><td style="color:${scoreColor(r.ms)}">${r.ms.toFixed(1)}</td><td style="color:#6b7280">#${r.sr}</td><td style="color:${sc};font-weight:600">${r.shift > 0 ? '+' : ''}${r.shift}${arrow}</td><td style="color:#6b7280">${r.n}</td></tr>`;
-            }
-            thtml += '</tbody></table>';
-            html += `<div class="panel"><h3>${dim}</h3>${thtml}</div>`;
+        const sGroups = groupDims(['difficulty', 'intent', 'domain', 'concept', 'task', 'agentic'], sbt, 10);
+        for (const group of sGroups) {
+            html += '<div class="panel">';
+            group.forEach((dim, g) => {
+                if (g > 0) html += PANEL_SEP;
+                const items = Object.entries(sbt[dim]).map(([t, info]) => [t, info.mean, info.n]).sort((a, b) => b[1] - a[1]);
+                html += `<h3>Selection by ${dim} ${TAG_BADGE(items.length)}</h3>${renderBarChart(items, 10, selDimColors[dim] || '#db2777')}`;
+            });
+            html += '</div>';
         }
         html += '</div></div>';
     }
 
-    // === Section 6: Thinking Mode Analysis ===
-    const tm = d.thinking_mode_stats || {};
-    if (tm.slow || tm.fast) {
-        html += '<div class="section"><h2>Thinking Mode Analysis</h2><div class="grid">';
-        html += '<div class="panel"><table><thead><tr><th></th><th>Slow Thinking</th><th>Fast Thinking</th></tr></thead><tbody>';
-        const s = tm.slow || {}; const f = tm.fast || {};
-        html += `<tr><td>Count</td><td>${s.count || 0}</td><td>${f.count || 0}</td></tr>`;
-        html += `<tr><td>Mean Value</td><td style="color:${scoreColor(s.mean_value)}">${(s.mean_value || 0).toFixed(1)}</td><td style="color:${scoreColor(f.mean_value)}">${(f.mean_value || 0).toFixed(1)}</td></tr>`;
-        html += `<tr><td>Mean Quality</td><td>${(s.mean_quality || 0).toFixed(1)}</td><td>${(f.mean_quality || 0).toFixed(1)}</td></tr>`;
-        html += `<tr><td>Mean Reasoning</td><td>${(s.mean_reasoning || 0).toFixed(1)}</td><td>${(f.mean_reasoning || 0).toFixed(1)}</td></tr>`;
-        html += '</tbody></table></div>';
-        html += '</div></div>';
-    }
-
-    // === Section 7: Flag Analysis ===
-    const flags = d.flag_counts || {};
-    if (Object.keys(flags).length > 0) {
-        html += '<div class="section"><h2>Flag Analysis</h2><div class="grid">';
-        const flagItems = Object.entries(flags).sort((a, b) => b[1] - a[1]);
-        const maxFlag = Math.max(...flagItems.map(x => x[1]), 1);
-        let flagHtml = '';
-        for (const [flag, count] of flagItems) {
-            const impact = (d.flag_value_impact || {})[flag];
-            const meanV = impact && impact.mean_value != null ? impact.mean_value.toFixed(1) : '-';
-            const isNeg = ['has-bug', 'security-issue', 'outdated-practice', 'incomplete', 'over-engineered', 'incorrect-output', 'poor-explanation'].includes(flag);
-            const color = isNeg ? '#dc2626' : '#16a34a';
-            const w = (count / maxFlag * 100).toFixed(1);
-            flagHtml += `<div class="bar-row">
-                <div class="bar-label" title="${flag}">${flag}</div>
-                <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${color}"></div></div>
-                <div class="bar-val">${count} (avg: ${meanV})</div>
-            </div>`;
-        }
-        html += `<div class="panel"><h3>Flags (count &amp; mean value)</h3>${flagHtml}</div>`;
-        html += '</div></div>';
-    }
-
-    // === Section 8: Coverage Impact (if available) ===
+    // === Section 7: Coverage Impact (if available) ===
     const cov = d.coverage_at_thresholds || {};
     if (Object.keys(cov).length > 0) {
         html += '<div class="section"><h2>Coverage Impact Analysis</h2>';
