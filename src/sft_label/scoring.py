@@ -438,7 +438,6 @@ def compute_selection_scores(samples, rarity_weights=None,
             else:
                 tag_groups.setdefault(tags, []).append((i, pure_qualities[i]))
 
-        # For each tag, compute percentiles
         for tag, members in tag_groups.items():
             if len(members) < min_group_size:
                 continue
@@ -447,11 +446,12 @@ def compute_selection_scores(samples, rarity_weights=None,
             n = len(sorted_members)
             for rank, (idx, _pq) in enumerate(sorted_members):
                 percentile = rank / max(n - 1, 1)
-                # Multi-select: take min (conservative)
+                # Multi-select: average across tags in this dimension
                 if dim in dim_percentiles[idx]:
-                    dim_percentiles[idx][dim] = min(dim_percentiles[idx][dim], percentile)
+                    prev, cnt = dim_percentiles[idx][dim]
+                    dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
                 else:
-                    dim_percentiles[idx][dim] = percentile
+                    dim_percentiles[idx][dim] = (percentile, 1)
 
     # Step 3: Global percentile fallback for samples not in any large-enough group
     valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
@@ -473,9 +473,9 @@ def compute_selection_scores(samples, rarity_weights=None,
         if percs:
             weighted_sum = 0.0
             weight_total = 0.0
-            for dim, pct in percs.items():
+            for dim, (pct_sum, pct_cnt) in percs.items():
                 w = rarity_weights.get(dim, 1.0)
-                weighted_sum += w * pct
+                weighted_sum += w * (pct_sum / pct_cnt)  # mean percentile
                 weight_total += w
             if weight_total > 0:
                 fused = weighted_sum / weight_total  # 0-1
@@ -573,10 +573,12 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
             n = len(sorted_members)
             for rank, (idx, _pq) in enumerate(sorted_members):
                 percentile = rank / max(n - 1, 1)
+                # Multi-select: average across tags in this dimension
                 if dim in dim_percentiles[idx]:
-                    dim_percentiles[idx][dim] = min(dim_percentiles[idx][dim], percentile)
+                    prev, cnt = dim_percentiles[idx][dim]
+                    dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
                 else:
-                    dim_percentiles[idx][dim] = percentile
+                    dim_percentiles[idx][dim] = (percentile, 1)
 
     # Step 3: Global fallback
     valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
@@ -595,9 +597,9 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         if percs:
             weighted_sum = 0.0
             weight_total = 0.0
-            for dim, pct in percs.items():
+            for dim, (pct_sum, pct_cnt) in percs.items():
                 w = rarity_weights.get(dim, 1.0)
-                weighted_sum += w * pct
+                weighted_sum += w * (pct_sum / pct_cnt)  # mean percentile
                 weight_total += w
             if weight_total > 0:
                 fused = weighted_sum / weight_total
@@ -798,6 +800,17 @@ def compute_value_stats(scored_samples, all_monitors):
         "rarity_score": _percentiles(extract_scores("rarity.score")),
     }
 
+    # Attach raw score arrays for cross-file merging (not serialized to JSON)
+    _raw_scores = {
+        "value_score": extract_scores("value_score"),
+        "selection_score": extract_scores("selection_score"),
+        "intra_class_rank": extract_scores("intra_class_rank"),
+        "complexity_overall": extract_scores("complexity.overall"),
+        "quality_overall": extract_scores("quality.overall"),
+        "reasoning_overall": extract_scores("reasoning.overall"),
+        "rarity_score": extract_scores("rarity.score"),
+    }
+
     # Sub-score means
     sub_score_means = {
         "complexity": {},
@@ -924,6 +937,7 @@ def compute_value_stats(scored_samples, all_monitors):
         "total_completion_tokens": total_completion_tokens,
         "total_tokens": total_prompt_tokens + total_completion_tokens,
         "score_distributions": score_distributions,
+        "_raw_scores": _raw_scores,
         "sub_score_means": sub_score_means,
         "value_by_tag": value_by_tag,
         "thinking_mode_stats": thinking_mode_stats,
@@ -1288,8 +1302,9 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     stats["chunked"] = True
 
     stats_path = output_dir / "stats_value.json"
+    stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
     with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+        json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
 
     # Dashboard
     try:
@@ -1584,8 +1599,9 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     }
 
     stats_path = output_dir / "stats_value.json"
+    stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
     with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+        json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
 
     # Dashboard
     try:
@@ -1683,8 +1699,9 @@ def _flush_scoring_file(collector, config, pprint=print):
     }
 
     stats_path = output_dir / "stats_value.json"
+    stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
     with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+        json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
 
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
@@ -1991,36 +2008,47 @@ def _merge_value_stats(file_stats_list):
         for s in file_stats_list
     ]
 
-    # Merge score distributions: weighted mean across files
+    # Merge score distributions: use raw scores when available for exact percentiles
     all_dist_keys = set()
     for s in file_stats_list:
         all_dist_keys.update(s.get("score_distributions", {}).keys())
     merged_distributions = {}
     for key in all_dist_keys:
-        # Weighted merge: accumulate sum/count for mean, track min/max/percentiles
-        total_n = 0
-        total_sum = 0.0
-        global_min = float("inf")
-        global_max = float("-inf")
+        # Collect raw values from all files (attached by compute_value_stats)
+        all_values = []
         for s in file_stats_list:
-            dist = s.get("score_distributions", {}).get(key, {})
-            n = s.get("total_scored", 0)
-            if not dist or n == 0:
-                continue
-            mean = dist.get("mean", 0)
-            total_sum += mean * n
-            total_n += n
-            if "min" in dist:
-                global_min = min(global_min, dist["min"])
-            if "max" in dist:
-                global_max = max(global_max, dist["max"])
-        if total_n > 0:
-            merged_distributions[key] = {
-                "mean": round(total_sum / total_n, 2),
-                "min": global_min if global_min != float("inf") else 0,
-                "max": global_max if global_max != float("-inf") else 0,
-                "total_n": total_n,
-            }
+            raw = s.get("_raw_scores", {}).get(key)
+            if raw:
+                all_values.extend(raw)
+
+        if all_values:
+            # Exact percentiles from raw data
+            merged_distributions[key] = _percentiles(all_values)
+        else:
+            # Fallback: weighted mean + global min/max (no raw data available)
+            total_n = 0
+            total_sum = 0.0
+            global_min = float("inf")
+            global_max = float("-inf")
+            for s in file_stats_list:
+                dist = s.get("score_distributions", {}).get(key, {})
+                n = s.get("total_scored", 0)
+                if not dist or n == 0:
+                    continue
+                mean = dist.get("mean", 0)
+                total_sum += mean * n
+                total_n += n
+                if "min" in dist:
+                    global_min = min(global_min, dist["min"])
+                if "max" in dist:
+                    global_max = max(global_max, dist["max"])
+            if total_n > 0:
+                merged_distributions[key] = {
+                    "mean": round(total_sum / total_n, 2),
+                    "min": global_min if global_min != float("inf") else 0,
+                    "max": global_max if global_max != float("-inf") else 0,
+                    "total_n": total_n,
+                }
     merged["score_distributions"] = merged_distributions
 
     # Merge thinking mode stats: sum counts, weighted means
