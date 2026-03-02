@@ -1352,10 +1352,14 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
         "slow": {
             "count": len(slow),
             "mean_value": round(sum(s.get("value_score", 0) or 0 for s in slow) / max(len(slow), 1), 2),
+            "mean_quality": round(sum(s.get("quality_overall", 0) or 0 for s in slow) / max(len(slow), 1), 2),
+            "mean_reasoning": round(sum(s.get("reasoning_overall", 0) or 0 for s in slow) / max(len(slow), 1), 2),
         },
         "fast": {
             "count": len(fast),
             "mean_value": round(sum(s.get("value_score", 0) or 0 for s in fast) / max(len(fast), 1), 2),
+            "mean_quality": round(sum(s.get("quality_overall", 0) or 0 for s in fast) / max(len(fast), 1), 2),
+            "mean_reasoning": round(sum(s.get("reasoning_overall", 0) or 0 for s in fast) / max(len(fast), 1), 2),
         },
     }
 
@@ -2053,8 +2057,8 @@ def _merge_value_stats(file_stats_list):
     merged["score_distributions"] = merged_distributions
 
     # Merge thinking mode stats: sum counts, weighted means
-    merged_thinking = {"slow": {"count": 0, "sum_value": 0.0},
-                       "fast": {"count": 0, "sum_value": 0.0}}
+    merged_thinking = {"slow": {"count": 0, "sum_value": 0.0, "sum_quality": 0.0, "sum_reasoning": 0.0},
+                       "fast": {"count": 0, "sum_value": 0.0, "sum_quality": 0.0, "sum_reasoning": 0.0}}
     for s in file_stats_list:
         ts = s.get("thinking_mode_stats", {})
         for mode in ("slow", "fast"):
@@ -2062,10 +2066,14 @@ def _merge_value_stats(file_stats_list):
             n = ms.get("count", 0)
             merged_thinking[mode]["count"] += n
             merged_thinking[mode]["sum_value"] += ms.get("mean_value", 0) * n
+            merged_thinking[mode]["sum_quality"] += ms.get("mean_quality", 0) * n
+            merged_thinking[mode]["sum_reasoning"] += ms.get("mean_reasoning", 0) * n
     merged["thinking_mode_stats"] = {
         mode: {
             "count": d["count"],
             "mean_value": round(d["sum_value"] / max(d["count"], 1), 2),
+            "mean_quality": round(d["sum_quality"] / max(d["count"], 1), 2),
+            "mean_reasoning": round(d["sum_reasoning"] / max(d["count"], 1), 2),
         }
         for mode, d in merged_thinking.items()
     }

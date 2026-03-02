@@ -22,8 +22,8 @@
   aliases:
   - completion
   - autocomplete
-  description: Complete partial code or suggest next code snippets. Auto-complete
-    function calls, variable names, or code blocks.
+  description: Fill in incomplete code — user provides partial function/class with blanks
+    or TODOs and asks to complete it. Not the same as writing new code from a description.
   source: curated-list
 - id: code-exploration
   name: Code Exploration
@@ -124,8 +124,8 @@
   - add-error-handling
   - exception-handling-task
   - validation-task
-  description: Add error handling and validation to code. Implement try-catch blocks,
-    input validation, and graceful degradation.
+  description: Add error handling and validation to code (the task). For error-handling
+    knowledge use concept:error-handling, for fault-tolerance requirements use constraint:fault-tolerant.
   source: task-expansion
 - id: feature-implementation
   name: Feature Implementation

@@ -89,7 +89,7 @@ Rules:
 What type of work is being done?
 - api-design: Define endpoints, request/response formats
 - bug-fixing: Fix bugs, identify root cause
-- code-completion: Complete partial code
+- code-completion: Fill in INCOMPLETE code — user provides a partial function/class with blanks, TODOs, or "..." and asks to complete it. NOT the same as writing new code from a description (→ feature-implementation)
 - code-explanation: Explain how code works
 - code-exploration: Navigate and understand codebase structure, find relevant files, trace call chains (distinct from code-explanation which explains specific code logic)
 - code-optimization: Improve performance/efficiency (ONLY when user explicitly requests performance improvement, NOT for best practices or clean code)
@@ -100,7 +100,7 @@ What type of work is being done?
 - dependency-management: Manage packages/dependencies
 - deployment: Deploy to production/staging
 - documentation: Write docs, README, API docs
-- error-handling-task: Add error handling/validation
+- error-handling-task: Add error handling/validation to code. This is a TASK (what work is done). For error-handling KNOWLEDGE → concept:error-handling. For "must handle failures" requirement → constraint:fault-tolerant
 - feature-implementation: Implement new functionality (default for "write new code")
 - logging: Add logging/instrumentation
 - migration: Migrate to newer versions/platforms
@@ -248,14 +248,14 @@ Advanced:
 
 Engineering:
 - design-patterns: GoF patterns, SOLID, dependency injection, MVC/MVVM
-- architecture: Microservices, event-driven, CQRS, distributed systems, CAP theorem
+- architecture: Named architectural patterns and distributed system concepts — microservices, event-driven, CQRS, CAP theorem, saga pattern. NOT basic "how to structure my project" or "separate frontend and backend"
 - testing: Unit/integration/e2e testing, TDD, mocking, coverage
 - security: Auth, encryption, XSS, CSRF, SQL injection, OAuth, JWT
-- database-concepts: Schema design, normalization, indexing, ACID, transactions, query optimization
+- database-concepts: Database THEORY — normalization, indexing strategies, ACID/isolation levels, query optimization, sharding. NOT writing a simple CREATE TABLE or basic CRUD queries
 - api-protocols: REST, GraphQL, gRPC, WebSocket
 - caching: Cache strategies, invalidation, CDN, memoization
 - version-control: Git workflows, branching, merge conflicts
-- ci-cd: CI/CD pipelines, build automation, DevOps practices
+- ci-cd: CI/CD pipeline DESIGN and principles, build automation strategies. NOT writing a simple CI config file (→ domain:devops + task:configuration)
 - profiling: Understanding profiling tools (cProfile, perf, flame graphs), benchmarking methodology, performance metrics interpretation
 - debugging: Systematic debugging methodology (breakpoint debugging, stack trace analysis, bisect/isolation, logging-based diagnosis). NOT the same as intent=debug; tag only when debugging TECHNIQUES are demonstrated or taught
 
@@ -269,6 +269,9 @@ Rules:
 - **THRESHOLD for `design-patterns`**: Tag ONLY when the query explicitly discusses or implements a NAMED pattern (Factory, Observer, Strategy, DI, SOLID). General OOP structure or code organization does NOT warrant this tag.
 - **THRESHOLD for `error-handling`**: Tag ONLY when error handling is a non-trivial focus (custom error types, error propagation strategy, Result/Option). Boilerplate try/catch alone does NOT warrant this tag.
 - **THRESHOLD for `algorithms`**: Tag ONLY when algorithm design, complexity analysis, or a specific algorithm (DP, greedy, sorting algorithm) is a meaningful focus. Using a built-in sort() does NOT warrant this tag. Dynamic programming, graph theory, geometry, combinatorics, bit manipulation → all map to `algorithms`.
+- **THRESHOLD for `architecture`**: Tag ONLY when the response discusses named architectural patterns (microservices, event-driven, CQRS, saga) or distributed system theory (CAP, consensus, partitioning). "Separate frontend and backend" or "put this in a utils folder" does NOT warrant this tag.
+- **THRESHOLD for `database-concepts`**: Tag ONLY when database theory is a meaningful focus (normalization forms, index design tradeoffs, isolation levels, query plan optimization, sharding strategies). Writing a simple CREATE TABLE or basic SELECT queries does NOT warrant this tag.
+- **THRESHOLD for `ci-cd`**: Tag ONLY when CI/CD pipeline DESIGN or principles are discussed (pipeline stages, artifact management, deployment strategies like blue-green/canary). Simply writing a GitHub Actions YAML or Dockerfile does NOT warrant this tag — that's task:configuration + domain:devops.
 - **THRESHOLD for `debugging`**: Tag ONLY when the response demonstrates or teaches debugging TECHNIQUES (systematic isolation, stack trace analysis, using debuggers, bisect strategy). Simply fixing a bug (intent=debug + task=bug-fixing) does NOT warrant this tag. "My sort() broke because of wrong key" → concept=[], NOT concept=debugging.
 - **error-handling vs other dimensions**: error-handling = KNOWLEDGE of error patterns (Result/Option, custom errors). Agent retrying on failure → agentic:error-recovery. User asking to add try/catch → task:error-handling-task. "Must handle failures gracefully" → constraint:fault-tolerant.
 - **Positive signals** — tag these concepts when you see:
@@ -373,21 +376,28 @@ Rules:
 
 ### Context (single-select)
 What is the code scope?
+
+Scope tags (prefer these — based on how much code the response touches):
 - snippet: Code fragment, smaller than a function
 - single-function: One complete function
 - single-file: One complete file with imports
 - multi-file: Changes spanning multiple files
 - module: Self-contained package/module
 - repository: Repo-wide operations
-- monorepo: Multiple projects in one repo
-- greenfield: New project from scratch
-- legacy-code: Maintaining/refactoring existing code
-- with-dependencies: Uses external packages/libraries
+
+Situational tags (use ONLY when the situation is the defining characteristic):
+- greenfield: New project from scratch (explicit "start a new project", scaffold, boilerplate)
+- legacy-code: Maintaining/refactoring existing old codebase (explicit "old code", "legacy system", upgrade)
+- monorepo: Multiple projects in one repo (explicit monorepo tooling like Nx, Turborepo, Bazel workspaces)
+- with-dependencies: Response CENTERS on external package integration (choosing, configuring, troubleshooting a library). NOT just importing a library
 
 Rules:
 - Choose ONE that best describes the scope
+- **Priority: scope tags first**. Default to a scope tag (snippet → repository). Only use a situational tag when the situation is MORE defining than the code scope
 - "New project" → greenfield
 - "Refactoring old code" → legacy-code
+- A Python script that imports requests → single-file (NOT with-dependencies, the import is incidental)
+- "Help me set up a React project with Tailwind" → greenfield (new project is the defining characteristic)
 - Scope hierarchy: snippet < single-function < single-file < multi-file < module < repository
   - `snippet`: Code fragment shorter than a complete function (a few lines, an expression)
   - `single-function`: ONE complete function with its logic

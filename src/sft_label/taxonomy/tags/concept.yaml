@@ -231,7 +231,7 @@
   name: Architecture
   category: Concept
   subcategory: Engineering
-  description: System architecture including microservices, monolithic, event-driven, CQRS, and distributed systems
+  description: Named architectural patterns and distributed system theory — microservices, event-driven, CQRS, saga, CAP theorem
   aliases:
   - microservices
   - monolithic-architecture
@@ -274,7 +274,7 @@
   name: Database Concepts
   category: Concept
   subcategory: Engineering
-  description: Schema design, normalization, indexing, ACID properties, transactions, and query optimization
+  description: Database theory — normalization, indexing strategies, ACID/isolation levels, query optimization, sharding
   aliases:
   - database-design
   - normalization
@@ -320,7 +320,7 @@
   name: CI/CD
   category: Concept
   subcategory: Engineering
-  description: Continuous integration, continuous deployment, build pipelines, and DevOps practices
+  description: CI/CD pipeline design and principles, deployment strategies (blue-green, canary), artifact management
   aliases:
   - continuous-integration
   - continuous-deployment

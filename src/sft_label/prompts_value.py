@@ -27,10 +27,16 @@ Rate the technical complexity of the task. Provide sub-scores and an overall:
 
 Score anchors:
   1-2: Trivial — print("hello"), variable assignment, basic syntax questions
-  3-4: Basic — simple CRUD operations, basic data manipulation, single-function tasks
-  5-6: Intermediate — design pattern application, moderate algorithms (sorting, BFS/DFS), multi-step logic with error handling
-  7-8: Advanced — system design, concurrent programming, complex algorithms (DP, graph theory), multi-module architecture
-  9-10: Expert — novel algorithm design, compiler/interpreter implementation, kernel-level programming, cutting-edge technique application
+  3-4: Basic — simple CRUD, basic data manipulation, single-function tasks, straightforward API/library usage
+  5-6: Intermediate — standard design patterns, moderate algorithms (sorting, BFS/DFS), multi-step logic, typical web/backend features
+  7-8: Advanced — system design, concurrent programming, complex algorithms (DP, graph theory), multi-module architecture, performance-critical optimization
+  9-10: Expert — novel algorithm design, compiler/interpreter implementation, kernel-level programming, cutting-edge techniques
+
+Calibration:
+- Most coding tasks fall in the 3-6 range. A standard Flask/Django endpoint is 4, not 7.
+- 7+ requires genuinely advanced technical depth (concurrency, distributed systems, complex algorithm design).
+- Cross-check with the difficulty tag in <meta>: if difficulty="intermediate", complexity should typically be 4-6. If "beginner", expect 1-3. Only "advanced"/"expert" tasks should reach 7+.
+- Reserve 7-8 for tasks requiring specialized knowledge most mid-level developers lack.
 
 ## Dimension 2: Quality (1-10)
 
@@ -72,7 +78,12 @@ Optionally tag notable qualities. Use ONLY these flag values:
 Positive: excellent-explanation, clean-code, creative-solution, good-error-handling, comprehensive-testing
 Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation
 
-Only include flags that clearly apply. An empty flags list is fine.
+Flag criteria (be selective — most samples should have 0-1 flags):
+- clean-code: Reserve for NOTABLY well-crafted code — thoughtful abstractions, excellent naming, clear separation of concerns. Merely correct or working code does NOT qualify.
+- comprehensive-testing: Must include actual test code (unit tests, assertions, test cases) covering multiple scenarios including edge cases. Simply mentioning "you should test" or having 1-2 basic asserts does NOT qualify.
+- excellent-explanation: Explanation that teaches transferable concepts or provides deep insight, not just describes what the code does line-by-line.
+- good-error-handling: Thoughtful, non-trivial error strategy (custom error types, retry logic, graceful degradation). Basic try/catch alone does NOT qualify.
+- An empty flags list is expected for most samples.
 
 ## Important Notes
 
@@ -133,7 +144,7 @@ def knapsack_01(W, weights, values):
     },
     {
         "role": "assistant",
-        "content": '{"complexity":{"instruction":6,"reasoning":5,"implementation":5,"overall":6},"quality":{"correctness":9,"code_quality":8,"explanation":5,"completeness":7,"overall":7},"reasoning":{"clarity":6,"consistency":8,"self_correction":false,"overall":7},"flags":["clean-code"],"confidence":0.90}',
+        "content": '{"complexity":{"instruction":6,"reasoning":5,"implementation":5,"overall":6},"quality":{"correctness":9,"code_quality":8,"explanation":5,"completeness":7,"overall":7},"reasoning":{"clarity":6,"consistency":8,"self_correction":false,"overall":7},"flags":[],"confidence":0.90}',
     },
     # Example 2: Low complexity, high quality (simple but well-explained)
     {
