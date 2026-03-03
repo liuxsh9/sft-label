@@ -242,7 +242,11 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
     _key = config.litellm_key if config else LITELLM_KEY
     _timeout = config.request_timeout if config else REQUEST_TIMEOUT
     url = f"{_base}/chat/completions"
-    headers = {"Authorization": f"Bearer {_key}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "sft-label/0.1.0",
+    }
     payload = {
         "model": model,
         "messages": messages,
@@ -258,7 +262,23 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
             if resp.status_code == 403:
                 # Content filtered by upstream WAF/provider — retry once to rule out transient proxy issues
                 resp_body = resp.text
-                last_error = f"HTTP 403: {resp_body[:300]}"
+                # Capture diagnostic headers to identify which layer returned the 403:
+                #   x-litellm-* → LiteLLM or upstream provider
+                #   via/x-squid/x-cache → corporate proxy
+                #   server → nginx/uvicorn/squid/etc
+                diag_keys = ("server", "via", "x-squid-error", "x-cache",
+                             "content-type", "x-litellm-version",
+                             "x-litellm-model-group", "x-litellm-call-id")
+                diag_headers = {k: resp.headers[k] for k in diag_keys if k in resp.headers}
+                is_html = "text/html" in resp.headers.get("content-type", "")
+                # Build diagnostic hint that flows with the error string everywhere
+                diag_src = ("litellm/upstream" if "x-litellm-version" in diag_headers
+                            else "proxy/WAF" if any(k in diag_headers for k in ("via", "x-squid-error", "x-cache"))
+                            else f"server={diag_headers.get('server', '?')}")
+                diag_hint = f" [source={diag_src}]"
+                if is_html:
+                    diag_hint += " [HTML response — likely WAF/proxy block page]"
+                last_error = f"HTTP 403: {resp_body[:300]}{diag_hint}"
                 if attempt < 1:
                     await asyncio.sleep(3 + random.uniform(0, 2))
                     continue
@@ -266,6 +286,8 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                     "prompt_tokens": 0, "completion_tokens": 0,
                     "error": last_error,
                     "error_response": resp_body,
+                    "error_diag_headers": diag_headers,
+                    "error_is_html": is_html,
                     "non_retryable": True,
                 }
             if resp.status_code in (429, 500, 502, 503, 504):
