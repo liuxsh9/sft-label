@@ -248,8 +248,20 @@ def _find_scored_files(input_path: Path):
         for pattern in ("scored*.json", "scored*.jsonl",
                          "*/scored*.json", "*/scored*.jsonl"):
             files.extend(input_path.glob(pattern))
-        # Deduplicate and sort
-        return sorted(set(files))
+        # Deduplicate: when both .json and .jsonl exist for the same stem
+        # in the same directory, prefer .json (avoids double-counting)
+        seen_stems = {}
+        for f in sorted(set(files)):
+            key = (f.parent, f.stem)
+            if key in seen_stems:
+                # Keep .json over .jsonl
+                existing = seen_stems[key]
+                if existing.suffix == ".jsonl" and f.suffix == ".json":
+                    seen_stems[key] = f
+                # else keep existing (.json already there)
+            else:
+                seen_stems[key] = f
+        return sorted(seen_stems.values())
 
     raise FileNotFoundError(f"Input path not found: {input_path}")
 

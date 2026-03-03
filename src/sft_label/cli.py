@@ -19,6 +19,10 @@ import sys
 
 def cmd_run(args):
     """Run the labeling pipeline."""
+    if not args.input and not args.resume:
+        print("Error: --input is required (unless using --resume)")
+        sys.exit(1)
+
     from sft_label.config import PipelineConfig
     from sft_label.pipeline import run
 
@@ -161,7 +165,7 @@ def main():
                "Override via PipelineConfig in library mode.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    run_parser.add_argument("--input", type=str, required=True,
+    run_parser.add_argument("--input", type=str, default=None,
                             help="Input file (.json/.jsonl) or directory")
     run_parser.add_argument("--output", type=str, default=None,
                             help="Output directory (default: sibling of input)")

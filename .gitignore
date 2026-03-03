@@ -10,3 +10,7 @@ build/
 *.egg
 .ruff_cache/
 uv.lock
+.claude/
+.codex/
+test_provider.py
+tests/fixtures/*-labeled-*/

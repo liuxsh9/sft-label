@@ -357,6 +357,17 @@ class TestDirectoryModeComplex:
         summary = run_filter(str(tmp_path), threshold=5.0)
         assert summary["total"] == 1
 
+    def test_directory_deduplicates_json_jsonl(self, tmp_path):
+        """When both scored.json and scored.jsonl exist, only one is loaded."""
+        data = [_scored(7.0), _scored(5.0)]
+        (tmp_path / "scored.json").write_text(json.dumps(data))
+        with open(tmp_path / "scored.jsonl", "w") as f:
+            for s in data:
+                f.write(json.dumps(s) + "\n")
+        # Both files have identical data — should NOT double-count
+        summary = run_filter(str(tmp_path), threshold=5.0)
+        assert summary["total"] == 2  # not 4
+
     def test_directory_jsonl_streaming(self, tmp_path):
         """Large JSONL file in directory mode - verify streaming works."""
         n = 100
