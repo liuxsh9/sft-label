@@ -535,3 +535,108 @@ class TestOutputPathGeneration:
         summary = run_filter(str(input_file), config=config)
         assert summary["output_jsonl"].endswith(".jsonl")
         assert summary["output_json"] is None
+
+
+# ── Conversation-level filtering ──
+
+def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None):
+    """Create a multi-turn slice sample."""
+    return {
+        "id": f"{source_id}_t{turn_index}",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+        "metadata": {
+            "source_id": source_id,
+            "turn_index": turn_index,
+            "total_turns": total_turns,
+        },
+        "labels": labels or {"difficulty": "advanced"},
+        "value": {"value_score": score},
+    }
+
+
+class TestConversationFilter:
+    def _setup_conv_data(self, tmp_path, conv_records, samples):
+        """Write scored.json and conversation_scores.json."""
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+        conv_path = tmp_path / "conversation_scores.json"
+        conv_path.write_text(json.dumps(conv_records))
+        return input_file
+
+    def test_conv_value_min(self, tmp_path):
+        samples = [
+            _mt_sample("c1", 1, 2, score=5.0),
+            _mt_sample("c1", 2, 2, score=6.0),
+            _mt_sample("c2", 1, 2, score=8.0),
+            _mt_sample("c2", 2, 2, score=9.0),
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 5.5, "conv_selection": 5.0, "peak_complexity": 4},
+            {"conversation_id": "c2", "conv_value": 8.5, "conv_selection": 8.0, "peak_complexity": 9},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=7.0)
+        summary = run_filter(str(input_file), config=config)
+        # Only c2 slices retained
+        assert summary["retained"] == 2
+
+    def test_conv_selection_min(self, tmp_path):
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 7.0, "conv_selection": 3.0, "peak_complexity": 5},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_selection_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+
+    def test_peak_complexity_min(self, tmp_path):
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 7.0, "conv_selection": 7.0, "peak_complexity": 3},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(peak_complexity_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+
+    def test_single_turn_unaffected(self, tmp_path):
+        """Single-turn samples should not be affected by conv criteria."""
+        samples = [
+            _scored(8.0),  # single-turn, no source_id
+            _mt_sample("c1", 1, 2, score=8.0),
+            _mt_sample("c1", 2, 2, score=8.0),
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 3.0, "conv_selection": 3.0, "peak_complexity": 2},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        # c1 fails conv criteria, single-turn passes through normally
+        assert summary["retained"] == 1
+
+    def test_combined_conv_and_shared(self, tmp_path):
+        """Conv criteria + shared criteria (difficulty) both apply."""
+        samples = [
+            _mt_sample("c1", 1, 2, labels={"difficulty": "advanced"}),
+            _mt_sample("c1", 2, 2, labels={"difficulty": "beginner"}),
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 8.0, "peak_complexity": 7},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=5.0, difficulty=["advanced"])
+        summary = run_filter(str(input_file), config=config)
+        # Conv passes, but only 1 slice has difficulty=advanced
+        assert summary["retained"] == 1
+
+    def test_missing_conversation_scores(self, tmp_path):
+        """When conversation_scores.json is missing, multi-turn slices are dropped."""
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+        # No conversation_scores.json written
+        config = FilterConfig(conv_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0

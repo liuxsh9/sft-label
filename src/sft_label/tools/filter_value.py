@@ -30,6 +30,10 @@ class FilterConfig:
     include_unscored: bool = False
     output_format: str = "scored"           # "scored" or "training"
     verify_source: str | None = None        # expected source file path
+    # Conversation-level criteria (multi-turn only)
+    conv_value_min: float | None = None     # min conversation-level value
+    conv_selection_min: float | None = None  # min conversation-level selection
+    peak_complexity_min: float | None = None # min peak complexity across turns
 
 
 def _parse_dim_tag(dim_tag):
@@ -141,6 +145,76 @@ def matches_filter(sample, config):
                 return False
 
     return True
+
+
+# ── Conversation-level filtering helpers ──
+
+def _load_conversation_scores(input_path):
+    """Load conversation_scores.json from input path or its subdirectories.
+
+    Returns dict {conversation_id: record}.
+    """
+    input_path = Path(input_path)
+    lookup = {}
+
+    paths_to_try = []
+    if input_path.is_file():
+        parent = input_path.parent
+        paths_to_try.append(parent / "conversation_scores.json")
+    elif input_path.is_dir():
+        paths_to_try.append(input_path / "conversation_scores.json")
+        for sub in sorted(input_path.iterdir()):
+            if sub.is_dir():
+                p = sub / "conversation_scores.json"
+                if p.exists():
+                    paths_to_try.append(p)
+
+    for p in paths_to_try:
+        if not p.exists():
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                records = json.load(f)
+            for rec in records:
+                cid = rec.get("conversation_id")
+                if cid:
+                    lookup[cid] = rec
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    return lookup
+
+
+def _matches_conv_criteria(conv_record, config):
+    """Check if a conversation record meets conversation-level criteria."""
+    if config.conv_value_min is not None:
+        cv = conv_record.get("conv_value")
+        if cv is None or cv < config.conv_value_min:
+            return False
+    if config.conv_selection_min is not None:
+        cs = conv_record.get("conv_selection")
+        if cs is None or cs < config.conv_selection_min:
+            return False
+    if config.peak_complexity_min is not None:
+        pc = conv_record.get("peak_complexity")
+        if pc is None or pc < config.peak_complexity_min:
+            return False
+    return True
+
+
+def _has_conv_criteria(config):
+    """Check if any conversation-level criteria are set."""
+    return any([
+        config.conv_value_min is not None,
+        config.conv_selection_min is not None,
+        config.peak_complexity_min is not None,
+    ])
+
+
+def _is_multi_turn(sample):
+    """Check if a sample is from a multi-turn conversation."""
+    meta = sample.get("metadata") or {}
+    return meta.get("source_id") and meta.get("total_turns", 1) > 1
 
 
 def filter_samples(samples, threshold=None, include_unscored=False, config=None):
@@ -262,6 +336,12 @@ def _generate_output_name(config, input_path):
         parts.append(config.thinking_mode)
     if config.exclude_inherited:
         parts.append("no-inherited")
+    if config.conv_value_min is not None:
+        parts.append(f"cv{config.conv_value_min:g}")
+    if config.conv_selection_min is not None:
+        parts.append(f"cs{config.conv_selection_min:g}")
+    if config.peak_complexity_min is not None:
+        parts.append(f"pc{config.peak_complexity_min:g}")
 
     suffix = "-".join(parts) if parts else "all"
 
@@ -306,14 +386,40 @@ def run_filter(input_path, threshold=None, output_path=None,
     if not scored_files:
         raise FileNotFoundError(f"No scored files found in {input_path}")
 
+    # Load conversation scores if conv criteria are set
+    use_conv = _has_conv_criteria(config)
+    conv_lookup = {}
+    if use_conv:
+        conv_lookup = _load_conversation_scores(input_path)
+
     # Filter using streaming iteration
     retained = []
     total = 0
 
     for sample in _iter_samples_from_files(scored_files):
         total += 1
-        if matches_filter(sample, config):
-            retained.append(sample)
+        if use_conv and _is_multi_turn(sample):
+            # Multi-turn: check conv criteria first
+            source_id = (sample.get("metadata") or {}).get("source_id")
+            conv_rec = conv_lookup.get(source_id) if source_id else None
+            if conv_rec is None or not _matches_conv_criteria(conv_rec, config):
+                continue
+            # Still apply shared slice criteria (tags, difficulty, thinking_mode)
+            # but skip slice-level value_min/selection_min
+            shared_config = FilterConfig(
+                include_tags=config.include_tags,
+                exclude_tags=config.exclude_tags,
+                difficulty=config.difficulty,
+                thinking_mode=config.thinking_mode,
+                exclude_inherited=config.exclude_inherited,
+                include_unscored=True,
+                verify_source=config.verify_source,
+            )
+            if matches_filter(sample, shared_config):
+                retained.append(sample)
+        else:
+            if matches_filter(sample, config):
+                retained.append(sample)
 
     n_retained = len(retained)
     n_dropped = total - n_retained
@@ -378,6 +484,12 @@ def run_filter(input_path, threshold=None, output_path=None,
         criteria.append(f"exclude_tags = {config.exclude_tags}")
     if config.exclude_inherited:
         criteria.append("exclude inherited")
+    if config.conv_value_min is not None:
+        criteria.append(f"conv_value >= {config.conv_value_min:g}")
+    if config.conv_selection_min is not None:
+        criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
+    if config.peak_complexity_min is not None:
+        criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
     filter_desc = " AND ".join(criteria) if criteria else "none"
 
     summary = {

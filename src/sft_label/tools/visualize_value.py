@@ -175,6 +175,56 @@ def compute_value_viz_data(samples, stats):
     return viz
 
 
+def _load_conversation_scores(run_dir):
+    """Load conversation_scores.json from run directory."""
+    path = run_dir / "conversation_scores.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _compute_conv_viz_data(conv_records):
+    """Compute visualization data for conversation-level aggregation."""
+    if not conv_records:
+        return None
+
+    total = len(conv_records)
+    values = [r["conv_value"] for r in conv_records if r.get("conv_value") is not None]
+    selections = [r["conv_selection"] for r in conv_records if r.get("conv_selection") is not None]
+    peaks = [r["peak_complexity"] for r in conv_records if r.get("peak_complexity") is not None]
+    turns = [r["turn_count"] for r in conv_records]
+
+    viz = {
+        "total": total,
+        "mean_conv_value": sum(values) / len(values) if values else 0,
+        "mean_conv_selection": sum(selections) / len(selections) if selections else 0,
+        "mean_peak_complexity": sum(peaks) / len(peaks) if peaks else 0,
+        "mean_turns": sum(turns) / len(turns) if turns else 0,
+    }
+
+    # Histograms (bins 1-10)
+    for key, data in [("conv_value", values), ("conv_selection", selections),
+                       ("peak_complexity", peaks)]:
+        bins = [0] * 10
+        for v in data:
+            if isinstance(v, (int, float)) and 1 <= v <= 10:
+                idx = min(int(v) - 1, 9)
+                bins[idx] += 1
+        viz[f"{key}_hist"] = bins
+
+    # Turn count distribution
+    turn_counts = {}
+    for t in turns:
+        turn_counts[t] = turn_counts.get(t, 0) + 1
+    viz["turn_distribution"] = turn_counts
+
+    return viz
+
+
 def _load_pass1_data(run_dir, is_global):
     """Try to load Pass 1 viz data from the same run directory.
 
@@ -316,6 +366,7 @@ tr:hover td { background: #f9fafb; }
 <script>
 const DATA_P1 = __DATA_P1_PLACEHOLDER__;
 const DATA_P2 = __DATA_P2_PLACEHOLDER__;
+const DATA_CONV = __DATA_CONV_PLACEHOLDER__;
 
 // ── Shared utilities ──
 function scoreColor(v) {
@@ -755,6 +806,49 @@ function sortTable(col) {
     rows.forEach(r => tbody.appendChild(r));
 }
 
+// ── Conversation-level rendering ──
+function renderConversations() {
+    if (!DATA_CONV) return;
+    const el = document.getElementById('dashboard');
+    let html = el.innerHTML;
+
+    html += '<hr class="pass-divider">';
+    html += '<div class="section"><h2>Conversation-Level Aggregation</h2>';
+
+    // Overview cards
+    html += '<div class="cards">';
+    html += `<div class="card"><div class="label">Conversations</div><div class="value">${DATA_CONV.total}</div></div>`;
+    html += `<div class="card"><div class="label">Mean Conv Value</div><div class="value" style="color:${scoreColor(DATA_CONV.mean_conv_value)}">${DATA_CONV.mean_conv_value.toFixed(1)}</div></div>`;
+    html += `<div class="card"><div class="label">Mean Conv Selection</div><div class="value" style="color:${scoreColor(DATA_CONV.mean_conv_selection)}">${DATA_CONV.mean_conv_selection.toFixed(1)}</div></div>`;
+    html += `<div class="card"><div class="label">Mean Peak Complexity</div><div class="value" style="color:${scoreColor(DATA_CONV.mean_peak_complexity)}">${DATA_CONV.mean_peak_complexity.toFixed(1)}</div></div>`;
+    html += `<div class="card"><div class="label">Mean Turns</div><div class="value">${DATA_CONV.mean_turns.toFixed(1)}</div></div>`;
+    html += '</div>';
+
+    // Histograms
+    const convHistKeys = [
+        ['conv_value_hist', 'Conv Value', '#3b82f6'],
+        ['conv_selection_hist', 'Conv Selection', '#db2777'],
+        ['peak_complexity_hist', 'Peak Complexity', '#ea580c'],
+    ];
+    html += '<div class="grid">';
+    for (const [key, label, color] of convHistKeys) {
+        const bins = DATA_CONV[key];
+        if (bins) {
+            html += `<div class="panel">${renderHistogram(bins, label, color, {})}</div>`;
+        }
+    }
+
+    // Turn distribution
+    const td = DATA_CONV.turn_distribution || {};
+    if (Object.keys(td).length > 0) {
+        const items = Object.entries(td).map(([k, v]) => [k + ' turns', v]).sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+        html += `<div class="panel"><h3>Turn Count Distribution</h3>${renderBarChart(items, null, '#0891b2')}</div>`;
+    }
+    html += '</div></div>';
+
+    el.innerHTML = html;
+}
+
 // ── Build subtitle and render ──
 const parts = [];
 if (DATA_P1) parts.push(`${DATA_P1.total} labeled`);
@@ -765,6 +859,7 @@ document.getElementById('subtitle').textContent = parts.join(' \u00b7 ');
 
 if (DATA_P1) renderPass1(DATA_P1);
 renderPass2();
+renderConversations();
 </script>
 </body>
 </html>"""
@@ -791,12 +886,19 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
     is_global = scored_file is None
     viz_data_p1 = _load_pass1_data(run_dir, is_global)
 
+    # Load conversation-level aggregation data
+    conv_records = _load_conversation_scores(run_dir)
+    viz_data_conv = _compute_conv_viz_data(conv_records)
+
     html = COMBINED_HTML_TEMPLATE.replace(
         "__DATA_P1_PLACEHOLDER__",
         json.dumps(viz_data_p1, ensure_ascii=False) if viz_data_p1 else "null"
     ).replace(
         "__DATA_P2_PLACEHOLDER__",
         json.dumps(viz_data_p2, ensure_ascii=False)
+    ).replace(
+        "__DATA_CONV_PLACEHOLDER__",
+        json.dumps(viz_data_conv, ensure_ascii=False) if viz_data_conv else "null"
     )
 
     out = run_dir / output_file

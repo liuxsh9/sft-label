@@ -104,6 +104,12 @@ KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 SELECTION_INTRA_WEIGHT = 0.75      # weight for intra-class quality vs global rarity
 SELECTION_MIN_GROUP_SIZE = 30      # min samples per tag to compute intra-class percentile
 
+# ─── Conversation-Level Aggregation (Post-scoring, no LLM) ──
+CONV_CONFIDENCE_INHERITED = 0.7           # confidence weight for inherited slices
+CONV_QUALITY_PENALTIES = {3: 0.5, 5: 0.8} # quality_floor < key → penalty multiplier
+CONV_QUALITY_PENALTY_DEFAULT = 1.0        # penalty when floor >= max(keys)
+CONV_FLAG_PENALTY_BASE = 0.95             # 0.95 ^ len(negative_flags)
+
 
 # ═══════════════════════════════════════════════════════════
 # Runtime-Overridable Config

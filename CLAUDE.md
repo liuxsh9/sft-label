@@ -33,6 +33,11 @@ uv run sft-label filter --input scored.json --threshold 6.0
 uv run sft-label filter --input scored.json --value-min 6 --difficulty advanced,expert
 uv run sft-label filter --input run_dir/ --value-min 7 --format training
 uv run sft-label filter --input scored.json --value-min 6 --exclude-inherited --thinking-mode slow
+
+# Filter by conversation-level metrics (multi-turn)
+uv run sft-label filter --input scored.json --conv-value-min 7
+uv run sft-label filter --input run_dir/ --conv-value-min 6 --conv-selection-min 5
+uv run sft-label filter --input scored.json --conv-value-min 7 --peak-complexity-min 6 --format training
 ```
 
 ## Architecture
@@ -53,8 +58,17 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 4. **Validation** — `validate_score_response()` checks all fields, converts types, tracks unknown flags
 5. **Aggregation** — weighted composite `value_score`, aggregate statistics, dashboard generation
 
+**Pass 2.5: Conversation Aggregation** (in `conversation.py`):
+- Post-scoring, no LLM — groups multi-turn slices by `source_id`, computes conversation-level metrics
+- Position-weighted averaging (later turns weighted 1→3×), inherited slices get 0.7× confidence
+- Quality floor penalty (min quality < 3 → 0.5×, < 5 → 0.8×) and negative flag penalty (0.95^count)
+- `conv_value` = weighted_avg(value_scores) × penalty, clamped [1,10]
+- `conv_selection` = 0.75×intra_class_rank + 0.25×conv_rarity (per-tag percentile, same as sample-level but on conversations)
+- Outputs `conversation_scores.json` alongside scored data
+
 **Pass 3: Filtering & Selection** (in `tools/filter_value.py`):
 - Multi-condition filtering: `value_min`, `selection_min`, `include_tags`/`exclude_tags`, `difficulty`, `thinking_mode`, `exclude_inherited`, `verify_source`
+- Conversation-level filtering: `conv_value_min`, `conv_selection_min`, `peak_complexity_min` — applies to multi-turn slices via conversation_scores.json lookup
 - Criteria use AND logic between different types, OR logic within tag lists
 - Output formats: `scored` (preserves labels/scores) or `training` (training-ready, strips metadata)
 - Training output for Pangu-original data uses `to_pangu_pseudo_multiturn()` in `preprocessing.py` to reconstruct the pseudo-multi-turn format with `[unused*]` tokens
@@ -90,6 +104,7 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 |------|---------|
 | `src/sft_label/pipeline.py` | Pass 1 labeling pipeline, `async_llm_call()` |
 | `src/sft_label/scoring.py` | Pass 2 value scoring pipeline |
+| `src/sft_label/conversation.py` | Pass 2.5 conversation-level aggregation (no LLM) |
 | `src/sft_label/preprocessing.py` | Format detection, slicing, truncation (both Pass 1 and Pass 2) |
 | `src/sft_label/prompts.py` | Pass 1 system prompts, TAG_POOLS |
 | `src/sft_label/prompts_value.py` | Pass 2 scoring prompts, few-shot examples |

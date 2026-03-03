@@ -1329,6 +1329,25 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
 
+    # Conversation-level aggregation (re-read scored.jsonl for chunked mode)
+    try:
+        from sft_label.conversation import aggregate_conversations, write_conversation_scores
+        scored_path = output_dir / "scored.jsonl"
+        if scored_path.exists():
+            conv_samples = []
+            with open(scored_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        conv_samples.append(json.loads(line))
+            conv_records = aggregate_conversations(conv_samples)
+            if conv_records:
+                write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+                print(f"  Conversations: {len(conv_records)} → conversation_scores.json")
+            del conv_samples
+    except Exception as e:
+        print(f"  Warning: conversation aggregation failed: {e}")
+
     # Dashboard
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
@@ -1646,6 +1665,16 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
 
+    # Conversation-level aggregation
+    try:
+        from sft_label.conversation import aggregate_conversations, write_conversation_scores
+        conv_records = aggregate_conversations(samples)
+        if conv_records:
+            write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+            print(f"  Conversations: {len(conv_records)} → conversation_scores.json")
+    except Exception as e:
+        print(f"  Warning: conversation aggregation failed: {e}")
+
     # Dashboard
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
@@ -1746,6 +1775,16 @@ def _flush_scoring_file(collector, config, pprint=print):
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
+
+    # Conversation-level aggregation
+    try:
+        from sft_label.conversation import aggregate_conversations, write_conversation_scores
+        conv_records = aggregate_conversations(samples)
+        if conv_records:
+            write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+            pprint(f"  Conversations: {len(conv_records)} → conversation_scores.json")
+    except Exception:
+        pass
 
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
@@ -2004,6 +2043,36 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         summary_path = output_dir / "summary_stats_value.json"
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
+
+        # Global conversation-level aggregation across all files
+        try:
+            from sft_label.conversation import aggregate_conversations, write_conversation_scores
+            all_conv_samples = []
+            for sub in sorted(output_dir.iterdir()):
+                if not sub.is_dir():
+                    continue
+                for pattern in ("scored.json", "scored.jsonl"):
+                    p = sub / pattern
+                    if p.exists():
+                        if p.suffix == ".jsonl":
+                            with open(p, encoding="utf-8") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if line:
+                                        all_conv_samples.append(json.loads(line))
+                        else:
+                            with open(p, encoding="utf-8") as f:
+                                data = json.load(f)
+                            if isinstance(data, list):
+                                all_conv_samples.extend(data)
+                        break  # prefer .json, skip .jsonl if .json found
+            conv_records = aggregate_conversations(all_conv_samples)
+            if conv_records:
+                write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+                print(f"  Global conversations: {len(conv_records)} → conversation_scores.json")
+            del all_conv_samples
+        except Exception as e:
+            print(f"  Warning: global conversation aggregation failed: {e}")
 
         # Global dashboard
         try:

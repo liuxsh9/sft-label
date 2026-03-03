@@ -108,6 +108,9 @@ def cmd_filter(args):
         include_unscored=args.include_unscored,
         output_format=args.output_format,
         verify_source=args.verify_source,
+        conv_value_min=args.conv_value_min,
+        conv_selection_min=args.conv_selection_min,
+        peak_complexity_min=args.peak_complexity_min,
     )
 
     # Validate: at least one criterion must be set
@@ -120,6 +123,9 @@ def cmd_filter(args):
         config.thinking_mode,
         config.exclude_inherited,
         config.verify_source,
+        config.conv_value_min is not None,
+        config.conv_selection_min is not None,
+        config.peak_complexity_min is not None,
     ])
     if not has_criterion and not config.include_unscored:
         print("Error: At least one filter criterion is required "
@@ -234,6 +240,12 @@ def main():
                                 help="Output format: 'scored' (with labels) or 'training' (training-ready)")
     filter_parser.add_argument("--verify-source", type=str, default=None,
                                 help="Only retain samples from this source file path")
+    filter_parser.add_argument("--conv-value-min", type=float, default=None,
+                                help="Min conversation-level value score (multi-turn)")
+    filter_parser.add_argument("--conv-selection-min", type=float, default=None,
+                                help="Min conversation-level selection score (multi-turn)")
+    filter_parser.add_argument("--peak-complexity-min", type=float, default=None,
+                                help="Min peak complexity across turns (multi-turn)")
 
     args = parser.parse_args()
 
