@@ -1125,6 +1125,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     out_scored = open(output_dir / "scored.jsonl", "w", encoding="utf-8")
     out_monitor = open(output_dir / "monitor_value.jsonl", "w", encoding="utf-8")
     out_failed = open(output_dir / "failed_value.jsonl", "w", encoding="utf-8")
+    out_failures_log = open(output_dir / "score_failures.jsonl", "w", encoding="utf-8")
 
     try:
         async with httpx.AsyncClient(
@@ -1224,6 +1225,15 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     else:
                         failed_count += 1
                         out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                        # Failure log record
+                        record = {
+                            "sample_id": sample.get("id", f"sample-{chunk_data['offset'] + i}"),
+                            "status": monitor["status"] if monitor else "no_result",
+                            "error": (monitor.get("error", "") if monitor else "no monitor record"),
+                            "error_response": (monitor.get("error_response", "")[:1000] if monitor else ""),
+                            "attempts": (monitor.get("attempts", 0) if monitor else 0),
+                        }
+                        out_failures_log.write(json.dumps(record, ensure_ascii=False) + "\n")
 
                     out_scored.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
@@ -1257,8 +1267,11 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
                         if not value and not first_error_logged and monitor:
                             err = monitor.get("error", "unknown")
+                            err_resp = monitor.get("error_response", "")
                             print(f"  [!] First failure: sample={monitor.get('sample_id')} "
                                   f"attempts={monitor.get('attempts')} err={err[:200]}")
+                            if err_resp and err_resp != err:
+                                print(f"      response={err_resp[:200]}")
                             first_error_logged = True
 
                         progress.update(task, advance=1,
@@ -1274,6 +1287,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         out_scored.close()
         out_monitor.close()
         out_failed.close()
+        out_failures_log.close()
 
     elapsed = time.time() - start_time
 
@@ -1281,6 +1295,11 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     failed_path = output_dir / "failed_value.jsonl"
     if failed_path.exists() and failed_path.stat().st_size == 0:
         failed_path.unlink()
+
+    # Remove empty failure log
+    failures_log_path = output_dir / "score_failures.jsonl"
+    if failures_log_path.exists() and failures_log_path.stat().st_size == 0:
+        failures_log_path.unlink()
 
     # ── Compute selection scores from summaries ──
     selection_results = compute_selection_scores_from_summaries(
@@ -1598,8 +1617,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                 failed_count += 1
                 if not first_error_logged and monitor:
                     err = monitor.get("error", "unknown")
+                    err_resp = monitor.get("error_response", "")
                     print(f"  [!] First failure: sample={monitor.get('sample_id')} "
                           f"attempts={monitor.get('attempts')} err={err[:200]}")
+                    if err_resp and err_resp != err:
+                        print(f"      response={err_resp[:200]}")
                     first_error_logged = True
             return idx
 
@@ -1646,6 +1668,21 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         with open(failed_path, "w", encoding="utf-8") as f:
             for s in failed_samples:
                 f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    # Failure log (aligned with Pass 1 format)
+    failed_indices = [i for i, v in enumerate(all_values) if v is None]
+    if failed_indices:
+        with open(output_dir / "score_failures.jsonl", "w", encoding="utf-8") as f:
+            for i in failed_indices:
+                m = all_monitors[i]
+                record = {
+                    "sample_id": samples[i].get("id", f"sample-{i}"),
+                    "status": m["status"] if m else "no_result",
+                    "error": (m.get("error", "") if m else "no monitor record"),
+                    "error_response": (m.get("error_response", "")[:1000] if m else ""),
+                    "attempts": (m.get("attempts", 0) if m else 0),
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     # Stats
     stats = compute_value_stats(samples, [m for m in all_monitors if m])
@@ -1758,6 +1795,22 @@ def _flush_scoring_file(collector, config, pprint=print):
         with open(failed_path, "w", encoding="utf-8") as f:
             for s in failed_samples:
                 f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    # Failure log (aligned with Pass 1 format)
+    failed_indices = [i for i, v in enumerate(all_values) if v is None]
+    if failed_indices:
+        with open(output_dir / "score_failures.jsonl", "w", encoding="utf-8") as f:
+            for i in failed_indices:
+                m = all_monitors[i]
+                record = {
+                    "sample_id": samples[i].get("id", f"sample-{i}"),
+                    "source_file": str(collector.labeled_path),
+                    "status": m["status"] if m else "no_result",
+                    "error": (m.get("error", "") if m else "no monitor record"),
+                    "error_response": (m.get("error_response", "")[:1000] if m else ""),
+                    "attempts": (m.get("attempts", 0) if m else 0),
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     valid_monitors = [m for m in all_monitors if m]
     stats = compute_value_stats(samples, valid_monitors)
@@ -2003,7 +2056,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         c.fail += 1
                         if not first_error_logged and monitor:
                             err = monitor.get("error", "unknown")
+                            err_resp = monitor.get("error_response", "")
                             pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
+                            if err_resp and err_resp != err:
+                                pprint(f"      response={err_resp[:200]}")
                             first_error_logged = True
 
                     total_ok = sum(cc.ok for cc in collectors.values())

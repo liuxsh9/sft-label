@@ -250,6 +250,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
         "max_tokens": max_tokens,
     }
     last_error = None
+    last_error_response = None
 
     for attempt in range(max_retries + 1):
         try:
@@ -272,6 +273,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 base_wait = min(2 ** attempt * 3 + 2, 60)
                 wait = base_wait + random.uniform(0, base_wait * 0.5)
                 last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                last_error_response = resp.text
                 if attempt < max_retries:
                     await asyncio.sleep(wait)
                     continue
@@ -288,10 +290,13 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 )):
                     return None, f"HTTP 400: {error_text[:300]}", {
                         "prompt_tokens": 0, "completion_tokens": 0,
-                        "error": f"HTTP 400: {error_text[:300]}", "non_retryable": True,
+                        "error": f"HTTP 400: {error_text[:300]}",
+                        "error_response": resp.text,
+                        "non_retryable": True,
                     }
                 # Likely a transient proxy/supplier error — retry with backoff
                 last_error = f"HTTP 400 (transient): {error_text[:200]}"
+                last_error_response = resp.text
                 if attempt < max_retries:
                     base_wait = min(2 ** attempt * 3 + 2, 60)
                     await asyncio.sleep(base_wait + random.uniform(0, base_wait * 0.5))
@@ -301,7 +306,9 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 error_text = resp.text[:300]
                 return None, f"HTTP 401: {error_text}", {
                     "prompt_tokens": 0, "completion_tokens": 0,
-                    "error": f"HTTP 401: {error_text}", "non_retryable": True,
+                    "error": f"HTTP 401: {error_text}",
+                    "error_response": resp.text,
+                    "non_retryable": True,
                 }
             resp.raise_for_status()
             data = resp.json()
@@ -347,7 +354,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 continue
             return None, str(e), {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error}
 
-    return None, f"max retries exceeded: {last_error}", {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error or "max_retries"}
+    return None, f"max retries exceeded: {last_error}", {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error or "max_retries", "error_response": last_error_response}
 
 
 # ─────────────────────────────────────────────────────────
@@ -950,7 +957,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
             "source_file": str(collector.abs_path),
             "status": m["status"] if m else "no_result",
             "error": (m.get("error", "") if m else "no monitor record"),
-            "error_response": (m.get("error_response", "")[:200] if m else ""),
+            "error_response": (m.get("error_response", "")[:1000] if m else ""),
             "attempts": (m.get("sample_attempt", 0) + 1 if m else 0),
         }
         failure_records.append(record)
@@ -1653,7 +1660,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                     "source_file": str(input_path),
                     "status": m["status"] if m else "timeout",
                     "error": (m.get("error", "") if m else "exceeded sample timeout"),
-                    "error_response": (m.get("error_response", "")[:200] if m else ""),
+                    "error_response": (m.get("error_response", "")[:1000] if m else ""),
                     "attempts": (m.get("sample_attempt", 0) + 1 if m else 0),
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
