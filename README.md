@@ -3,8 +3,10 @@
 SFT Capability Taxonomy & Auto-Labeling Pipeline.
 
 Two-pass automated labeling pipeline for SFT code-generation training data:
-- **Pass 1 (Tag Labeling)**: 9-category taxonomy (221 tags) via LLM calls
+- **Pass 1 (Tag Labeling)**: 9-category taxonomy (224 tags) via LLM calls
 - **Pass 2 (Value Scoring)**: Complexity, quality, reasoning, and rarity scoring for data selection
+- **Pass 2.5 (Conversation Aggregation)**: Conversation-level metrics from multi-turn slices (no LLM)
+- **Pass 3 (Filtering & Selection)**: Multi-condition sample and conversation filtering
 
 ## Install
 
@@ -62,6 +64,11 @@ sft-label filter --input scored.json --value-min 6 --difficulty advanced,expert
 sft-label filter --input scored.json --selection-min 7.0 --exclude-inherited
 sft-label filter --input run_dir/ --value-min 7 --format training
 sft-label filter --input scored.json --value-min 6 --thinking-mode slow
+
+# Filter by conversation-level metrics (multi-turn)
+sft-label filter --input scored.json --conv-value-min 7
+sft-label filter --input run_dir/ --conv-value-min 6 --conv-selection-min 5
+sft-label filter --input scored.json --turn-value-min 5 --turn-count-min 3
 
 # Validate taxonomy
 sft-label validate
@@ -123,11 +130,19 @@ Input (ShareGPT JSON / Pangu JSONL)
   │   ├─ COT-preserving truncation: head + middle fragments + tail
   │   ├─ LLM scoring: complexity, quality, reasoning (1 call per sample)
   │   ├─ Weighted aggregation: value_score = Σ(weight × dimension)
-  │   ├─ Selection score: intra-class quality ranking + global rarity
+  │   ├─ Selection score: intra-class rank + absolute quality + global rarity
   │   └─ Output: scored.json + stats_value.json + dashboard_value.html
   │
+  ├─ Pass 2.5: Conversation Aggregation (conversation.py)
+  │   ├─ Group multi-turn slices by source conversation
+  │   ├─ Position-weighted averaging (later turns weighted higher)
+  │   ├─ Quality floor + negative flag penalties
+  │   └─ Output: conversation_scores.json (conv_value, conv_selection)
+  │
   └─ Pass 3: Filtering & Selection (tools/filter_value.py)
-      ├─ Multi-condition: value_min, selection_min, difficulty, thinking_mode
+      ├─ Sample-level: value_min, selection_min, difficulty, thinking_mode
+      ├─ Conversation-level: conv_value_min, conv_selection_min, peak_complexity_min
+      ├─ Turn-level: turn_value_min, turn_count_min/max, keep_first_last
       ├─ Tag filtering: include_tags / exclude_tags (dim:tag format)
       ├─ Source control: exclude_inherited, verify_source
       └─ Output formats: scored (preserves metadata) or training (stripped)
@@ -135,17 +150,17 @@ Input (ShareGPT JSON / Pangu JSONL)
 
 ## Taxonomy (Pass 1)
 
-9 orthogonal categories, 221 tags:
+9 orthogonal categories, 224 tags:
 
 | Category   | Tags | Select |
 |-----------|------|--------|
-| Intent     | 5    | single |
+| Intent     | 6    | single |
 | Difficulty | 4    | single |
 | Context    | 10   | single |
 | Language   | 75   | multi  |
 | Domain     | 38   | multi  |
-| Task       | 21   | multi  |
-| Concept    | 25   | multi  |
+| Task       | 22   | multi  |
+| Concept    | 26   | multi  |
 | Agentic    | 23   | multi  |
 | Constraint | 20   | multi  |
 
@@ -156,12 +171,12 @@ Each sample receives multi-dimensional scores (1-10):
 | Dimension   | Sub-scores | Weight |
 |------------|-----------|--------|
 | Complexity  | instruction, reasoning, implementation | 0.25 |
-| Quality     | correctness, code_quality, explanation, completeness | 0.35 |
-| Reasoning   | clarity, consistency, self_correction | 0.15 |
-| Rarity      | tag IDF, combo rarity (computed, no LLM) | 0.25 |
+| Quality     | correctness, code_quality, explanation, completeness | 0.40 |
+| Reasoning   | clarity, consistency, self_correction | 0.20 |
+| Rarity      | tag IDF, combo rarity (computed, no LLM) | 0.15 |
 
 Additional outputs per sample:
-- `selection_score`: Intra-class quality percentile × global rarity (0.75/0.25 weight), for data selection
+- `selection_score`: Weighted fusion of intra-class percentile rank (0.55), absolute quality (0.20), and global rarity (0.25)
 - `flags`: Qualitative markers (e.g., `has-bug`, `excellent-explanation`, `clean-code`)
 - `thinking_mode`: Auto-detected `slow` (explicit COT) or `fast` (inline reasoning)
 - `confidence`: Model confidence in its assessment (0-1)
@@ -171,6 +186,7 @@ Additional outputs per sample:
 | File | Contents |
 |------|----------|
 | `scored.json` | Labeled samples with `value` field added |
+| `conversation_scores.json` | Conversation-level aggregated metrics (multi-turn) |
 | `stats_value.json` | Aggregate statistics, score distributions, cross-analysis |
 | `dashboard_value.html` | Self-contained interactive dashboard |
 | `monitor_value.jsonl` | Per-sample LLM call metadata |
@@ -202,6 +218,16 @@ Multi-condition sample selection with AND logic between criteria, OR within tag 
 | Exclude inherited | `--exclude-inherited` | Drops sparse-sampled inherited labels |
 | Source verification | `--verify-source` | `--verify-source original.json` |
 | Output format | `--format` | `scored` (default) or `training` (stripped) |
+
+Conversation-level criteria (multi-turn):
+
+| Criterion | Flag | Example |
+|-----------|------|---------|
+| Conv value | `--conv-value-min` | `--conv-value-min 7` |
+| Conv selection | `--conv-selection-min` | `--conv-selection-min 5` |
+| Peak complexity | `--peak-complexity-min` | `--peak-complexity-min 6` |
+| Turn count | `--turn-count-min/max` | `--turn-count-min 3 --turn-count-max 20` |
+| Turn-level pruning | `--turn-value-min` | `--turn-value-min 5` (prune low-value turns) |
 
 ## Development
 
