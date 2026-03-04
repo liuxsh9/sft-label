@@ -104,17 +104,17 @@ class TestPositionWeight:
 
     def test_two(self):
         assert _position_weight(0, 2) == 1.0
-        assert _position_weight(1, 2) == 3.0
+        assert _position_weight(1, 2) == 2.0
 
     def test_three(self):
         assert _position_weight(0, 3) == 1.0
-        assert _position_weight(1, 3) == pytest.approx(2.0)
-        assert _position_weight(2, 3) == 3.0
+        assert _position_weight(1, 3) == pytest.approx(1.5)
+        assert _position_weight(2, 3) == 2.0
 
     def test_five(self):
         assert _position_weight(0, 5) == 1.0
-        assert _position_weight(2, 5) == pytest.approx(2.0)
-        assert _position_weight(4, 5) == 3.0
+        assert _position_weight(2, 5) == pytest.approx(1.5)
+        assert _position_weight(4, 5) == 2.0
 
 
 # ── TestEffectiveWeights ──
@@ -124,20 +124,20 @@ class TestEffectiveWeights:
         slices = [_slice("c", 1, 2), _slice("c", 2, 2)]
         weights = _effective_weights(slices)
         assert weights[0] == pytest.approx(1.0)
-        assert weights[1] == pytest.approx(3.0)
+        assert weights[1] == pytest.approx(2.0)
 
     def test_with_inherited(self):
         slices = [_slice("c", 1, 2, inherited=True), _slice("c", 2, 2)]
         weights = _effective_weights(slices)
         assert weights[0] == pytest.approx(0.7)
-        assert weights[1] == pytest.approx(3.0)
+        assert weights[1] == pytest.approx(2.0)
 
     def test_all_inherited(self):
         slices = [_slice("c", 1, 2, inherited=True),
                   _slice("c", 2, 2, inherited=True)]
         weights = _effective_weights(slices)
         assert weights[0] == pytest.approx(0.7)
-        assert weights[1] == pytest.approx(2.1)
+        assert weights[1] == pytest.approx(1.4)
 
 
 # ── TestComputePenalty ──

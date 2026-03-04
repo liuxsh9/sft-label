@@ -454,6 +454,10 @@ TAG_ALIASES = {
     "write-tests": "testing-task",
     # domain
     "security": "cybersecurity",
+    # intent — modify aliases
+    "refactor": "modify",
+    "optimize": "modify",
+    "transform": "modify",
 }
 
 # Tags that belong to a DIFFERENT category — drop from the current dimension

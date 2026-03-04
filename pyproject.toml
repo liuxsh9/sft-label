@@ -20,6 +20,10 @@ dev = [
     "pytest-asyncio>=0.21",
     "ruff",
 ]
+data = [
+    "huggingface_hub>=0.20",
+    "datasets>=2.16",
+]
 
 [build-system]
 requires = ["hatchling"]

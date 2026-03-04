@@ -71,6 +71,10 @@ CONSISTENCY_RULES = [
      "Context=snippet contradicts agentic=multi-file-coordination"),
     ("intent == 'review' and 'code-review-task' not in task and len(task) > 0",
      "Intent=review but no code-review-task in task"),
+    ("intent == 'modify' and 'code-refactoring' not in task "
+     "and 'code-optimization' not in task and 'migration' not in task "
+     "and 'code-translation' not in task and len(task) > 0",
+     "Intent=modify but no modify-relevant task (refactoring/optimization/migration/translation)"),
 ]
 
 # ═══════════════════════════════════════════════════════════
@@ -87,7 +91,7 @@ VALUE_WEIGHTS = {
     "rarity": 0.15,
 }
 RARITY_WEIGHTS = {
-    "intent": 0.3,
+    "intent": 0.15,
     "difficulty": 0.3,
     "context": 0.5,
     "language": 1.0,
@@ -128,6 +132,9 @@ CONV_CONFIDENCE_INHERITED = 0.7           # confidence weight for inherited slic
 CONV_QUALITY_PENALTIES = {3: 0.5, 5: 0.8} # quality_floor < key → penalty multiplier
 CONV_QUALITY_PENALTY_DEFAULT = 1.0        # penalty when floor >= max(keys)
 CONV_FLAG_PENALTY_BASE = 0.95             # 0.95 ^ len(negative_flags)
+
+# ─── Rationale (exploratory, default off) ──────────────
+ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -176,3 +183,4 @@ class PipelineConfig:
     selection_intra_weight: float = SELECTION_INTRA_WEIGHT
     selection_min_group_size: int = SELECTION_MIN_GROUP_SIZE
     selection_smoothing_prior: int = SELECTION_SMOOTHING_PRIOR
+    enable_rationale: bool = ENABLE_RATIONALE

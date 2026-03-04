@@ -79,6 +79,15 @@ This dimension adapts based on the thinking_mode in <meta>:
 - **self_correction** (true/false): Does the response acknowledge limitations or alternatives?
 - **overall** (1-10): How well-reasoned is the approach? Focus on whether the chosen algorithm/design is well-justified and trade-offs are acknowledged — NOT on explanation quality (which is covered by quality.explanation).
 
+Score anchors:
+  1-2: No reasoning visible — bare code dump with zero justification
+  3-4: Minimal — brief comments or surface-level "this works" statements
+  5-6: Adequate — reasoning present but routine; standard approach without deeper insight
+  7-8: Clear multi-step reasoning, trade-offs acknowledged, approach well-justified
+  9-10: Exceptional — systematic analysis, alternatives explored, rigorous self-correction
+
+For fast-mode samples, the absence of a separate COT block does NOT itself indicate lower reasoning quality. A concise but well-justified approach can score 7-8.
+
 ## Flags
 
 Optionally tag notable qualities. Use ONLY these flag values:
@@ -91,6 +100,7 @@ Flag criteria (be selective — most samples should have 0-1 flags):
 - comprehensive-testing: Must include actual test code (unit tests, assertions, test cases) covering multiple scenarios including edge cases. Simply mentioning "you should test" or having 1-2 basic asserts does NOT qualify.
 - excellent-explanation: Explanation that teaches transferable concepts or provides deep insight, not just describes what the code does line-by-line.
 - good-error-handling: Thoughtful, non-trivial error strategy (custom error types, retry logic, graceful degradation). Basic try/catch alone does NOT qualify.
+- creative-solution: Uses an approach that is notably non-obvious — e.g., an elegant algorithmic insight, a clever use of language features, or a particularly efficient design. Standard well-known patterns do NOT qualify even if well-implemented.
 - has-bug: Only for bugs that would cause incorrect output or runtime errors, not minor style issues or missing edge cases.
 - incomplete: The response is missing major requested functionality, not just minor details.
 - hallucination: The response fabricates non-existent APIs, libraries, functions, or language features.
@@ -408,8 +418,27 @@ This server uses `context.WithCancel`... [content truncated, showing 4200 of 120
 # Message builder
 # ─────────────────────────────────────────────────────────
 
+# Rationale addon (injected when ENABLE_RATIONALE=True)
+RATIONALE_ADDON = """
+Additionally, include a brief "rationale" field (1-3 sentences, max 500 chars) explaining your key scoring decisions — what drove the overall scores up or down. This helps calibrate the scoring pipeline.
+
+Updated output format when rationale is enabled:
+```json
+{
+  "complexity": {...},
+  "quality": {...},
+  "reasoning": {...},
+  "flags": [...],
+  "confidence": 0.85,
+  "rationale": "Brief explanation of scoring decisions"
+}
+```
+"""
+
+
 def build_scoring_messages(truncated, thinking_mode, labels,
-                           total_turns, code_block_count):
+                           total_turns, code_block_count,
+                           enable_rationale=False):
     """Construct the full message array for the scoring LLM call.
 
     Args:
@@ -443,7 +472,11 @@ def build_scoring_messages(truncated, thinking_mode, labels,
 
     user_content = f"<meta>\n{meta}\n</meta>\n\n<conversation>\n{conversation}\n</conversation>"
 
-    messages = [{"role": "system", "content": SCORING_SYSTEM}]
+    system_prompt = SCORING_SYSTEM
+    if enable_rationale:
+        system_prompt = system_prompt + "\n" + RATIONALE_ADDON
+
+    messages = [{"role": "system", "content": system_prompt}]
     messages.extend(SCORING_FEWSHOT)
     messages.append({"role": "user", "content": user_content})
     return messages

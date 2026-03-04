@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 import asyncio
 import random
@@ -125,7 +126,7 @@ def compute_sample_rarity(sample_labels, idf_map, total_samples,
             if not tags:
                 continue
             tag_idf_values = [dim_idfs.get(t, math.log2(total_samples)) for t in tags]
-            dim_rarity = sum(tag_idf_values) / len(tag_idf_values)
+            dim_rarity = max(tag_idf_values)
         else:
             # Single-select dimension
             dim_rarity = dim_idfs.get(tags, math.log2(total_samples))
@@ -208,6 +209,26 @@ def normalize_rarity_scores(rarity_results):
 # Score validation
 # ─────────────────────────────────────────────────────────
 
+def _clamp_overall_to_subscores(dim_dict, sub_keys, dim_name, issues):
+    """Clamp overall to within ±2 of mean(sub_scores).
+
+    When |overall - mean(sub_scores)| > 2.0, sets overall = round(mean).
+    Operates in-place on dim_dict; appends to issues list.
+    """
+    overall = dim_dict.get("overall")
+    if overall is None:
+        return
+    valid_subs = [dim_dict[k] for k in sub_keys if dim_dict.get(k) is not None]
+    if not valid_subs:
+        return
+    mean_sub = sum(valid_subs) / len(valid_subs)
+    if abs(overall - mean_sub) > 2.0:
+        clamped = max(1, min(10, round(mean_sub)))
+        issues.append(f"{dim_name}.overall {overall} clamped to {clamped} "
+                      f"(mean sub-scores={mean_sub:.1f})")
+        dim_dict["overall"] = clamped
+
+
 def validate_score_response(parsed):
     """Validate LLM scoring response.
 
@@ -224,12 +245,15 @@ def validate_score_response(parsed):
     if isinstance(complexity, dict):
         for key in ("instruction", "analytical_depth", "implementation", "overall"):
             val = complexity.get(key)
-            if isinstance(val, (int, float)) and 1 <= val <= 10:
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and 1 <= val <= 10:
                 complexity[key] = int(val)
             else:
                 complexity[key] = None
                 issues.append(f"complexity.{key} invalid: {val}")
         result["complexity"] = complexity
+        _clamp_overall_to_subscores(
+            complexity, ["instruction", "analytical_depth", "implementation"],
+            "complexity", issues)
     else:
         result["complexity"] = {"instruction": None, "analytical_depth": None, "implementation": None, "overall": None}
         issues.append("complexity not a dict")
@@ -239,7 +263,7 @@ def validate_score_response(parsed):
     if isinstance(quality, dict):
         for key in ("correctness", "code_quality", "explanation", "completeness", "overall"):
             val = quality.get(key)
-            if isinstance(val, (int, float)) and 1 <= val <= 10:
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and 1 <= val <= 10:
                 quality[key] = int(val)
             else:
                 quality[key] = None
@@ -252,6 +276,9 @@ def validate_score_response(parsed):
                 and q_overall > q_correct + 2):
             quality["overall"] = q_correct + 2
             issues.append(f"quality.overall {q_overall} clamped to {quality['overall']} (correctness+2 rule)")
+        _clamp_overall_to_subscores(
+            quality, ["correctness", "code_quality", "explanation", "completeness"],
+            "quality", issues)
     else:
         result["quality"] = {"correctness": None, "code_quality": None, "explanation": None, "completeness": None, "overall": None}
         issues.append("quality not a dict")
@@ -261,12 +288,12 @@ def validate_score_response(parsed):
     if isinstance(reasoning, dict):
         for key in ("clarity", "consistency", "overall"):
             val = reasoning.get(key)
-            if isinstance(val, (int, float)) and 1 <= val <= 10:
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and 1 <= val <= 10:
                 reasoning[key] = int(val)
-            elif isinstance(val, bool):
-                reasoning[key] = val  # self_correction is bool
             else:
                 reasoning[key] = None
+                if val is not None:
+                    issues.append(f"reasoning.{key} invalid: {val}")
         # self_correction can be bool
         sc = reasoning.get("self_correction")
         if isinstance(sc, bool):
@@ -274,6 +301,9 @@ def validate_score_response(parsed):
         else:
             reasoning["self_correction"] = None
         result["reasoning"] = reasoning
+        _clamp_overall_to_subscores(
+            reasoning, ["clarity", "consistency"],
+            "reasoning", issues)
     else:
         result["reasoning"] = {"clarity": None, "consistency": None, "self_correction": None, "overall": None}
         issues.append("reasoning not a dict")
@@ -304,6 +334,11 @@ def validate_score_response(parsed):
     else:
         result["confidence"] = 0.5
         issues.append(f"confidence invalid: {conf}")
+
+    # Extract optional rationale (when ENABLE_RATIONALE is on)
+    rationale = parsed.get("rationale")
+    if isinstance(rationale, str) and rationale.strip():
+        result["rationale"] = rationale.strip()[:500]
 
     return result, issues
 
@@ -342,6 +377,13 @@ def compute_value_score(score_result, rarity_result, weights=None):
         components["rarity"] = rarity_result["score"]
 
     if not components:
+        return None
+
+    # Require at least 2 LLM dimensions for a reliable composite score;
+    # with only 1, weight renormalization inflates a single dimension
+    llm_dims = sum(1 for k in ("complexity", "quality", "reasoning")
+                   if k in components)
+    if llm_dims < 2:
         return None
 
     # Apply rarity default only when we have at least one LLM score
@@ -735,6 +777,7 @@ async def score_one(http_client, sample, model, rarity_result,
         labels=labels,
         total_turns=total_turns,
         code_block_count=code_block_count,
+        enable_rationale=config.enable_rationale if config else False,
     )
 
     # LLM call with retry — retry OUTSIDE semaphore
@@ -851,6 +894,34 @@ def compute_value_stats(scored_samples, all_monitors):
         "reasoning_overall": _percentiles(extract_scores("reasoning.overall")),
         "rarity_score": _percentiles(extract_scores("rarity.score")),
     }
+
+    # Distribution bias detection (quality.overall)
+    distribution_warnings = []
+    quality_scores = extract_scores("quality.overall")
+    if len(quality_scores) >= 20:
+        n_q = len(quality_scores)
+        buckets = {
+            "1-3": sum(1 for s in quality_scores if 1 <= s <= 3) / n_q * 100,
+            "4-6": sum(1 for s in quality_scores if 4 <= s <= 6) / n_q * 100,
+            "7-8": sum(1 for s in quality_scores if 7 <= s <= 8) / n_q * 100,
+            "9-10": sum(1 for s in quality_scores if 9 <= s <= 10) / n_q * 100,
+        }
+        expected = {"1-3": 15, "4-6": 50, "7-8": 30, "9-10": 5}
+        for bucket, actual_pct in buckets.items():
+            exp_pct = expected[bucket]
+            deviation = actual_pct - exp_pct
+            if abs(deviation) > 20:
+                direction = "over" if deviation > 0 else "under"
+                distribution_warnings.append(
+                    f"quality.overall bucket {bucket}: {actual_pct:.1f}% "
+                    f"({direction}-represented vs expected {exp_pct}%, "
+                    f"deviation={deviation:+.1f}pp)"
+                )
+    score_distributions["distribution_warnings"] = distribution_warnings
+
+    # Confidence distribution
+    confidence_scores = extract_scores("confidence")
+    score_distributions["confidence"] = _percentiles(confidence_scores)
 
     # Attach raw score arrays for cross-file merging (not serialized to JSON)
     _raw_scores = {
@@ -1036,7 +1107,7 @@ def _create_progress():
 
 
 async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
-                      limit=0, config=None):
+                      limit=0, config=None, resume=False):
     """Run value scoring (Pass 2) on pre-labeled data.
 
     Args:
@@ -1045,6 +1116,7 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
         tag_stats_path: Path to stats.json for rarity computation
         limit: Max samples to score (0 = all)
         config: PipelineConfig override
+        resume: If True, skip samples that already have scores in scored.jsonl
     """
     if config is None:
         config = PipelineConfig()
@@ -1055,7 +1127,7 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
     if input_path.is_dir():
         return await _run_scoring_directory(input_path, output_dir, tag_stats_path, limit, config)
     else:
-        return await _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config)
+        return await _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=resume)
 
 
 async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
@@ -1386,8 +1458,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     stats_path = output_dir / "stats_value.json"
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
-    with open(stats_path, "w", encoding="utf-8") as f:
+    tmp_stats = stats_path.with_suffix(".tmp.json")
+    with open(tmp_stats, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_stats, stats_path)
 
     # Conversation-level aggregation (re-read scored.jsonl for chunked mode)
     try:
@@ -1637,7 +1711,7 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
     print(f"\nRun dir: {run_dir}")
 
 
-async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config):
+async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=False):
     """Score a single labeled file."""
     input_path = Path(input_path)
 
@@ -1660,6 +1734,24 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     if limit > 0:
         samples = samples[:limit]
     total = len(samples)
+
+    # Resume: load previously scored samples from scored.jsonl
+    resumed_values = {}
+    if resume:
+        scored_jsonl_path = output_dir / "scored.jsonl"
+        if scored_jsonl_path.exists():
+            with open(scored_jsonl_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    scored_sample = json.loads(line)
+                    sid = scored_sample.get("id", "")
+                    v = scored_sample.get("value")
+                    if sid and v:
+                        resumed_values[sid] = v
+            if resumed_values:
+                print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
 
     # Load tag stats for rarity
     stats_ref_info = None
@@ -1713,12 +1805,26 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     all_monitors = [None] * total
     all_values = [None] * total
 
-    scored_count = 0
+    # Pre-fill resumed values
+    skipped_count = 0
+    if resumed_values:
+        for idx, s in enumerate(samples):
+            sid = s.get("id", "")
+            if sid in resumed_values:
+                all_values[idx] = resumed_values[sid]
+                all_monitors[idx] = {"sample_id": sid, "status": "resumed",
+                                     "llm_calls": 0, "prompt_tokens": 0,
+                                     "completion_tokens": 0, "attempts": 0}
+                skipped_count += 1
+
+    scored_count = skipped_count
     failed_count = 0
     first_error_logged = False
     start_time = time.time()
 
-    print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency}")
+    to_score = [i for i in range(total) if all_values[i] is None]
+    print(f"  Scoring {len(to_score)} samples (skipped {skipped_count} resumed) "
+          f"| model={config.scoring_model} concurrency={config.scoring_concurrency}")
 
     async with httpx.AsyncClient(
         proxy=None,
@@ -1751,9 +1857,9 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             return idx
 
         with _create_progress() as progress:
-            task = progress.add_task("Scoring", total=total, info="")
+            task = progress.add_task("Scoring", total=len(to_score), info="")
 
-            tasks = [asyncio.create_task(score_task(i)) for i in range(total)]
+            tasks = [asyncio.create_task(score_task(i)) for i in to_score]
             for coro in asyncio.as_completed(tasks):
                 idx = await coro
                 progress.update(task, advance=1,
@@ -1769,15 +1875,19 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     # Compute selection scores (intra-class quality ranking, no LLM)
     compute_selection_scores(samples, config=config)
 
-    # Write outputs
+    # Write outputs (atomic: write to .tmp then rename)
     scored_path = output_dir / "scored.json"
-    with open(scored_path, "w", encoding="utf-8") as f:
+    tmp_scored = scored_path.with_suffix(".tmp.json")
+    with open(tmp_scored, "w", encoding="utf-8") as f:
         json.dump(samples, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_scored, scored_path)
 
     scored_jsonl_path = output_dir / "scored.jsonl"
-    with open(scored_jsonl_path, "w", encoding="utf-8") as f:
+    tmp_jsonl = scored_jsonl_path.with_suffix(".tmp.jsonl")
+    with open(tmp_jsonl, "w", encoding="utf-8") as f:
         for s in samples:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
+    os.replace(tmp_jsonl, scored_jsonl_path)
 
     # Monitor
     monitor_path = output_dir / "monitor_value.jsonl"
@@ -1824,8 +1934,10 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     stats_path = output_dir / "stats_value.json"
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
-    with open(stats_path, "w", encoding="utf-8") as f:
+    tmp_stats = stats_path.with_suffix(".tmp.json")
+    with open(tmp_stats, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_stats, stats_path)
 
     # Conversation-level aggregation
     try:
@@ -1895,17 +2007,21 @@ def _flush_scoring_file(collector, config, pprint=print):
     # Compute selection scores (intra-class quality ranking, no LLM)
     compute_selection_scores(samples, config=config)
 
-    # Write outputs
+    # Write outputs (atomic: write to .tmp then rename)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scored_path = output_dir / "scored.json"
-    with open(scored_path, "w", encoding="utf-8") as f:
+    tmp_scored = scored_path.with_suffix(".tmp.json")
+    with open(tmp_scored, "w", encoding="utf-8") as f:
         json.dump(samples, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_scored, scored_path)
 
     scored_jsonl_path = output_dir / "scored.jsonl"
-    with open(scored_jsonl_path, "w", encoding="utf-8") as f:
+    tmp_jsonl = scored_jsonl_path.with_suffix(".tmp.jsonl")
+    with open(tmp_jsonl, "w", encoding="utf-8") as f:
         for s in samples:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
+    os.replace(tmp_jsonl, scored_jsonl_path)
 
     monitor_path = output_dir / "monitor_value.jsonl"
     with open(monitor_path, "w", encoding="utf-8") as f:
@@ -1950,8 +2066,10 @@ def _flush_scoring_file(collector, config, pprint=print):
 
     stats_path = output_dir / "stats_value.json"
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
-    with open(stats_path, "w", encoding="utf-8") as f:
+    tmp_stats = stats_path.with_suffix(".tmp.json")
+    with open(tmp_stats, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_stats, stats_path)
 
     # Conversation-level aggregation
     try:

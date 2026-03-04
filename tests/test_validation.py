@@ -2,7 +2,7 @@
 
 from sft_label.validate import run_validation, ValidationReport
 from sft_label._resources import load_taxonomy_yaml, load_all_tag_yamls
-from sft_label.pipeline import validate_tags, TAG_ALIASES, CROSS_CATEGORY_CORRECTIONS
+from sft_label.pipeline import validate_tags, TAG_ALIASES, CROSS_CATEGORY_CORRECTIONS, check_consistency
 from sft_label.prompts import TAG_POOLS
 
 
@@ -27,13 +27,18 @@ class TestValidation:
     def test_full_validation_passes(self):
         report = run_validation()
         assert not report.has_errors(), f"Validation errors: {report.errors}"
-        # Expected: 1 warning about 'make' alias
-        assert len(report.warnings) == 1
-        assert "make" in report.warnings[0]
+        # Expected warnings: 'make' alias conflict + modify aliases overlapping
+        # with existing tags (refactor→code-refactoring, optimize→code-optimization,
+        # upgrade→migration) + long description
+        assert len(report.warnings) == 5
+        warning_text = "\n".join(report.warnings)
+        assert "make" in warning_text
+        assert "refactor" in warning_text
+        assert "optimize" in warning_text
 
     def test_tag_count_matches(self):
         report = run_validation()
-        assert report.stats["Total tags"] == 223
+        assert report.stats["Total tags"] == 224
 
 
 class TestValidationReport:
@@ -156,3 +161,28 @@ class TestCrossCategoryCorrection:
         cleaned, issues = validate_tags(result, "call1")
         assert "documentation" not in cleaned["domain"]
         assert "documentation" in cleaned["task"]
+
+
+class TestModifyConsistency:
+    """Verify consistency rules for the modify intent tag."""
+
+    def test_modify_with_refactoring_passes(self):
+        labels = {"intent": "modify", "language": ["python"], "domain": [],
+                  "task": ["code-refactoring"], "difficulty": "intermediate",
+                  "concept": [], "agentic": [], "constraint": [], "context": "single-file"}
+        warnings = check_consistency(labels)
+        assert not any("modify" in w.lower() for w in warnings)
+
+    def test_modify_without_relevant_task_warns(self):
+        labels = {"intent": "modify", "language": ["python"], "domain": [],
+                  "task": ["feature-implementation"], "difficulty": "intermediate",
+                  "concept": [], "agentic": [], "constraint": [], "context": "single-file"}
+        warnings = check_consistency(labels)
+        assert any("modify" in w.lower() for w in warnings)
+
+    def test_modify_with_empty_task_no_warning(self):
+        labels = {"intent": "modify", "language": ["python"], "domain": [],
+                  "task": [], "difficulty": "intermediate",
+                  "concept": [], "agentic": [], "constraint": [], "context": "single-file"}
+        warnings = check_consistency(labels)
+        assert not any("modify" in w.lower() for w in warnings)

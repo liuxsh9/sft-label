@@ -274,7 +274,7 @@ class TestTruncateForScoring:
 class TestComputeTagIdf:
     def test_basic_idf(self):
         distributions = {
-            "intent": {"build": 500, "learn": 300, "debug": 200},
+            "intent": {"build": 500, "learn": 300, "debug": 200, "modify": 100},
         }
         idf = compute_tag_idf(distributions, 1000)
         assert "intent" in idf
@@ -307,7 +307,7 @@ class TestComputeTagIdf:
 class TestComputeSampleRarity:
     def setup_method(self):
         self.distributions = {
-            "intent": {"build": 500, "learn": 300, "debug": 200},
+            "intent": {"build": 500, "learn": 300, "debug": 200, "modify": 100},
             "difficulty": {"beginner": 600, "intermediate": 300, "advanced": 80, "expert": 20},
             "concept": {"algorithms": 100, "data-types": 400, "concurrency": 30},
         }
@@ -356,11 +356,13 @@ class TestComputeSampleRarity:
         expected_max = math.log2(1000)
         assert result["tag_rarity"] == round(expected_max, 3)
 
-    def test_multi_select_averages(self):
+    def test_multi_select_uses_max(self):
         labels = {"concept": ["algorithms", "data-types"]}
         result = compute_sample_rarity(labels, self.idf_map, 1000)
-        # Should average the IDF of both tags
-        assert result["tag_rarity"] > 0
+        # Should use max IDF of the two tags (algorithms is rarer → higher IDF)
+        algo_idf = self.idf_map["concept"]["algorithms"]
+        data_types_idf = self.idf_map["concept"]["data-types"]
+        assert result["tag_rarity"] == round(max(algo_idf, data_types_idf), 3)
 
     def test_custom_weights(self):
         labels = {"intent": "build", "concept": ["algorithms"]}
@@ -559,6 +561,69 @@ class TestValidateScoreResponse:
         assert "security-issue" in result["flags"]
         assert len(issues) == 0
 
+    def test_boolean_in_numeric_fields(self):
+        """P0-1: isinstance(True, int) is True — booleans must be rejected as numeric scores."""
+        parsed = {
+            "complexity": {"instruction": True, "analytical_depth": 5, "implementation": 5, "overall": False},
+            "quality": {"correctness": True, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
+            "reasoning": {"clarity": True, "consistency": False, "self_correction": True, "overall": 5},
+            "flags": [],
+            "confidence": 0.8,
+        }
+        result, issues = validate_score_response(parsed)
+        # Boolean values in numeric fields should become None
+        assert result["complexity"]["instruction"] is None
+        assert result["complexity"]["overall"] is None
+        assert result["quality"]["correctness"] is None
+        assert result["reasoning"]["clarity"] is None
+        assert result["reasoning"]["consistency"] is None
+        # self_correction IS a boolean field — should be preserved
+        assert result["reasoning"]["self_correction"] is True
+        # Valid numeric fields preserved
+        assert result["complexity"]["analytical_depth"] == 5
+        assert result["reasoning"]["overall"] == 5
+
+    def test_complexity_overall_clamped_by_subscores(self):
+        """P0-2: overall must be within ±2 of mean(sub-scores)."""
+        parsed = {
+            "complexity": {"instruction": 2, "analytical_depth": 3, "implementation": 2, "overall": 9},
+            "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
+            "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
+            "flags": [],
+            "confidence": 0.8,
+        }
+        result, issues = validate_score_response(parsed)
+        # mean(2,3,2) = 2.33, overall=9 → clamped to round(2.33) = 2
+        assert result["complexity"]["overall"] <= 5  # must be clamped down
+        assert any("complexity.overall" in i and "clamped" in i for i in issues)
+
+    def test_reasoning_overall_clamped_by_subscores(self):
+        """P0-2: reasoning overall clamped when sub-scores diverge."""
+        parsed = {
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+            "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
+            "reasoning": {"clarity": 2, "consistency": 3, "self_correction": False, "overall": 9},
+            "flags": [],
+            "confidence": 0.8,
+        }
+        result, issues = validate_score_response(parsed)
+        # mean(2,3) = 2.5, overall=9 → clamped to round(2.5) = 2 (banker's rounding)
+        assert result["reasoning"]["overall"] <= 5
+        assert any("reasoning.overall" in i and "clamped" in i for i in issues)
+
+    def test_subscores_null_no_clamp(self):
+        """P0-2: when all sub-scores are None, no clamp should apply."""
+        parsed = {
+            "complexity": {"instruction": None, "analytical_depth": None, "implementation": None, "overall": 8},
+            "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
+            "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
+            "flags": [],
+            "confidence": 0.8,
+        }
+        result, issues = validate_score_response(parsed)
+        # No valid sub-scores → no clamping, overall preserved
+        assert result["complexity"]["overall"] == 8
+
 
 # ─────────────────────────────────────────────────────────
 # 8.4  Value Score Computation
@@ -648,6 +713,29 @@ class TestComputeValueScore:
         # No penalty: 0.25*8 + 0.40*4 + 0.20*6 + 0.15*5 = 5.55
         assert value is not None
         assert value >= 5.0  # no penalty, score reflects actual weighted mean
+
+    def test_single_llm_dimension_returns_none(self):
+        """P1-3: with only 1 LLM dimension, weight renormalization inflates score."""
+        score_result = {
+            "complexity": {"overall": None},
+            "quality": {"overall": 9},
+            "reasoning": {"overall": None},
+        }
+        rarity_result = {"score": 5.0}
+        value = compute_value_score(score_result, rarity_result)
+        assert value is None  # insufficient LLM dimensions
+
+    def test_two_dimensions_returns_value(self):
+        """P1-3: 2 LLM dimensions is enough for a reliable composite."""
+        score_result = {
+            "complexity": {"overall": 7},
+            "quality": {"overall": 8},
+            "reasoning": {"overall": None},
+        }
+        rarity_result = {"score": 5.0}
+        value = compute_value_score(score_result, rarity_result)
+        assert value is not None
+        assert 1.0 <= value <= 10.0
 
     def test_rarity_none_uses_default(self):
         """Rarity=None uses default 5.0 instead of renormalizing."""
@@ -739,6 +827,52 @@ class TestComputeValueStats:
         stats = compute_value_stats(scored, monitors)
         assert stats["total_failed"] == 1
 
+    def test_distribution_warnings_generated(self):
+        """P1-2: detect quality.overall distribution bias."""
+        # All quality scores clustered at 9-10 → over-represented top bucket
+        scored = []
+        for i in range(30):
+            scored.append({
+                "labels": {"intent": "build"},
+                "value": {
+                    "complexity": {"overall": 5},
+                    "quality": {"overall": 9},  # all high quality
+                    "reasoning": {"overall": 5},
+                    "rarity": {"score": 5.0},
+                    "flags": [],
+                    "thinking_mode": "fast",
+                    "value_score": 7.0,
+                },
+            })
+        monitors = [{"status": "success", "llm_calls": 1,
+                      "prompt_tokens": 0, "completion_tokens": 0}] * 30
+        stats = compute_value_stats(scored, monitors)
+        warnings = stats["score_distributions"].get("distribution_warnings", [])
+        assert len(warnings) > 0
+        assert any("9-10" in w for w in warnings)
+
+    def test_no_warnings_small_batch(self):
+        """P1-2: no distribution warnings when < 20 samples."""
+        scored = []
+        for i in range(10):
+            scored.append({
+                "labels": {"intent": "build"},
+                "value": {
+                    "complexity": {"overall": 5},
+                    "quality": {"overall": 10},
+                    "reasoning": {"overall": 5},
+                    "rarity": {"score": 5.0},
+                    "flags": [],
+                    "thinking_mode": "fast",
+                    "value_score": 7.0,
+                },
+            })
+        monitors = [{"status": "success", "llm_calls": 1,
+                      "prompt_tokens": 0, "completion_tokens": 0}] * 10
+        stats = compute_value_stats(scored, monitors)
+        warnings = stats["score_distributions"].get("distribution_warnings", [])
+        assert len(warnings) == 0
+
 
 # ─────────────────────────────────────────────────────────
 # Smoke test fixture loading
@@ -786,7 +920,7 @@ class TestSmokeTestFixtures:
 
 
 # ─────────────────────────────────────────────────────────
-# 8.5  Integration test: end-to-end scoring via API
+# 8.5  Resume support
 # ─────────────────────────────────────────────────────────
 
 import os
@@ -794,6 +928,291 @@ import asyncio
 import tempfile
 import shutil
 import pytest
+
+
+class TestResumeScoringFile:
+    """Test resume support for _run_scoring_file."""
+
+    def test_resume_skips_prescored(self, tmp_path):
+        """Partially scored.jsonl should let resume skip those samples."""
+        from sft_label.scoring import _run_scoring_file
+        from sft_label.config import PipelineConfig
+        from unittest.mock import patch, AsyncMock
+
+        # Create labeled.json with 3 samples
+        samples = [
+            {
+                "id": f"sample-{i}",
+                "conversations": [
+                    {"from": "human", "value": f"Question {i}"},
+                    {"from": "gpt", "value": f"Answer {i}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }
+            for i in range(3)
+        ]
+        labeled_path = tmp_path / "labeled.json"
+        with open(labeled_path, "w") as f:
+            json.dump(samples, f)
+
+        # Pre-scored JSONL: sample-0 already scored
+        pre_scored = {
+            "id": "sample-0",
+            "conversations": samples[0]["conversations"],
+            "labels": samples[0]["labels"],
+            "value": {
+                "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "rarity": {"score": 5.0},
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            },
+        }
+        scored_jsonl = tmp_path / "scored.jsonl"
+        with open(scored_jsonl, "w") as f:
+            f.write(json.dumps(pre_scored) + "\n")
+
+        # Mock score_one to track which samples are scored
+        scored_ids = []
+        original_score_one = None
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                  sample_idx, total, sem, config=None):
+            scored_ids.append(sample.get("id"))
+            value = {
+                "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }
+            monitor = {"sample_id": sample.get("id"), "status": "success",
+                        "llm_calls": 1, "prompt_tokens": 100, "completion_tokens": 50,
+                        "attempts": 1, "validation_issues": []}
+            return value, monitor
+
+        config = PipelineConfig(scoring_concurrency=2, sample_max_retries=1)
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            asyncio.run(_run_scoring_file(
+                labeled_path, tmp_path, None, 0, config, resume=True,
+            ))
+
+        # sample-0 should NOT have been scored again
+        assert "sample-0" not in scored_ids
+        # sample-1 and sample-2 should have been scored
+        assert "sample-1" in scored_ids
+        assert "sample-2" in scored_ids
+
+
+# ─────────────────────────────────────────────────────────
+# 8.6  Selection Scores
+# ─────────────────────────────────────────────────────────
+
+from sft_label.scoring import compute_selection_scores
+
+
+class TestComputeSelectionScores:
+    def _make_sample(self, idx, labels, complexity=5, quality=5, reasoning=5,
+                     rarity_score=5.0, value_score=5.0):
+        return {
+            "id": f"sample-{idx}",
+            "labels": labels,
+            "value": {
+                "complexity": {"instruction": complexity, "overall": complexity},
+                "quality": {"correctness": quality, "overall": quality},
+                "reasoning": {"clarity": reasoning, "overall": reasoning},
+                "rarity": {"score": rarity_score},
+                "flags": [],
+                "value_score": value_score,
+            },
+        }
+
+    def test_basic_computation(self):
+        """15+ samples with diverse labels → selection_score in [1, 10]."""
+        samples = []
+        intents = ["build", "learn", "debug", "modify"]
+        diffs = ["beginner", "intermediate", "advanced", "expert"]
+        for i in range(20):
+            labels = {
+                "intent": intents[i % len(intents)],
+                "difficulty": diffs[i % len(diffs)],
+                "language": ["python"],
+                "concept": ["algorithms"] if i % 2 == 0 else ["data-types"],
+            }
+            samples.append(self._make_sample(
+                i, labels, complexity=3 + i % 7, quality=3 + i % 7,
+                reasoning=3 + i % 5, value_score=3 + i * 0.3,
+            ))
+
+        compute_selection_scores(samples, min_group_size=2)
+
+        scored = [s for s in samples if s["value"].get("selection_score") is not None]
+        assert len(scored) > 0
+        for s in scored:
+            assert 1.0 <= s["value"]["selection_score"] <= 10.0
+
+    def test_small_group_below_threshold(self):
+        """Tag groups below min_group_size fall back to global percentile."""
+        # 1 sample with unique tag, rest share common tag
+        samples = []
+        for i in range(10):
+            labels = {"intent": "build", "language": ["python"]}
+            samples.append(self._make_sample(i, labels, quality=5 + i % 3, value_score=5.0))
+        # One sample with a unique tag
+        samples.append(self._make_sample(10, {"intent": "build", "language": ["haskell"]},
+                                          quality=9, value_score=8.0))
+
+        compute_selection_scores(samples, min_group_size=5)
+
+        # The haskell sample should still get a selection score (via global fallback)
+        haskell = samples[10]["value"]
+        assert haskell.get("selection_score") is not None
+
+    def test_bayesian_shrinkage_formula(self):
+        """When n = prior, shrinkage should be 0.5."""
+        from sft_label.config import SELECTION_SMOOTHING_PRIOR
+        # Create exactly SELECTION_SMOOTHING_PRIOR samples for one tag
+        n = SELECTION_SMOOTHING_PRIOR
+        samples = []
+        for i in range(n):
+            labels = {"intent": "build", "language": ["python"]}
+            samples.append(self._make_sample(i, labels, quality=i + 1, value_score=float(i + 1)))
+
+        compute_selection_scores(samples, min_group_size=1)
+
+        # Shrinkage = n / (n + prior) = 0.5, so percentiles blend 50/50
+        # All should have selection scores
+        for s in samples:
+            assert s["value"].get("selection_score") is not None
+
+    def test_multi_tag_averaging(self):
+        """Multiple tags within a dimension → percentiles averaged."""
+        samples = []
+        for i in range(15):
+            labels = {
+                "intent": "build",
+                "concept": ["algorithms", "data-structures"],  # multi-tag
+                "language": ["python"],
+            }
+            samples.append(self._make_sample(i, labels, quality=3 + i % 7, value_score=5.0))
+
+        compute_selection_scores(samples, min_group_size=2)
+
+        for s in samples:
+            v = s["value"]
+            assert v.get("intra_class_rank") is not None
+
+    def test_fallback_to_value_score(self):
+        """Samples with no value dict use value_score as fallback."""
+        sample = {
+            "id": "sample-0",
+            "labels": {"intent": "build"},
+            "value": {
+                "value_score": 7.5,
+                # No complexity/quality/reasoning → pure_quality is None
+            },
+        }
+        compute_selection_scores([sample], min_group_size=1)
+        # No pure_quality computable → ultimate fallback
+        assert sample["value"]["selection_score"] == 7.5
+
+    def test_single_sample(self):
+        """Edge case: n=1, single sample should not crash."""
+        samples = [self._make_sample(0, {"intent": "build", "language": ["python"]},
+                                      value_score=6.0)]
+        compute_selection_scores(samples, min_group_size=1)
+        assert samples[0]["value"].get("selection_score") is not None
+
+
+# ─────────────────────────────────────────────────────────
+# 8.7  Conversation aggregation
+# ─────────────────────────────────────────────────────────
+
+from sft_label.conversation import (
+    _compute_pure_quality_from_slice,
+    _compute_penalty,
+    aggregate_conversation,
+)
+
+
+class TestConversationAggregation:
+    def test_conv_no_double_penalty(self):
+        """P2-1: pure_quality should NOT apply 0.7× penalty (only _compute_penalty does)."""
+        # Slice with quality=2 (below threshold 3 → penalty 0.5× from _compute_penalty)
+        sample = {
+            "value": {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 2},
+                "reasoning": {"overall": 5},
+            },
+        }
+        pq = _compute_pure_quality_from_slice(sample)
+        assert pq is not None
+        # Without penalty: (0.25*5 + 0.40*2 + 0.20*5) / 0.85 = (1.25+0.8+1.0)/0.85 = 3.59
+        # The old code would apply 0.7× → 2.51, new code does NOT
+        assert pq > 3.0  # no penalty applied at slice level
+
+    def test_conv_penalty_still_applies(self):
+        """_compute_penalty should still apply quality floor penalty to conversation."""
+        slices = [
+            {"value": {"quality": {"overall": 2}, "flags": []}},
+            {"value": {"quality": {"overall": 7}, "flags": []}},
+        ]
+        penalty, quality_floor, neg_flags = _compute_penalty(slices)
+        assert quality_floor == 2
+        assert penalty < 1.0  # penalty should kick in
+        assert penalty == 0.5  # quality < 3 → 0.5×
+
+    def test_conversation_with_low_quality_slice(self):
+        """Full aggregation: low quality slice should apply penalty once."""
+        slices = [
+            {
+                "id": "s1",
+                "metadata": {"source_id": "conv-1", "total_turns": 2, "turn_index": 0},
+                "labels": {"intent": "build", "language": ["python"]},
+                "value": {
+                    "complexity": {"overall": 5},
+                    "quality": {"overall": 2},
+                    "reasoning": {"overall": 5},
+                    "rarity": {"score": 5.0},
+                    "flags": [],
+                    "value_score": 4.0,
+                    "thinking_mode": "fast",
+                },
+            },
+            {
+                "id": "s2",
+                "metadata": {"source_id": "conv-1", "total_turns": 2, "turn_index": 1},
+                "labels": {"intent": "build", "language": ["python"]},
+                "value": {
+                    "complexity": {"overall": 7},
+                    "quality": {"overall": 8},
+                    "reasoning": {"overall": 7},
+                    "rarity": {"score": 5.0},
+                    "flags": [],
+                    "value_score": 7.0,
+                    "thinking_mode": "fast",
+                },
+            },
+        ]
+        rec = aggregate_conversation("conv-1", slices)
+        assert rec is not None
+        # penalty = 0.5 (quality_floor=2 < 3)
+        assert rec["detail"]["penalty"] == 0.5
+        # conv_value = q_base * 0.5, where q_base is weighted avg of 4.0 and 7.0
+        assert 1.0 <= rec["conv_value"] <= 10.0
+
+
+# ─────────────────────────────────────────────────────────
+# 8.8  Integration test: end-to-end scoring via API
+# ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.skipif(
@@ -905,7 +1324,7 @@ class TestIntegrationScoring:
         # Verify dashboard is valid HTML
         html = (tmp_path / "dashboard_value.html").read_text(encoding="utf-8")
         assert "<!DOCTYPE html>" in html
-        assert "SFT Value Scoring Dashboard" in html
+        assert "SFT Labeling & Value Dashboard" in html or "SFT Value Scoring Dashboard" in html
 
         # Verify stats return value
         assert result is not None

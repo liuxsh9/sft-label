@@ -30,15 +30,23 @@ Label the conversation on these 5 dimensions:
 
 ### Intent (single-select)
 What is the user's primary goal?
-- `learn`: Understand a concept/technique. Signals: "explain", "how does X work", "difference between"
-- `build`: Create new functionality. Signals: "help me write", "implement", "create", "build"
-- `debug`: Find and fix a problem. Signals: "error", "doesn't work", "why does it fail", "bug"
-- `review`: Get feedback on existing code. Signals: "review this", "any issues", "improvements"
-- `decide`: Choose between options. Signals: "A vs B", "which should I", "how to choose"
+- `learn`: Understand a concept/technique. Signals: "explain", "how does X work", "difference between", "解释", "什么意思", "原理"
+- `build`: Create NEW functionality from scratch. Signals: "help me write", "implement", "create", "帮我写", "帮我实现"
+- `modify`: Change/improve/transform EXISTING working code. Signals: "refactor", "optimize", "migrate", "convert to", "upgrade", "rewrite", "重构", "优化", "迁移", "改成"
+- `debug`: Find and fix a problem. Signals: "error", "doesn't work", "why does it fail", "bug", "报错", "跑不起来"
+- `review`: Get feedback on existing code WITHOUT producing new implementation. Signals: "review this", "any issues", "is this good", "帮我看看", "有没有问题"
+- `decide`: Choose between options. Signals: "A vs B", "which should I", "how to choose", "用哪个好", "怎么选"
 Disambiguation:
 - User has broken code and wants it fixed → `debug` (even if they also want to understand)
 - User is learning by building something → `build` (learning is a side-effect)
 - User asks "explain X" with no code to fix → `learn`
+- User provides working code and asks to restructure/optimize/migrate → `modify` (NOT `build`)
+- User asks "rewrite this in TypeScript" → `modify` (translation of existing code)
+- User asks "build a REST API" with no prior code → `build` (creating from scratch)
+- User asks "review my code" without requesting changes → `review`; if they ask to also fix/improve → `modify` or `debug`
+- User asks "explain this error" with a specific traceback → `debug` (NOT `learn`)
+- Decision + implementation in one request → `build` (implementation is the primary goal)
+- Pure comparison without implementation request → `decide`; pure knowledge comparison → `learn`
 
 ### Language (multi-select)
 What programming languages appear in the conversation?
@@ -256,6 +264,42 @@ total_turns: 2
     {
         "role": "assistant",
         "content": '{"intent":"build","language":["python"],"domain":["web-backend"],"task":["feature-implementation"],"difficulty":"advanced","confidence":{"intent":0.98,"language":0.99,"domain":0.85,"task":0.95,"difficulty":0.92},"unmapped":[]}'
+    },
+    # Example 6: Modify (refactoring callback → async/await)
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"帮我把这个 Express 路由从 callback 重构成 async/await：\\n\\n```javascript\\nrouter.get('/users', (req, res) => {\\n  db.query('SELECT * FROM users', (err, rows) => {\\n    if (err) {\\n      console.error(err);\\n      return res.status(500).json({ error: 'DB error' });\\n    }\\n    redis.get('user_count', (err2, count) => {\\n      if (err2) count = rows.length;\\n      res.json({ users: rows, total: parseInt(count) });\\n    });\\n  });\\n});\\n```"},{"from":"gpt","value":"重构后的 async/await 版本：\\n\\n```javascript\\nrouter.get('/users', async (req, res) => {\\n  try {\\n    const rows = await db.query('SELECT * FROM users');\\n    let count;\\n    try {\\n      count = await redis.get('user_count');\\n    } catch {\\n      count = rows.length;\\n    }\\n    res.json({ users: rows, total: parseInt(count) });\\n  } catch (err) {\\n    console.error(err);\\n    res.status(500).json({ error: 'DB error' });\\n  }\\n});\\n```\\n\\n改动点：\\n1. 回调嵌套 → 扁平的 await 链\\n2. redis 错误单独 try-catch，保持原有降级逻辑\\n3. 外层 try-catch 替代 if(err) 检查"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["javascript"]
+has_tool_roles: false
+code_block_count: 2
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"modify","language":["javascript"],"domain":["web-backend"],"task":["code-refactoring"],"difficulty":"intermediate","confidence":{"intent":0.97,"language":0.99,"domain":0.88,"task":0.95,"difficulty":0.85},"unmapped":[]}'
+    },
+    # Example 7: Review (code quality feedback, no implementation)
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"帮我看看这个 Go HTTP middleware 写得怎么样：\\n\\n```go\\nfunc AuthMiddleware(next http.Handler) http.Handler {\\n    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\\n        token := r.Header.Get(\\"Authorization\\")\\n        if token == \\"\\" {\\n            http.Error(w, \\"unauthorized\\", 401)\\n            return\\n        }\\n        claims, err := jwt.Parse(token, keyFunc)\\n        if err != nil {\\n            http.Error(w, \\"invalid token\\", 401)\\n            return\\n        }\\n        ctx := context.WithValue(r.Context(), \\"user\\", claims)\\n        next.ServeHTTP(w, r.WithContext(ctx))\\n    })\\n}\\n```"},{"from":"gpt","value":"整体结构清晰，几个建议：\\n\\n1. **Context key 类型安全**：用 `string` 作为 context key 容易冲突，建议定义私有类型：\\n   ```go\\n   type contextKey struct{}\\n   var userKey = contextKey{}\\n   ```\\n\\n2. **Bearer 前缀处理**：标准做法是 `Authorization: Bearer <token>`，需要 `strings.TrimPrefix`\\n\\n3. **错误信息**：401 应该返回 JSON 而非纯文本，保持 API 响应格式一致\\n\\n4. **状态码常量**：`401` → `http.StatusUnauthorized`，更可读\\n\\n总体是一个可用的 middleware，主要问题是 context key 的类型安全。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["go"]
+has_tool_roles: false
+code_block_count: 2
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"review","language":["go"],"domain":["web-backend"],"task":["code-review-task"],"difficulty":"intermediate","confidence":{"intent":0.96,"language":0.99,"domain":0.90,"task":0.95,"difficulty":0.82},"unmapped":[]}'
     },
 ]
 
@@ -624,7 +668,7 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result):
 # ─────────────────────────────────────────────────────────
 
 TAG_POOLS = {
-    "intent": {"learn", "build", "debug", "review", "decide"},
+    "intent": {"learn", "build", "modify", "debug", "review", "decide"},
     "difficulty": {"beginner", "intermediate", "advanced", "expert"},
     "context": {"snippet", "single-function", "single-file", "multi-file", "module",
                 "repository", "monorepo", "greenfield", "legacy-code", "with-dependencies"},

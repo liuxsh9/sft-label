@@ -85,3 +85,23 @@
   - "PostgreSQL vs CockroachDB for multi-tenant SaaS?"
   - "Should we use microservices or start with a monolith?"
   - "Next.js vs Remix for our new frontend?"
+
+- id: modify
+  name: Modify
+  category: Intent
+  description: >
+    User wants to change, improve, or transform existing working code
+    without adding fundamentally new functionality. Includes refactoring,
+    optimization, migration, and translation of existing codebases.
+    Response should preserve original intent while improving the targeted aspect.
+  aliases:
+  - refactor
+  - optimize
+  - migrate
+  - transform
+  - convert
+  - upgrade
+  examples:
+  - "Refactor this class to use composition instead of inheritance"
+  - "Optimize this SQL query, it's taking 30 seconds on 1M rows"
+  - "Migrate this Express app from JavaScript to TypeScript"

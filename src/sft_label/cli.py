@@ -90,6 +90,7 @@ def cmd_score(args):
             tag_stats_path=getattr(args, "tag_stats", None),
             limit=args.limit,
             config=config,
+            resume=getattr(args, "resume", False),
         ))
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -204,6 +205,8 @@ def main():
                                help="Path to stats.json for rarity (default: auto-discover)")
     score_parser.add_argument("--limit", type=int, default=0,
                                help="Max samples to score, 0 = all (default: 0)")
+    score_parser.add_argument("--resume", action="store_true",
+                               help="Resume scoring: skip samples already in scored.jsonl")
 
     # --- export-review ---
     review_parser = subparsers.add_parser("export-review",

@@ -97,6 +97,7 @@ def compute_value_viz_data(samples, stats):
         "mean_complexity": dists.get("complexity_overall", {}).get("mean", 0),
         "mean_quality": dists.get("quality_overall", {}).get("mean", 0),
         "median_rarity": dists.get("rarity_score", {}).get("p50", 0),
+        "mean_confidence": dists.get("confidence", {}).get("mean", 0),
         "total_tokens": stats.get("total_tokens", 0),
     }
 
@@ -130,6 +131,16 @@ def compute_value_viz_data(samples, stats):
         # Fallback: use pre-computed histogram bins from stats
         histograms = stats["histograms"]
     viz["histograms"] = histograms
+
+    # Confidence histogram (0.0-1.0 in 10 bins of 0.1)
+    conf_bins = [0] * 10
+    for s in samples:
+        v = s.get("value", {})
+        conf = v.get("confidence")
+        if isinstance(conf, (int, float)) and 0 <= conf <= 1:
+            idx = min(int(conf * 10), 9)
+            conf_bins[idx] += 1
+    viz["confidence_histogram"] = conf_bins
 
     # Score distribution stats (percentiles etc. from stats file)
     viz["score_distributions"] = dists
@@ -624,6 +635,10 @@ function renderPass2() {
     if (selDist.mean) {
         html += `<div class="card"><div class="label">Mean Selection</div><div class="value" style="color:${scoreColor(selDist.mean)}">${selDist.mean.toFixed(1)}</div></div>`;
     }
+    const confDist = (d.score_distributions || {}).confidence || {};
+    if (confDist.mean) {
+        html += `<div class="card"><div class="label">Mean Confidence</div><div class="value">${confDist.mean.toFixed(2)}</div><div class="sub">p50=${(confDist.p50 || 0).toFixed(2)}</div></div>`;
+    }
     const sel = d.selection_thresholds || {};
     if (sel.top_10pct) {
         html += `<div class="card"><div class="label">Top 10%</div><div class="value c-green">${sel.top_10pct.count}</div><div class="sub">&ge; ${sel.top_10pct.threshold}</div></div>`;
@@ -651,6 +666,26 @@ function renderPass2() {
                 html += `<div class="panel">${renderPercentileTable(key, distInfo, histColors[key] || '#3b82f6')}</div>`;
             }
         }
+        html += '</div></div>';
+    }
+
+    // Confidence histogram (0-1 range, separate from 1-10 score histograms)
+    const confBins = d.confidence_histogram;
+    if (confBins && confBins.some(b => b > 0)) {
+        html += '<div class="section"><h2>Confidence Distribution</h2><div class="grid">';
+        const maxBin = Math.max(...confBins, 1);
+        let confHtml = '<div class="panel"><h3>LLM Confidence (0.0 - 1.0)</h3><div style="display:flex;align-items:flex-end;gap:3px;height:120px;">';
+        for (let i = 0; i < confBins.length; i++) {
+            const h = Math.round(confBins[i] / maxBin * 100);
+            const label = (i / 10).toFixed(1);
+            confHtml += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;">`;
+            confHtml += `<span style="font-size:10px;color:#6b7280;">${confBins[i]}</span>`;
+            confHtml += `<div style="width:100%;height:${h}px;background:#8b5cf6;border-radius:2px;"></div>`;
+            confHtml += `<span style="font-size:9px;color:#9ca3af;margin-top:2px;">${label}</span>`;
+            confHtml += `</div>`;
+        }
+        confHtml += '</div></div>';
+        html += confHtml;
         html += '</div></div>';
     }
 

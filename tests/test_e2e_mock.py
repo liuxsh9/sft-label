@@ -70,6 +70,18 @@ CALL1_RESPONSES = {
         },
         "unmapped": [],
     },
+    "modify": {
+        "intent": "modify",
+        "language": ["python"],
+        "domain": ["web-backend"],
+        "task": ["code-refactoring"],
+        "difficulty": "intermediate",
+        "confidence": {
+            "intent": 0.97, "language": 0.99, "domain": 0.85,
+            "task": 0.95, "difficulty": 0.80,
+        },
+        "unmapped": [],
+    },
 }
 
 CALL2_RESPONSE = {
@@ -109,6 +121,8 @@ def _pick_call1(messages):
         return CALL1_RESPONSES["learn"]
     if "c++" in content or "cpp" in content or "单例" in content:
         return CALL1_RESPONSES["cpp"]
+    if "重构" in content or "refactor" in content:
+        return CALL1_RESPONSES["modify"]
     return CALL1_RESPONSES["default"]
 
 
@@ -319,7 +333,7 @@ class TestE2EScoring:
         stats_data = {
             "total_samples": 100,
             "tag_distributions": {
-                "intent": {"build": 40, "debug": 20, "learn": 30, "review": 10},
+                "intent": {"build": 30, "modify": 10, "debug": 20, "learn": 30, "review": 10},
                 "language": {"python": 60, "javascript": 20, "cpp": 10, "rust": 5, "go": 5},
                 "difficulty": {"beginner": 25, "intermediate": 40, "advanced": 25, "expert": 10},
                 "concept": {"algorithms": 30, "data-structures": 20, "data-types": 15,

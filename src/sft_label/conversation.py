@@ -55,7 +55,7 @@ def group_by_conversation(samples):
 # ─── Weighting helpers ───────────────────────────────────
 
 def _position_weight(i, n):
-    """Linear position weight: 1.0 for first turn → 3.0 for last turn.
+    """Linear position weight: 1.0 for first turn → 2.0 for last turn.
 
     Args:
         i: 0-based turn index within the conversation
@@ -63,7 +63,7 @@ def _position_weight(i, n):
     """
     if n <= 1:
         return 1.0
-    return 1.0 + 2.0 * i / (n - 1)
+    return 1.0 + 1.0 * i / (n - 1)
 
 
 def _effective_weights(slices):
@@ -208,10 +208,10 @@ def _compute_pure_quality_from_slice(s):
 
     pq = sum(quality_weights.get(k, 0) * v for k, v in components.items()) / total_w
 
-    # Quality floor penalty: consistent with compute_value_score
-    quality_overall = components.get("quality")
-    if quality_overall is not None and quality_overall < 4:
-        pq *= 0.7
+    # NOTE: No quality floor penalty here — penalty is applied only at the
+    # conversation level via _compute_penalty() to avoid double-penalizing.
+    # The sample-level _extract_pure_quality (in scoring.py) keeps its own
+    # 0.7× penalty because it feeds directly into selection_score.
 
     return pq
 
@@ -235,6 +235,16 @@ def aggregate_conversation(source_id, slices):
     )
     if q_base is None:
         return None
+
+    # Max-pooling blend: prevent a single bad early turn from
+    # drowning out genuinely good later turns
+    valid_values = [
+        (s.get("value") or {}).get("value_score")
+        for s in slices
+    ]
+    valid_values = [v for v in valid_values if v is not None]
+    if valid_values:
+        q_base = 0.7 * q_base + 0.3 * max(valid_values)
 
     # Penalty
     penalty, quality_floor, neg_flags = _compute_penalty(slices)
