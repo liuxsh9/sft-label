@@ -19,6 +19,10 @@ uv run pytest tests/test_scoring.py  # scoring tests only
 # Validate taxonomy (should report 0 errors)
 uv run sft-label validate
 
+# E2E test with real open-source data (requires LITELLM_BASE and LITELLM_KEY env vars)
+uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score --limit 10  # quick smoke
+uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score              # full 2300 samples
+
 # Run labeling pipeline (requires LITELLM_BASE and LITELLM_KEY env vars)
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json
 
@@ -120,16 +124,23 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 
 ## Test Data
 
-**Unit test fixtures** (small, in-repo):
-- ShareGPT: `tests/fixtures/smoke_test.json` (5 samples), `tests/fixtures/e2e_multiturn.json` (7 samples)
-- Pangu: `tests/fixtures/pangu_e2e_test.json` (6 samples → 8 after slicing)
+**Unit test fixtures** (small, in-repo, for `uv run pytest`):
+- `tests/fixtures/smoke_test.json` (5 ShareGPT samples) — used by `test_e2e_mock.py`
+- `tests/fixtures/smoke_test_value.json` (5 samples) — used by `test_scoring.py`, `test_e2e_mock.py`
+- `tests/fixtures/pangu_test_samples.jsonl` (12 Pangu samples) — used by `test_preprocessing.py`
 
-**Open-source e2e test data** (Pangu format, for end-to-end pipeline testing):
-- `tests/fixtures/mot_code_pangu_1000.json` — 1000 samples from [open-r1/Mixture-of-Thoughts](https://huggingface.co/datasets/open-r1/Mixture-of-Thoughts) code subset (competitive programming with COT). Pangu format with `[unused16/17]` COT blocks. Single-turn, all `thinking_mode=slow`. Use this for realistic e2e testing of Pass 1 + Pass 2 pipeline.
-  - Quick e2e test: `uv run sft-label run --input tests/fixtures/mot_code_pangu_1000.json --score` (or slice first 10 with jq for faster iteration)
-  - Raw dataset stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/open-r1__Mixture-of-Thoughts/code/` (83k samples, parquet)
-
-- `tests/fixtures/e2e_folder_test/` — Multi-file directory fixture for comprehensive e2e testing. Structure:
+**E2E test data** (`tests/fixtures/e2e_folder_test/`, Pangu JSONL format, real open-source data):
+- This is the primary e2e test dataset. All files are JSONL (one JSON per line), matching production input format.
+- **E2E testing should always use this folder**, either as directory input or individual files:
+  ```bash
+  # Full directory e2e (all 2300 samples)
+  uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score
+  # Quick smoke (10 samples from each file)
+  uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score --limit 10
+  # Single file e2e
+  uv run sft-label run --input tests/fixtures/e2e_folder_test/code/magicoder_oss_instruct.jsonl --score
+  ```
+- Structure:
   ```
   e2e_folder_test/
     code/
@@ -142,16 +153,14 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
       code_feedback_multiturn.jsonl     (100 multi-turn iterative coding, avg 6.5 turns)
       coderforge_swe_trajectories.jsonl (100 multi-turn agent trajectories, tool calls, avg 125 turns)
   ```
-  - Sources:
-    - `mot_code_*`: [open-r1/Mixture-of-Thoughts](https://huggingface.co/datasets/open-r1/Mixture-of-Thoughts) code subset
-    - `nemotron_swe_repair`: [nvidia/Nemotron-Cascade-SFT-Stage-2](https://huggingface.co/datasets/nvidia/Nemotron-Cascade-SFT-Stage-2) swe_repair subset
-    - `magicoder_oss_instruct`: [ise-uiuc/Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) — code gen grounded in real OSS code
-    - `commitpackft_multilang`: [bigcode/commitpackft](https://huggingface.co/datasets/bigcode/commitpackft) — real git commits across 20 languages
-    - `code_feedback_multiturn`: [m-a-p/Code-Feedback](https://huggingface.co/datasets/m-a-p/Code-Feedback) — iterative coding with execution feedback
-    - `coderforge_swe_trajectories`: [togethercomputer/CoderForge-Preview](https://huggingface.co/datasets/togethercomputer/CoderForge-Preview) SWE_Rebench — OpenHands agent trajectories with tool calls
-  - Tests: directory mode, multi-turn slicing, tool signal extraction, conversation aggregation, multi-language labeling, diverse intent/difficulty coverage
-  - Quick e2e test: `uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score --limit 10`
-  - Raw datasets stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/`
+- Sources:
+  - `mot_code_*`: [open-r1/Mixture-of-Thoughts](https://huggingface.co/datasets/open-r1/Mixture-of-Thoughts) code subset
+  - `nemotron_swe_repair`: [nvidia/Nemotron-Cascade-SFT-Stage-2](https://huggingface.co/datasets/nvidia/Nemotron-Cascade-SFT-Stage-2) swe_repair subset
+  - `magicoder_oss_instruct`: [ise-uiuc/Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) — code gen grounded in real OSS code
+  - `commitpackft_multilang`: [bigcode/commitpackft](https://huggingface.co/datasets/bigcode/commitpackft) — real git commits across 20 languages
+  - `code_feedback_multiturn`: [m-a-p/Code-Feedback](https://huggingface.co/datasets/m-a-p/Code-Feedback) — iterative coding with execution feedback
+  - `coderforge_swe_trajectories`: [togethercomputer/CoderForge-Preview](https://huggingface.co/datasets/togethercomputer/CoderForge-Preview) SWE_Rebench — OpenHands agent trajectories with tool calls
+- Raw datasets stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/`
 
 **Dataset download scripts** (in `scripts/`):
 - `scripts/download_hf_dataset.py` — Download HuggingFace datasets (`--subset` to filter, `--convert` for ShareGPT JSON)

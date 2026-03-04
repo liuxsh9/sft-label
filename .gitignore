@@ -17,3 +17,4 @@ tests/fixtures/*-labeled-*/
 .DS_Store
 # Large open-source test datasets (single-file, downloaded via scripts/)
 tests/fixtures/mot_*.json
+.claude/plans/
