@@ -26,7 +26,7 @@ def cmd_run(args):
     from sft_label.config import PipelineConfig
     from sft_label.pipeline import run
 
-    config = PipelineConfig()
+    config = PipelineConfig(prompt_mode=args.prompt_mode)
     try:
         stats = asyncio.run(run(
             input_path=args.input,
@@ -83,7 +83,7 @@ def cmd_score(args):
     from sft_label.config import PipelineConfig
     from sft_label.scoring import run_scoring
 
-    config = PipelineConfig()
+    config = PipelineConfig(prompt_mode=args.prompt_mode)
     try:
         asyncio.run(run_scoring(
             input_path=args.input,
@@ -194,6 +194,9 @@ def main():
                             help="Chain Pass 2 value scoring after labeling")
     run_parser.add_argument("--tag-stats", type=str, default=None,
                             help="Path to stats.json for Pass 2 rarity (used with --score)")
+    run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
+                            default="full",
+                            help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
@@ -217,6 +220,9 @@ def main():
                                help="Max samples to score, 0 = all (default: 0)")
     score_parser.add_argument("--resume", action="store_true",
                                help="Resume scoring: skip samples already in scored.jsonl")
+    score_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
+                               default="full",
+                               help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
 
     # --- export-review ---
     review_parser = subparsers.add_parser("export-review",

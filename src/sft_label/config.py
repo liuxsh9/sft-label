@@ -205,3 +205,4 @@ class PipelineConfig:
     selection_min_group_size: int = SELECTION_MIN_GROUP_SIZE
     selection_smoothing_prior: int = SELECTION_SMOOTHING_PRIOR
     enable_rationale: bool = ENABLE_RATIONALE
+    prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)

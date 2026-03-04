@@ -36,6 +36,7 @@ from rich.progress import (
 
 from sft_label.prompts import (
     CALL1_SYSTEM, CALL1_FEWSHOT, CALL2_SYSTEM, CALL2_FEWSHOT,
+    CALL1_FEWSHOT_COMPACT, CALL2_FEWSHOT_COMPACT,
     TAG_POOLS, SINGLE_SELECT, MULTI_SELECT
 )
 from sft_label.preprocessing import preprocess, format_signals_for_prompt, normalize_and_slice, truncate_conversations_for_labeling, apply_sparse_sampling
@@ -513,7 +514,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
 # Prompt builders (inline to avoid cross-import issues with async)
 # ─────────────────────────────────────────────────────────
 
-def build_call1_messages(conversation_json, preprocessed_signals):
+def build_call1_messages(conversation_json, preprocessed_signals, compact=False):
     user_content = f"""<conversation>
 {conversation_json}
 </conversation>
@@ -521,13 +522,14 @@ def build_call1_messages(conversation_json, preprocessed_signals):
 <preprocessed_signals>
 {preprocessed_signals}
 </preprocessed_signals>"""
+    fewshot = CALL1_FEWSHOT_COMPACT if compact else CALL1_FEWSHOT
     messages = [{"role": "system", "content": CALL1_SYSTEM}]
-    messages.extend(CALL1_FEWSHOT)
+    messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
 
 
-def build_call2_messages(conversation_json, preprocessed_signals, call1_result):
+def build_call2_messages(conversation_json, preprocessed_signals, call1_result, compact=False):
     call1_str = json.dumps(call1_result, ensure_ascii=False) if isinstance(call1_result, dict) else str(call1_result)
     user_content = f"""<conversation>
 {conversation_json}
@@ -540,8 +542,9 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result):
 <preprocessed_signals>
 {preprocessed_signals}
 </preprocessed_signals>"""
+    fewshot = CALL2_FEWSHOT_COMPACT if compact else CALL2_FEWSHOT
     messages = [{"role": "system", "content": CALL2_SYSTEM}]
-    messages.extend(CALL2_FEWSHOT)
+    messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
 
@@ -730,6 +733,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
     _max_retries_sample = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
     _max_retries = config.max_retries if config else MAX_RETRIES
     _conf_threshold = config.confidence_threshold if config else CONFIDENCE_THRESHOLD
+    _compact = config.prompt_mode == "compact" if config else False
     start = time.time()
 
     # Truncate oversized conversations before sending to LLM
@@ -779,7 +783,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     call1_cleaned, msgs1 = _cached_call1
                     monitor["call1_cached"] = True
                 else:
-                    msgs1 = build_call1_messages(conversations_json, signals_str)
+                    msgs1 = build_call1_messages(conversations_json, signals_str, compact=_compact)
                     call1_result, call1_raw, usage1 = await async_llm_call(http_client, msgs1, model,
                                                                           max_retries=_max_retries, config=config,
                                                                           rate_limiter=rate_limiter)
@@ -804,7 +808,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
                 # Call 2 (depends on Call 1)
                 call1_context = {d: call1_cleaned[d] for d in ["intent", "language", "domain", "task", "difficulty"] if d in call1_cleaned}
-                msgs2 = build_call2_messages(conversations_json, signals_str, call1_context)
+                msgs2 = build_call2_messages(conversations_json, signals_str, call1_context, compact=_compact)
                 call2_result, call2_raw, usage2 = await async_llm_call(http_client, msgs2, model,
                                                                       max_retries=_max_retries, config=config,
                                                                       rate_limiter=rate_limiter)

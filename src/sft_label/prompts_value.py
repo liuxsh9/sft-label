@@ -482,10 +482,17 @@ Updated output format when rationale is enabled:
 """
 
 
+# ─── Compact few-shot subset (for --prompt-mode compact) ──
+
+# Scoring: keep 3 of 6 — quality=7(DP), quality=3(has-bug), quality=5(medium anchor)
+SCORING_FEWSHOT_COMPACT = SCORING_FEWSHOT[0:2] + SCORING_FEWSHOT[4:6] + SCORING_FEWSHOT[10:12]
+
+
 def build_scoring_messages(truncated, thinking_mode, labels,
                            total_turns, code_block_count,
                            enable_rationale=False,
-                           turn_index=None, total_turns_meta=None):
+                           turn_index=None, total_turns_meta=None,
+                           compact=False):
     """Construct the full message array for the scoring LLM call.
 
     Args:
@@ -527,7 +534,8 @@ def build_scoring_messages(truncated, thinking_mode, labels,
     if enable_rationale:
         system_prompt = system_prompt + "\n" + RATIONALE_ADDON
 
+    fewshot = SCORING_FEWSHOT_COMPACT if compact else SCORING_FEWSHOT
     messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(SCORING_FEWSHOT)
+    messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages

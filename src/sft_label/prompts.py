@@ -634,7 +634,16 @@ total_turns: 2
 ]
 
 
-def build_call1_messages(conversation_json, preprocessed_signals):
+# ─── Compact few-shot subsets (for --prompt-mode compact) ──
+
+# Call 1: keep 3 of 7 — build(Flask CRUD), debug(Rust), modify(JS async)
+CALL1_FEWSHOT_COMPACT = CALL1_FEWSHOT[0:2] + CALL1_FEWSHOT[2:4] + CALL1_FEWSHOT[10:12]
+
+# Call 2: keep 2 of 4 — agentic debug(concurrency), empty CRUD(calibration anchor)
+CALL2_FEWSHOT_COMPACT = CALL2_FEWSHOT[2:4] + CALL2_FEWSHOT[6:8]
+
+
+def build_call1_messages(conversation_json, preprocessed_signals, compact=False):
     """Build messages for Call 1 labeling."""
     user_content = f"""<conversation>
 {conversation_json}
@@ -644,13 +653,14 @@ def build_call1_messages(conversation_json, preprocessed_signals):
 {preprocessed_signals}
 </preprocessed_signals>"""
 
+    fewshot = CALL1_FEWSHOT_COMPACT if compact else CALL1_FEWSHOT
     messages = [{"role": "system", "content": CALL1_SYSTEM}]
-    messages.extend(CALL1_FEWSHOT)
+    messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
 
 
-def build_call2_messages(conversation_json, preprocessed_signals, call1_result):
+def build_call2_messages(conversation_json, preprocessed_signals, call1_result, compact=False):
     """Build messages for Call 2 labeling, including Call 1 results as context."""
     import json
     call1_str = json.dumps(call1_result, ensure_ascii=False) if isinstance(call1_result, dict) else str(call1_result)
@@ -667,8 +677,9 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result):
 {preprocessed_signals}
 </preprocessed_signals>"""
 
+    fewshot = CALL2_FEWSHOT_COMPACT if compact else CALL2_FEWSHOT
     messages = [{"role": "system", "content": CALL2_SYSTEM}]
-    messages.extend(CALL2_FEWSHOT)
+    messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
 

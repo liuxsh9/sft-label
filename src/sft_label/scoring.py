@@ -798,6 +798,8 @@ async def score_one(http_client, sample, model, rarity_result,
     turn_index = metadata.get("turn_index")
     total_turns_meta = metadata.get("total_turns")
 
+    _compact = config.prompt_mode == "compact" if config else False
+
     messages = build_scoring_messages(
         truncated=truncated,
         thinking_mode=thinking_mode,
@@ -807,6 +809,7 @@ async def score_one(http_client, sample, model, rarity_result,
         enable_rationale=config.enable_rationale if config else False,
         turn_index=turn_index,
         total_turns_meta=total_turns_meta,
+        compact=_compact,
     )
 
     # LLM call with retry — retry OUTSIDE semaphore
