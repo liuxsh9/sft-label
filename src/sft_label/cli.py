@@ -116,7 +116,13 @@ def cmd_filter(args):
         conv_value_min=args.conv_value_min,
         conv_selection_min=args.conv_selection_min,
         peak_complexity_min=args.peak_complexity_min,
+        turn_count_min=args.turn_count_min,
+        turn_count_max=args.turn_count_max,
         correctness_min=args.correctness_min,
+        turn_value_min=args.turn_value_min,
+        turn_quality_min=args.turn_quality_min,
+        max_pruned_ratio=args.max_pruned_ratio,
+        keep_first_last=not args.no_keep_first_last,
     )
 
     # Validate: at least one criterion must be set
@@ -132,7 +138,11 @@ def cmd_filter(args):
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
         config.peak_complexity_min is not None,
+        config.turn_count_min is not None,
+        config.turn_count_max is not None,
         config.correctness_min is not None,
+        config.turn_value_min is not None,
+        config.turn_quality_min is not None,
     ])
     if not has_criterion and not config.include_unscored:
         print("Error: At least one filter criterion is required "
@@ -255,8 +265,20 @@ def main():
                                 help="Min conversation-level selection score (multi-turn)")
     filter_parser.add_argument("--peak-complexity-min", type=float, default=None,
                                 help="Min peak complexity across turns (multi-turn)")
+    filter_parser.add_argument("--turn-count-min", type=int, default=None,
+                                help="Min total turns in conversation (multi-turn)")
+    filter_parser.add_argument("--turn-count-max", type=int, default=None,
+                                help="Max total turns in conversation (multi-turn)")
     filter_parser.add_argument("--correctness-min", type=float, default=None,
                                 help="Min quality.correctness score (hard floor)")
+    filter_parser.add_argument("--turn-value-min", type=float, default=None,
+                                help="Min per-turn value_score (turn-level pruning)")
+    filter_parser.add_argument("--turn-quality-min", type=float, default=None,
+                                help="Min per-turn quality.overall (turn-level pruning)")
+    filter_parser.add_argument("--max-pruned-ratio", type=float, default=0.5,
+                                help="Max fraction of turns to prune per conversation (default: 0.5)")
+    filter_parser.add_argument("--no-keep-first-last", action="store_true",
+                                help="Allow pruning first/last turns in conversations")
 
     args = parser.parse_args()
 

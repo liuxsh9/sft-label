@@ -187,9 +187,17 @@ def normalize_and_slice(sample):
         normalized = normalize_pangu(sample)
     else:
         normalized = dict(sample)
-        # Strip CoT from ShareGPT conversations
         if "conversations" in normalized:
-            for turn in normalized["conversations"]:
+            raw_convs = normalized["conversations"]
+            # Detect and save COT metadata before stripping (Pangu parity)
+            thinking_mode = detect_thinking_mode(raw_convs)
+            if thinking_mode == "slow":
+                cot_text, _, _ = extract_cot_content(raw_convs)
+                normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
+                if cot_text:
+                    normalized["metadata"]["cot_text"] = cot_text
+            # Strip CoT from conversations
+            for turn in raw_convs:
                 if turn.get("from") == "gpt" and turn.get("value"):
                     turn["value"] = strip_cot(turn["value"])
 
@@ -1004,11 +1012,12 @@ def detect_keywords(text):
     return hits
 
 
-def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=2, threshold=12):
+def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=2, max_gap=8, threshold=12):
     """Front-dense, back-sparse sampling schedule for pyramid slices.
 
     n <= threshold: label all (return [0..n-1])
-    n > threshold: first full_label_count all labeled, then gap grows ~gap_multiplier, last always labeled
+    n > threshold: first full_label_count all labeled, then gap grows ~gap_multiplier
+                   (capped at max_gap), last always labeled
     """
     if n <= threshold:
         return list(range(n))
@@ -1019,6 +1028,7 @@ def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=
     while pos < n - 1:
         schedule.append(pos)
         gap *= gap_multiplier
+        gap = min(gap, max_gap)
         pos = min(pos + max(int(gap), min_gap), n - 1)
 
     # Always include the last slice
@@ -1028,7 +1038,7 @@ def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=
     return schedule
 
 
-def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, threshold=12):
+def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, max_gap=8, threshold=12):
     """Apply sparse sampling to multi-turn pyramid slices.
 
     Single-turn samples (no source_id or total_turns=1) are always labeled.
@@ -1065,7 +1075,7 @@ def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_g
         # Sort by turn_index
         members.sort(key=lambda x: x[1])
         n = len(members)
-        schedule = generate_sparse_schedule(n, full_label_count, gap_multiplier, min_gap, threshold)
+        schedule = generate_sparse_schedule(n, full_label_count, gap_multiplier, min_gap, max_gap, threshold)
         schedule_set = set(schedule)
 
         # Mark labeled indices

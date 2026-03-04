@@ -15,13 +15,15 @@ LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
 MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
 REQUEST_TIMEOUT = 120          # seconds per LLM call (gpt-4o-mini is fast)
+DEFAULT_RPS_LIMIT = 30         # max LLM requests/sec (0 = unlimited)
+DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
 
 # ═══════════════════════════════════════════════════════════
 # Pass 1: Tag Labeling
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_LABELING_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 200
+DEFAULT_CONCURRENCY = 500
 CONFIDENCE_THRESHOLD = 0.60
 
 # ─── Conversation Truncation (Pass 1) ───────────────────
@@ -42,6 +44,7 @@ MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
 SPARSE_FULL_LABEL_COUNT = 8   # first N slices always labeled
 SPARSE_GAP_MULTIPLIER = 1.3   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
+SPARSE_MAX_GAP = 8            # maximum gap between labeled slices (bounds inheritance distance)
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
 
 # ─── Consistency Rules ──────────────────────────────────
@@ -82,7 +85,7 @@ CONSISTENCY_RULES = [
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_SCORING_MODEL = "gpt-4o-mini"
-DEFAULT_SCORING_CONCURRENCY = 200
+DEFAULT_SCORING_CONCURRENCY = 500
 
 VALUE_WEIGHTS = {
     "complexity": 0.25,
@@ -155,6 +158,8 @@ class PipelineConfig:
     max_retries: int = MAX_RETRIES
     sample_max_retries: int = SAMPLE_MAX_RETRIES
     request_timeout: int = REQUEST_TIMEOUT
+    rps_limit: float = DEFAULT_RPS_LIMIT
+    rps_warmup: float = DEFAULT_RPS_WARMUP
 
     # Pass 1: Tag Labeling
     labeling_model: str = DEFAULT_LABELING_MODEL
@@ -171,6 +176,7 @@ class PipelineConfig:
     sparse_full_label_count: int = SPARSE_FULL_LABEL_COUNT
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP
+    sparse_max_gap: int = SPARSE_MAX_GAP
     sparse_threshold: int = SPARSE_THRESHOLD
 
     # Pass 2: Value Scoring

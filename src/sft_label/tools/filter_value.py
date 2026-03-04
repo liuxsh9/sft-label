@@ -34,8 +34,16 @@ class FilterConfig:
     conv_value_min: float | None = None     # min conversation-level value
     conv_selection_min: float | None = None  # min conversation-level selection
     peak_complexity_min: float | None = None # min peak complexity across turns
+    # Turn count criteria (multi-turn only)
+    turn_count_min: int | None = None       # min total_turns in conversation
+    turn_count_max: int | None = None       # max total_turns in conversation
     # Sub-score hard floors
     correctness_min: float | None = None    # min quality.correctness (hard floor)
+    # Turn-level pruning (within conversations that pass conv-level criteria)
+    turn_value_min: float | None = None     # min per-slice value_score
+    turn_quality_min: float | None = None   # min per-slice quality.overall
+    max_pruned_ratio: float = 0.5           # don't prune more than 50% of turns
+    keep_first_last: bool = True            # always keep first and last turns
 
 
 def _parse_dim_tag(dim_tag):
@@ -208,6 +216,14 @@ def _matches_conv_criteria(conv_record, config):
         pc = conv_record.get("peak_complexity")
         if pc is None or pc < config.peak_complexity_min:
             return False
+    if config.turn_count_min is not None:
+        tc = conv_record.get("turn_count")
+        if tc is None or tc < config.turn_count_min:
+            return False
+    if config.turn_count_max is not None:
+        tc = conv_record.get("turn_count")
+        if tc is None or tc > config.turn_count_max:
+            return False
     return True
 
 
@@ -217,6 +233,8 @@ def _has_conv_criteria(config):
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
         config.peak_complexity_min is not None,
+        config.turn_count_min is not None,
+        config.turn_count_max is not None,
     ])
 
 
@@ -224,6 +242,26 @@ def _is_multi_turn(sample):
     """Check if a sample is from a multi-turn conversation."""
     meta = sample.get("metadata") or {}
     return meta.get("source_id") and meta.get("total_turns", 1) > 1
+
+
+def _has_turn_criteria(config):
+    """Check if any turn-level pruning criteria are set."""
+    return config.turn_value_min is not None or config.turn_quality_min is not None
+
+
+def _passes_turn_criteria(sample, config):
+    """Check if a single slice passes turn-level thresholds."""
+    value = sample.get("value") or {}
+    if config.turn_value_min is not None:
+        vs = value.get("value_score")
+        if vs is not None and vs < config.turn_value_min:
+            return False
+    if config.turn_quality_min is not None:
+        quality = value.get("quality") or value.get("scores", {}).get("quality") or {}
+        qo = quality.get("overall") if isinstance(quality, dict) else None
+        if qo is not None and qo < config.turn_quality_min:
+            return False
+    return True
 
 
 def filter_samples(samples, threshold=None, include_unscored=False, config=None):
@@ -363,6 +401,14 @@ def _generate_output_name(config, input_path):
         parts.append(f"cs{config.conv_selection_min:g}")
     if config.peak_complexity_min is not None:
         parts.append(f"pc{config.peak_complexity_min:g}")
+    if config.turn_count_min is not None:
+        parts.append(f"tc{config.turn_count_min}")
+    if config.turn_count_max is not None:
+        parts.append(f"tc-max{config.turn_count_max}")
+    if config.turn_value_min is not None:
+        parts.append(f"tv{config.turn_value_min:g}")
+    if config.turn_quality_min is not None:
+        parts.append(f"tq{config.turn_quality_min:g}")
 
     suffix = "-".join(parts) if parts else "all"
 
@@ -445,6 +491,65 @@ def run_filter(input_path, threshold=None, output_path=None,
 
     n_retained = len(retained)
     n_dropped = total - n_retained
+    n_turn_pruned = 0
+
+    # Turn-level pruning: prune low-value slices within retained conversations
+    if _has_turn_criteria(config) and retained:
+        # Group multi-turn samples by source_id for per-conversation pruning
+        mt_groups = {}  # source_id -> [(index_in_retained, sample)]
+        final_retained = []
+        for i, sample in enumerate(retained):
+            if _is_multi_turn(sample):
+                source_id = (sample.get("metadata") or {}).get("source_id")
+                mt_groups.setdefault(source_id, []).append((i, sample))
+            else:
+                # Single-turn: apply turn criteria as simple filter
+                if _passes_turn_criteria(sample, config):
+                    final_retained.append(sample)
+                else:
+                    n_turn_pruned += 1
+
+        # Per-conversation pruning
+        for source_id, members in mt_groups.items():
+            n = len(members)
+            if n <= 1:
+                final_retained.extend(s for _, s in members)
+                continue
+
+            # Sort by turn_index for position-aware pruning
+            members.sort(key=lambda x: (x[1].get("metadata") or {}).get("turn_index", 0))
+
+            # Determine which slices to keep/prune
+            max_prune = int(n * config.max_pruned_ratio)
+            candidates_to_prune = []
+
+            for j, (orig_idx, sample) in enumerate(members):
+                is_first = (j == 0)
+                is_last = (j == n - 1)
+                if config.keep_first_last and (is_first or is_last):
+                    continue  # protected
+                if not _passes_turn_criteria(sample, config):
+                    vs = (sample.get("value") or {}).get("value_score", 0.0) or 0.0
+                    candidates_to_prune.append((j, vs))
+
+            # If too many to prune, rescue highest-scoring ones
+            if max_prune == 0:
+                candidates_to_prune = []
+            elif len(candidates_to_prune) > max_prune:
+                # Sort by value_score descending, rescue the top ones
+                candidates_to_prune.sort(key=lambda x: x[1], reverse=True)
+                candidates_to_prune = candidates_to_prune[-max_prune:]  # keep lowest-scoring
+
+            prune_set = {j for j, _ in candidates_to_prune}
+            n_turn_pruned += len(prune_set)
+
+            for j, (orig_idx, sample) in enumerate(members):
+                if j not in prune_set:
+                    final_retained.append(sample)
+
+        retained = final_retained
+        n_retained = len(retained)
+        n_dropped = total - n_retained
 
     # Compute output path
     if output_path is None:
@@ -512,8 +617,16 @@ def run_filter(input_path, threshold=None, output_path=None,
         criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
     if config.peak_complexity_min is not None:
         criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
+    if config.turn_count_min is not None:
+        criteria.append(f"turn_count >= {config.turn_count_min}")
+    if config.turn_count_max is not None:
+        criteria.append(f"turn_count <= {config.turn_count_max}")
     if config.correctness_min is not None:
         criteria.append(f"correctness >= {config.correctness_min:g}")
+    if config.turn_value_min is not None:
+        criteria.append(f"turn_value >= {config.turn_value_min:g}")
+    if config.turn_quality_min is not None:
+        criteria.append(f"turn_quality >= {config.turn_quality_min:g}")
     filter_desc = " AND ".join(criteria) if criteria else "none"
 
     summary = {
@@ -523,6 +636,7 @@ def run_filter(input_path, threshold=None, output_path=None,
         "retention_rate": n_retained / total if total > 0 else 0.0,
         "mean_value_retained": mean_value,
         "inherited_retained": inherited_count,
+        "turn_pruned": n_turn_pruned,
         "threshold": config.value_min,
         "filter_criteria": filter_desc,
         "output_format": config.output_format,
@@ -542,6 +656,8 @@ def run_filter(input_path, threshold=None, output_path=None,
     print(f"  {'Mean value (retained):':<24} {mean_value:.2f}")
     if inherited_count:
         print(f"  {'Inherited (retained):':<24} {inherited_count}")
+    if n_turn_pruned:
+        print(f"  {'Turn-pruned:':<24} {n_turn_pruned}")
     if verify_stats:
         print(f"  {'Source verified:':<24} {verify_stats['matched']} matched, {verify_stats['no_metadata']} no metadata")
     print(f"  {'Format:':<24} {config.output_format}")

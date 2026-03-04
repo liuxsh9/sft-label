@@ -132,6 +132,41 @@ class TestNormalizeAndSlice:
         assert result[0]["id"] == "m1_t1"
         assert result[1]["id"] == "m1_t2"
 
+    def test_sharegpt_cot_metadata_preserved(self):
+        """Single-turn ShareGPT with <think> should preserve thinking_mode and cot_text."""
+        sample = {
+            "id": "cot1",
+            "conversations": [
+                {"from": "human", "value": "Solve this problem"},
+                {"from": "gpt", "value": "<think>Let me reason step by step...</think>The answer is 42"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        meta = result[0].get("metadata", {})
+        assert meta.get("thinking_mode") == "slow"
+        assert "step by step" in meta.get("cot_text", "")
+        # COT should be stripped from conversation text
+        assert "<think>" not in result[0]["conversations"][1]["value"]
+
+    def test_sharegpt_multiturn_sliced_still_fast(self):
+        """Multi-turn ShareGPT with COT: slices should be marked fast (COT not attributable)."""
+        sample = {
+            "id": "cot_mt",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "<think>reasoning</think>a1"},
+                {"from": "human", "value": "q2"},
+                {"from": "gpt", "value": "a2"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 2
+        # Both slices should be fast (COT not attributable to individual turns)
+        for s in result:
+            assert s["metadata"]["thinking_mode"] == "fast"
+            assert "cot_text" not in s["metadata"]
+
 
 class TestLanguageDetection:
     def test_code_fence_python(self):
@@ -191,6 +226,23 @@ class TestSparseSchedule:
         assert schedule[0] == 0
         assert schedule[-1] == 49
         assert len(schedule) < 50  # Some were skipped
+
+    def test_max_gap_caps_schedule(self):
+        """With max_gap=8, no gap between consecutive labeled indices should exceed 8."""
+        schedule = generate_sparse_schedule(50, max_gap=8)
+        assert schedule[0] == 0
+        assert schedule[-1] == 49
+        for i in range(1, len(schedule)):
+            gap = schedule[i] - schedule[i - 1]
+            assert gap <= 8, f"Gap {gap} between indices {schedule[i-1]} and {schedule[i]} exceeds max_gap=8"
+        # With capped gap, we should have more labeled points than uncapped
+        uncapped = generate_sparse_schedule(50, max_gap=999)
+        assert len(schedule) >= len(uncapped)
+
+    def test_max_gap_default_unchanged_for_small(self):
+        """n=12 (at threshold) should still label all regardless of max_gap."""
+        schedule = generate_sparse_schedule(12, max_gap=4)
+        assert schedule == list(range(12))
 
 
 class TestApplySparseSampling:

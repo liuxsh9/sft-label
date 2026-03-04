@@ -131,7 +131,7 @@ _call_counter = 0
 
 async def mock_llm_call(http_client, messages, model,
                         temperature=0.1, max_tokens=1000,
-                        max_retries=3, config=None):
+                        max_retries=3, config=None, rate_limiter=None):
     """Mock async_llm_call that returns pre-built responses."""
     global _call_counter
     _call_counter += 1

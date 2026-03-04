@@ -980,7 +980,7 @@ class TestResumeScoringFile:
         original_score_one = None
 
         async def mock_score_one(http_client, sample, model, rarity_result,
-                                  sample_idx, total, sem, config=None):
+                                  sample_idx, total, sem, config=None, rate_limiter=None):
             scored_ids.append(sample.get("id"))
             value = {
                 "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},

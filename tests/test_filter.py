@@ -651,3 +651,195 @@ class TestConversationFilter:
         config = FilterConfig(conv_value_min=5.0)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 0
+
+    def test_turn_count_min_filters_short_conversations(self, tmp_path):
+        """turn_count_min should filter out conversations with fewer turns."""
+        samples = [
+            _mt_sample("short", 1, 2, score=8.0),
+            _mt_sample("short", 2, 2, score=8.0),
+            _mt_sample("long", 1, 5, score=8.0),
+            _mt_sample("long", 2, 5, score=8.0),
+            _mt_sample("long", 3, 5, score=8.0),
+            _mt_sample("long", 4, 5, score=8.0),
+            _mt_sample("long", 5, 5, score=8.0),
+        ]
+        conv_records = [
+            {"conversation_id": "short", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 2},
+            {"conversation_id": "long", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 5},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(turn_count_min=3)
+        summary = run_filter(str(input_file), config=config)
+        # Only "long" conversation (5 slices) should be retained
+        assert summary["retained"] == 5
+
+    def test_turn_count_max_filters_long_conversations(self, tmp_path):
+        """turn_count_max should filter out conversations with too many turns."""
+        samples = [
+            _mt_sample("short", 1, 2, score=8.0),
+            _mt_sample("short", 2, 2, score=8.0),
+            _mt_sample("long", 1, 10, score=8.0),
+            _mt_sample("long", 2, 10, score=8.0),
+        ]
+        conv_records = [
+            {"conversation_id": "short", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 2},
+            {"conversation_id": "long", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 10},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(turn_count_max=5)
+        summary = run_filter(str(input_file), config=config)
+        # Only "short" conversation (2 slices) should be retained
+        assert summary["retained"] == 2
+
+
+# ── Turn-level pruning ──
+
+def _mt_sample_scored(source_id, turn_index, total_turns, score=7.0,
+                      quality_overall=7.0, labels=None):
+    """Create a multi-turn slice with value_score and quality.overall."""
+    return {
+        "id": f"{source_id}_t{turn_index}",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+        "metadata": {
+            "source_id": source_id,
+            "turn_index": turn_index,
+            "total_turns": total_turns,
+        },
+        "labels": labels or {"difficulty": "advanced"},
+        "value": {
+            "value_score": score,
+            "quality": {"overall": quality_overall},
+        },
+    }
+
+
+class TestTurnLevelPruning:
+    def _setup(self, tmp_path, samples, conv_records=None):
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+        if conv_records:
+            conv_path = tmp_path / "conversation_scores.json"
+            conv_path.write_text(json.dumps(conv_records))
+        return input_file
+
+    def test_turn_value_min_prunes_low_slices(self, tmp_path):
+        """Low-value slices should be pruned from conversations."""
+        samples = [
+            _mt_sample_scored("c1", 1, 4, score=8.0),
+            _mt_sample_scored("c1", 2, 4, score=3.0),  # low
+            _mt_sample_scored("c1", 3, 4, score=2.0),  # low
+            _mt_sample_scored("c1", 4, 4, score=9.0),
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 4},
+        ]
+        input_file = self._setup(tmp_path, samples, conv_records)
+        config = FilterConfig(conv_value_min=5.0, turn_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        # Slices 2 and 3 are below turn_value_min=5, but max_pruned_ratio=0.5
+        # means we can prune at most 2 of 4 = 2 slices. Both are low, both pruned.
+        assert summary["retained"] == 2
+        assert summary["turn_pruned"] == 2
+
+    def test_keep_first_last_protects_endpoints(self, tmp_path):
+        """First and last slices should be kept even if below threshold."""
+        samples = [
+            _mt_sample_scored("c1", 1, 3, score=2.0),  # first, protected
+            _mt_sample_scored("c1", 2, 3, score=2.0),  # middle, prunable
+            _mt_sample_scored("c1", 3, 3, score=2.0),  # last, protected
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 3},
+        ]
+        input_file = self._setup(tmp_path, samples, conv_records)
+        config = FilterConfig(conv_value_min=5.0, turn_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        # Only middle slice pruned; first and last protected
+        assert summary["retained"] == 2
+        assert summary["turn_pruned"] == 1
+
+    def test_max_pruned_ratio_limits_pruning(self, tmp_path):
+        """Should not prune more than max_pruned_ratio of turns."""
+        samples = [
+            _mt_sample_scored("c1", 1, 5, score=9.0),   # first, protected
+            _mt_sample_scored("c1", 2, 5, score=1.0),   # low
+            _mt_sample_scored("c1", 3, 5, score=1.0),   # low
+            _mt_sample_scored("c1", 4, 5, score=1.0),   # low
+            _mt_sample_scored("c1", 5, 5, score=9.0),   # last, protected
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 5},
+        ]
+        input_file = self._setup(tmp_path, samples, conv_records)
+        # max_pruned_ratio=0.3 → max 1 prune out of 5
+        config = FilterConfig(conv_value_min=5.0, turn_value_min=5.0, max_pruned_ratio=0.3)
+        summary = run_filter(str(input_file), config=config)
+        # 3 candidates for pruning but only 1 allowed
+        assert summary["retained"] == 4
+        assert summary["turn_pruned"] == 1
+
+    def test_rescued_slices_are_highest_scoring(self, tmp_path):
+        """When max_pruned_ratio limits pruning, highest-scoring candidates are rescued."""
+        samples = [
+            _mt_sample_scored("c1", 1, 5, score=9.0),   # first, protected
+            _mt_sample_scored("c1", 2, 5, score=4.0),   # low, but highest among low
+            _mt_sample_scored("c1", 3, 5, score=2.0),   # low
+            _mt_sample_scored("c1", 4, 5, score=1.0),   # lowest
+            _mt_sample_scored("c1", 5, 5, score=9.0),   # last, protected
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 8.0,
+             "peak_complexity": 7, "turn_count": 5},
+        ]
+        input_file = self._setup(tmp_path, samples, conv_records)
+        # max_pruned_ratio=0.3 → max 1 prune. 3 candidates, rescue highest 2.
+        config = FilterConfig(conv_value_min=5.0, turn_value_min=5.0, max_pruned_ratio=0.3)
+        summary = run_filter(str(input_file), config=config)
+        # Should prune the lowest-scoring (score=1.0, turn 4)
+        assert summary["turn_pruned"] == 1
+        retained_ids = {s["id"] for s in _load_retained(tmp_path)}
+        assert "c1_t4" not in retained_ids  # lowest pruned
+        assert "c1_t2" in retained_ids  # highest low-scorer rescued
+
+    def test_turn_pruning_without_conv_criteria(self, tmp_path):
+        """Turn criteria without conv criteria should apply to all samples."""
+        samples = [
+            _mt_sample_scored("c1", 1, 3, score=8.0),
+            _mt_sample_scored("c1", 2, 3, score=2.0),  # low
+            _mt_sample_scored("c1", 3, 3, score=8.0),
+            _scored(3.0),  # single-turn, below turn threshold
+            _scored(7.0),  # single-turn, above turn threshold
+        ]
+        input_file = self._setup(tmp_path, samples)
+        config = FilterConfig(turn_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        # Single-turn: score=3.0 pruned, score=7.0 kept
+        # Multi-turn: turn 2 (score=2.0) pruned, turns 1 and 3 kept
+        assert summary["retained"] == 3
+
+    def test_single_turn_unaffected_by_keep_first_last(self, tmp_path):
+        """Single-turn samples should not be affected by turn criteria's keep_first_last."""
+        samples = [
+            _scored(3.0),  # below, no turn protection
+            _scored(8.0),  # above
+        ]
+        input_file = self._setup(tmp_path, samples)
+        config = FilterConfig(turn_value_min=5.0, keep_first_last=True)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 1
+
+
+def _load_retained(tmp_path):
+    """Load retained samples from the filter output."""
+    for p in tmp_path.iterdir():
+        if p.name.startswith("filtered-") and p.suffix == ".json":
+            with open(p) as f:
+                return json.load(f)
+    return []

@@ -42,7 +42,7 @@ from sft_label.preprocessing import (
     detect_thinking_mode, extract_cot_content, truncate_for_scoring,
     count_code_blocks,
 )
-from sft_label.pipeline import async_llm_call
+from sft_label.pipeline import async_llm_call, AsyncRateLimiter, RequestStats
 
 
 # ─────────────────────────────────────────────────────────
@@ -718,7 +718,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
 # ─────────────────────────────────────────────────────────
 
 async def score_one(http_client, sample, model, rarity_result,
-                    sample_idx, total, sem, config=None):
+                    sample_idx, total, sem, config=None, rate_limiter=None):
     """Score a single sample: truncate, call LLM, validate, compute value_score.
 
     Retry loop is OUTSIDE the semaphore so failed/retrying samples don't block
@@ -792,6 +792,7 @@ async def score_one(http_client, sample, model, rarity_result,
             parsed, raw, usage = await async_llm_call(
                 http_client, messages, model,
                 temperature=0.1, max_tokens=800, config=config,
+                rate_limiter=rate_limiter,
             )
             monitor["llm_calls"] += 1
             monitor["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -1223,8 +1224,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     total = len(raw_rarities)
 
     # ── Pass B: Chunked LLM scoring ──
-    print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency}")
+    _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
+    print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
 
+    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
     sem = asyncio.Semaphore(config.scoring_concurrency)
     scored_count = 0
     failed_count = 0
@@ -1262,7 +1265,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 nonlocal scored_count, failed_count, first_error_logged
                 value, monitor = await score_one(
                     client, sample, config.scoring_model, rarity_result,
-                    idx, total, sem, config=config,
+                    idx, total, sem, config=config, rate_limiter=rate_limiter,
                 )
                 return chunk_idx, idx, value, monitor, sample
 
@@ -1387,8 +1390,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                 print(f"      response={err_resp[:200]}")
                             first_error_logged = True
 
-                        progress.update(task, advance=1,
-                                        info=f"ok={scored_count + (1 if value else 0)} fail={failed_count + (0 if value else 1)}")
+                        _info = f"ok={scored_count + (1 if value else 0)} fail={failed_count + (0 if value else 1)}"
+                        if rate_limiter:
+                            _info += f" | {rate_limiter.stats.summary_line()}"
+                        progress.update(task, advance=1, info=_info)
 
                         # Check if chunk is done
                         if chunk_data["done"] >= chunk_data["total"]:
@@ -1447,6 +1452,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(input_path)
+    if rate_limiter:
+        stats["http_request_stats"] = rate_limiter.stats.to_dict()
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -1646,6 +1653,20 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
     if elapsed > 0 and total_scored > 0:
         print(f"Throughput:  {total_scored / elapsed:.1f} samples/sec")
 
+    # HTTP request stats
+    http = stats.get("http_request_stats")
+    if http and http.get("total_http_requests", 0) > 0:
+        t = http["total_http_requests"]
+        ok = http["success"]
+        rate = http["success_rate"]
+        errs = http.get("errors", {})
+        timeouts = http.get("timeouts", 0)
+        err_parts = [f"{code}×{n}" for code, n in errs.items()]
+        if timeouts:
+            err_parts.append(f"timeout×{timeouts}")
+        err_str = f" — errors: {', '.join(err_parts)}" if err_parts else ""
+        print(f"HTTP:        {ok}/{t} ({rate}%){err_str}")
+
     # Score distributions
     dists = stats.get("score_distributions", {})
     dims = [
@@ -1801,6 +1822,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     normalize_rarity_scores(rarity_results)
 
     # Run LLM scoring
+    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
     sem = asyncio.Semaphore(config.scoring_concurrency)
     all_monitors = [None] * total
     all_values = [None] * total
@@ -1823,8 +1845,9 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     start_time = time.time()
 
     to_score = [i for i in range(total) if all_values[i] is None]
+    _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
     print(f"  Scoring {len(to_score)} samples (skipped {skipped_count} resumed) "
-          f"| model={config.scoring_model} concurrency={config.scoring_concurrency}")
+          f"| model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
 
     async with httpx.AsyncClient(
         proxy=None,
@@ -1838,7 +1861,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             nonlocal scored_count, failed_count, first_error_logged
             value, monitor = await score_one(
                 client, samples[idx], config.scoring_model, rarity_results[idx],
-                idx, total, sem, config=config,
+                idx, total, sem, config=config, rate_limiter=rate_limiter,
             )
             all_values[idx] = value
             all_monitors[idx] = monitor
@@ -1862,8 +1885,10 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             tasks = [asyncio.create_task(score_task(i)) for i in to_score]
             for coro in asyncio.as_completed(tasks):
                 idx = await coro
-                progress.update(task, advance=1,
-                                info=f"ok={scored_count} fail={failed_count}")
+                _info = f"ok={scored_count} fail={failed_count}"
+                if rate_limiter:
+                    _info += f" | {rate_limiter.stats.summary_line()}"
+                progress.update(task, advance=1, info=_info)
 
     elapsed = time.time() - start_time
 
@@ -1924,6 +1949,8 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(input_path)
+    if rate_limiter:
+        stats["http_request_stats"] = rate_limiter.stats.to_dict()
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -1958,6 +1985,8 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         print(f"  Warning: dashboard generation failed: {e}")
 
     stats["elapsed_seconds"] = round(elapsed, 1)
+    if rate_limiter:
+        stats["http_request_stats"] = rate_limiter.stats.to_dict()
     print_scoring_summary(stats, output_dir)
 
     return stats
@@ -2172,10 +2201,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     concurrency = config.scoring_concurrency
     watermark = int(concurrency * config.dir_pipeline_watermark)
     max_active = config.dir_pipeline_max_files
+    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
     sem = asyncio.Semaphore(concurrency)
     pprint = print
 
-    print(f"  Scoring: model={config.scoring_model} concurrency={concurrency}")
+    _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
+    print(f"  Scoring: model={config.scoring_model} concurrency={concurrency} {_rps}")
 
     batch_start = time.time()
 
@@ -2184,7 +2215,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                             total_in_file):
         value, monitor = await score_one(
             client, sample, config.scoring_model, rarity_result,
-            sample_idx, total_in_file, sem, config=config,
+            sample_idx, total_in_file, sem, config=config, rate_limiter=rate_limiter,
         )
         return file_idx, sample_idx, value, monitor
 
@@ -2306,8 +2337,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
                     total_ok = sum(cc.ok for cc in collectors.values())
                     total_fail = sum(cc.fail for cc in collectors.values())
-                    progress.update(sample_task, advance=1,
-                                    info=f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]")
+                    _info = f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]"
+                    if rate_limiter:
+                        _info += f" | {rate_limiter.stats.summary_line()}"
+                    progress.update(sample_task, advance=1, info=_info)
 
                     # Check if file is fully done
                     if c.done >= c.total and not c.completed:
@@ -2337,6 +2370,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         summary["model"] = config.scoring_model
         summary["input_path"] = str(input_dir)
         summary["files_processed"] = len(all_file_stats)
+        if rate_limiter:
+            summary["http_request_stats"] = rate_limiter.stats.to_dict()
 
         summary_path = output_dir / "summary_stats_value.json"
         with open(summary_path, "w", encoding="utf-8") as f:
@@ -2437,7 +2472,7 @@ def _merge_value_stats(file_stats_list):
             for s in file_stats_list:
                 dist = s.get("score_distributions", {}).get(key, {})
                 n = s.get("total_scored", 0)
-                if not dist or n == 0:
+                if not dist or n == 0 or not isinstance(dist, dict):
                     continue
                 mean = dist.get("mean", 0)
                 total_sum += mean * n

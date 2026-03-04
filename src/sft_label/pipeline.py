@@ -1480,6 +1480,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         _sparse_kw = dict(full_label_count=config.sparse_full_label_count,
                           gap_multiplier=config.sparse_gap_multiplier,
                           min_gap=config.sparse_min_gap,
+                          max_gap=config.sparse_max_gap,
                           threshold=config.sparse_threshold)
 
     stats_acc = StatsAccumulator()
@@ -1695,6 +1696,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         _sparse_kw = dict(full_label_count=config.sparse_full_label_count,
                           gap_multiplier=config.sparse_gap_multiplier,
                           min_gap=config.sparse_min_gap,
+                          max_gap=config.sparse_max_gap,
                           threshold=config.sparse_threshold)
     label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
     label_count = len(label_indices)
@@ -1962,6 +1964,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             _sparse_kw = dict(full_label_count=config.sparse_full_label_count,
                               gap_multiplier=config.sparse_gap_multiplier,
                               min_gap=config.sparse_min_gap,
+                              max_gap=config.sparse_max_gap,
                               threshold=config.sparse_threshold)
         label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
         label_count = len(label_indices)
