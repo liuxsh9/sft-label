@@ -48,12 +48,29 @@ SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
 CONSISTENCY_RULES = [
     ("intent == 'learn' and len(agentic) > 3",
      "Intent=learn but many agentic tags"),
-    ("intent == 'build' and 'feature-implementation' not in task and len(task) > 0",
-     "Intent=build but no feature-implementation in task"),
+    ("intent == 'build' and 'feature-implementation' not in task "
+     "and 'configuration' not in task and 'schema-design' not in task "
+     "and 'deployment' not in task and 'api-design' not in task "
+     "and 'testing-task' not in task and 'documentation' not in task "
+     "and 'logging' not in task and 'monitoring' not in task "
+     "and len(task) > 0",
+     "Intent=build but no build-relevant task"),
     ("difficulty == 'beginner' and len(concept) > 3",
      "Difficulty=beginner but many concepts"),
     ("len(constraint) > 0 and difficulty == 'beginner'",
      "Has constraints but difficulty=beginner"),
+    ("intent == 'debug' and 'bug-fixing' not in task and len(task) > 0",
+     "Intent=debug but no bug-fixing in task"),
+    ("difficulty == 'expert' and len(concept) == 0",
+     "Difficulty=expert but no concepts tagged"),
+    ("'code-translation' in task and len(language) < 2",
+     "Task=code-translation but fewer than 2 languages"),
+    ("'ownership' in concept and 'rust' not in language",
+     "Concept=ownership (Rust-specific) but Rust not in language"),
+    ("context == 'snippet' and 'multi-file-coordination' in agentic",
+     "Context=snippet contradicts agentic=multi-file-coordination"),
+    ("intent == 'review' and 'code-review-task' not in task and len(task) > 0",
+     "Intent=review but no code-review-task in task"),
 ]
 
 # ═══════════════════════════════════════════════════════════

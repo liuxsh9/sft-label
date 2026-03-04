@@ -35,11 +35,16 @@ What is the user's primary goal?
 - `debug`: Find and fix a problem. Signals: "error", "doesn't work", "why does it fail", "bug"
 - `review`: Get feedback on existing code. Signals: "review this", "any issues", "improvements"
 - `decide`: Choose between options. Signals: "A vs B", "which should I", "how to choose"
+Disambiguation:
+- User has broken code and wants it fixed → `debug` (even if they also want to understand)
+- User is learning by building something → `build` (learning is a side-effect)
+- User asks "explain X" with no code to fix → `learn`
 
 ### Language (multi-select)
 What programming languages appear in the conversation?
 Common: python, javascript, typescript, java, go, rust, c, cpp, csharp, ruby, php, swift, kotlin, sql, html, css, shell, dockerfile, yaml, json, markdown, hcl, xml, toml
 Other: ada, apl, assembly, bazel, clojure, cmake, cobol, crystal, dart, dotenv, elixir, erb, erlang, fortran, fsharp, gradle, groovy, handlebars, haskell, ini, jinja, julia, latex, liquid, lisp, lua, makefile, matlab, maven, nginx-config, nim, objective-c, ocaml, perl, powershell, prolog, properties, r, racket, restructuredtext, ruby, scala, scheme, smalltalk, solidity, verilog, vhdl, vyper, zig
+Note: "Common" and "Other" groupings are for readability only — all tags have equal status. Choose based on what appears in the conversation.
 Rules:
 - Detect from code blocks, framework mentions (Django→python, React→typescript, Spring Boot→java)
 - Config file formats count (Docker Compose→yaml, Terraform→hcl)
@@ -77,13 +82,21 @@ What application area does this belong to?
 - systems-programming: Low-level system software — memory allocators, custom runtimes, system utilities. NOT general C/C++/Rust programming — use only when the code targets system-level concerns
 - web-backend: Server-side web development
 - web-frontend: Client-side web development
-- (also: accessibility, bioinformatics, compliance, computer-vision, geospatial, internationalization, iot, robotics)
+- accessibility: Accessibility engineering — WCAG compliance, screen reader support, keyboard navigation, ARIA patterns
+- bioinformatics: Bioinformatics — genomic analysis, sequence alignment, phylogenetics, structural biology software
+- compliance: Regulatory/compliance engineering — audit trails, policy-as-code, SOX/SOC2 automation
+- computer-vision: Computer vision — image recognition, object detection, OCR, video analysis (distinct from machine-learning when vision is the primary focus)
+- geospatial: Geospatial software — GIS, mapping, spatial queries, coordinate transformations
+- internationalization: i18n/l10n engineering — locale-aware formatting, translation pipelines, bi-directional text
+- iot: Internet of Things — sensor networks, MQTT, edge computing, device management
+- robotics: Robotics software — motion planning, ROS, sensor fusion, SLAM
 Rules:
 - Tag the application SCENARIO, not the technology
 - A query can span multiple domains (e.g., "SaaS payment" → web-backend + e-commerce + financial-technology)
 - Pure algorithm practice with no application context → empty
 - Prefer the most specific domain tag
 - "algorithm", "data-structure", "documentation" are NOT domains. Algorithm/DS practice → concept:algorithms or concept:data-structures, domain should be empty. Writing docs → task:documentation, not a domain.
+- **Cardinality norm**: Typically 0-2 domains. More than 2 is rare and should have strong justification.
 
 ### Task (multi-select)
 What type of work is being done?
@@ -113,13 +126,18 @@ Rules:
 - "asking for best practices" ≠ code-optimization (use code-explanation or configuration)
 - "write idiomatic code" ≠ code-optimization (use feature-implementation)
 - code-optimization requires EXPLICIT performance improvement intent (speed, memory, latency)
+- **Cardinality norm**: Typically 1-3 tasks. More than 3 is rare and should have strong justification.
 
 ### Difficulty (single-select)
 What coding ability level is needed to produce a good response?
-- `beginner`: Basic syntax, simple API calls, standard library usage (e.g., Python list operations, HTML/CSS basics)
-- `intermediate`: Framework usage, common design patterns, multi-component coordination (e.g., Flask REST API, React components)
-- `advanced`: Performance optimization, complex architecture, deep debugging, multi-system integration (e.g., distributed rate limiter, connection pool implementation)
-- `expert`: Deep internals knowledge, cutting-edge techniques, large-scale system design (e.g., Rust Pin/Unpin mechanism, Linux kernel scheduler, lock-free data structures, JIT compiler)
+- `beginner`: Basic syntax, simple API calls, standard library usage (e.g., Python list operations, HTML/CSS basics, simple file I/O)
+- `intermediate`: Framework usage, common design patterns, multi-component coordination (e.g., Flask CRUD API, React components with state, SQL joins)
+- `advanced`: Performance optimization, complex architecture, deep debugging, multi-system integration (e.g., distributed rate limiter with Redis sliding window, connection pool implementation, custom Webpack plugin)
+- `expert`: Deep internals knowledge, cutting-edge techniques, large-scale system design (e.g., Rust Pin/Unpin mechanism, Linux kernel scheduler, lock-free data structures, custom memory allocator, JIT compiler)
+Calibration anchors:
+- Flask CRUD = intermediate (standard framework usage)
+- Distributed rate limiter with sliding window + degradation = advanced (multi-system, algorithmic)
+- Custom malloc implementation = expert (deep system internals)
 
 ## Output Format
 Return ONLY valid JSON (no markdown, no explanation):
@@ -201,7 +219,43 @@ total_turns: 6
     },
     {
         "role": "assistant",
-        "content": '{"intent":"build","language":["typescript","css","json"],"domain":["web-frontend"],"task":["configuration","feature-implementation"],"difficulty":"beginner","confidence":{"intent":0.98,"language":0.90,"domain":0.95,"task":0.85,"difficulty":0.90},"unmapped":[]}'
+        "content": '{"intent":"build","language":["typescript","css"],"domain":["web-frontend"],"task":["configuration","feature-implementation"],"difficulty":"beginner","confidence":{"intent":0.98,"language":0.90,"domain":0.95,"task":0.85,"difficulty":0.90},"unmapped":[]}'
+    },
+    # Example 4: Learn + beginner (concept explanation, no build)
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"Python 装饰器是怎么工作的？能举个例子解释一下 @functools.wraps 的作用吗？"},{"from":"gpt","value":"## Python 装饰器原理\\n\\n装饰器本质上是一个接受函数作为参数并返回新函数的高阶函数。\\n\\n### 基本装饰器\\n```python\\ndef my_decorator(func):\\n    def wrapper(*args, **kwargs):\\n        print('Before call')\\n        result = func(*args, **kwargs)\\n        print('After call')\\n        return result\\n    return wrapper\\n\\n@my_decorator\\ndef say_hello():\\n    print('Hello!')\\n```\\n\\n`@my_decorator` 等价于 `say_hello = my_decorator(say_hello)`。\\n\\n### functools.wraps 的作用\\n不加 `@wraps` 时，`say_hello.__name__` 会变成 `'wrapper'`，docstring 也会丢失。`@wraps(func)` 会把原函数的元信息复制到 wrapper 上：\\n\\n```python\\nimport functools\\n\\ndef my_decorator(func):\\n    @functools.wraps(func)\\n    def wrapper(*args, **kwargs):\\n        return func(*args, **kwargs)\\n    return wrapper\\n```\\n\\n这样 `say_hello.__name__` 仍然是 `'say_hello'`，在调试和文档生成时很重要。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["python"]
+has_tool_roles: false
+code_block_count: 2
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"learn","language":["python"],"domain":[],"task":["code-explanation"],"difficulty":"intermediate","confidence":{"intent":0.98,"language":0.99,"domain":0.95,"task":0.95,"difficulty":0.88},"unmapped":[]}'
+    },
+    # Example 5: Build + advanced (distributed rate limiter with Redis)
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"帮我实现一个分布式限流器，要求：\\n1. 用 Redis 滑动窗口算法\\n2. 支持按用户/IP 限流\\n3. 当 Redis 不可用时降级到本地限流\\n4. 要线程安全"},{"from":"gpt","value":"好的，这是一个完整的分布式限流器实现：\\n\\n```python\\nimport time\\nimport threading\\nimport redis\\nfrom collections import defaultdict\\n\\nclass SlidingWindowRateLimiter:\\n    def __init__(self, redis_url, max_requests, window_seconds):\\n        self.redis = redis.Redis.from_url(redis_url)\\n        self.max_requests = max_requests\\n        self.window = window_seconds\\n        self._local_counts = defaultdict(list)\\n        self._lock = threading.Lock()\\n        self._degraded = False\\n\\n    def is_allowed(self, key: str) -> bool:\\n        try:\\n            return self._check_redis(key)\\n        except redis.ConnectionError:\\n            self._degraded = True\\n            return self._check_local(key)\\n\\n    def _check_redis(self, key: str) -> bool:\\n        now = time.time()\\n        pipe = self.redis.pipeline()\\n        window_key = f'ratelimit:{key}'\\n        pipe.zremrangebyscore(window_key, 0, now - self.window)\\n        pipe.zadd(window_key, {f'{now}': now})\\n        pipe.zcard(window_key)\\n        pipe.expire(window_key, self.window)\\n        results = pipe.execute()\\n        return results[2] <= self.max_requests\\n\\n    def _check_local(self, key: str) -> bool:\\n        now = time.time()\\n        with self._lock:\\n            self._local_counts[key] = [\\n                t for t in self._local_counts[key]\\n                if t > now - self.window\\n            ]\\n            if len(self._local_counts[key]) >= self.max_requests:\\n                return False\\n            self._local_counts[key].append(now)\\n            return True\\n```\\n\\n关键设计：\\n- Redis ZSET 实现精确滑动窗口（`ZREMRANGEBYSCORE` + `ZCARD`）\\n- Pipeline 减少 RTT\\n- `ConnectionError` 时自动降级到本地 `threading.Lock` 保护的内存计数器\\n- 本地降级是尽力而为，不保证全局一致性"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["python"]
+has_tool_roles: false
+code_block_count: 1
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"build","language":["python"],"domain":["web-backend"],"task":["feature-implementation"],"difficulty":"advanced","confidence":{"intent":0.98,"language":0.99,"domain":0.85,"task":0.95,"difficulty":0.92},"unmapped":[]}'
     },
 ]
 
@@ -217,9 +271,11 @@ You are given the conversation AND the results of a prior labeling pass (Call 1 
 ## Annotation Principles
 1. **Evidence-based only**: Every tag must have direct evidence in the conversation. Do not speculate.
 2. **Conservative**: When uncertain, omit. Missing a correct tag < adding a wrong tag.
-3. **Label the last turn**: Focus on the last user query and its response.
+3. **Label the last turn**: Focus on the last user query and its response. Even if earlier turns discuss a different topic, only label the capabilities required for the FINAL assistant response.
 4. **Umbrella concepts**: Use the broadest applicable concept tag. E.g., use `concurrency` (not "mutex" or "deadlock" separately — those are sub-concepts captured by the umbrella).
 5. **Agentic = what the AI agent DID**: Not what the user asked about. "How to use Git" ≠ `git-operations`. Only tag if the response actually performs the action.
+6. **Call 1 is fallible**: The Call 1 result is provided as context, but it may contain errors. Always verify against the actual conversation evidence. If the conversation contradicts a Call 1 label, trust the conversation.
+7. **Confidence calibration**: When you are genuinely torn between two options (e.g., concept A vs concept B), your confidence should reflect that (~0.55, not 0.85). Reserve high confidence (>0.85) for clear-cut cases.
 
 ## Your Task
 Label these 4 dimensions:
@@ -260,6 +316,7 @@ Engineering:
 - debugging: Systematic debugging methodology (breakpoint debugging, stack trace analysis, bisect/isolation, logging-based diagnosis). NOT the same as intent=debug; tag only when debugging TECHNIQUES are demonstrated or taught
 
 Rules:
+- **Cardinality norms**: concept 0-3 (most responses need 0-2), agentic 0-4, constraint 0-2
 - Tag 1-3 concepts typically (the CORE knowledge areas), rarely more than 4
 - **Empty is a valid answer**: If the response only uses basic syntax, framework APIs, or configuration — concept should be empty []. Not every code sample needs concept tags.
 - Choose the umbrella concept, not sub-concepts
@@ -272,12 +329,14 @@ Rules:
 - **THRESHOLD for `architecture`**: Tag ONLY when the response discusses named architectural patterns (microservices, event-driven, CQRS, saga) or distributed system theory (CAP, consensus, partitioning). "Separate frontend and backend" or "put this in a utils folder" does NOT warrant this tag.
 - **THRESHOLD for `database-concepts`**: Tag ONLY when database theory is a meaningful focus (normalization forms, index design tradeoffs, isolation levels, query plan optimization, sharding strategies). Writing a simple CREATE TABLE or basic SELECT queries does NOT warrant this tag.
 - **THRESHOLD for `ci-cd`**: Tag ONLY when CI/CD pipeline DESIGN or principles are discussed (pipeline stages, artifact management, deployment strategies like blue-green/canary). Simply writing a GitHub Actions YAML or Dockerfile does NOT warrant this tag — that's task:configuration + domain:devops.
+- **THRESHOLD for `concurrency`**: Tag ONLY when concurrency is a meaningful focus — race conditions, synchronization primitives (mutex, semaphore, channel), parallel algorithms, concurrent data structures. Simple `async/await` for sequential I/O (e.g., `await fetch(url)`) does NOT warrant this tag.
+- **THRESHOLD for `metaprogramming`**: Tag ONLY when the response involves CREATING custom decorators, metaclasses, macros, or code generation. Simply USING a framework's built-in decorators (e.g., `@app.route`, `@pytest.fixture`, `@dataclass`) does NOT warrant this tag.
 - **THRESHOLD for `debugging`**: Tag ONLY when the response demonstrates or teaches debugging TECHNIQUES (systematic isolation, stack trace analysis, using debuggers, bisect strategy). Simply fixing a bug (intent=debug + task=bug-fixing) does NOT warrant this tag. "My sort() broke because of wrong key" → concept=[], NOT concept=debugging.
 - **error-handling vs other dimensions**: error-handling = KNOWLEDGE of error patterns (Result/Option, custom errors). Agent retrying on failure → agentic:error-recovery. User asking to add try/catch → task:error-handling-task. "Must handle failures gracefully" → constraint:fault-tolerant.
 - **Positive signals** — tag these concepts when you see:
-  - Python decorators, macros, code generation, compiler plugins → `metaprogramming`
+  - Writing custom Python decorators/metaclasses, Rust/C macros, code generation, compiler plugins → `metaprogramming`
   - TTL cache, LRU eviction, memoization, CDN caching → `caching`
-  - async/await, Promise chains, concurrent HTTP fetches → `concurrency`
+  - Concurrent async operations (asyncio.gather, Promise.all), parallel HTTP fetches, thread pools → `concurrency`
   - Class hierarchy with inheritance, encapsulation, polymorphism → `object-oriented-programming`
   - Container security, RBAC, permissions, OAuth/JWT → `security`
   - WebSocket, REST API design, gRPC, JSON-RPC → `api-protocols`
@@ -339,12 +398,14 @@ Behavioral Patterns (cognitive strategies the agent employs):
 Rules:
 - Tool Actions: ONLY if the response contains evidence of tool use (tool role messages, command outputs, file read/write)
 - Behavioral Patterns: ONLY if the AI agent **actually demonstrates** the pattern in its response
-  - `multi-step-reasoning`: Agent explicitly breaks down and executes steps (NOT just giving a detailed explanation)
+  - `multi-step-reasoning`: Agent explicitly breaks down and executes steps where LATER steps depend on EARLIER step results (NOT just giving a structured explanation or numbered list)
   - `planning`: Agent creates an explicit plan before executing (NOT just answering a planning question)
   - `iterative-refinement`: Agent tries, fails, adjusts, retries (NOT just explaining alternatives)
 - **Key distinction**: A thorough explanation is NOT agentic behavior. Q&A without tool use → Agentic should be empty []
 - A user asking "how to use Git" does NOT mean the agent uses git-operations
 - If there are no tool role messages and no evidence of iterative agent behavior → leave Agentic empty
+- **planning vs multi-step-reasoning**: `planning` = agent explicitly LISTS a plan before executing (e.g., "Step 1: ..., Step 2: ..., Let me start with step 1"). `multi-step-reasoning` = agent executes steps where each step's output informs the next (e.g., reads a file → finds the bug → applies fix → tests). A structured explanation with numbered points is NEITHER.
+- **preprocessed_signals are heuristic**: Fields in preprocessed_signals (e.g., `has_tool_roles`, `detected_languages`) are automated heuristics and may contain false positives. Always verify against the actual conversation content before tagging.
 
 ### Constraint (multi-select)
 What non-functional requirements are EXPLICITLY stated or strongly implied?
@@ -406,6 +467,7 @@ Rules:
 - A single SQL statement → snippet
 - A complete Python script with imports → single-file
 - A GitHub Actions workflow file → single-file (not repository)
+- Pure discussion with no actual code → default to `snippet`
 
 ## Output Format
 Return ONLY valid JSON (no markdown, no explanation):
@@ -447,6 +509,9 @@ total_turns: 2
         "content": '{"concept":["algorithms","data-structures"],"agentic":[],"constraint":[],"context":"snippet","confidence":{"concept":0.90,"agentic":0.98,"constraint":0.99,"context":0.92},"unmapped":[]}'
     },
     # Example 2: Agentic multi-turn debugging
+    # Note: data-structures is correct here because the bug is about map reference
+    # semantics (returning internal map vs copy) — this is a data structure design issue,
+    # not incidental container usage.
     {
         "role": "user",
         "content": """<conversation>
@@ -488,7 +553,29 @@ total_turns: 6
     },
     {
         "role": "assistant",
-        "content": '{"concept":["ci-cd","testing"],"agentic":["file-operations","bash-execution","multi-file-coordination","planning"],"constraint":[],"context":"repository","confidence":{"concept":0.90,"agentic":0.92,"constraint":0.97,"context":0.88},"unmapped":[]}'
+        "content": '{"concept":[],"agentic":["file-operations","bash-execution","multi-file-coordination","planning"],"constraint":[],"context":"repository","confidence":{"concept":0.92,"agentic":0.92,"constraint":0.97,"context":0.88},"unmapped":[]}'
+    },
+    # Example 4: Standard framework CRUD — empty concept
+    # Key calibration: routine framework usage does NOT need concept tags.
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"帮我用 Django REST Framework 写一个 Product 的 ViewSet，支持 CRUD，加上分页和权限控制"},{"from":"gpt","value":"好的，这是一个标准的 DRF ViewSet 实现：\\n\\n```python\\nfrom rest_framework import viewsets, permissions, pagination\\nfrom .models import Product\\nfrom .serializers import ProductSerializer\\n\\nclass StandardPagination(pagination.PageNumberPagination):\\n    page_size = 20\\n    page_size_query_param = 'page_size'\\n    max_page_size = 100\\n\\nclass ProductViewSet(viewsets.ModelViewSet):\\n    queryset = Product.objects.all()\\n    serializer_class = ProductSerializer\\n    pagination_class = StandardPagination\\n    permission_classes = [permissions.IsAuthenticatedOrReadOnly]\\n\\n    def perform_create(self, serializer):\\n        serializer.save(created_by=self.request.user)\\n```\\n\\n然后在 urls.py 注册：\\n```python\\nfrom rest_framework.routers import DefaultRouter\\nfrom .views import ProductViewSet\\n\\nrouter = DefaultRouter()\\nrouter.register('products', ProductViewSet)\\nurlpatterns = router.urls\\n```\\n\\n这样就有了完整的 CRUD + 分页 + 权限。GET 所有人可访问，POST/PUT/DELETE 需要登录。"}]
+</conversation>
+
+<call1_result>
+{"intent":"build","language":["python"],"domain":["web-backend","api-development"],"task":["feature-implementation","api-design"],"difficulty":"intermediate"}
+</call1_result>
+
+<preprocessed_signals>
+has_tool_roles: false
+code_block_count: 2
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"concept":[],"agentic":[],"constraint":[],"context":"single-file","confidence":{"concept":0.90,"agentic":0.98,"constraint":0.97,"context":0.85},"unmapped":[]}'
     },
 ]
 
