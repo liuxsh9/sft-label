@@ -63,7 +63,7 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 - Position-weighted averaging (later turns weighted 1→3×), inherited slices get 0.7× confidence
 - Quality floor penalty (min quality < 3 → 0.5×, < 5 → 0.8×) and negative flag penalty (0.95^count)
 - `conv_value` = weighted_avg(value_scores) × penalty, clamped [1,10]
-- `conv_selection` = 0.75×intra_class_rank + 0.25×conv_rarity (per-tag percentile, same as sample-level but on conversations)
+- `conv_selection` = 0.85×intra_class_rank + 0.15×conv_rarity (per-tag percentile with Bayesian shrinkage, same as sample-level but on conversations)
 - Outputs `conversation_scores.json` alongside scored data
 
 **Pass 3: Filtering & Selection** (in `tools/filter_value.py`):
@@ -83,8 +83,9 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 - Multi-turn slices get `thinking_mode="fast"` and `cot_text` removed (since COT is stripped during slicing), preventing misleading scoring in Pass 2
 - Pass 2 uses COT-preserving truncation (unlike Pass 1 which strips COT) because COT quality is a key scoring dimension
 - Rarity is computed from tag IDF (not LLM), normalized to 1-10 via percentile mapping
-- Value score = 0.25×complexity + 0.35×quality + 0.15×reasoning + 0.25×rarity (configurable)
-- Selection score = 0.75×intra_class_rank + 0.25×rarity (per-tag percentile, structurally different from value_score)
+- Value score = 0.25×complexity + 0.40×quality + 0.20×reasoning + 0.15×rarity (configurable)
+- Quality floor penalty: quality.overall < 4 → value_score *= 0.7
+- Selection score = 0.85×intra_class_rank + 0.15×rarity (per-tag percentile with Bayesian shrinkage, structurally different from value_score)
 - Pangu pseudo-multiturn reconstruction (`to_pangu_pseudo_multiturn`) uses `raw_pangu_data` saved during normalization for roundtrip fidelity; falls back to algorithmic reconstruction for sliced/modified samples
 - `source_file` metadata is added to each sample during labeling to enable downstream source verification in filtering
 

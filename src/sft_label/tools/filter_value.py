@@ -34,6 +34,8 @@ class FilterConfig:
     conv_value_min: float | None = None     # min conversation-level value
     conv_selection_min: float | None = None  # min conversation-level selection
     peak_complexity_min: float | None = None # min peak complexity across turns
+    # Sub-score hard floors
+    correctness_min: float | None = None    # min quality.correctness (hard floor)
 
 
 def _parse_dim_tag(dim_tag):
@@ -112,6 +114,13 @@ def matches_filter(sample, config):
             if not config.include_unscored:
                 return False
         elif score < config.selection_min:
+            return False
+
+    # Check correctness_min (hard floor on code correctness)
+    if config.correctness_min is not None:
+        quality = value.get("quality") or value.get("scores", {}).get("quality") or {}
+        correctness = quality.get("correctness") if isinstance(quality, dict) else None
+        if correctness is not None and correctness < config.correctness_min:
             return False
 
     # Check thinking_mode
@@ -426,6 +435,7 @@ def run_filter(input_path, threshold=None, output_path=None,
                 exclude_inherited=config.exclude_inherited,
                 include_unscored=True,
                 verify_source=config.verify_source,
+                correctness_min=config.correctness_min,
             )
             if matches_filter(sample, shared_config):
                 retained.append(sample)
@@ -502,6 +512,8 @@ def run_filter(input_path, threshold=None, output_path=None,
         criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
     if config.peak_complexity_min is not None:
         criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
+    if config.correctness_min is not None:
+        criteria.append(f"correctness >= {config.correctness_min:g}")
     filter_desc = " AND ".join(criteria) if criteria else "none"
 
     summary = {

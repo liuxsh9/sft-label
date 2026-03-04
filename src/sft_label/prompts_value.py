@@ -21,7 +21,7 @@ Your task: assess the training VALUE of a single conversation sample across thre
 Rate the technical complexity of the task. Provide sub-scores and an overall:
 
 - **instruction** (1-10): How challenging is the question/request itself?
-- **reasoning** (1-10): How many logical steps or how deep the reasoning needed?
+- **analytical_depth** (1-10): How many logical steps or how deep the reasoning needed?
 - **implementation** (1-10): How difficult is the actual code implementation?
 - **overall** (1-10): Holistic complexity assessment.
 
@@ -35,8 +35,9 @@ Score anchors:
 Calibration:
 - Most coding tasks fall in the 3-6 range. A standard Flask/Django endpoint is 4, not 7.
 - 7+ requires genuinely advanced technical depth (concurrency, distributed systems, complex algorithm design).
-- Cross-check with the difficulty tag in <meta>: if difficulty="intermediate", complexity should typically be 4-6. If "beginner", expect 1-3. Only "advanced"/"expert" tasks should reach 7+.
+- The difficulty tag in <meta> is a rough reference only (it may be inaccurate). Always assess complexity independently based on the actual task content.
 - Reserve 7-8 for tasks requiring specialized knowledge most mid-level developers lack.
+- For agentic/tool-use tasks, assess the orchestration complexity: how many tools, how complex the decision logic for choosing tools, and how well errors are handled across tool calls.
 
 ## Dimension 2: Quality (1-10)
 
@@ -55,6 +56,13 @@ Score anchors:
   7-8: Good — correct, well-structured code, clear explanation, handles edge cases
   9-10: Excellent — perfectly correct, production-quality code, insightful explanation, comprehensive
 
+Calibration:
+- A response with bugs in core logic is 3-4 at most for correctness, regardless of code style or explanation quality.
+- "Mostly works but misses edge cases" is 5-6, not 7-8.
+- overall should never exceed correctness by more than 2 points. Buggy code cannot be "high quality".
+- Reserve 9-10 for code you would merge into production without changes.
+- Expected distribution: ~15% at 1-3, ~50% at 4-6, ~30% at 7-8, ~5% at 9-10.
+
 ## Dimension 3: Reasoning (1-10)
 
 This dimension adapts based on the thinking_mode in <meta>:
@@ -69,35 +77,40 @@ This dimension adapts based on the thinking_mode in <meta>:
 - **clarity** (1-10): Is the reasoning within the response clear?
 - **consistency** (1-10): Are the explanations logically consistent with the code?
 - **self_correction** (true/false): Does the response acknowledge limitations or alternatives?
-- **overall** (1-10): How well-integrated is the reasoning with the implementation?
+- **overall** (1-10): How well-reasoned is the approach? Focus on whether the chosen algorithm/design is well-justified and trade-offs are acknowledged — NOT on explanation quality (which is covered by quality.explanation).
 
 ## Flags
 
 Optionally tag notable qualities. Use ONLY these flag values:
 
 Positive: excellent-explanation, clean-code, creative-solution, good-error-handling, comprehensive-testing
-Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation
+Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation, hallucination
 
 Flag criteria (be selective — most samples should have 0-1 flags):
 - clean-code: Reserve for NOTABLY well-crafted code — thoughtful abstractions, excellent naming, clear separation of concerns. Merely correct or working code does NOT qualify.
 - comprehensive-testing: Must include actual test code (unit tests, assertions, test cases) covering multiple scenarios including edge cases. Simply mentioning "you should test" or having 1-2 basic asserts does NOT qualify.
 - excellent-explanation: Explanation that teaches transferable concepts or provides deep insight, not just describes what the code does line-by-line.
 - good-error-handling: Thoughtful, non-trivial error strategy (custom error types, retry logic, graceful degradation). Basic try/catch alone does NOT qualify.
+- has-bug: Only for bugs that would cause incorrect output or runtime errors, not minor style issues or missing edge cases.
+- incomplete: The response is missing major requested functionality, not just minor details.
+- hallucination: The response fabricates non-existent APIs, libraries, functions, or language features.
 - An empty flags list is expected for most samples.
 
 ## Important Notes
 
 - The <meta> block provides context: Pass 1 tags, original lengths (before truncation), thinking mode.
-- If content was truncated, consider original_*_chars for complexity assessment — longer COT/response often indicates higher complexity.
-- For correctness: if you cannot fully assess correctness due to truncation, lean toward the score suggested by the visible code quality and approach correctness. Do not penalize heavily for truncation.
+- original_*_chars provides context about truncation extent, but longer does NOT necessarily mean higher complexity or quality. A concise, correct 200-char response can be higher quality than a rambling 5000-char one.
+- For truncated content: assume the truncated portion continues at the same quality level as visible content, unless there are specific signs of degradation. Do not penalize completeness heavily for truncation.
+- When you cannot verify correctness with certainty (complex algorithms, concurrency, external dependencies), set confidence lower (0.6-0.7) rather than guessing a high correctness score.
 - Avoid middle-clustering: use the full 1-10 range. A trivial "hello world" IS a 1-2, not a 5.
+- overall should reflect its sub-scores but you may adjust up to +/-1 based on holistic judgment.
 
 ## Output Format
 
 Return ONLY valid JSON:
 ```json
 {
-  "complexity": {"instruction": N, "reasoning": N, "implementation": N, "overall": N},
+  "complexity": {"instruction": N, "analytical_depth": N, "implementation": N, "overall": N},
   "quality": {"correctness": N, "code_quality": N, "explanation": N, "completeness": N, "overall": N},
   "reasoning": {"clarity": N, "consistency": N, "self_correction": BOOL, "overall": N},
   "flags": ["flag1", "flag2"],
@@ -113,7 +126,7 @@ All scores are integers 1-10. confidence is a float 0.0-1.0 indicating your conf
 # ─────────────────────────────────────────────────────────
 
 SCORING_FEWSHOT = [
-    # Example 1: High complexity, high quality (DP algorithm with good explanation)
+    # Example 1: Medium complexity, good quality (DP algorithm with minimal explanation)
     {
         "role": "user",
         "content": """<meta>
@@ -144,7 +157,7 @@ def knapsack_01(W, weights, values):
     },
     {
         "role": "assistant",
-        "content": '{"complexity":{"instruction":6,"reasoning":5,"implementation":5,"overall":6},"quality":{"correctness":9,"code_quality":8,"explanation":5,"completeness":7,"overall":7},"reasoning":{"clarity":6,"consistency":8,"self_correction":false,"overall":7},"flags":[],"confidence":0.90}',
+        "content": '{"complexity":{"instruction":5,"analytical_depth":5,"implementation":5,"overall":5},"quality":{"correctness":9,"code_quality":8,"explanation":4,"completeness":7,"overall":7},"reasoning":{"clarity":4,"consistency":5,"self_correction":false,"overall":4},"flags":[],"confidence":0.90}',
     },
     # Example 2: Low complexity, high quality (simple but well-explained)
     {
@@ -183,7 +196,7 @@ COLORS = ("red", "green", "blue")
     },
     {
         "role": "assistant",
-        "content": '{"complexity":{"instruction":2,"reasoning":2,"implementation":1,"overall":2},"quality":{"correctness":9,"code_quality":8,"explanation":9,"completeness":9,"overall":9},"reasoning":{"clarity":9,"consistency":9,"self_correction":false,"overall":9},"flags":["excellent-explanation"],"confidence":0.95}',
+        "content": '{"complexity":{"instruction":2,"analytical_depth":2,"implementation":1,"overall":2},"quality":{"correctness":9,"code_quality":8,"explanation":9,"completeness":9,"overall":9},"reasoning":{"clarity":6,"consistency":6,"self_correction":false,"overall":6},"flags":["excellent-explanation"],"confidence":0.95}',
     },
     # Example 3: High complexity, low quality (has bugs, incomplete)
     {
@@ -234,7 +247,159 @@ class ConnectionPool:
     },
     {
         "role": "assistant",
-        "content": '{"complexity":{"instruction":8,"reasoning":6,"implementation":7,"overall":7},"quality":{"correctness":3,"code_quality":4,"explanation":2,"completeness":3,"overall":3},"reasoning":{"clarity":3,"consistency":3,"self_correction":false,"overall":3},"flags":["has-bug","incomplete"],"confidence":0.85}',
+        "content": '{"complexity":{"instruction":7,"analytical_depth":6,"implementation":7,"overall":7},"quality":{"correctness":3,"code_quality":4,"explanation":2,"completeness":3,"overall":3},"reasoning":{"clarity":3,"consistency":3,"self_correction":true,"overall":3},"flags":["has-bug","incomplete"],"confidence":0.85}',
+    },
+    # Example 4: Multi-turn + slow mode + high-quality COT + agentic tool-use
+    {
+        "role": "user",
+        "content": """<meta>
+thinking_mode: slow
+original_cot_chars: 5800
+original_response_chars: 2400
+total_turns: 6
+code_block_count: 2
+tags: {"intent":"build","language":["typescript"],"domain":["web-backend"],"task":["feature-implementation","api-integration"],"difficulty":"advanced","concept":["api-design","error-handling"],"agentic":["tool-calling","multi-step"],"constraint":["rate-limit"],"context":"multi-file"}
+</meta>
+
+<conversation>
+[Human] I need a retry-aware API client that fetches user data from /users, enriches it with /permissions, and handles rate limiting (429). It should use exponential backoff.
+[GPT] Sure, let me clarify — should the retry apply to both endpoints independently, or treat the whole enrich flow as one retryable unit?
+[Human] Each endpoint independently. Also add a circuit breaker if 3 consecutive failures.
+[COT]
+OK, so the requirements are:
+1. Fetch /users → get user list
+2. For each user, call /permissions to enrich
+3. Both calls need independent retry with exponential backoff
+4. Rate limiting (429) → use Retry-After header if present, else exponential backoff
+5. Circuit breaker: 3 consecutive failures → stop calling that endpoint for a cooldown period
+
+Let me think about the design:
+- Create a generic RetryClient class with backoff + circuit breaker logic
+- The circuit breaker state: CLOSED (normal) → OPEN (failing) → HALF_OPEN (test one request)
+- Backoff formula: delay = base * 2^attempt + jitter
+
+Wait, I need to be careful about the circuit breaker scope — it should be per-endpoint, not global. Otherwise a failing /permissions would block /users too.
+
+The enrich flow: fetch all users first, then batch-enrich with concurrency control to avoid overwhelming the permissions endpoint...
+[/COT]
+[GPT] Here's the implementation with a generic retry client and per-endpoint circuit breakers:
+
+```typescript
+interface CircuitState {
+  failures: number;
+  state: 'closed' | 'open' | 'half-open';
+  nextAttempt: number;
+}
+
+class RetryClient {
+  private circuits = new Map<string, CircuitState>();
+  private maxRetries = 3;
+  private cooldownMs = 30000;
+
+  async fetch(url: string, options?: RequestInit): Promise<Response> {
+    const circuit = this.getCircuit(url);
+    if (circuit.state === 'open' && Date.now() < circuit.nextAttempt) {
+      throw new Error(`Circuit open for ${url}`);
+    }
+    // ... exponential backoff with jitter, 429 Retry-After handling
+  }
+}
+```
+
+Usage for the enrichment flow:
+
+```typescript
+async function enrichUsers(client: RetryClient) {
+  const users = await client.fetch('/users').then(r => r.json());
+  const enriched = await Promise.allSettled(
+    users.map(u => client.fetch(`/permissions/${u.id}`).then(r => r.json()))
+  );
+  return users.map((u, i) => ({
+    ...u,
+    permissions: enriched[i].status === 'fulfilled' ? enriched[i].value : null,
+  }));
+}
+```
+</conversation>""",
+    },
+    {
+        "role": "assistant",
+        "content": '{"complexity":{"instruction":7,"analytical_depth":7,"implementation":6,"overall":7},"quality":{"correctness":7,"code_quality":7,"explanation":6,"completeness":6,"overall":7},"reasoning":{"clarity":8,"consistency":8,"self_correction":true,"overall":8},"flags":[],"confidence":0.80}',
+    },
+    # Example 5: Truncated, non-Python, mid-range scores, low confidence
+    {
+        "role": "user",
+        "content": """<meta>
+thinking_mode: fast
+original_cot_chars: 0
+original_response_chars: 12000
+total_turns: 2
+code_block_count: 3
+tags: {"intent":"build","language":["go"],"domain":["systems"],"task":["feature-implementation"],"difficulty":"intermediate","concept":["concurrency","networking"],"agentic":[],"constraint":[],"context":"single-file"}
+</meta>
+
+<conversation>
+[Human] Write a Go TCP echo server that handles multiple clients concurrently using goroutines, with graceful shutdown on SIGINT.
+[GPT] ```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "io"
+    "net"
+    "os"
+    "os/signal"
+    "sync"
+    "syscall"
+)
+
+func main() {
+    ctx, cancel := context.WithCancel(context.Background())
+    listener, err := net.Listen("tcp", ":8080")
+    if err != nil {
+        fmt.Println("Listen error:", err)
+        os.Exit(1)
+    }
+
+    var wg sync.WaitGroup
+    go func() {
+        sigCh := make(chan os.Signal, 1)
+        signal.Notify(sigCh, syscall.SIGINT)
+        <-sigCh
+        cancel()
+        listener.Close()
+    }()
+
+    for {
+        conn, err := listener.Accept()
+        if err != nil {
+            select {
+            case <-ctx.Done():
+                wg.Wait()
+                fmt.Println("Server shut down gracefully")
+                return
+            default:
+                fmt.Println("Accept error:", err)
+                continue
+            }
+        }
+        wg.Add(1)
+        go func(c net.Conn) {
+            defer wg.Done()
+            defer c.Close()
+            io.Copy(c, c)
+        }(conn)
+    }
+}
+```
+
+This server uses `context.WithCancel`... [content truncated, showing 4200 of 12000 chars]
+</conversation>""",
+    },
+    {
+        "role": "assistant",
+        "content": '{"complexity":{"instruction":5,"analytical_depth":5,"implementation":5,"overall":5},"quality":{"correctness":7,"code_quality":7,"explanation":5,"completeness":5,"overall":6},"reasoning":{"clarity":5,"consistency":6,"self_correction":false,"overall":5},"flags":[],"confidence":0.65}',
     },
 ]
 

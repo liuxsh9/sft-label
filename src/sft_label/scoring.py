@@ -34,6 +34,7 @@ from sft_label.config import (
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     SELECTION_INTRA_WEIGHT, SELECTION_MIN_GROUP_SIZE,
+    SELECTION_SMOOTHING_PRIOR,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -221,7 +222,7 @@ def validate_score_response(parsed):
     # Validate complexity
     complexity = parsed.get("complexity", {})
     if isinstance(complexity, dict):
-        for key in ("instruction", "reasoning", "implementation", "overall"):
+        for key in ("instruction", "analytical_depth", "implementation", "overall"):
             val = complexity.get(key)
             if isinstance(val, (int, float)) and 1 <= val <= 10:
                 complexity[key] = int(val)
@@ -230,7 +231,7 @@ def validate_score_response(parsed):
                 issues.append(f"complexity.{key} invalid: {val}")
         result["complexity"] = complexity
     else:
-        result["complexity"] = {"instruction": None, "reasoning": None, "implementation": None, "overall": None}
+        result["complexity"] = {"instruction": None, "analytical_depth": None, "implementation": None, "overall": None}
         issues.append("complexity not a dict")
 
     # Validate quality
@@ -244,6 +245,13 @@ def validate_score_response(parsed):
                 quality[key] = None
                 issues.append(f"quality.{key} invalid: {val}")
         result["quality"] = quality
+        # Enforce overall <= correctness + 2 (prompt constraint)
+        q_correct = quality.get("correctness")
+        q_overall = quality.get("overall")
+        if (q_correct is not None and q_overall is not None
+                and q_overall > q_correct + 2):
+            quality["overall"] = q_correct + 2
+            issues.append(f"quality.overall {q_overall} clamped to {quality['overall']} (correctness+2 rule)")
     else:
         result["quality"] = {"correctness": None, "code_quality": None, "explanation": None, "completeness": None, "overall": None}
         issues.append("quality not a dict")
@@ -307,7 +315,10 @@ def validate_score_response(parsed):
 def compute_value_score(score_result, rarity_result, weights=None):
     """Compute weighted composite value_score.
 
-    Handles null rarity by renormalizing weights.
+    Uses default rarity=5.0 when rarity is missing (instead of renormalizing
+    weights) to maintain cross-batch comparability.  Applies quality floor
+    penalty: quality.overall < 4 → value *= 0.7.
+
     Returns float 1-10 or None if no valid scores.
     """
     if weights is None:
@@ -333,13 +344,24 @@ def compute_value_score(score_result, rarity_result, weights=None):
     if not components:
         return None
 
-    # Weighted mean with renormalization for missing components
+    # Apply rarity default only when we have at least one LLM score
+    if "rarity" not in components and "rarity" in weights and weights["rarity"] > 0:
+        components["rarity"] = 5.0
+
+    # Weighted mean
     total_weight = sum(weights.get(k, 0) for k in components)
     if total_weight <= 0:
         return None
 
     value = sum(weights.get(k, 0) * v for k, v in components.items()) / total_weight
-    return round(value, 1)
+
+    # Quality floor penalty: buggy code should not pass threshold
+    quality_overall = components.get("quality")
+    quality_weight = weights.get("quality", 0)
+    if quality_overall is not None and quality_overall < 4 and quality_weight > 0:
+        value *= 0.7
+
+    return round(max(1.0, min(10.0, value)), 1)
 
 
 # ─────────────────────────────────────────────────────────
@@ -376,7 +398,14 @@ def _extract_pure_quality(value_dict, quality_weights=None):
     if total_w <= 0:
         return None
 
-    return sum(quality_weights.get(k, 0) * v for k, v in components.items()) / total_w
+    pq = sum(quality_weights.get(k, 0) * v for k, v in components.items()) / total_w
+
+    # Quality floor penalty: consistent with compute_value_score
+    quality_overall = components.get("quality")
+    if quality_overall is not None and quality_overall < 4:
+        pq *= 0.7
+
+    return pq
 
 
 def compute_selection_scores(samples, rarity_weights=None,
@@ -419,8 +448,18 @@ def compute_selection_scores(samples, rarity_weights=None,
         else:
             pure_qualities.append(None)
 
-    # Step 2: Per-dimension, per-tag quality percentile
-    dim_percentiles = [{} for _ in samples]  # [{dim: percentile}, ...]
+    # Step 2: Global percentile (needed for Bayesian shrinkage)
+    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
+    global_percentiles = {}
+    if valid_pq:
+        sorted_global = sorted(valid_pq, key=lambda x: x[1])
+        n_global = len(sorted_global)
+        for rank, (idx, _pq) in enumerate(sorted_global):
+            global_percentiles[idx] = rank / max(n_global - 1, 1)
+
+    # Step 3: Per-dimension, per-tag quality percentile with Bayesian shrinkage
+    smoothing_prior = SELECTION_SMOOTHING_PRIOR
+    dim_percentiles = [{} for _ in samples]  # [{dim: (percentile_sum, count)}, ...]
 
     for dim in _SELECTION_DIMS:
         # Build tag -> list of (sample_idx, pure_quality)
@@ -444,23 +483,18 @@ def compute_selection_scores(samples, rarity_weights=None,
 
             sorted_members = sorted(members, key=lambda x: x[1])
             n = len(sorted_members)
+            # Bayesian shrinkage: blend tag-group percentile toward global
+            shrinkage = n / (n + smoothing_prior)
             for rank, (idx, _pq) in enumerate(sorted_members):
-                percentile = rank / max(n - 1, 1)
+                tag_pct = rank / max(n - 1, 1)
+                g_pct = global_percentiles.get(idx, 0.5)
+                percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
                 # Multi-select: average across tags in this dimension
                 if dim in dim_percentiles[idx]:
                     prev, cnt = dim_percentiles[idx][dim]
                     dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
                 else:
                     dim_percentiles[idx][dim] = (percentile, 1)
-
-    # Step 3: Global percentile fallback for samples not in any large-enough group
-    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
-    global_percentiles = {}
-    if valid_pq:
-        sorted_global = sorted(valid_pq, key=lambda x: x[1])
-        n = len(sorted_global)
-        for rank, (idx, _pq) in enumerate(sorted_global):
-            global_percentiles[idx] = rank / max(n - 1, 1)
 
     # Step 4: Weighted fusion across dimensions → intra_class_rank + selection_score
     for i, s in enumerate(samples):
@@ -479,13 +513,13 @@ def compute_selection_scores(samples, rarity_weights=None,
                 weight_total += w
             if weight_total > 0:
                 fused = weighted_sum / weight_total  # 0-1
-                intra_class_rank = round(fused * 9 + 1, 1)
+                intra_class_rank = round(fused * 9 + 1, 2)
             else:
                 intra_class_rank = None
         else:
             # Fallback: global percentile
             if i in global_percentiles:
-                intra_class_rank = round(global_percentiles[i] * 9 + 1, 1)
+                intra_class_rank = round(global_percentiles[i] * 9 + 1, 2)
             else:
                 intra_class_rank = None
 
@@ -495,7 +529,7 @@ def compute_selection_scores(samples, rarity_weights=None,
         if intra_class_rank is not None:
             if rarity_score is not None:
                 v["selection_score"] = round(
-                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 1)
+                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 2)
             else:
                 v["selection_score"] = intra_class_rank
         else:
@@ -544,11 +578,24 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         if components:
             tw = sum(quality_weights.get(k, 0) for k in components)
             pq = sum(quality_weights.get(k, 0) * v for k, v in components.items()) / tw if tw > 0 else None
+            # Quality floor penalty: consistent with compute_value_score
+            if pq is not None and components.get("quality") is not None and components["quality"] < 4:
+                pq *= 0.7
         else:
             pq = None
         pure_qualities.append(pq)
 
-    # Step 2: Per-tag percentile
+    # Step 2: Global percentile (needed for Bayesian shrinkage)
+    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
+    global_percentiles = {}
+    if valid_pq:
+        sorted_global = sorted(valid_pq, key=lambda x: x[1])
+        n_global = len(sorted_global)
+        for rank, (idx, _pq) in enumerate(sorted_global):
+            global_percentiles[idx] = rank / max(n_global - 1, 1)
+
+    # Step 3: Per-tag percentile with Bayesian shrinkage
+    smoothing_prior = SELECTION_SMOOTHING_PRIOR
     dim_percentiles = [{} for _ in summaries]
 
     for dim in _SELECTION_DIMS:
@@ -571,23 +618,17 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                 continue
             sorted_members = sorted(members, key=lambda x: x[1])
             n = len(sorted_members)
+            shrinkage = n / (n + smoothing_prior)
             for rank, (idx, _pq) in enumerate(sorted_members):
-                percentile = rank / max(n - 1, 1)
+                tag_pct = rank / max(n - 1, 1)
+                g_pct = global_percentiles.get(idx, 0.5)
+                percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
                 # Multi-select: average across tags in this dimension
                 if dim in dim_percentiles[idx]:
                     prev, cnt = dim_percentiles[idx][dim]
                     dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
                 else:
                     dim_percentiles[idx][dim] = (percentile, 1)
-
-    # Step 3: Global fallback
-    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
-    global_percentiles = {}
-    if valid_pq:
-        sorted_global = sorted(valid_pq, key=lambda x: x[1])
-        n = len(sorted_global)
-        for rank, (idx, _pq) in enumerate(sorted_global):
-            global_percentiles[idx] = rank / max(n - 1, 1)
 
     # Step 4: Fusion
     results = []
@@ -603,12 +644,12 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                 weight_total += w
             if weight_total > 0:
                 fused = weighted_sum / weight_total
-                intra_class_rank = round(fused * 9 + 1, 1)
+                intra_class_rank = round(fused * 9 + 1, 2)
             else:
                 intra_class_rank = None
         else:
             if i in global_percentiles:
-                intra_class_rank = round(global_percentiles[i] * 9 + 1, 1)
+                intra_class_rank = round(global_percentiles[i] * 9 + 1, 2)
             else:
                 intra_class_rank = None
 
@@ -616,7 +657,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         if intra_class_rank is not None:
             if rarity_score is not None:
                 selection_score = round(
-                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 1)
+                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 2)
             else:
                 selection_score = intra_class_rank
         else:
@@ -1362,7 +1403,6 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             conv_records = aggregate_conversations(conv_samples)
             if conv_records:
                 write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-                print(f"  Conversations: {len(conv_records)} → conversation_scores.json")
             del conv_samples
     except Exception as e:
         print(f"  Warning: conversation aggregation failed: {e}")
@@ -1376,8 +1416,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
-    print(f"\nScoring complete: {scored_count}/{total} scored, {failed_count} failed")
-    print(f"  Time: {elapsed:.1f}s | Output: {output_dir}")
+    print_scoring_summary(stats, output_dir)
 
     return stats
 
@@ -1510,6 +1549,92 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
         "flag_value_impact": flag_value_impact,
         "selection_thresholds": selection_thresholds,
     }
+
+
+def print_scoring_summary(stats, run_dir, is_batch=False):
+    """Print final scoring summary to stdout (mirrors Pass 1's print_summary)."""
+    print(f"\n{'='*80}")
+    label = "BATCH SCORING COMPLETE" if is_batch else "SCORING COMPLETE"
+    elapsed = stats.get('elapsed_seconds', 0)
+    print(f"{label} in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    print(f"{'='*80}")
+
+    total_scored = stats.get('total_scored', 0)
+    total_failed = stats.get('total_failed', 0)
+    total = total_scored + total_failed
+    success_rate = total_scored / total * 100 if total > 0 else 0
+    if is_batch:
+        print(f"Files:       {stats.get('files_processed', '?')}")
+    print(f"Scored:      {total_scored}/{total} ({success_rate:.1f}%)")
+    print(f"LLM calls:   {stats.get('total_llm_calls', 0)}")
+    total_tokens = stats.get('total_tokens', 0)
+    print(f"Tokens:      {total_tokens:,}")
+    if elapsed > 0 and total_scored > 0:
+        print(f"Throughput:  {total_scored / elapsed:.1f} samples/sec")
+
+    # Score distributions
+    dists = stats.get("score_distributions", {})
+    dims = [
+        ("value_score", "Value"),
+        ("complexity_overall", "Complexity"),
+        ("quality_overall", "Quality"),
+        ("reasoning_overall", "Reasoning"),
+        ("rarity_score", "Rarity"),
+        ("selection_score", "Selection"),
+    ]
+    print(f"\nScore distributions (mean ± std):")
+    for key, label in dims:
+        d = dists.get(key, {})
+        mean = d.get("mean", 0)
+        std = d.get("std", 0)
+        p50 = d.get("p50", 0)
+        bar = "█" * int(mean)
+        print(f"  {label:12s} {mean:5.2f} ±{std:4.2f}  p50={p50:.1f}  {bar}")
+
+    # Thinking mode breakdown
+    ts = stats.get("thinking_mode_stats", {})
+    slow = ts.get("slow", {})
+    fast = ts.get("fast", {})
+    if slow.get("count", 0) > 0 or fast.get("count", 0) > 0:
+        print(f"\nThinking modes:")
+        if slow.get("count", 0) > 0:
+            print(f"  slow:  {slow['count']:4d}  val={slow.get('mean_value', 0):.2f}  "
+                  f"qual={slow.get('mean_quality', 0):.2f}  "
+                  f"reas={slow.get('mean_reasoning', 0):.2f}")
+        if fast.get("count", 0) > 0:
+            print(f"  fast:  {fast['count']:4d}  val={fast.get('mean_value', 0):.2f}  "
+                  f"qual={fast.get('mean_quality', 0):.2f}  "
+                  f"reas={fast.get('mean_reasoning', 0):.2f}")
+
+    # Top flags
+    flag_counts = stats.get("flag_counts", {})
+    if flag_counts:
+        top_flags = list(flag_counts.items())[:8]
+        flags_str = ", ".join(f"{f}({n})" for f, n in top_flags)
+        print(f"\nFlags: {flags_str}")
+
+    # Selection thresholds
+    thresholds = stats.get("selection_thresholds", {})
+    if thresholds:
+        parts = []
+        for k in ["top_10pct", "top_25pct", "top_50pct"]:
+            t = thresholds.get(k, {})
+            if t:
+                parts.append(f"{k.replace('_', ' ')}≥{t.get('threshold', 0):.1f}({t.get('count', 0)})")
+        if parts:
+            print(f"Thresholds: {', '.join(parts)}")
+
+    # Per-file summary in batch mode
+    per_file = stats.get("per_file_summary", [])
+    if is_batch and per_file:
+        print(f"\nPer-file scores:")
+        for pf in per_file:
+            print(f"  {pf.get('file', '?'):30s}  n={pf.get('count', 0):4d}  "
+                  f"val={pf.get('mean_value', 0):.2f}  "
+                  f"qual={pf.get('mean_quality', 0):.2f}  "
+                  f"sel={pf.get('mean_selection', 0):.2f}")
+
+    print(f"\nRun dir: {run_dir}")
 
 
 async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config):
@@ -1708,7 +1833,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         conv_records = aggregate_conversations(samples)
         if conv_records:
             write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-            print(f"  Conversations: {len(conv_records)} → conversation_scores.json")
     except Exception as e:
         print(f"  Warning: conversation aggregation failed: {e}")
 
@@ -1721,8 +1845,8 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
-    print(f"\nScoring complete: {scored_count}/{total} scored, {failed_count} failed")
-    print(f"  Time: {elapsed:.1f}s | Output: {output_dir}")
+    stats["elapsed_seconds"] = round(elapsed, 1)
+    print_scoring_summary(stats, output_dir)
 
     return stats
 
@@ -1835,7 +1959,6 @@ def _flush_scoring_file(collector, config, pprint=print):
         conv_records = aggregate_conversations(samples)
         if conv_records:
             write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-            pprint(f"  Conversations: {len(conv_records)} → conversation_scores.json")
     except Exception:
         pass
 
@@ -1843,7 +1966,8 @@ def _flush_scoring_file(collector, config, pprint=print):
         from sft_label.tools.visualize_value import generate_value_dashboard
         generate_value_dashboard(output_dir, scored_file="scored.json",
                                  stats_file="stats_value.json",
-                                 output_file="dashboard_value.html")
+                                 output_file="dashboard_value.html",
+                                 quiet=True)
     except Exception:
         pass
 
@@ -2125,7 +2249,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             conv_records = aggregate_conversations(all_conv_samples)
             if conv_records:
                 write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-                print(f"  Global conversations: {len(conv_records)} → conversation_scores.json")
             del all_conv_samples
         except Exception as e:
             print(f"  Warning: global conversation aggregation failed: {e}")
@@ -2136,11 +2259,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             dir_name = input_dir.name
             generate_value_dashboard(output_dir, scored_file=None,
                                      stats_file="summary_stats_value.json",
-                                     output_file=f"dashboard_value_{dir_name}.html")
+                                     output_file=f"dashboard_value_{dir_name}.html",
+                                     quiet=True)
         except Exception as e:
             print(f"  Warning: global dashboard generation failed: {e}")
 
-        print(f"\nAll files scored in {elapsed:.1f}s. Summary: {summary_path}")
+        print_scoring_summary(summary, output_dir, is_batch=True)
 
     return summary if all_file_stats else {}
 

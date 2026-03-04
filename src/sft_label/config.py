@@ -65,9 +65,9 @@ DEFAULT_SCORING_CONCURRENCY = 200
 
 VALUE_WEIGHTS = {
     "complexity": 0.25,
-    "quality": 0.35,
-    "reasoning": 0.15,
-    "rarity": 0.25,
+    "quality": 0.40,
+    "reasoning": 0.20,
+    "rarity": 0.15,
 }
 RARITY_WEIGHTS = {
     "intent": 0.3,
@@ -97,12 +97,14 @@ KNOWN_FLAGS_POSITIVE = frozenset({
 KNOWN_FLAGS_NEGATIVE = frozenset({
     "has-bug", "security-issue", "outdated-practice",
     "incomplete", "over-engineered", "incorrect-output", "poor-explanation",
+    "hallucination",
 })
 KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 
 # ─── Selection Score (Post-scoring, no LLM) ──────────
-SELECTION_INTRA_WEIGHT = 0.75      # weight for intra-class quality vs global rarity
-SELECTION_MIN_GROUP_SIZE = 30      # min samples per tag to compute intra-class percentile
+SELECTION_INTRA_WEIGHT = 0.85      # weight for intra-class quality vs global rarity
+SELECTION_MIN_GROUP_SIZE = 5       # min samples per tag to compute intra-class percentile
+SELECTION_SMOOTHING_PRIOR = 30     # Bayesian shrinkage prior: blend toward global at n < prior
 
 # ─── Conversation-Level Aggregation (Post-scoring, no LLM) ──
 CONV_CONFIDENCE_INHERITED = 0.7           # confidence weight for inherited slices
@@ -156,3 +158,4 @@ class PipelineConfig:
     value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
     selection_intra_weight: float = SELECTION_INTRA_WEIGHT
     selection_min_group_size: int = SELECTION_MIN_GROUP_SIZE
+    selection_smoothing_prior: int = SELECTION_SMOOTHING_PRIOR

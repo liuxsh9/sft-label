@@ -458,7 +458,7 @@ class TestBuildComboCounts:
 class TestValidateScoreResponse:
     def test_valid_response(self):
         parsed = {
-            "complexity": {"instruction": 7, "reasoning": 8, "implementation": 6, "overall": 7},
+            "complexity": {"instruction": 7, "analytical_depth": 8, "implementation": 6, "overall": 7},
             "quality": {"correctness": 8, "code_quality": 7, "explanation": 6, "completeness": 8, "overall": 7},
             "reasoning": {"clarity": 7, "consistency": 9, "self_correction": True, "overall": 8},
             "flags": ["clean-code"],
@@ -481,7 +481,7 @@ class TestValidateScoreResponse:
 
     def test_out_of_range_scores(self):
         parsed = {
-            "complexity": {"instruction": 0, "reasoning": 11, "implementation": 5, "overall": 5},
+            "complexity": {"instruction": 0, "analytical_depth": 11, "implementation": 5, "overall": 5},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
             "flags": [],
@@ -489,7 +489,7 @@ class TestValidateScoreResponse:
         }
         result, issues = validate_score_response(parsed)
         assert result["complexity"]["instruction"] is None  # 0 is out of range
-        assert result["complexity"]["reasoning"] is None  # 11 is out of range
+        assert result["complexity"]["analytical_depth"] is None  # 11 is out of range
         assert result["complexity"]["implementation"] == 5  # valid
         assert len(issues) >= 2
 
@@ -509,7 +509,7 @@ class TestValidateScoreResponse:
 
     def test_unknown_flags(self):
         parsed = {
-            "complexity": {"instruction": 5, "reasoning": 5, "implementation": 5, "overall": 5},
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
             "flags": ["clean-code", "totally-made-up-flag", "another-fake"],
@@ -524,7 +524,7 @@ class TestValidateScoreResponse:
 
     def test_invalid_confidence(self):
         parsed = {
-            "complexity": {"instruction": 5, "reasoning": 5, "implementation": 5, "overall": 5},
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
             "flags": [],
@@ -536,7 +536,7 @@ class TestValidateScoreResponse:
 
     def test_float_scores_converted_to_int(self):
         parsed = {
-            "complexity": {"instruction": 7.5, "reasoning": 8.0, "implementation": 6.3, "overall": 7.2},
+            "complexity": {"instruction": 7.5, "analytical_depth": 8.0, "implementation": 6.3, "overall": 7.2},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
             "flags": [],
@@ -544,11 +544,11 @@ class TestValidateScoreResponse:
         }
         result, issues = validate_score_response(parsed)
         assert result["complexity"]["instruction"] == 7
-        assert result["complexity"]["reasoning"] == 8
+        assert result["complexity"]["analytical_depth"] == 8
 
     def test_negative_flags_preserved(self):
         parsed = {
-            "complexity": {"instruction": 5, "reasoning": 5, "implementation": 5, "overall": 5},
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
             "flags": ["has-bug", "security-issue"],
@@ -586,7 +586,7 @@ class TestComputeValueScore:
         value = compute_value_score(score_result, rarity_result)
         assert value == 10.0
 
-    def test_null_rarity_renormalizes(self):
+    def test_null_rarity_uses_default(self):
         score_result = {
             "complexity": {"overall": 8},
             "quality": {"overall": 8},
@@ -594,7 +594,9 @@ class TestComputeValueScore:
         }
         rarity_result = {"score": None}
         value = compute_value_score(score_result, rarity_result)
-        assert value == 8.0  # All available scores are 8
+        # Default rarity=5.0 applied: 0.25*8 + 0.40*8 + 0.20*8 + 0.15*5.0 = 7.55
+        assert value is not None
+        assert value < 8.0  # No longer pure 8.0 due to default rarity=5.0
 
     def test_no_valid_scores(self):
         score_result = {
@@ -619,6 +621,60 @@ class TestComputeValueScore:
             weights={"complexity": 1.0, "quality": 0.0, "reasoning": 0.0, "rarity": 0.0},
         )
         assert value == 10.0
+
+    def test_quality_floor_penalty_applied(self):
+        """quality.overall < 4 triggers 0.7x penalty."""
+        score_result = {
+            "complexity": {"overall": 8},
+            "quality": {"overall": 3},
+            "reasoning": {"overall": 6},
+        }
+        rarity_result = {"score": 5.0}
+        value = compute_value_score(score_result, rarity_result)
+        # Without penalty: 0.25*8 + 0.40*3 + 0.20*6 + 0.15*5 = 5.15
+        # With penalty: 5.15 * 0.7 = 3.605 → clamped to max(1.0, 3.6)
+        assert value is not None
+        assert value < 4.0  # penalty kicks in
+
+    def test_quality_floor_not_applied(self):
+        """quality.overall >= 4 has no penalty."""
+        score_result = {
+            "complexity": {"overall": 8},
+            "quality": {"overall": 4},
+            "reasoning": {"overall": 6},
+        }
+        rarity_result = {"score": 5.0}
+        value = compute_value_score(score_result, rarity_result)
+        # No penalty: 0.25*8 + 0.40*4 + 0.20*6 + 0.15*5 = 5.55
+        assert value is not None
+        assert value >= 5.0  # no penalty, score reflects actual weighted mean
+
+    def test_rarity_none_uses_default(self):
+        """Rarity=None uses default 5.0 instead of renormalizing."""
+        score_result = {
+            "complexity": {"overall": 8},
+            "quality": {"overall": 8},
+            "reasoning": {"overall": 8},
+        }
+        # Explicit None rarity
+        value_with_none = compute_value_score(score_result, {"score": None})
+        # Explicit 5.0 rarity
+        value_with_default = compute_value_score(score_result, {"score": 5.0})
+        assert value_with_none == value_with_default
+
+    def test_quality_overall_clamped_by_correctness(self):
+        """validate_score_response enforces overall <= correctness + 2."""
+        parsed = {
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+            "quality": {"correctness": 3, "code_quality": 8, "explanation": 8, "completeness": 8, "overall": 8},
+            "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
+            "flags": [],
+            "confidence": 0.8,
+        }
+        result, issues = validate_score_response(parsed)
+        # overall=8 should be clamped to correctness+2 = 5
+        assert result["quality"]["overall"] == 5
+        assert any("clamped" in i for i in issues)
 
 
 # ─────────────────────────────────────────────────────────

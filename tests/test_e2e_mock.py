@@ -86,7 +86,7 @@ CALL2_RESPONSE = {
 
 SCORE_RESPONSE = {
     "complexity": {
-        "instruction": 6, "reasoning": 7, "implementation": 6, "overall": 6,
+        "instruction": 6, "analytical_depth": 7, "implementation": 6, "overall": 6,
     },
     "quality": {
         "correctness": 8, "code_quality": 7, "explanation": 7,

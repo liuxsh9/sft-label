@@ -867,7 +867,8 @@ renderConversations();
 
 def generate_value_dashboard(run_dir, scored_file="scored.json",
                               stats_file="stats_value.json",
-                              output_file="dashboard_value.html"):
+                              output_file="dashboard_value.html",
+                              quiet=False):
     """Generate a combined labeling + value scoring dashboard HTML file.
 
     Automatically discovers Pass 1 data (stats.json / labeled.json) in the
@@ -903,4 +904,5 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
 
     out = run_dir / output_file
     out.write_text(html, encoding="utf-8")
-    print(f"  Dashboard: {out}")
+    if not quiet:
+        print(f"  Dashboard: {out}")

@@ -22,6 +22,7 @@ from sft_label.config import (
     RARITY_WEIGHTS,
     SELECTION_INTRA_WEIGHT,
     SELECTION_MIN_GROUP_SIZE,
+    SELECTION_SMOOTHING_PRIOR,
     KNOWN_FLAGS_NEGATIVE,
 )
 
@@ -180,7 +181,7 @@ def _merge_labels(slices):
 def _compute_pure_quality_from_slice(s):
     """Compute pure quality (without rarity) from a slice's value dict.
 
-    Formula: (0.25×complexity + 0.35×quality + 0.15×reasoning) / 0.75
+    Uses VALUE_WEIGHTS excluding rarity, renormalized.
     """
     v = s.get("value") or {}
     components = {}
@@ -205,7 +206,14 @@ def _compute_pure_quality_from_slice(s):
     if total_w <= 0:
         return None
 
-    return sum(quality_weights.get(k, 0) * v for k, v in components.items()) / total_w
+    pq = sum(quality_weights.get(k, 0) * v for k, v in components.items()) / total_w
+
+    # Quality floor penalty: consistent with compute_value_score
+    quality_overall = components.get("quality")
+    if quality_overall is not None and quality_overall < 4:
+        pq *= 0.7
+
+    return pq
 
 
 # ─── Per-conversation aggregation ────────────────────────
@@ -316,14 +324,29 @@ def compute_conv_selection_scores(records):
     """Compute per-tag percentile of pure_quality → conv_selection.
 
     Similar to sample-level selection scores but operates on conversation
-    records. Uses lower min_group_size since there are fewer conversations.
+    records. Uses Bayesian shrinkage to handle small tag groups.
     """
     if not records:
         return
 
-    min_group_size = max(1, SELECTION_MIN_GROUP_SIZE // 5)
+    min_group_size = max(1, SELECTION_MIN_GROUP_SIZE)
+    smoothing_prior = max(1, SELECTION_SMOOTHING_PRIOR // 5)  # lighter prior for fewer records
     rarity_weights = RARITY_WEIGHTS
     intra_weight = SELECTION_INTRA_WEIGHT
+
+    # Global percentile (needed for Bayesian shrinkage)
+    valid_pq = []
+    for i, rec in enumerate(records):
+        pq = (rec.get("detail") or {}).get("pure_quality")
+        if pq is not None:
+            valid_pq.append((i, pq))
+
+    global_percentiles = {}
+    if valid_pq:
+        sorted_global = sorted(valid_pq, key=lambda x: x[1])
+        n_global = len(sorted_global)
+        for rank, (idx, _pq) in enumerate(sorted_global):
+            global_percentiles[idx] = rank / max(n_global - 1, 1)
 
     # Per-record percentiles across dimensions
     dim_percentiles = [{} for _ in records]
@@ -349,13 +372,16 @@ def compute_conv_selection_scores(records):
                 continue
             sorted_members = sorted(members, key=lambda x: x[1])
             n = len(sorted_members)
+            shrinkage = n / (n + smoothing_prior)
             for rank, (idx, _pq) in enumerate(sorted_members):
-                percentile = rank / max(n - 1, 1)
+                tag_pct = rank / max(n - 1, 1)
+                g_pct = global_percentiles.get(idx, 0.5)
+                percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
                 if dim in dim_percentiles[idx]:
-                    dim_percentiles[idx][dim] = (
-                        dim_percentiles[idx][dim] + percentile) / 2
+                    prev, cnt = dim_percentiles[idx][dim]
+                    dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
                 else:
-                    dim_percentiles[idx][dim] = percentile
+                    dim_percentiles[idx][dim] = (percentile, 1)
 
     # Fuse into intra_class_rank per record
     for i, rec in enumerate(records):
@@ -365,10 +391,10 @@ def compute_conv_selection_scores(records):
 
         total_w = 0.0
         total_v = 0.0
-        for dim, pct in percs.items():
+        for dim, (pct_sum, pct_cnt) in percs.items():
             w = rarity_weights.get(dim, 1.0)
             total_w += w
-            total_v += w * pct
+            total_v += w * (pct_sum / pct_cnt)  # arithmetic mean percentile
         if total_w <= 0:
             continue
 

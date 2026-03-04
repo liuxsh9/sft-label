@@ -115,6 +115,7 @@ def cmd_filter(args):
         conv_value_min=args.conv_value_min,
         conv_selection_min=args.conv_selection_min,
         peak_complexity_min=args.peak_complexity_min,
+        correctness_min=args.correctness_min,
     )
 
     # Validate: at least one criterion must be set
@@ -130,6 +131,7 @@ def cmd_filter(args):
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
         config.peak_complexity_min is not None,
+        config.correctness_min is not None,
     ])
     if not has_criterion and not config.include_unscored:
         print("Error: At least one filter criterion is required "
@@ -250,6 +252,8 @@ def main():
                                 help="Min conversation-level selection score (multi-turn)")
     filter_parser.add_argument("--peak-complexity-min", type=float, default=None,
                                 help="Min peak complexity across turns (multi-turn)")
+    filter_parser.add_argument("--correctness-min", type=float, default=None,
+                                help="Min quality.correctness score (hard floor)")
 
     args = parser.parse_args()
 
