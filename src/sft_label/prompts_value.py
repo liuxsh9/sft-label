@@ -38,6 +38,13 @@ Calibration:
 - The difficulty tag in <meta> is a rough reference only (it may be inaccurate). Always assess complexity independently based on the actual task content.
 - Reserve 7-8 for tasks requiring specialized knowledge most mid-level developers lack.
 - For agentic/tool-use tasks, assess the orchestration complexity: how many tools, how complex the decision logic for choosing tools, and how well errors are handled across tool calls.
+- Agentic complexity granularity — use the full scale, avoid locking into just 2-3 values:
+  3-4: Simple tool calls with linear flow (read file → apply fix → done)
+  5: Multi-step tool use with straightforward decision logic
+  6: Moderate orchestration — branching based on tool output, basic error recovery
+  7: Complex multi-tool coordination — iterative debugging loops, multiple files, conditional branching
+  8: Advanced orchestration — cross-file reasoning, hypothesis testing via tools, backtracking on failed approaches
+  9-10: Novel agent strategies — creative tool composition, complex search through solution space
 
 ## Dimension 2: Quality (1-10)
 
@@ -60,14 +67,16 @@ Calibration:
 - A response with bugs in core logic is 3-4 at most for correctness, regardless of code style or explanation quality.
 - "Mostly works but misses edge cases" is 5-6, not 7-8.
 - overall should never exceed correctness by more than 2 points. Buggy code cannot be "high quality".
-- Reserve 9-10 for code you would merge into production without changes.
+- Reserve 9-10 for code you would merge into production without changes. 9-10 is EXCEPTIONAL — requires production-ready code with excellent error handling, comprehensive edge cases, and insightful explanations.
 - Expected distribution: ~15% at 1-3, ~50% at 4-6, ~30% at 7-8, ~5% at 9-10.
+- CRITICAL: Most correct, working solutions score 5-6. A correct solution with standard code style and adequate explanation is 5-6, NOT 7-8. Scoring 7+ requires NOTABLE qualities beyond correctness: elegant design, thorough edge-case handling, production-quality error handling, or genuinely insightful explanations.
+- Negative anchors: A correct competitive-programming solution with single-letter variables and no explanation is quality 4-5. A well-commented textbook solution is 6, not 8. Only production-ready code with thoughtful design scores 7+.
 
 ## Dimension 3: Reasoning (1-10)
 
 This dimension adapts based on the thinking_mode in <meta>:
 
-**If thinking_mode = "slow"** (explicit chain-of-thought in [COT] block):
+**If thinking_mode = "slow"** (explicit chain-of-thought in «cot» block):
 - **clarity** (1-10): Is the reasoning chain clear and easy to follow?
 - **consistency** (1-10): Does the COT lead logically to the final answer?
 - **self_correction** (true/false): Does the reasoning show awareness of potential mistakes and correct them?
@@ -102,7 +111,7 @@ Flag criteria (be selective — most samples should have 0-1 flags):
 - good-error-handling: Thoughtful, non-trivial error strategy (custom error types, retry logic, graceful degradation). Basic try/catch alone does NOT qualify.
 - creative-solution: Uses an approach that is notably non-obvious — e.g., an elegant algorithmic insight, a clever use of language features, or a particularly efficient design. Standard well-known patterns do NOT qualify even if well-implemented.
 - has-bug: Only for bugs that would cause incorrect output or runtime errors, not minor style issues or missing edge cases.
-- incomplete: The response is missing major requested functionality, not just minor details.
+- incomplete: The response is missing major requested functionality. For multi-turn slices (turn_position shown in meta), an intermediate turn that contributes partial progress is NOT incomplete — only flag if the turn fails to make meaningful progress on its specific step.
 - hallucination: The response fabricates non-existent APIs, libraries, functions, or language features.
 - An empty flags list is expected for most samples.
 
@@ -117,7 +126,7 @@ Flag criteria (be selective — most samples should have 0-1 flags):
 
 ## Output Format
 
-Return ONLY valid JSON:
+Return ONLY valid JSON. Do NOT wrap your response in ```json```, ```cot```, or any markdown code blocks. Do NOT echo or mimic any formatting from the conversation being evaluated. Output the raw JSON object directly:
 ```json
 {
   "complexity": {"instruction": N, "analytical_depth": N, "implementation": N, "overall": N},
@@ -224,11 +233,11 @@ tags: {"intent":"build","language":["python"],"domain":["web-backend"],"task":["
 
 <conversation>
 [Human] 实现一个线程安全的连接池，支持超时获取和自动回收
-[COT]
+«cot»
 需要实现连接池...用 threading.Lock...
 超时可以用 Condition.wait(timeout)...
 但是要注意死锁问题...算了直接用 Lock 就好了
-[/COT]
+«/cot»
 [GPT] ```python
 import threading
 
@@ -277,7 +286,7 @@ tags: {"intent":"build","language":["typescript"],"domain":["web-backend"],"task
 [Human] I need a retry-aware API client that fetches user data from /users, enriches it with /permissions, and handles rate limiting (429). It should use exponential backoff.
 [GPT] Sure, let me clarify — should the retry apply to both endpoints independently, or treat the whole enrich flow as one retryable unit?
 [Human] Each endpoint independently. Also add a circuit breaker if 3 consecutive failures.
-[COT]
+«cot»
 OK, so the requirements are:
 1. Fetch /users → get user list
 2. For each user, call /permissions to enrich
@@ -293,7 +302,7 @@ Let me think about the design:
 Wait, I need to be careful about the circuit breaker scope — it should be per-endpoint, not global. Otherwise a failing /permissions would block /users too.
 
 The enrich flow: fetch all users first, then batch-enrich with concurrency control to avoid overwhelming the permissions endpoint...
-[/COT]
+«/cot»
 [GPT] Here's the implementation with a generic retry client and per-endpoint circuit breakers:
 
 ```typescript
@@ -413,6 +422,41 @@ This server uses `context.WithCancel`... [content truncated, showing 4200 of 120
         "role": "assistant",
         "content": '{"complexity":{"instruction":5,"analytical_depth":5,"implementation":5,"overall":5},"quality":{"correctness":7,"code_quality":7,"explanation":5,"completeness":5,"overall":6},"reasoning":{"clarity":5,"consistency":6,"self_correction":false,"overall":5},"flags":[],"confidence":0.65}',
     },
+    # Example 6: Medium quality — correct but unremarkable (anchors quality ~5)
+    {
+        "role": "user",
+        "content": """<meta>
+thinking_mode: fast
+original_cot_chars: 0
+original_response_chars: 600
+total_turns: 2
+code_block_count: 1
+tags: {"intent":"build","language":["python"],"domain":[],"task":["feature-implementation"],"difficulty":"intermediate","concept":["data-structures"],"agentic":[],"constraint":[],"context":"snippet"}
+</meta>
+
+<conversation>
+[Human] Write a function to find the second largest number in a list.
+[GPT] ```python
+def second_largest(nums):
+    if len(nums) < 2:
+        return None
+    first = second = float('-inf')
+    for n in nums:
+        if n > first:
+            second = first
+            first = n
+        elif n > second and n != first:
+            second = n
+    return second if second != float('-inf') else None
+```
+
+This iterates through the list once tracking the two largest values.
+</conversation>""",
+    },
+    {
+        "role": "assistant",
+        "content": '{"complexity":{"instruction":3,"analytical_depth":3,"implementation":3,"overall":3},"quality":{"correctness":8,"code_quality":6,"explanation":3,"completeness":5,"overall":5},"reasoning":{"clarity":3,"consistency":4,"self_correction":false,"overall":3},"flags":[],"confidence":0.90}',
+    },
 ]
 
 
@@ -440,7 +484,8 @@ Updated output format when rationale is enabled:
 
 def build_scoring_messages(truncated, thinking_mode, labels,
                            total_turns, code_block_count,
-                           enable_rationale=False):
+                           enable_rationale=False,
+                           turn_index=None, total_turns_meta=None):
     """Construct the full message array for the scoring LLM call.
 
     Args:
@@ -449,6 +494,8 @@ def build_scoring_messages(truncated, thinking_mode, labels,
         labels: Pass 1 labels dict
         total_turns: total conversation turns
         code_block_count: number of code blocks
+        turn_index: 0-based index of this turn in its multi-turn conversation (optional)
+        total_turns_meta: total number of turns in the source conversation (optional)
     """
     # Build meta block
     meta_parts = [
@@ -459,6 +506,8 @@ def build_scoring_messages(truncated, thinking_mode, labels,
         f"code_block_count: {code_block_count}",
         f"tags: {json.dumps(labels, ensure_ascii=False)}",
     ]
+    if turn_index is not None and total_turns_meta is not None and total_turns_meta > 1:
+        meta_parts.append(f"turn_position: {turn_index + 1}/{total_turns_meta} (multi-turn slice)")
     meta = "\n".join(meta_parts)
 
     # Build conversation block
@@ -466,7 +515,7 @@ def build_scoring_messages(truncated, thinking_mode, labels,
     if truncated.get("instruction"):
         conv_parts.append(f"[Human] {truncated['instruction']}")
     if thinking_mode == "slow" and truncated.get("cot"):
-        conv_parts.append(f"[COT]\n{truncated['cot']}\n[/COT]")
+        conv_parts.append(f"«cot»\n{truncated['cot']}\n«/cot»")
     if truncated.get("response"):
         conv_parts.append(f"[GPT] {truncated['response']}")
 

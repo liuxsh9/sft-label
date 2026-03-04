@@ -7,6 +7,7 @@ from pathlib import Path
 from sft_label.tools.filter_value import (
     filter_samples, run_filter, matches_filter, FilterConfig,
     _find_scored_files, _convert_to_training_format,
+    _load_conversation_scores,
 )
 
 
@@ -380,6 +381,31 @@ class TestDirectoryModeComplex:
         assert summary["total"] == n
         # Scores 8, 9, 10 → 3 out of 10, repeated 10 times
         assert summary["retained"] == 30
+
+    def test_nested_two_level_subdirectories(self, tmp_path):
+        """Scored files two levels deep (e.g., code/part1/scored.json)."""
+        deep = tmp_path / "code" / "part1"
+        deep.mkdir(parents=True)
+        (deep / "scored.json").write_text(json.dumps([_scored(7.0), _scored(8.0)]))
+
+        deep2 = tmp_path / "multi_turn" / "trajectories"
+        deep2.mkdir(parents=True)
+        (deep2 / "scored.json").write_text(json.dumps([_scored(9.0)]))
+
+        summary = run_filter(str(tmp_path), threshold=6.0)
+        assert summary["total"] == 3
+        assert summary["retained"] == 3
+
+    def test_conversation_scores_nested_two_levels(self, tmp_path):
+        """conversation_scores.json two levels deep should be discovered."""
+        deep = tmp_path / "multi_turn" / "traj"
+        deep.mkdir(parents=True)
+        conv_data = [{"conversation_id": "c1", "conv_value": 8.0}]
+        (deep / "conversation_scores.json").write_text(json.dumps(conv_data))
+
+        lookup = _load_conversation_scores(str(tmp_path))
+        assert "c1" in lookup
+        assert lookup["c1"]["conv_value"] == 8.0
 
     def test_directory_empty_files(self, tmp_path):
         """Directory with empty scored files."""

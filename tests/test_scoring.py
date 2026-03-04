@@ -1329,3 +1329,212 @@ class TestIntegrationScoring:
         # Verify stats return value
         assert result is not None
         assert result["total_scored"] > 0
+
+
+# ─────────────────────────────────────────────────────────
+# P0-1: modify+task consistency rule
+# ─────────────────────────────────────────────────────────
+
+class TestConsistencyRuleModify:
+    """Verify that modify+feature-implementation and modify+bug-fixing
+    no longer trigger consistency rule warnings."""
+
+    def test_modify_feature_implementation_no_warning(self):
+        from sft_label.config import CONSISTENCY_RULES
+        # Simulate the eval context
+        context = {
+            "intent": "modify",
+            "task": ["feature-implementation"],
+            "language": ["python"],
+            "agentic": [],
+            "concept": [],
+            "constraint": [],
+            "difficulty": "intermediate",
+            "context": "single-file",
+            "domain": [],
+        }
+        for rule_expr, msg in CONSISTENCY_RULES:
+            if "modify" in rule_expr and "modify-relevant" in msg:
+                result = eval(rule_expr, {}, context)
+                assert not result, f"modify+feature-implementation should not trigger: {msg}"
+
+    def test_modify_bug_fixing_no_warning(self):
+        from sft_label.config import CONSISTENCY_RULES
+        context = {
+            "intent": "modify",
+            "task": ["bug-fixing"],
+            "language": ["python"],
+            "agentic": [],
+            "concept": [],
+            "constraint": [],
+            "difficulty": "intermediate",
+            "context": "single-file",
+            "domain": [],
+        }
+        for rule_expr, msg in CONSISTENCY_RULES:
+            if "modify" in rule_expr and "modify-relevant" in msg:
+                result = eval(rule_expr, {}, context)
+                assert not result, f"modify+bug-fixing should not trigger: {msg}"
+
+    def test_modify_error_handling_no_warning(self):
+        from sft_label.config import CONSISTENCY_RULES
+        context = {
+            "intent": "modify",
+            "task": ["error-handling-task"],
+            "language": [],
+            "agentic": [],
+            "concept": [],
+            "constraint": [],
+            "difficulty": "intermediate",
+            "context": "single-file",
+            "domain": [],
+        }
+        for rule_expr, msg in CONSISTENCY_RULES:
+            if "modify" in rule_expr and "modify-relevant" in msg:
+                result = eval(rule_expr, {}, context)
+                assert not result
+
+    def test_modify_no_relevant_task_still_warns(self):
+        """modify + unrelated tasks should still trigger warning."""
+        from sft_label.config import CONSISTENCY_RULES
+        context = {
+            "intent": "modify",
+            "task": ["code-explanation"],
+            "language": [],
+            "agentic": [],
+            "concept": [],
+            "constraint": [],
+            "difficulty": "intermediate",
+            "context": "single-file",
+            "domain": [],
+        }
+        triggered = False
+        for rule_expr, msg in CONSISTENCY_RULES:
+            if "modify" in rule_expr and "modify-relevant" in msg:
+                if eval(rule_expr, {}, context):
+                    triggered = True
+        assert triggered, "modify+code-explanation should still trigger warning"
+
+
+# ─────────────────────────────────────────────────────────
+# P1-1: Selection score with quality component
+# ─────────────────────────────────────────────────────────
+
+class TestSelectionScoreQualityComponent:
+    def _make_sample(self, idx, quality=5, rarity_score=5.0):
+        return {
+            "id": f"sample-{idx}",
+            "labels": {"intent": "build", "language": ["python"], "concept": ["algorithms"]},
+            "value": {
+                "complexity": {"instruction": 5, "overall": 5},
+                "quality": {"correctness": quality, "overall": quality},
+                "reasoning": {"clarity": 5, "overall": 5},
+                "rarity": {"score": rarity_score},
+                "flags": [],
+                "value_score": 5.0,
+            },
+        }
+
+    def test_high_quality_gets_higher_selection(self):
+        """High quality samples should get higher selection scores than low quality."""
+        samples = []
+        for i in range(20):
+            # Half high quality, half low quality
+            q = 9 if i < 10 else 3
+            samples.append(self._make_sample(i, quality=q))
+
+        compute_selection_scores(samples, min_group_size=2)
+
+        high_q = [s["value"]["selection_score"] for s in samples[:10]
+                  if s["value"].get("selection_score") is not None]
+        low_q = [s["value"]["selection_score"] for s in samples[10:]
+                 if s["value"].get("selection_score") is not None]
+
+        if high_q and low_q:
+            # Mean of high quality group should be higher
+            assert sum(high_q) / len(high_q) > sum(low_q) / len(low_q)
+
+
+# ─────────────────────────────────────────────────────────
+# P1-2: Turn position in scoring messages
+# ─────────────────────────────────────────────────────────
+
+class TestBuildScoringMessagesMultiTurn:
+    def test_turn_position_added_for_multiturn(self):
+        from sft_label.prompts_value import build_scoring_messages
+        truncated = {
+            "instruction": "Fix the bug",
+            "response": "Here is the fix",
+            "original_cot_chars": 0,
+            "original_response_chars": 100,
+        }
+        messages = build_scoring_messages(
+            truncated=truncated, thinking_mode="fast",
+            labels={"intent": "debug"}, total_turns=2,
+            code_block_count=1,
+            turn_index=2, total_turns_meta=5,
+        )
+        user_msg = messages[-1]["content"]
+        assert "turn_position: 3/5 (multi-turn slice)" in user_msg
+
+    def test_no_turn_position_for_single_turn(self):
+        from sft_label.prompts_value import build_scoring_messages
+        truncated = {
+            "instruction": "Write code",
+            "response": "Here is code",
+            "original_cot_chars": 0,
+            "original_response_chars": 100,
+        }
+        messages = build_scoring_messages(
+            truncated=truncated, thinking_mode="fast",
+            labels={"intent": "build"}, total_turns=2,
+            code_block_count=1,
+            turn_index=0, total_turns_meta=1,
+        )
+        user_msg = messages[-1]["content"]
+        assert "turn_position" not in user_msg
+
+
+# ─────────────────────────────────────────────────────────
+# P1-3: Agentic quality floor penalty
+# ─────────────────────────────────────────────────────────
+
+class TestAgenticQualityFloor:
+    def test_agentic_uses_p10_not_min(self):
+        """Agentic conversations with 5+ slices should use p10 quality, not min."""
+        # 10 slices: 9 have quality=7, 1 has quality=1
+        slices = []
+        for i in range(10):
+            q = 1 if i == 0 else 7
+            slices.append({
+                "labels": {"agentic": ["tool-calling"]},
+                "value": {"quality": {"overall": q}, "flags": []},
+            })
+        penalty, quality_floor, neg_flags = _compute_penalty(slices)
+        # p10 of [1,7,7,7,7,7,7,7,7,7] → sorted[1] = 7 (idx=int(10*0.1)=1)
+        assert quality_floor == 7
+        assert penalty == 1.0  # quality_floor=7 → no penalty
+
+    def test_non_agentic_uses_min(self):
+        """Non-agentic conversations should still use min quality."""
+        slices = []
+        for i in range(10):
+            q = 1 if i == 0 else 7
+            slices.append({
+                "labels": {},
+                "value": {"quality": {"overall": q}, "flags": []},
+            })
+        penalty, quality_floor, neg_flags = _compute_penalty(slices)
+        assert quality_floor == 1
+        assert penalty < 1.0  # quality_floor=1 < 3 → 0.5×
+
+    def test_agentic_small_group_uses_min(self):
+        """Agentic conversations with <5 slices still use min (not enough data for p10)."""
+        slices = [
+            {"labels": {"agentic": ["tool-calling"]},
+             "value": {"quality": {"overall": 2}, "flags": []}},
+            {"labels": {"agentic": ["tool-calling"]},
+             "value": {"quality": {"overall": 8}, "flags": []}},
+        ]
+        penalty, quality_floor, neg_flags = _compute_penalty(slices)
+        assert quality_floor == 2  # min, not p10

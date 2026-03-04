@@ -14,7 +14,8 @@ LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
 # ─── Shared Defaults ────────────────────────────────────
 MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
-REQUEST_TIMEOUT = 120          # seconds per LLM call (gpt-4o-mini is fast)
+REQUEST_TIMEOUT = 60           # seconds per LLM call (first attempt)
+REQUEST_TIMEOUT_ESCALATION = [60, 90, 120]  # per-attempt timeout escalation
 DEFAULT_RPS_LIMIT = 30         # max LLM requests/sec (0 = unlimited)
 DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
 
@@ -76,8 +77,17 @@ CONSISTENCY_RULES = [
      "Intent=review but no code-review-task in task"),
     ("intent == 'modify' and 'code-refactoring' not in task "
      "and 'code-optimization' not in task and 'migration' not in task "
-     "and 'code-translation' not in task and len(task) > 0",
-     "Intent=modify but no modify-relevant task (refactoring/optimization/migration/translation)"),
+     "and 'code-translation' not in task "
+     "and 'feature-implementation' not in task "
+     "and 'bug-fixing' not in task "
+     "and 'error-handling-task' not in task "
+     "and 'configuration' not in task "
+     "and 'documentation' not in task "
+     "and 'testing-task' not in task "
+     "and 'schema-design' not in task "
+     "and 'dependency-management' not in task "
+     "and len(task) > 0",
+     "Intent=modify but no modify-relevant task"),
 ]
 
 # ═══════════════════════════════════════════════════════════
@@ -126,7 +136,9 @@ KNOWN_FLAGS_NEGATIVE = frozenset({
 KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 
 # ─── Selection Score (Post-scoring, no LLM) ──────────
-SELECTION_INTRA_WEIGHT = 0.85      # weight for intra-class quality vs global rarity
+SELECTION_INTRA_WEIGHT = 0.55          # weight for intra-class percentile ranking
+SELECTION_QUALITY_WEIGHT = 0.20        # weight for absolute quality (pure_quality)
+SELECTION_RARITY_WEIGHT = 0.25         # weight for global rarity
 SELECTION_MIN_GROUP_SIZE = 5       # min samples per tag to compute intra-class percentile
 SELECTION_SMOOTHING_PRIOR = 30     # Bayesian shrinkage prior: blend toward global at n < prior
 
@@ -135,6 +147,7 @@ CONV_CONFIDENCE_INHERITED = 0.7           # confidence weight for inherited slic
 CONV_QUALITY_PENALTIES = {3: 0.5, 5: 0.8} # quality_floor < key → penalty multiplier
 CONV_QUALITY_PENALTY_DEFAULT = 1.0        # penalty when floor >= max(keys)
 CONV_FLAG_PENALTY_BASE = 0.95             # 0.95 ^ len(negative_flags)
+CONV_AGENTIC_QUALITY_PERCENTILE = 0.1     # use p10 instead of min for agentic conversations
 
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)
@@ -158,6 +171,7 @@ class PipelineConfig:
     max_retries: int = MAX_RETRIES
     sample_max_retries: int = SAMPLE_MAX_RETRIES
     request_timeout: int = REQUEST_TIMEOUT
+    request_timeout_escalation: list = None  # defaults to REQUEST_TIMEOUT_ESCALATION
     rps_limit: float = DEFAULT_RPS_LIMIT
     rps_warmup: float = DEFAULT_RPS_WARMUP
 
@@ -187,6 +201,7 @@ class PipelineConfig:
     rarity_combo_alpha: float = RARITY_COMBO_ALPHA
     value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
     selection_intra_weight: float = SELECTION_INTRA_WEIGHT
+    selection_quality_weight: float = SELECTION_QUALITY_WEIGHT
     selection_min_group_size: int = SELECTION_MIN_GROUP_SIZE
     selection_smoothing_prior: int = SELECTION_SMOOTHING_PRIOR
     enable_rationale: bool = ENABLE_RATIONALE

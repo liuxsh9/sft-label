@@ -66,6 +66,7 @@ What application area does this belong to?
 - cli-tool: Command-line tools
 - cloud-computing: Cloud-NATIVE capabilities — Lambda/Cloud Functions, S3/GCS object storage, IAM policies, IaC (CDK/Pulumi), service mesh, multi-cloud. NOT simply deploying a web app to AWS/GCP — that's the app's own domain + devops
 - compiler-development: Compilers, interpreters, language tooling
+- competitive-programming: Algorithmic problem-solving in contest settings — Codeforces, LeetCode, USACO, ICPC-style problems with formal input/output specs, time/memory constraints. NOT general algorithm practice without contest context (→ leave domain empty, use concept:algorithms)
 - cybersecurity: Security engineering as an APPLICATION DOMAIN (pentesting, threat modeling, vulnerability research, appsec). For security KNOWLEDGE (auth, encryption, XSS), use concept:security instead
 - data-engineering: Data INFRASTRUCTURE — building ETL/ELT pipelines, data warehouses, lakehouses, orchestration (Airflow/Dagster/Prefect), streaming (Kafka/Flink/Spark Streaming), schema evolution, data quality frameworks. NOT simple file I/O, CSV parsing, or basic pandas/SQL queries — those are normal coding in whatever domain the data serves
 - data-science: Exploratory data analysis, statistical modeling, data visualization, BI dashboards. NOT training ML models (→ machine-learning) or building data pipelines (→ data-engineering)
@@ -141,11 +142,14 @@ What coding ability level is needed to produce a good response?
 - `beginner`: Basic syntax, simple API calls, standard library usage (e.g., Python list operations, HTML/CSS basics, simple file I/O)
 - `intermediate`: Framework usage, common design patterns, multi-component coordination (e.g., Flask CRUD API, React components with state, SQL joins)
 - `advanced`: Performance optimization, complex architecture, deep debugging, multi-system integration (e.g., distributed rate limiter with Redis sliding window, connection pool implementation, custom Webpack plugin)
-- `expert`: Deep internals knowledge, cutting-edge techniques, large-scale system design (e.g., Rust Pin/Unpin mechanism, Linux kernel scheduler, lock-free data structures, custom memory allocator, JIT compiler)
+- `expert`: Deep internals knowledge, cutting-edge techniques, large-scale system design (e.g., Rust Pin/Unpin mechanism, Linux kernel scheduler, lock-free data structures, custom memory allocator, JIT compiler, multi-file repository-level debugging with deep codebase understanding)
 Calibration anchors:
 - Flask CRUD = intermediate (standard framework usage)
 - Distributed rate limiter with sliding window + degradation = advanced (multi-system, algorithmic)
 - Custom malloc implementation = expert (deep system internals)
+- Multi-step repository-level debugging across 5+ files with root-cause analysis = expert (deep codebase understanding)
+- Designing a lock-free concurrent data structure with correctness guarantees = expert (correctness-critical systems)
+Note: expert should remain rare (top 5-10%). The bar is high: requires knowledge most senior developers do not routinely possess.
 
 ## Output Format
 Return ONLY valid JSON (no markdown, no explanation):
@@ -691,7 +695,7 @@ TAG_POOLS = {
     },
     "domain": {
         "api-development", "automation", "bioinformatics", "blockchain", "cli-tool",
-        "cloud-computing", "compiler-development", "compliance", "computer-vision",
+        "cloud-computing", "compiler-development", "competitive-programming", "compliance", "computer-vision",
         "cybersecurity", "data-engineering", "data-science", "database-administration",
         "desktop-application", "devops", "e-commerce", "embedded-systems",
         "financial-technology", "game-development", "geospatial", "graphics-and-xr",

@@ -179,11 +179,11 @@ def _load_conversation_scores(input_path):
         parent = input_path.parent
         paths_to_try.append(parent / "conversation_scores.json")
     elif input_path.is_dir():
-        paths_to_try.append(input_path / "conversation_scores.json")
-        for sub in sorted(input_path.iterdir()):
-            if sub.is_dir():
-                p = sub / "conversation_scores.json"
-                if p.exists():
+        for pattern in ("conversation_scores.json",
+                         "*/conversation_scores.json",
+                         "*/*/conversation_scores.json"):
+            for p in sorted(input_path.glob(pattern)):
+                if p not in paths_to_try:
                     paths_to_try.append(p)
 
     for p in paths_to_try:
@@ -293,7 +293,8 @@ def _find_scored_files(input_path: Path):
     if input_path.is_dir():
         files = []
         for pattern in ("scored*.json", "scored*.jsonl",
-                         "*/scored*.json", "*/scored*.jsonl"):
+                         "*/scored*.json", "*/scored*.jsonl",
+                         "*/*/scored*.json", "*/*/scored*.jsonl"):
             files.extend(input_path.glob(pattern))
         # Deduplicate: when both .json and .jsonl exist for the same stem
         # in the same directory, prefer .json (avoids double-counting)

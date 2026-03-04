@@ -175,7 +175,7 @@ class TestModifyConsistency:
 
     def test_modify_without_relevant_task_warns(self):
         labels = {"intent": "modify", "language": ["python"], "domain": [],
-                  "task": ["feature-implementation"], "difficulty": "intermediate",
+                  "task": ["code-explanation"], "difficulty": "intermediate",
                   "concept": [], "agentic": [], "constraint": [], "context": "single-file"}
         warnings = check_consistency(labels)
         assert any("modify" in w.lower() for w in warnings)
