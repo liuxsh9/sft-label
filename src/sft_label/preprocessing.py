@@ -50,15 +50,26 @@ _TRAINING_XML_TAGS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Markdown COT blocks (```COT ... ```) that LLMs may mimic in output
+_MARKDOWN_COT_BLOCK_RE = re.compile(
+    r'```(?:COT|REASONING|THINKING)\b.*?```',
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def sanitize_training_markers(text: str) -> str:
-    """Strip training-specific XML tags (keep content between tags).
+    """Strip training-specific XML tags and markdown COT blocks (keep content between tags).
 
     These tags (e.g. <solution>, <tool_call>) appear in SWE repair and tool-use
     training data.  When sent to the labeling/scoring LLM they cause prompt
     injection — the LLM mimics the XML format instead of outputting valid JSON.
+
+    Markdown COT blocks (```COT...```) similarly cause the LLM to echo COT
+    format instead of producing structured JSON output.
     """
-    return _TRAINING_XML_TAGS_RE.sub('', text)
+    text = _TRAINING_XML_TAGS_RE.sub('', text)
+    text = _MARKDOWN_COT_BLOCK_RE.sub('', text)
+    return text
 
 PANGU_ROLE_MAP = {"user": "human", "assistant": "gpt", "tool": "tool"}
 
@@ -1038,6 +1049,33 @@ def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=
     return schedule
 
 
+def _should_force_label(source_sample, target_sample):
+    """Check if target's signals differ enough from source to warrant fresh labeling.
+
+    Prevents label inheritance when the adjacent slice has materially different
+    characteristics (language change, tool role presence change).
+    """
+    s_convs = source_sample.get("conversations", [])
+    t_convs = target_sample.get("conversations", [])
+
+    # Compare last assistant response languages
+    s_last = next((t["value"] for t in reversed(s_convs) if t.get("from") == "gpt"), "")
+    t_last = next((t["value"] for t in reversed(t_convs) if t.get("from") == "gpt"), "")
+
+    s_langs = set(detect_code_fence_languages(s_last))
+    t_langs = set(detect_code_fence_languages(t_last))
+    if s_langs and t_langs and s_langs != t_langs:
+        return True
+
+    # Tool role presence changed (agentic → non-agentic or vice versa)
+    s_has_tool = any(t.get("from") == "tool" for t in s_convs[-3:])
+    t_has_tool = any(t.get("from") == "tool" for t in t_convs[-3:])
+    if s_has_tool != t_has_tool:
+        return True
+
+    return False
+
+
 def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, max_gap=8, threshold=12):
     """Apply sparse sampling to multi-turn pyramid slices.
 
@@ -1086,6 +1124,7 @@ def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_g
                 labeled_positions.append(pos_in_group)
 
         # Build inherit_map: unlabeled → nearest labeled (forward first, backward fallback)
+        # Signal change detection: if target differs from source, force fresh labeling
         for pos_in_group, (global_idx, _) in enumerate(members):
             if pos_in_group in schedule_set:
                 continue
@@ -1102,7 +1141,12 @@ def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_g
                         source_pos = lp
                         break
             if source_pos is not None:
-                inherit_map[global_idx] = members[source_pos][0]
+                source_global_idx = members[source_pos][0]
+                # Check for signal divergence before inheriting
+                if _should_force_label(samples[source_global_idx], samples[global_idx]):
+                    label_indices.add(global_idx)
+                else:
+                    inherit_map[global_idx] = source_global_idx
 
     return label_indices, inherit_map
 

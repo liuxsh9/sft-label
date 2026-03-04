@@ -18,9 +18,11 @@ from sft_label.config import (
     CONV_QUALITY_PENALTIES,
     CONV_QUALITY_PENALTY_DEFAULT,
     CONV_FLAG_PENALTY_BASE,
+    CONV_AGENTIC_QUALITY_PERCENTILE,
     VALUE_WEIGHTS,
     RARITY_WEIGHTS,
     SELECTION_INTRA_WEIGHT,
+    SELECTION_QUALITY_WEIGHT,
     SELECTION_MIN_GROUP_SIZE,
     SELECTION_SMOOTHING_PRIOR,
     KNOWN_FLAGS_NEGATIVE,
@@ -111,6 +113,18 @@ def _compute_penalty(slices):
             quality_values.append(q)
 
     quality_floor = min(quality_values) if quality_values else None
+
+    # For conversations with agentic behaviors, use p10 quality instead of min.
+    # Agent trajectories naturally have low-quality "error" turns (tool returns
+    # error, exploratory dead ends) that are normal exploration, not quality failures.
+    has_agentic = any(
+        (s.get("labels") or {}).get("agentic")
+        for s in slices
+    )
+    if has_agentic and len(quality_values) >= 5:
+        sorted_q = sorted(quality_values)
+        p10_idx = max(0, int(len(sorted_q) * CONV_AGENTIC_QUALITY_PERCENTILE))
+        quality_floor = sorted_q[p10_idx]
 
     # Quality floor penalty
     q_penalty = CONV_QUALITY_PENALTY_DEFAULT
@@ -394,6 +408,9 @@ def compute_conv_selection_scores(records):
                     dim_percentiles[idx][dim] = (percentile, 1)
 
     # Fuse into intra_class_rank per record
+    quality_weight = SELECTION_QUALITY_WEIGHT
+    rarity_fuse_weight = 1.0 - intra_weight - quality_weight
+
     for i, rec in enumerate(records):
         percs = dim_percentiles[i]
         if not percs:
@@ -411,13 +428,19 @@ def compute_conv_selection_scores(records):
         intra_rank = total_v / total_w
         intra_rank_scaled = 1.0 + 9.0 * intra_rank  # scale to 1-10
 
-        # Fuse with rarity
+        # Absolute quality component
+        pq = (rec.get("detail") or {}).get("pure_quality")
+        pq_scaled = max(1.0, min(10.0, pq)) if pq is not None else 5.5
+
+        # Fuse with rarity and quality
         rarity = rec.get("conv_rarity")
         if rarity is not None:
             conv_selection = (intra_weight * intra_rank_scaled +
-                              (1 - intra_weight) * rarity)
+                              quality_weight * pq_scaled +
+                              rarity_fuse_weight * rarity)
         else:
-            conv_selection = intra_rank_scaled
+            conv_selection = ((intra_weight + rarity_fuse_weight * 0.5) * intra_rank_scaled +
+                              (quality_weight + rarity_fuse_weight * 0.5) * pq_scaled)
 
         conv_selection = max(1.0, min(10.0, conv_selection))
         rec["conv_selection"] = round(conv_selection, 2)

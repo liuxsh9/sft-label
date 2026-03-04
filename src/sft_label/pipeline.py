@@ -42,7 +42,7 @@ from sft_label.preprocessing import preprocess, format_signals_for_prompt, norma
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
     DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
-    REQUEST_TIMEOUT,
+    REQUEST_TIMEOUT, REQUEST_TIMEOUT_ESCALATION,
     MAX_CONVERSATION_CHARS,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
@@ -337,6 +337,8 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
     _base = config.litellm_base if config else LITELLM_BASE
     _key = config.litellm_key if config else LITELLM_KEY
     _timeout = config.request_timeout if config else REQUEST_TIMEOUT
+    _escalation = (config.request_timeout_escalation if config and config.request_timeout_escalation
+                   else REQUEST_TIMEOUT_ESCALATION)
     url = f"{_base}/chat/completions"
     headers = {
         "Authorization": f"Bearer {_key}",
@@ -354,10 +356,13 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
 
     for attempt in range(max_retries + 1):
         _http_recorded = False
+        # Adaptive timeout: escalate on retries
+        attempt_timeout = (_escalation[attempt] if _escalation and attempt < len(_escalation)
+                           else _timeout)
         try:
             if rate_limiter is not None:
                 await rate_limiter.acquire()
-            resp = await http_client.post(url, json=payload, headers=headers, timeout=_timeout)
+            resp = await http_client.post(url, json=payload, headers=headers, timeout=attempt_timeout)
             if rate_limiter is not None:
                 rate_limiter.stats.record(resp.status_code)
                 _http_recorded = True
@@ -583,6 +588,18 @@ TAG_ALIASES = {
     "refactor": "modify",
     "optimize": "modify",
     "transform": "modify",
+    # language — common abbreviations
+    "objc": "objective-c",
+    "objective_c": "objective-c",
+    "js": "javascript",
+    "ts": "typescript",
+    "rb": "ruby",
+    "py": "python",
+    # concept — additional mappings
+    "regex": "algorithms",
+    "regular-expressions": "algorithms",
+    "async-await": "concurrency",
+    "system-programming": "concurrency",
 }
 
 # Tags that belong to a DIFFERENT category — drop from the current dimension

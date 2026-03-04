@@ -34,8 +34,8 @@ from sft_label.config import (
     VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
-    SELECTION_INTRA_WEIGHT, SELECTION_MIN_GROUP_SIZE,
-    SELECTION_SMOOTHING_PRIOR,
+    SELECTION_INTRA_WEIGHT, SELECTION_QUALITY_WEIGHT,
+    SELECTION_MIN_GROUP_SIZE, SELECTION_SMOOTHING_PRIOR,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -539,6 +539,10 @@ def compute_selection_scores(samples, rarity_weights=None,
                     dim_percentiles[idx][dim] = (percentile, 1)
 
     # Step 4: Weighted fusion across dimensions → intra_class_rank + selection_score
+    quality_weight = (config.selection_quality_weight if config
+                      else SELECTION_QUALITY_WEIGHT)
+    rarity_weight = 1.0 - intra_weight - quality_weight
+
     for i, s in enumerate(samples):
         v = s.get("value")
         if v is None:
@@ -568,12 +572,20 @@ def compute_selection_scores(samples, rarity_weights=None,
         v["intra_class_rank"] = intra_class_rank
 
         rarity_score = (v.get("rarity") or {}).get("score")
+        pq = pure_qualities[i]
+        pq_scaled = max(1.0, min(10.0, pq)) if pq is not None else 5.5
+
         if intra_class_rank is not None:
             if rarity_score is not None:
                 v["selection_score"] = round(
-                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 2)
+                    intra_weight * intra_class_rank +
+                    quality_weight * pq_scaled +
+                    rarity_weight * rarity_score, 2)
             else:
-                v["selection_score"] = intra_class_rank
+                # No rarity: redistribute rarity_weight into intra + quality
+                v["selection_score"] = round(
+                    (intra_weight + rarity_weight * 0.5) * intra_class_rank +
+                    (quality_weight + rarity_weight * 0.5) * pq_scaled, 2)
         else:
             # Ultimate fallback: use value_score
             v["selection_score"] = v.get("value_score")
@@ -673,6 +685,10 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                     dim_percentiles[idx][dim] = (percentile, 1)
 
     # Step 4: Fusion
+    quality_weight = (config.selection_quality_weight if config
+                      else SELECTION_QUALITY_WEIGHT)
+    rarity_weight = 1.0 - intra_weight - quality_weight
+
     results = []
     for i, s in enumerate(summaries):
         percs = dim_percentiles[i]
@@ -696,12 +712,19 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                 intra_class_rank = None
 
         rarity_score = s.get("rarity_score")
+        pq = pure_qualities[i]
+        pq_scaled = max(1.0, min(10.0, pq)) if pq is not None else 5.5
+
         if intra_class_rank is not None:
             if rarity_score is not None:
                 selection_score = round(
-                    intra_weight * intra_class_rank + (1 - intra_weight) * rarity_score, 2)
+                    intra_weight * intra_class_rank +
+                    quality_weight * pq_scaled +
+                    rarity_weight * rarity_score, 2)
             else:
-                selection_score = intra_class_rank
+                selection_score = round(
+                    (intra_weight + rarity_weight * 0.5) * intra_class_rank +
+                    (quality_weight + rarity_weight * 0.5) * pq_scaled, 2)
         else:
             selection_score = s.get("value_score")
 
@@ -771,6 +794,10 @@ async def score_one(http_client, sample, model, rarity_result,
     )
     total_turns = len(conversations)
 
+    # Multi-turn slice position (for incomplete flag calibration)
+    turn_index = metadata.get("turn_index")
+    total_turns_meta = metadata.get("total_turns")
+
     messages = build_scoring_messages(
         truncated=truncated,
         thinking_mode=thinking_mode,
@@ -778,6 +805,8 @@ async def score_one(http_client, sample, model, rarity_result,
         total_turns=total_turns,
         code_block_count=code_block_count,
         enable_rationale=config.enable_rationale if config else False,
+        turn_index=turn_index,
+        total_turns_meta=total_turns_meta,
     )
 
     # LLM call with retry — retry OUTSIDE semaphore
@@ -801,6 +830,10 @@ async def score_one(http_client, sample, model, rarity_result,
         if parsed is None:
             monitor["error"] = raw[:300] if raw else "null response"
             monitor["error_response"] = usage.get("error_response") or (raw[:500] if raw else "")
+            # Detect COT mimicry — LLM echoed COT format instead of JSON
+            if raw and raw.lstrip().startswith(("```COT", "```cot", "```Cot",
+                                                "[COT]", "COT\n", "«cot»")):
+                monitor["error"] = f"cot_mimicry: {raw[:200]}"
             if usage.get("non_retryable"):
                 break
             continue

@@ -522,3 +522,121 @@ class TestToPanguPseudoMultiturn:
         assert "[unused16]Let me think[unused17]" in reconstructed["data"][1]["content"]
         assert "Python is great" in reconstructed["data"][1]["content"]
 
+
+# ─── P0-2b: Markdown COT block sanitization ────────────
+
+class TestSanitizeMarkdownCotBlocks:
+    def test_strips_cot_block(self):
+        text = "Before ```COT\nsome reasoning\n``` after"
+        result = sanitize_training_markers(text)
+        assert "```COT" not in result
+        assert "some reasoning" not in result
+        assert "Before" in result and "after" in result
+
+    def test_strips_reasoning_block(self):
+        text = "text ```REASONING\nthinking...\n``` more"
+        result = sanitize_training_markers(text)
+        assert "```REASONING" not in result
+        assert "thinking..." not in result
+
+    def test_strips_thinking_block(self):
+        text = "start ```Thinking\nmy thoughts\n``` end"
+        result = sanitize_training_markers(text)
+        assert "```Thinking" not in result
+        assert "my thoughts" not in result
+
+    def test_case_insensitive(self):
+        text = "a ```cot\nlower case\n``` b"
+        result = sanitize_training_markers(text)
+        assert "```cot" not in result
+
+    def test_preserves_normal_code_blocks(self):
+        text = "```python\nprint('hello')\n```"
+        result = sanitize_training_markers(text)
+        assert result == text
+
+    def test_mixed_blocks(self):
+        text = "code: ```python\nprint(1)\n``` then ```COT\nthink\n``` done"
+        result = sanitize_training_markers(text)
+        assert "```python" in result
+        assert "```COT" not in result
+
+
+# ─── P2-2: Signal change detection for sparse sampling ──
+
+class TestShouldForceLabel:
+    def test_same_language_no_force(self):
+        from sft_label.preprocessing import _should_force_label
+        source = {"conversations": [
+            {"from": "human", "value": "Q"},
+            {"from": "gpt", "value": "```python\nprint(1)\n```"},
+        ]}
+        target = {"conversations": [
+            {"from": "human", "value": "Q2"},
+            {"from": "gpt", "value": "```python\nprint(2)\n```"},
+        ]}
+        assert not _should_force_label(source, target)
+
+    def test_language_change_forces(self):
+        from sft_label.preprocessing import _should_force_label
+        source = {"conversations": [
+            {"from": "human", "value": "Q"},
+            {"from": "gpt", "value": "```python\nprint(1)\n```"},
+        ]}
+        target = {"conversations": [
+            {"from": "human", "value": "Q2"},
+            {"from": "gpt", "value": "```javascript\nconsole.log(1)\n```"},
+        ]}
+        assert _should_force_label(source, target)
+
+    def test_tool_role_change_forces(self):
+        from sft_label.preprocessing import _should_force_label
+        source = {"conversations": [
+            {"from": "human", "value": "Q"},
+            {"from": "gpt", "value": "answer"},
+        ]}
+        target = {"conversations": [
+            {"from": "human", "value": "Q2"},
+            {"from": "tool", "value": "result"},
+            {"from": "gpt", "value": "answer2"},
+        ]}
+        assert _should_force_label(source, target)
+
+    def test_no_code_no_force(self):
+        from sft_label.preprocessing import _should_force_label
+        source = {"conversations": [
+            {"from": "human", "value": "Q"},
+            {"from": "gpt", "value": "text answer"},
+        ]}
+        target = {"conversations": [
+            {"from": "human", "value": "Q2"},
+            {"from": "gpt", "value": "text answer 2"},
+        ]}
+        assert not _should_force_label(source, target)
+
+
+class TestSparseSamplingSignalDetection:
+    def test_language_change_forces_labeling(self):
+        """Sparse sampling should force-label when language changes between slices."""
+        # 15 slices (above threshold=12), language changes at slice 10
+        samples = []
+        for i in range(15):
+            lang = "python" if i < 10 else "javascript"
+            code = f"```{lang}\ncode_{i}\n```"
+            samples.append({
+                "id": f"s_{i}",
+                "metadata": {"source_id": "conv-1", "turn_index": i, "total_turns": 15},
+                "conversations": [
+                    {"from": "human", "value": f"Q{i}"},
+                    {"from": "gpt", "value": code},
+                ],
+            })
+        label_indices, inherit_map = apply_sparse_sampling(samples, threshold=12)
+        # Slices near the language change boundary (10+) that would
+        # normally be inherited should be force-labeled instead
+        # At minimum, more slices should be labeled than the default schedule
+        labeled_after_change = [i for i in range(10, 15) if i in label_indices]
+        inherited_after_change = [i for i in range(10, 15) if i in inherit_map]
+        # The force-labeling should increase labeled count vs pure schedule
+        assert len(labeled_after_change) > 0
+
