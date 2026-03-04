@@ -63,7 +63,7 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 
 **Pass 2.5: Conversation Aggregation** (in `conversation.py`):
 - Post-scoring, no LLM — groups multi-turn slices by `source_id`, computes conversation-level metrics
-- Position-weighted averaging (later turns weighted 1→3×), inherited slices get 0.7× confidence
+- Position-weighted averaging (later turns weighted 1→2×), inherited slices get 0.7× confidence
 - Quality floor penalty (min quality < 3 → 0.5×, < 5 → 0.8×) and negative flag penalty (0.95^count)
 - `conv_value` = weighted_avg(value_scores) × penalty, clamped [1,10]
 - `conv_selection` = 0.85×intra_class_rank + 0.15×conv_rarity (per-tag percentile with Bayesian shrinkage, same as sample-level but on conversations)
@@ -129,19 +129,29 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
   - Quick e2e test: `uv run sft-label run --input tests/fixtures/mot_code_pangu_1000.json --score` (or slice first 10 with jq for faster iteration)
   - Raw dataset stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/open-r1__Mixture-of-Thoughts/code/` (83k samples, parquet)
 
-- `tests/fixtures/e2e_folder_test/` — Multi-file directory fixture for testing directory mode and SWE repair labeling. Structure:
+- `tests/fixtures/e2e_folder_test/` — Multi-file directory fixture for comprehensive e2e testing. Structure:
   ```
   e2e_folder_test/
     code/
-      mot_code_part1.json       (500 single-turn, MoT competitive programming)
-      mot_code_part2.json       (500 single-turn, MoT competitive programming)
+      mot_code_part1.jsonl              (500 single-turn, MoT competitive programming, COT)
+      mot_code_part2.jsonl              (500 single-turn, MoT competitive programming, COT)
+      magicoder_oss_instruct.jsonl      (500 single-turn, OSS-grounded code gen, 20 languages)
+      commitpackft_multilang.jsonl      (500 single-turn, real git commits, 20 languages)
     multi_turn/
-      nemotron_swe_repair.json    (100 single-turn SWE repair, COT)
+      nemotron_swe_repair.jsonl         (100 single-turn SWE repair, COT)
+      code_feedback_multiturn.jsonl     (100 multi-turn iterative coding, avg 6.5 turns)
+      coderforge_swe_trajectories.jsonl (100 multi-turn agent trajectories, tool calls, avg 125 turns)
   ```
-  - Source: [nvidia/Nemotron-Cascade-SFT-Stage-2](https://huggingface.co/datasets/nvidia/Nemotron-Cascade-SFT-Stage-2) (`swe_repair` subset)
-  - Tests: directory mode batch processing, SWE repair labeling with XML marker handling
+  - Sources:
+    - `mot_code_*`: [open-r1/Mixture-of-Thoughts](https://huggingface.co/datasets/open-r1/Mixture-of-Thoughts) code subset
+    - `nemotron_swe_repair`: [nvidia/Nemotron-Cascade-SFT-Stage-2](https://huggingface.co/datasets/nvidia/Nemotron-Cascade-SFT-Stage-2) swe_repair subset
+    - `magicoder_oss_instruct`: [ise-uiuc/Magicoder-OSS-Instruct-75K](https://huggingface.co/datasets/ise-uiuc/Magicoder-OSS-Instruct-75K) — code gen grounded in real OSS code
+    - `commitpackft_multilang`: [bigcode/commitpackft](https://huggingface.co/datasets/bigcode/commitpackft) — real git commits across 20 languages
+    - `code_feedback_multiturn`: [m-a-p/Code-Feedback](https://huggingface.co/datasets/m-a-p/Code-Feedback) — iterative coding with execution feedback
+    - `coderforge_swe_trajectories`: [togethercomputer/CoderForge-Preview](https://huggingface.co/datasets/togethercomputer/CoderForge-Preview) SWE_Rebench — OpenHands agent trajectories with tool calls
+  - Tests: directory mode, multi-turn slicing, tool signal extraction, conversation aggregation, multi-language labeling, diverse intent/difficulty coverage
   - Quick e2e test: `uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score --limit 10`
-  - Raw dataset stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/nvidia__Nemotron-Cascade-SFT-Stage-2/` (tool_calling.jsonl 6.3GB, swe_repair.jsonl 3.5GB)
+  - Raw datasets stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/`
 
 **Dataset download scripts** (in `scripts/`):
 - `scripts/download_hf_dataset.py` — Download HuggingFace datasets (`--subset` to filter, `--convert` for ShareGPT JSON)
