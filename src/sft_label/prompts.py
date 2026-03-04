@@ -170,7 +170,8 @@ Rules for output:
 - Multi-select fields are arrays (can be empty [])
 - Single-select fields are strings
 - confidence: 0.0-1.0 per dimension (how sure you are)
-- unmapped: any tags you wanted to assign but couldn't find in the pool (free text)"""
+- unmapped: tags you wanted to assign but couldn't find in the pool (short kebab-case IDs only, NOT sentences or explanations. If none, return empty array [])
+- The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
 
 CALL1_FEWSHOT = [
@@ -527,7 +528,12 @@ Return ONLY valid JSON (no markdown, no explanation):
     "context": 0.80
   },
   "unmapped": []
-}"""
+}
+
+Rules for output:
+- Use ONLY exact lowercase kebab-case tag IDs from the pools above
+- unmapped: tags you wanted to assign but couldn't find in the pool (short kebab-case IDs only, NOT sentences or explanations. If none, return empty array [])
+- The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
 
 CALL2_FEWSHOT = [

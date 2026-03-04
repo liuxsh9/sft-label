@@ -20,6 +20,7 @@ from sft_label.preprocessing import (
     apply_sparse_sampling,
     truncate_conversations_for_labeling,
     to_pangu_pseudo_multiturn,
+    sanitize_training_markers,
 )
 
 
@@ -230,6 +231,55 @@ class TestTruncation:
         assert truncated
         total = sum(len(t["value"]) for t in result)
         assert total <= 5500  # Allow some margin
+
+    def test_truncation_sanitizes_xml_tags(self):
+        convs = [
+            {"from": "human", "value": "Fix the bug <solution>hint</solution>"},
+            {"from": "gpt", "value": "Here is the <fix attr='v'>patch</fix>"},
+        ]
+        result, _ = truncate_conversations_for_labeling(convs)
+        assert "<solution>" not in result[0]["value"]
+        assert "<fix" not in result[1]["value"]
+        assert "hint" in result[0]["value"]
+        assert "patch" in result[1]["value"]
+
+
+class TestSanitizeTrainingMarkers:
+    def test_strips_basic_tags(self):
+        text = "Before <solution>code here</solution> after"
+        assert sanitize_training_markers(text) == "Before code here after"
+
+    def test_strips_self_closing_with_space(self):
+        text = "text <fix /> more"
+        assert sanitize_training_markers(text) == "text  more"
+
+    def test_strips_tags_with_attributes(self):
+        text = '<tool_call name="edit">content</tool_call>'
+        assert sanitize_training_markers(text) == "content"
+
+    def test_case_insensitive(self):
+        text = "<SOLUTION>code</SOLUTION>"
+        assert sanitize_training_markers(text) == "code"
+
+    def test_preserves_non_target_tags(self):
+        text = "<div>html</div> <span>content</span>"
+        assert sanitize_training_markers(text) == text
+
+    def test_preserves_code_angle_brackets(self):
+        text = "if (a < b && c > d) { fix(); }"
+        assert sanitize_training_markers(text) == text
+
+    def test_empty_input(self):
+        assert sanitize_training_markers("") == ""
+
+    def test_nested_tags(self):
+        text = "<solution><code_change>new code</code_change></solution>"
+        assert sanitize_training_markers(text) == "new code"
+
+    def test_extended_tags(self):
+        """Tags added based on expert review: command, output, result, reasoning, response."""
+        text = "<command>ls -la</command> <output>file.txt</output>"
+        assert sanitize_training_markers(text) == "ls -la file.txt"
 
 
 class TestPreprocess:

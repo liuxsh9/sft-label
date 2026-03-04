@@ -232,11 +232,107 @@ def resolve_run_dir(output, input_path):
 
 
 # ─────────────────────────────────────────────────────────
+# Rate limiter + HTTP request stats
+# ─────────────────────────────────────────────────────────
+
+class RequestStats:
+    """Track HTTP request outcomes for real-time display and summary."""
+    __slots__ = ('success', 'errors', 'timeouts')
+
+    def __init__(self):
+        self.success = 0
+        self.errors = {}   # status_code (int) -> count
+        self.timeouts = 0
+
+    def record(self, status_code: int):
+        if 200 <= status_code < 300:
+            self.success += 1
+        else:
+            self.errors[status_code] = self.errors.get(status_code, 0) + 1
+
+    def record_timeout(self):
+        self.timeouts += 1
+
+    @property
+    def total(self):
+        return self.success + sum(self.errors.values()) + self.timeouts
+
+    def summary_line(self):
+        """One-line summary for progress display."""
+        t = self.total
+        if t == 0:
+            return ""
+        parts = [f"✓{self.success}"]
+        for code in sorted(self.errors):
+            parts.append(f"{code}×{self.errors[code]}")
+        if self.timeouts:
+            parts.append(f"timeout×{self.timeouts}")
+        rate = self.success / t * 100
+        return f"http({' '.join(parts)} {rate:.0f}%)"
+
+    def to_dict(self):
+        t = self.total
+        return {
+            "total_http_requests": t,
+            "success": self.success,
+            "errors": {str(k): v for k, v in sorted(self.errors.items())},
+            "timeouts": self.timeouts,
+            "success_rate": round(self.success / t * 100, 1) if t > 0 else 0,
+        }
+
+
+class AsyncRateLimiter:
+    """Token bucket rate limiter for async contexts with warmup support.
+
+    During warmup, effective RPS ramps linearly from 1 to the target RPS.
+    Initial tokens = 1 (cold start) to avoid burst on startup.
+    """
+
+    def __init__(self, rps: float, burst: int | None = None, warmup: float = 0.0):
+        self._rps = rps
+        self._burst = burst if burst is not None else max(int(rps), 1)
+        self._tokens = 1.0  # Cold start: only 1 token initially (no burst)
+        self._last_refill = 0.0
+        self._start_time = 0.0
+        self._warmup = warmup
+        self._lock = asyncio.Lock()
+        self.stats = RequestStats()
+
+    def _effective_rps(self, now):
+        """Current RPS considering warmup ramp."""
+        if self._warmup <= 0 or self._start_time == 0.0:
+            return self._rps
+        elapsed = now - self._start_time
+        if elapsed >= self._warmup:
+            return self._rps
+        # Linear ramp: 1 → rps over warmup seconds
+        progress = elapsed / self._warmup
+        return 1.0 + (self._rps - 1.0) * progress
+
+    async def acquire(self):
+        while True:
+            async with self._lock:
+                now = asyncio.get_event_loop().time()
+                if self._last_refill == 0.0:
+                    self._last_refill = now
+                    self._start_time = now
+                elapsed = now - self._last_refill
+                effective_rps = self._effective_rps(now)
+                self._tokens = min(self._burst, self._tokens + elapsed * effective_rps)
+                self._last_refill = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / effective_rps
+            await asyncio.sleep(wait)  # Sleep OUTSIDE lock
+
+
+# ─────────────────────────────────────────────────────────
 # Async LLM calls
 # ─────────────────────────────────────────────────────────
 
 async def async_llm_call(http_client, messages, model, temperature=0.1, max_tokens=1000, max_retries=MAX_RETRIES,
-                         config=None):
+                         config=None, rate_limiter=None):
     """Async LLM call with retry + jitter. Returns (parsed_json, raw_content, usage)."""
     _base = config.litellm_base if config else LITELLM_BASE
     _key = config.litellm_key if config else LITELLM_KEY
@@ -257,8 +353,14 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
     last_error_response = None
 
     for attempt in range(max_retries + 1):
+        _http_recorded = False
         try:
+            if rate_limiter is not None:
+                await rate_limiter.acquire()
             resp = await http_client.post(url, json=payload, headers=headers, timeout=_timeout)
+            if rate_limiter is not None:
+                rate_limiter.stats.record(resp.status_code)
+                _http_recorded = True
             if resp.status_code == 403:
                 # Content filtered by upstream WAF/provider — retry once to rule out transient proxy issues
                 resp_body = resp.text
@@ -291,10 +393,22 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                     "non_retryable": True,
                 }
             if resp.status_code in (429, 500, 502, 503, 504):
+                resp_text = resp.text[:500]
+                resp_lower = resp_text.lower()
+                # LiteLLM "No deployments available" — all deployments are in cooldown,
+                # often caused by upstream content-filter 400s.  Retrying immediately
+                # only prolongs the cooldown cycle, so treat as non-retryable.
+                if "no deployments available" in resp_lower or "cooldown_list" in resp_lower:
+                    return None, f"HTTP {resp.status_code}: {resp_text[:300]}", {
+                        "prompt_tokens": 0, "completion_tokens": 0,
+                        "error": f"HTTP {resp.status_code} (deployment cooldown): {resp_text[:300]}",
+                        "error_response": resp.text,
+                        "non_retryable": True,
+                    }
                 # Rate limited or server error — exponential backoff with jitter
                 base_wait = min(2 ** attempt * 3 + 2, 60)
                 wait = base_wait + random.uniform(0, base_wait * 0.5)
-                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                last_error = f"HTTP {resp.status_code}: {resp_text[:200]}"
                 last_error_response = resp.text
                 if attempt < max_retries:
                     await asyncio.sleep(wait)
@@ -306,13 +420,22 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 # Keep this list narrow — in multi-hop proxy chains, broad keywords
                 # like "invalid_request" or "model_not_found" can match transient
                 # supplier routing errors (e.g. "Unknown model: gpt4ominicep").
-                if any(kw in error_lower for kw in (
+                #
+                # Content moderation keywords (Azure + OpenAI + LiteLLM wrappers):
+                #   content_filter / content_policy — Azure RAI filter
+                #   responsibleaipolicyviolation — Azure innererror code
+                #   content_management_policy — Azure alternate wording
+                #   moderation — OpenAI moderation endpoint flag
+                _NON_RETRYABLE_400_KEYWORDS = (
                     "context_length_exceeded", "maximum context length",
                     "content_policy", "content_filter",
-                )):
+                    "responsibleaipolicyviolation", "content_management_policy",
+                    "moderation",
+                )
+                if any(kw in error_lower for kw in _NON_RETRYABLE_400_KEYWORDS):
                     return None, f"HTTP 400: {error_text[:300]}", {
                         "prompt_tokens": 0, "completion_tokens": 0,
-                        "error": f"HTTP 400: {error_text[:300]}",
+                        "error": f"HTTP 400 (content filtered): {error_text[:300]}",
                         "error_response": resp.text,
                         "non_retryable": True,
                     }
@@ -368,6 +491,8 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 continue
             return None, content if 'content' in locals() else "", {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error}
         except Exception as e:
+            if rate_limiter is not None and not _http_recorded:
+                rate_limiter.stats.record_timeout()
             last_error = f"{type(e).__name__}: {e}"
             if attempt < max_retries:
                 base_wait = min(2 ** attempt * 3 + 2, 60)
@@ -531,6 +656,17 @@ def validate_tags(result, call_name="call1"):
                     unmapped.append({"dimension": dim, "value": v})
             cleaned[dim] = valid
 
+    # Normalize string items to dict format (LLM may return plain strings)
+    unmapped = [
+        item if isinstance(item, dict) else {"dimension": "?", "value": item}
+        for item in unmapped
+    ]
+    # Filter out LLM explanation sentences — unmapped should be short tag IDs
+    unmapped = [
+        item for item in unmapped
+        if len(item.get("value", "")) <= 60 and item.get("value", "").count(" ") <= 3
+    ]
+
     cleaned["unmapped"] = unmapped
     return cleaned, issues
 
@@ -571,7 +707,7 @@ def find_low_confidence_dims(labels, threshold=CONFIDENCE_THRESHOLD):
 # ─────────────────────────────────────────────────────────
 
 async def label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                    config=None):
+                    config=None, rate_limiter=None):
     """Label a single sample with sample-level retry on failure."""
     _max_chars = config.max_conversation_chars if config else MAX_CONVERSATION_CHARS
     _max_retries_sample = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
@@ -628,7 +764,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 else:
                     msgs1 = build_call1_messages(conversations_json, signals_str)
                     call1_result, call1_raw, usage1 = await async_llm_call(http_client, msgs1, model,
-                                                                          max_retries=_max_retries, config=config)
+                                                                          max_retries=_max_retries, config=config,
+                                                                          rate_limiter=rate_limiter)
                     monitor["llm_calls"] += 1
                     monitor["total_prompt_tokens"] += usage1["prompt_tokens"]
                     monitor["total_completion_tokens"] += usage1["completion_tokens"]
@@ -652,7 +789,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 call1_context = {d: call1_cleaned[d] for d in ["intent", "language", "domain", "task", "difficulty"] if d in call1_cleaned}
                 msgs2 = build_call2_messages(conversations_json, signals_str, call1_context)
                 call2_result, call2_raw, usage2 = await async_llm_call(http_client, msgs2, model,
-                                                                      max_retries=_max_retries, config=config)
+                                                                      max_retries=_max_retries, config=config,
+                                                                      rate_limiter=rate_limiter)
                 monitor["llm_calls"] += 1
                 monitor["total_prompt_tokens"] += usage2["prompt_tokens"]
                 monitor["total_completion_tokens"] += usage2["completion_tokens"]
@@ -703,7 +841,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
                     if any(d in call1_dims for d, _ in low_conf):
                         re1, _, u1 = await async_llm_call(http_client, msgs1, model, temperature=0.3,
-                                                          max_retries=_max_retries, config=config)
+                                                          max_retries=_max_retries, config=config,
+                                                          rate_limiter=rate_limiter)
                         monitor["llm_calls"] += 1
                         monitor["total_prompt_tokens"] += u1["prompt_tokens"]
                         monitor["total_completion_tokens"] += u1["completion_tokens"]
@@ -716,7 +855,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
                     if any(d in call2_dims for d, _ in low_conf):
                         re2, _, u2 = await async_llm_call(http_client, msgs2, model, temperature=0.3,
-                                                          max_retries=_max_retries, config=config)
+                                                          max_retries=_max_retries, config=config,
+                                                          rate_limiter=rate_limiter)
                         monitor["llm_calls"] += 1
                         monitor["total_prompt_tokens"] += u2["prompt_tokens"]
                         monitor["total_completion_tokens"] += u2["completion_tokens"]
@@ -1315,7 +1455,8 @@ def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
 
 async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  enable_arbitration=True, limit=0, shuffle=False,
-                                 progress=None, sample_task=None, config=None):
+                                 progress=None, sample_task=None, config=None,
+                                 rate_limiter=None):
     """Chunked JSONL labeling: watermark-based processing for large files.
 
     Processes JSONL files in chunks to bound memory usage. Each chunk is
@@ -1414,7 +1555,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                 coro = label_one(
                     http_client, samples[idx], model, idx, len(samples), sem,
                     enable_arbitration=enable_arbitration,
-                    config=config,
+                    config=config, rate_limiter=rate_limiter,
                 )
                 fut = asyncio.ensure_future(_tagged_label(coro, chunk_idx, idx))
                 pending_futures.add(fut)
@@ -1468,6 +1609,8 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
                 if progress and sample_task is not None:
                     info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [chunk {c.chunk_idx + 1}]"
+                    if rate_limiter:
+                        info += f" | {rate_limiter.stats.summary_line()}"
                     progress.update(sample_task, advance=1, info=info)
 
                 # Check if chunk is fully done
@@ -1525,7 +1668,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 async def run_one_file(input_path, output_dir, http_client, sem, model,
                        enable_arbitration=True, limit=0, shuffle=False,
                        file_prefix=None, progress=None, sample_task=None,
-                       config=None):
+                       config=None, rate_limiter=None):
     """Label a single file. Writes outputs to output_dir. Returns stats dict.
 
     file_prefix: if set, output files are named e.g. labeled_<prefix>.json
@@ -1537,6 +1680,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             input_path, output_dir, http_client, sem, model,
             enable_arbitration=enable_arbitration, limit=limit, shuffle=shuffle,
             progress=progress, sample_task=sample_task, config=config,
+            rate_limiter=rate_limiter,
         )
 
     # Load input — streaming for JSONL
@@ -1577,7 +1721,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         tasks.append(label_one(
             http_client, samples[idx], model, idx, total, sem,
             enable_arbitration=enable_arbitration,
-            config=config,
+            config=config, rate_limiter=rate_limiter,
         ))
 
     done_count = 0
@@ -1598,6 +1742,8 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
         if progress and sample_task is not None:
             info = f"✓{ok_count}" + (f" ✗{fail_count}" if fail_count else "") + sparse_info
+            if rate_limiter:
+                info += f" | {rate_limiter.stats.summary_line()}"
             progress.update(sample_task, advance=1, info=info)
         else:
             # Fallback: per-sample print (no progress bar)
@@ -1759,7 +1905,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                                  limit=0, shuffle=False,
                                  progress=None, file_task=None, sample_task=None,
                                  http_client=None, sem=None, enable_arbitration=True,
-                                 config=None):
+                                 config=None, rate_limiter=None):
     """Cross-file pipeline with watermark-based file loading.
 
     Instead of processing files serially, loads new files whenever in-flight
@@ -1846,7 +1992,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             coro = label_one(
                 http_client, samples[idx], model, idx, len(samples), sem,
                 enable_arbitration=enable_arbitration,
-                config=config,
+                config=config, rate_limiter=rate_limiter,
             )
             fut = asyncio.ensure_future(_tagged_label(coro, orig_idx, idx))
             pending_futures.add(fut)
@@ -1905,6 +2051,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             # Update samples progress bar
             if progress and sample_task is not None:
                 info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [{c.rel_path.name}]" + c.sparse_info
+                if rate_limiter:
+                    info += f" | {rate_limiter.stats.summary_line()}"
                 progress.update(sample_task, advance=1, info=info)
 
             # Check if this file is fully done (compare against label_count, not total)
@@ -1957,6 +2105,20 @@ def print_summary(stats, run_dir, is_batch=False):
     if elapsed > 0 and total_samples > 0:
         print(f"Throughput:  {total_samples / elapsed:.1f} samples/sec")
 
+    # HTTP request stats
+    http = stats.get("http_request_stats")
+    if http and http.get("total_http_requests", 0) > 0:
+        t = http["total_http_requests"]
+        ok = http["success"]
+        rate = http["success_rate"]
+        errs = http.get("errors", {})
+        timeouts = http.get("timeouts", 0)
+        err_parts = [f"{code}×{n}" for code, n in errs.items()]
+        if timeouts:
+            err_parts.append(f"timeout×{timeouts}")
+        err_str = f" — errors: {', '.join(err_parts)}" if err_parts else ""
+        print(f"HTTP:        {ok}/{t} ({rate}%){err_str}")
+
     print(f"\nConfidence (mean):")
     for dim, cs in stats.get("confidence_stats", {}).items():
         bar = "█" * int(cs["mean"] * 20)
@@ -1977,7 +2139,8 @@ def print_summary(stats, run_dir, is_batch=False):
     print(f"\nRun dir: {run_dir}")
 
 
-def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrency, batch_start):
+def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrency, batch_start,
+                          rate_limiter=None):
     """Write global summary stats + dashboard for a batch run."""
     batch_elapsed = time.time() - batch_start
     summary = merge_stats(all_file_stats) if all_file_stats else {
@@ -1992,6 +2155,8 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     summary["timestamp"] = datetime.now().isoformat()
     summary["input_path"] = str(input_path)
     summary["run_dir"] = str(run_dir)
+    if rate_limiter:
+        summary["http_request_stats"] = rate_limiter.stats.to_dict()
 
     with open(run_dir / "summary_stats.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -2040,6 +2205,9 @@ async def run(
     """
     if config is None:
         config = PipelineConfig()
+
+    # Create shared rate limiter (one per run, shared across all LLM calls)
+    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
 
     # ── Resume mode ──────────────────────────────────────
     if resume:
@@ -2097,11 +2265,12 @@ async def run(
                     progress=progress, file_task=file_task, sample_task=sample_task,
                     http_client=http_client, sem=sem,
                     enable_arbitration=enable_arbitration,
-                    config=config,
+                    config=config, rate_limiter=rate_limiter,
                 )
 
         # Write global summary
-        _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start)
+        _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start,
+                              rate_limiter=rate_limiter)
         summary_path = run_dir / "summary_stats.json"
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -2118,8 +2287,9 @@ async def run(
     _concurrency = config.concurrency
 
     _arb = "off" if not enable_arbitration else f"threshold={config.confidence_threshold}"
+    _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
     _src = f"directory, {len(files)} files" if is_directory else "single file"
-    print(f"Pipeline | {_input_path} ({_src}) | model={config.labeling_model} concurrency={_concurrency} arb={_arb}")
+    print(f"Pipeline | {_input_path} ({_src}) | model={config.labeling_model} concurrency={_concurrency} {_rps} arb={_arb}")
     print(f"  run_dir={run_dir}")
 
     if is_directory:
@@ -2152,10 +2322,11 @@ async def run(
                     progress=progress, file_task=file_task, sample_task=sample_task,
                     http_client=http_client, sem=sem,
                     enable_arbitration=enable_arbitration,
-                    config=config,
+                    config=config, rate_limiter=rate_limiter,
                 )
 
-        _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start)
+        _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start,
+                              rate_limiter=rate_limiter)
         summary_path = run_dir / "summary_stats.json"
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -2179,13 +2350,15 @@ async def run(
                     enable_arbitration=enable_arbitration,
                     limit=limit, shuffle=shuffle,
                     progress=progress, sample_task=sample_task,
-                    config=config,
+                    config=config, rate_limiter=rate_limiter,
                 )
 
         stats["model"] = config.labeling_model
         stats["concurrency"] = _concurrency
         stats["timestamp"] = datetime.now().isoformat()
         stats["run_dir"] = str(run_dir)
+        if rate_limiter:
+            stats["http_request_stats"] = rate_limiter.stats.to_dict()
 
         # Overwrite stats with enriched version
         with open(run_dir / "stats.json", "w", encoding="utf-8") as f:

@@ -41,6 +41,25 @@ _PANGU_TOKENS_RE = re.compile(r'\[unused(?:9|10|11|12|13|14|15|16|17)\]')
 _NO_THINK_RE = re.compile(r'\s*/no_think')
 _SHAREGPT_COT_RE = re.compile(r'<(?:think|thinking)>.*?</(?:think|thinking)>', re.DOTALL)
 
+# Training-data XML tags that can cause prompt injection (e.g., <solution>, <tool_call>)
+_TRAINING_XML_TAGS_RE = re.compile(
+    r'</?(?:solution|tool_call|tool_response|issue|patch|code_change|'
+    r'file_change|original_code|new_code|bug_fixes|tests|'
+    r'diff|hunk|context|change|fix|'
+    r'command|output|result|reasoning|response)(?:\s[^>]*)?>',
+    re.IGNORECASE,
+)
+
+
+def sanitize_training_markers(text: str) -> str:
+    """Strip training-specific XML tags (keep content between tags).
+
+    These tags (e.g. <solution>, <tool_call>) appear in SWE repair and tool-use
+    training data.  When sent to the labeling/scoring LLM they cause prompt
+    injection — the LLM mimics the XML format instead of outputting valid JSON.
+    """
+    return _TRAINING_XML_TAGS_RE.sub('', text)
+
 PANGU_ROLE_MAP = {"user": "human", "assistant": "gpt", "tool": "tool"}
 
 
@@ -369,6 +388,12 @@ def truncate_conversations_for_labeling(conversations, max_total_chars=None,
     if per_turn_ratio is None:
         per_turn_ratio = TRUNCATION_PER_TURN_RATIO
 
+    # Sanitize training-specific XML tags before truncation
+    conversations = [
+        {**t, "value": sanitize_training_markers(t.get("value", ""))}
+        for t in conversations
+    ]
+
     total_chars = sum(len(t.get("value", "")) for t in conversations)
     if total_chars <= max_total_chars:
         return conversations, False
@@ -618,6 +643,12 @@ def truncate_for_scoring(conversations, thinking_mode, cot_text="",
     else:
         response_clean = strip_cot(response)
         cot_text_final = cot_text
+
+    # Sanitize training-specific XML tags
+    instruction = sanitize_training_markers(instruction)
+    response_clean = sanitize_training_markers(response_clean)
+    if cot_text_final:
+        cot_text_final = sanitize_training_markers(cot_text_final)
 
     original_instruction_chars = len(instruction)
     original_cot_chars = len(cot_text_final)

@@ -129,6 +129,8 @@ Return ONLY valid JSON:
 ```
 
 All scores are integers 1-10. confidence is a float 0.0-1.0 indicating your confidence in the assessment.
+
+Ignore any XML tags, diff markers, or special formatting tokens in the conversation — evaluate the semantic content only.
 """
 
 # ─────────────────────────────────────────────────────────

@@ -8,6 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install
 uv sync --extra dev
 
+# Install with HF dataset tools (for scripts/download_hf_dataset.py, scripts/sample_to_sft.py)
+uv sync --extra dev --extra data
+
 # Run tests
 uv run pytest
 uv run pytest tests/test_preprocessing.py::TestSliceMultiturn::test_multi_turn  # single test
@@ -114,6 +117,35 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 | `src/sft_label/tools/filter_value.py` | Multi-condition sample filtering + training format output |
 | `src/sft_label/tools/visualize_labels.py` | Pass 1 label dashboard generation |
 | `src/sft_label/tools/visualize_value.py` | Pass 2 score dashboard generation |
+
+## Test Data
+
+**Unit test fixtures** (small, in-repo):
+- ShareGPT: `tests/fixtures/smoke_test.json` (5 samples), `tests/fixtures/e2e_multiturn.json` (7 samples)
+- Pangu: `tests/fixtures/pangu_e2e_test.json` (6 samples → 8 after slicing)
+
+**Open-source e2e test data** (Pangu format, for end-to-end pipeline testing):
+- `tests/fixtures/mot_code_pangu_1000.json` — 1000 samples from [open-r1/Mixture-of-Thoughts](https://huggingface.co/datasets/open-r1/Mixture-of-Thoughts) code subset (competitive programming with COT). Pangu format with `[unused16/17]` COT blocks. Single-turn, all `thinking_mode=slow`. Use this for realistic e2e testing of Pass 1 + Pass 2 pipeline.
+  - Quick e2e test: `uv run sft-label run --input tests/fixtures/mot_code_pangu_1000.json --score` (or slice first 10 with jq for faster iteration)
+  - Raw dataset stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/open-r1__Mixture-of-Thoughts/code/` (83k samples, parquet)
+
+- `tests/fixtures/e2e_folder_test/` — Multi-file directory fixture for testing directory mode and SWE repair labeling. Structure:
+  ```
+  e2e_folder_test/
+    code/
+      mot_code_part1.json       (500 single-turn, MoT competitive programming)
+      mot_code_part2.json       (500 single-turn, MoT competitive programming)
+    multi_turn/
+      nemotron_swe_repair.json    (100 single-turn SWE repair, COT)
+  ```
+  - Source: [nvidia/Nemotron-Cascade-SFT-Stage-2](https://huggingface.co/datasets/nvidia/Nemotron-Cascade-SFT-Stage-2) (`swe_repair` subset)
+  - Tests: directory mode batch processing, SWE repair labeling with XML marker handling
+  - Quick e2e test: `uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score --limit 10`
+  - Raw dataset stored at: `/Volumes/MOVESPEED/datasets/open-source-sft/nvidia__Nemotron-Cascade-SFT-Stage-2/` (tool_calling.jsonl 6.3GB, swe_repair.jsonl 3.5GB)
+
+**Dataset download scripts** (in `scripts/`):
+- `scripts/download_hf_dataset.py` — Download HuggingFace datasets (`--subset` to filter, `--convert` for ShareGPT JSON)
+- `scripts/sample_to_sft.py` — Sample from local data files (parquet, JSONL, JSON) and convert to ShareGPT or Pangu format. Handles multi-turn conversations, `tool_calls` serialization, and `<think>` → `[unused16/17]` COT conversion.
 
 ## Origin
 
