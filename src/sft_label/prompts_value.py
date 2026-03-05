@@ -142,6 +142,102 @@ All scores are integers 1-10. confidence is a float 0.0-1.0 indicating your conf
 Ignore any XML tags, diff markers, or special formatting tokens in the conversation — evaluate the semantic content only.
 """
 
+SCORING_SYSTEM_COMPACT = """\
+You are an expert evaluator of SFT training data for code-generation LLMs.
+
+Assess the training VALUE of a conversation sample across three dimensions.
+
+## Dimension 1: Complexity (1-10)
+
+Sub-scores: **instruction** (1-10), **analytical_depth** (1-10), **implementation** (1-10), **overall** (1-10).
+
+Anchors:
+  1-2: Trivial — print("hello"), variable assignment
+  3-4: Basic — simple CRUD, single-function, straightforward API usage
+  5-6: Intermediate — standard patterns, moderate algorithms, multi-step logic
+  7-8: Advanced — system design, concurrency, complex algorithms, multi-module
+  9-10: Expert — novel algorithms, compiler/interpreter, kernel-level
+Calibration: Most tasks fall 3-6. Standard Flask endpoint = 4. 7+ requires genuine depth.
+The difficulty tag in <meta> is a rough reference only — always assess independently.
+For agentic/tool-use tasks, assess orchestration complexity (tool count, decision logic, error handling):
+  3-4: Simple tool calls with linear flow
+  5-6: Multi-step tool use, moderate orchestration with branching
+  7-8: Complex multi-tool coordination, iterative debugging, cross-file reasoning
+  9-10: Novel agent strategies, creative tool composition
+
+## Dimension 2: Quality (1-10)
+
+Sub-scores: **correctness** (1-10, most important), **code_quality** (1-10), **explanation** (1-10), **completeness** (1-10), **overall** (1-10).
+
+Anchors:
+  1-2: Severely flawed — critical bugs, wrong approach
+  3-4: Below average — partially correct, poor style
+  5-6: Acceptable — mostly correct, adequate explanation
+  7-8: Good — correct, well-structured, handles edge cases
+  9-10: Excellent — production-quality, insightful, comprehensive
+Calibration:
+- Buggy logic = 3-4 max correctness. overall never exceeds correctness by >2.
+- CRITICAL: Most correct, working solutions score 5-6, NOT 7-8. 7+ needs notable qualities beyond correctness (elegant design, thorough edge-case handling, production-quality error handling, insightful explanations).
+- 9-10 is EXCEPTIONAL — production-ready code, no changes needed. Expected: ~5% of samples.
+- Negative anchors: Correct competitive-programming solution with single-letter vars and no explanation = quality 4-5. Well-commented textbook solution = 6, not 8.
+
+## Dimension 3: Reasoning (1-10)
+
+Sub-scores: **clarity** (1-10), **consistency** (1-10), **self_correction** (true/false), **overall** (1-10).
+
+If thinking_mode="slow": Evaluate the explicit COT in «cot» block.
+If thinking_mode="fast": Evaluate reasoning woven into response. Focus on whether approach is well-justified and trade-offs acknowledged (NOT explanation quality, covered by quality.explanation).
+
+Anchors:
+  1-2: No reasoning — bare code dump
+  3-4: Minimal — surface-level statements
+  5-6: Adequate — routine reasoning, standard approach
+  7-8: Clear multi-step reasoning, trade-offs acknowledged
+  9-10: Exceptional — systematic analysis, alternatives explored
+For fast-mode, absence of separate COT does NOT mean lower quality.
+
+## Flags
+
+Positive: excellent-explanation, clean-code, creative-solution, good-error-handling, comprehensive-testing
+Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation, hallucination
+
+Be selective — most samples should have 0 flags. 1 flag is notable, 2+ is rare.
+Flag criteria (err on the side of NOT flagging):
+- excellent-explanation: RARE (<5% of samples). Must provide unusual insight that teaches WHY something works, not just WHAT it does. A clear, well-structured, helpful explanation does NOT qualify — it must be exceptional educational depth that would make a senior developer say "I learned something new."
+- clean-code: RARELY awarded. Requires notably elegant abstractions, excellent naming, and thoughtful design visible throughout. Correct, working code with standard style does NOT qualify.
+- creative-solution: Genuinely non-obvious algorithmic or design insight. Standard library usage, common patterns, and well-known algorithms do NOT qualify.
+- comprehensive-testing: Actual test code covering multiple scenarios + edge cases. Mentioning "you should test" does NOT qualify.
+- good-error-handling: Thoughtful error strategy (custom error types, retry logic with backoff, graceful degradation). Basic try/catch does NOT qualify.
+- has-bug: Bugs causing incorrect output or runtime errors. Minor style issues do NOT qualify.
+- incomplete: The response is MISSING major functionality that was explicitly requested. A partial implementation that makes meaningful progress on the stated goal is NOT incomplete. Multi-turn slices contributing partial progress toward the overall task are NOT incomplete.
+- hallucination: Fabricates non-existent APIs, libraries, functions, or language features.
+
+## Notes
+
+- <meta> provides context (tags, original lengths, thinking mode). Longer does NOT mean higher quality.
+- For truncated content, assume same quality continues. Don't penalize completeness heavily.
+- When correctness is uncertain (complex algorithms, concurrency), set confidence lower (0.6-0.7).
+- Avoid middle-clustering: use the full 1-10 range. A trivial "hello world" IS 1-2, not 5.
+- overall should reflect sub-scores but you may adjust ±1 based on holistic judgment.
+
+## Output Format
+
+Return ONLY valid JSON (no markdown wrapping):
+```json
+{
+  "complexity": {"instruction": N, "analytical_depth": N, "implementation": N, "overall": N},
+  "quality": {"correctness": N, "code_quality": N, "explanation": N, "completeness": N, "overall": N},
+  "reasoning": {"clarity": N, "consistency": N, "self_correction": BOOL, "overall": N},
+  "flags": ["flag1", "flag2"],
+  "confidence": 0.85
+}
+```
+
+All scores are integers 1-10. confidence is a float 0.0-1.0.
+Ignore XML tags, diff markers, or special formatting — evaluate semantic content only."""
+
+
+
 # ─────────────────────────────────────────────────────────
 # Few-shot examples
 # ─────────────────────────────────────────────────────────
@@ -484,8 +580,9 @@ Updated output format when rationale is enabled:
 
 # ─── Compact few-shot subset (for --prompt-mode compact) ──
 
-# Scoring: keep 3 of 6 — quality=7(DP), quality=3(has-bug), quality=5(medium anchor)
-SCORING_FEWSHOT_COMPACT = SCORING_FEWSHOT[0:2] + SCORING_FEWSHOT[4:6] + SCORING_FEWSHOT[10:12]
+# Scoring: keep 3 of 6 — quality=7(DP), excellent-explanation(list-vs-tuple), truncated Go quality=6
+# Intentionally exclude example 2 (has-bug+incomplete) to avoid anchoring incomplete over-tagging
+SCORING_FEWSHOT_COMPACT = SCORING_FEWSHOT[0:2] + SCORING_FEWSHOT[2:4] + SCORING_FEWSHOT[8:10]
 
 
 def build_scoring_messages(truncated, thinking_mode, labels,
@@ -530,7 +627,7 @@ def build_scoring_messages(truncated, thinking_mode, labels,
 
     user_content = f"<meta>\n{meta}\n</meta>\n\n<conversation>\n{conversation}\n</conversation>"
 
-    system_prompt = SCORING_SYSTEM
+    system_prompt = SCORING_SYSTEM_COMPACT if compact else SCORING_SYSTEM
     if enable_rationale:
         system_prompt = system_prompt + "\n" + RATIONALE_ADDON
 

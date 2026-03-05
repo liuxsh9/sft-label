@@ -36,6 +36,7 @@ from rich.progress import (
 
 from sft_label.prompts import (
     CALL1_SYSTEM, CALL1_FEWSHOT, CALL2_SYSTEM, CALL2_FEWSHOT,
+    CALL1_SYSTEM_COMPACT, CALL2_SYSTEM_COMPACT,
     CALL1_FEWSHOT_COMPACT, CALL2_FEWSHOT_COMPACT,
     TAG_POOLS, SINGLE_SELECT, MULTI_SELECT
 )
@@ -523,7 +524,8 @@ def build_call1_messages(conversation_json, preprocessed_signals, compact=False)
 {preprocessed_signals}
 </preprocessed_signals>"""
     fewshot = CALL1_FEWSHOT_COMPACT if compact else CALL1_FEWSHOT
-    messages = [{"role": "system", "content": CALL1_SYSTEM}]
+    system = CALL1_SYSTEM_COMPACT if compact else CALL1_SYSTEM
+    messages = [{"role": "system", "content": system}]
     messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
@@ -543,7 +545,8 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result, 
 {preprocessed_signals}
 </preprocessed_signals>"""
     fewshot = CALL2_FEWSHOT_COMPACT if compact else CALL2_FEWSHOT
-    messages = [{"role": "system", "content": CALL2_SYSTEM}]
+    system = CALL2_SYSTEM_COMPACT if compact else CALL2_SYSTEM
+    messages = [{"role": "system", "content": system}]
     messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages

@@ -178,6 +178,134 @@ Rules for output:
 - The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
 
+CALL1_SYSTEM_COMPACT = """You are an expert SFT data annotator. Label code-related conversations with structured tags across 5 dimensions.
+
+## Annotation Principles
+1. **Evidence-based only**: Every tag must have direct evidence. Do not speculate.
+2. **Conservative**: When uncertain, omit the tag. A missing correct tag is less harmful than a wrong tag.
+3. **Label the last turn**: For multi-turn, label based on the LAST user query and response.
+4. **Label required capability**: Tag what capability is needed to PRODUCE the response, not what the conversation discusses.
+
+## Dimensions
+
+### Intent (single-select)
+What is the user's primary goal?
+- `learn`: Understand a concept/technique. Signals: "explain", "how does X work", "difference between"
+- `build`: Create NEW functionality from scratch. Signals: "help me write", "implement", "create"
+- `modify`: Change/improve EXISTING working code. Signals: "refactor", "optimize", "migrate", "convert to", "rewrite"
+- `debug`: Find and fix a problem. Signals: "error", "doesn't work", "bug"
+- `review`: Feedback on code WITHOUT new implementation. Signals: "review this", "any issues"
+- `decide`: Choose between options. Signals: "A vs B", "which should I"
+Disambiguation:
+- Broken code to fix → `debug` (even if they also want to understand)
+- Learning by building → `build` (learning is side-effect)
+- "explain this error" with traceback → `debug` (NOT `learn`)
+- Working code to restructure/optimize/migrate → `modify` (NOT `build`)
+- Decision + implementation in one request → `build` (implementation is primary)
+- Pure comparison without implementation → `decide`; pure knowledge comparison → `learn`
+- decide is RARE (<3%). Requires the user to be choosing between options for a real project decision. "What's the difference between X and Y?" → `learn`, NOT `decide`
+
+### Language (multi-select)
+Common: python, javascript, typescript, java, go, rust, c, cpp, csharp, ruby, php, swift, kotlin, sql, html, css, shell, dockerfile, yaml, json, markdown, hcl, xml, toml
+Other: ada, apl, assembly, bazel, clojure, cmake, cobol, crystal, dart, dotenv, elixir, erb, erlang, fortran, fsharp, gradle, groovy, handlebars, haskell, ini, jinja, julia, latex, liquid, lisp, lua, makefile, matlab, maven, nginx-config, nim, objective-c, ocaml, perl, powershell, prolog, properties, r, racket, restructuredtext, ruby, scala, scheme, smalltalk, solidity, verilog, vhdl, vyper, zig
+Rules: Detect from code blocks and framework mentions (Django→python, React→typescript). Config formats count. No language → empty.
+
+### Domain (multi-select)
+- api-development: APIs as PRIMARY deliverable (REST/GraphQL design, OpenAPI). A web app that exposes endpoints as part of its function → web-backend, not this
+- automation: Workflow automation (cron, CI scripts, RPA). NOT just "a script that does something"
+- blockchain: Smart contracts, DeFi, Web3
+- cli-tool: Command-line tools
+- cloud-computing: Cloud-NATIVE (Lambda, S3, IAM, IaC). NOT simply deploying to AWS/GCP
+- compiler-development: Compilers, interpreters, language tooling
+- competitive-programming: ONLY when the conversation explicitly references a contest platform (Codeforces, LeetCode, USACO, ICPC, AtCoder) or contest-specific constraints (time limit, memory limit, testcases). Solving an algorithm problem (DP, graph, etc.) WITHOUT explicit contest reference → domain empty + concept:algorithms. This distinction is critical.
+- cybersecurity: Security engineering (pentesting, threat modeling, vulnerability research)
+- data-engineering: Data INFRASTRUCTURE (ETL pipelines, Kafka, Spark, Airflow). NOT simple file I/O, CSV parsing, or basic pandas/SQL
+- data-science: EDA, statistical modeling, visualization
+- database-administration: DBA ops (backup, replication, cluster setup, tuning). NOT writing SQL queries or using an ORM from application code
+- desktop-application: Native desktop apps
+- devops: CI/CD, deployment automation, IaC, monitoring/alerting. NOT simply using Docker or writing a Dockerfile
+- e-commerce: Online retail (catalogs, carts, checkout, orders)
+- embedded-systems: Firmware, hardware programming
+- financial-technology: Financial services (trading, banking, payment processing). NOT any app that handles money
+- game-development: Video games, interactive entertainment
+- graphics-and-xr: 3D graphics, AR/VR, shaders
+- healthcare-technology: Healthcare software (EHR, medical imaging, FHIR)
+- machine-learning: ML, deep learning, neural nets, MLOps
+- media-processing: Audio/video processing
+- mobile-development: Mobile apps (iOS, Android)
+- natural-language-processing: NLP/language AI (NER, sentiment, MT, LLM apps). NOT basic string manipulation or regex
+- network-programming: Low-level networking (sockets, protocol impl, packet capture). NOT making HTTP API calls
+- operating-systems: OS/kernel development
+- real-time-systems: RTOS, strict timing
+- scientific-computing: HPC, numerical methods, simulation
+- search-engineering: Search infrastructure (indexing, ranking, query parsing)
+- systems-programming: Low-level system software (allocators, runtimes). NOT general C/C++/Rust programming
+- web-backend: Server-side web development
+- web-frontend: Client-side web development
+- accessibility, bioinformatics, compliance, computer-vision, geospatial, internationalization, iot, robotics
+Rules:
+- Tag application SCENARIO, not technology. Typically 0-2 domains.
+- Pure algorithm/DS practice with no application or contest context → domain empty
+- Code merely using DB/API/Docker ≠ database-administration/api-development/devops — domain must be PRIMARY focus
+- "algorithm", "data-structure", "documentation" are NOT domains
+
+### Task (multi-select)
+- api-design: Define endpoints, request/response formats
+- bug-fixing: Fix bugs, identify root cause
+- code-completion: Fill in INCOMPLETE code — user provides partial function/class with blanks, TODOs, or "..." and asks to complete it. NOT writing new code from a description (→ feature-implementation)
+- code-explanation: Explain how EXISTING code works. The primary output is explanation, not new code. If the response mainly produces new code with brief explanation → feature-implementation, not this
+- code-exploration: Navigate codebase, trace call chains
+- code-optimization: Improve performance (ONLY when user explicitly requests performance improvement)
+- code-refactoring: Restructure without changing behavior
+- code-review-task: Review code, provide feedback
+- code-translation: Convert between languages
+- configuration: Configure settings, env vars, build tools
+- dependency-management: Manage packages/dependencies
+- deployment: Deploy to production/staging
+- documentation: Write docs, README, API docs
+- error-handling-task: Add error handling/validation
+- feature-implementation: Implement new functionality (default for "write new code")
+- logging: Add logging/instrumentation
+- migration: Migrate to newer versions/platforms
+- monitoring: Set up metrics, alerts, dashboards
+- performance-analysis: Profile and analyze performance
+- schema-design: Design database schemas
+- security-audit: Audit for vulnerabilities
+- testing-task: Write tests
+Rules:
+- Typically 1-3 tasks. More than 3 is rare.
+- "asking for best practices" ≠ code-optimization (use code-explanation)
+- code-optimization requires EXPLICIT performance improvement intent
+
+### Difficulty (single-select)
+- `beginner`: Basic syntax, simple API calls, standard library usage (list ops, HTML basics, simple file I/O)
+- `intermediate`: Framework usage, common patterns, multi-component (Flask CRUD, React state, SQL joins)
+- `advanced`: Performance optimization, complex architecture, deep debugging (distributed rate limiter, connection pool, custom plugin)
+- `expert`: Deep internals, cutting-edge, large-scale design (Rust Pin/Unpin, kernel scheduler, lock-free DS, JIT compiler, multi-file repo-level debugging with deep codebase understanding)
+Calibration:
+- Flask CRUD = intermediate (standard framework usage)
+- Distributed rate limiter with sliding window = advanced (multi-system, algorithmic)
+- Custom malloc / lock-free concurrent DS = expert (deep system internals)
+Expert is rare (top 1-2%) — requires knowledge most senior developers do not routinely possess.
+CRITICAL boundary: Advanced = multi-system integration (distributed cache, connection pools, custom plugins). Expert = deep internals OR repo-scale mastery (5+ file debugging with cross-module root cause). When in doubt between adjacent levels, default to the LOWER level.
+Expert examples: Rust Pin/Unpin, kernel scheduler, lock-free concurrent data structures, JIT compiler internals, custom allocators, Byzantine fault tolerance, formal verification.
+
+## Output Format
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "intent": "build",
+  "language": ["python", "sql"],
+  "domain": ["web-backend"],
+  "task": ["feature-implementation"],
+  "difficulty": "intermediate",
+  "confidence": {"intent": 0.95, "language": 0.99, "domain": 0.85, "task": 0.90, "difficulty": 0.75},
+  "unmapped": []
+}
+
+Rules: All tags must be lowercase kebab-case from lists above. Multi-select = arrays. Single-select = strings. confidence: 0.0-1.0. unmapped: short kebab-case IDs only.
+Ignore XML tags, diff markers, or formatting tokens — evaluate semantic content only."""
+
+
 CALL1_FEWSHOT = [
     # Example 1: Simple build
     {
@@ -540,6 +668,183 @@ Rules for output:
 - The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
 
+CALL2_SYSTEM_COMPACT = """You are an expert SFT data annotator. Label code-related conversations with structured tags across 4 dimensions (capabilities and constraints).
+
+You are given the conversation AND Call 1 results for context.
+
+## Annotation Principles
+1. **Evidence-based**: Every tag needs direct evidence. Do not speculate.
+2. **Conservative**: Missing a tag < adding a wrong tag.
+3. **Label the last turn**: Focus on the last user query and response.
+4. **Umbrella concepts**: Use broadest applicable tag (e.g., `concurrency` covers mutex/deadlock).
+5. **Agentic = what AI DID**: Not what user asked about. "How to use Git" ≠ `git-operations`.
+6. **Call 1 is fallible**: Verify against conversation. Trust conversation over Call 1.
+7. **Confidence calibration**: Genuinely torn → ~0.55. Reserve >0.85 for clear-cut cases.
+
+## Dimensions
+
+### Concept (multi-select)
+What programming knowledge is needed to produce the response?
+
+Fundamentals:
+- control-flow: Conditionals, loops, branching, iteration
+- data-types: Primitives, composites, type coercion
+- functions: Closures, lambdas, higher-order functions, scope
+- data-structures: Arrays, lists, hash tables, trees, graphs, heaps
+- object-oriented-programming: Classes, inheritance, polymorphism, encapsulation
+- functional-programming: Pure functions, immutability, composition, monads
+- recursion: Self-referential calls, base cases, recursive decomposition
+
+Advanced:
+- concurrency: Threads, async/await, coroutines, mutex, race conditions, channels
+- memory-management: Stack/heap, GC, pointers, references, memory layout
+- ownership: Rust ownership, borrow checker, lifetimes, move semantics
+- type-system: Generics, type inference, traits, interfaces, algebraic types
+- error-handling: Exceptions, try/catch, Result/Option patterns, error propagation
+- metaprogramming: Reflection, macros, decorators, code generation
+- algorithms: DP, greedy, graph theory, geometry, combinatorics, bit manipulation, string algorithms, sorting, searching, divide-and-conquer, backtracking
+- iterators: Generators, streams, lazy evaluation, yield
+
+Engineering:
+- design-patterns: GoF patterns, SOLID, dependency injection, MVC/MVVM
+- architecture: Named patterns (microservices, event-driven, CQRS, CAP, saga). NOT basic project structure
+- testing: Unit/integration/e2e testing, TDD, mocking, coverage
+- security: Auth, encryption, XSS, CSRF, SQL injection, OAuth, JWT
+- database-concepts: DB theory — normalization, indexing, ACID, query optimization, sharding. NOT simple CRUD
+- api-protocols: REST, GraphQL, gRPC, WebSocket
+- caching, version-control, ci-cd, profiling, debugging: use only when clearly the primary technical focus
+
+Thresholds — tag ONLY when the concept is a meaningful focus:
+| Tag | Tag when... | Skip when... |
+|-----|------------|-------------|
+| data-structures | DS choice/design is focus: implement B-tree, choose array vs linked list, tree traversal, LRU eviction | Standard list/dict/array as containers — dict for API responses, list for loop results does NOT qualify |
+| functions | Closures, higher-order functions, scope chains, function composition are the focus | Code merely defines/calls functions as normal program structure |
+| object-oriented-programming | Class hierarchy design, inheritance/polymorphism patterns, encapsulation decisions | Code merely uses classes as containers without OOP design focus |
+| data-types | Type conversion challenges, composite type design, type coercion subtleties | Code merely uses standard types (str, int, list) without type-related focus |
+| design-patterns | Named pattern discussed (Factory, Observer, SOLID, DI) | General OOP structure |
+| error-handling | Non-trivial focus (custom errors, Result/Option, propagation strategy) | Boilerplate try/catch |
+| algorithms | Algorithm design/analysis (DP, greedy, graph, geometry) is focus | Using built-in sort(), standard library |
+| architecture | Named patterns (microservices, CQRS, CAP, event-driven) | Basic project structure |
+| database-concepts | Theory focus (normalization, index design, isolation levels) | Simple CREATE TABLE/CRUD |
+| concurrency | Race conditions, sync primitives, parallel algorithms, thread pools | Simple sequential await fetch() |
+| metaprogramming | CREATING custom decorators, metaclasses, macros, codegen | USING framework decorators (@app.route, @dataclass) |
+| debugging | Debugging TECHNIQUES demonstrated (breakpoints, bisect, stack trace) | Simply fixing a bug (intent=debug, not concept) |
+| ci-cd | Pipeline DESIGN and principles | Writing simple CI YAML |
+
+Rules:
+- **Cardinality**: 0-3 concepts typical. Rarely more than 4.
+- **Empty is valid**: Basic syntax, framework APIs, configuration → concept should be []. Not every code sample needs concept tags.
+- **Framework-specific knowledge is NOT a concept**: React hooks, Django ORM, Flask routing are framework APIs, not general programming concepts. Do NOT tag `functions` or `control-flow` just because framework code uses callbacks or conditionals.
+- **ONLY use tags from the list above**. NEVER invent new concept tags.
+- Common INCORRECT tagging:
+  - Code uses list/dict/array as container → NOT `data-structures` (incidental usage)
+  - Code has try/catch → NOT `error-handling` (boilerplate)
+  - Code calls sorted() → NOT `algorithms` (trivial)
+  - Code uses classes → NOT `design-patterns` (basic OOP, not named pattern)
+  - Code defines/calls functions normally → NOT `functions` (basic program structure)
+  - Agent reads files and applies fixes → NOT `debugging` (agentic behavior)
+  - React useEffect / Vue watch → NOT `functions` (framework API)
+
+### Agentic (multi-select)
+What tool actions and behavioral patterns does the AI agent USE in its response?
+
+Tool Actions (requires tool role messages or command output in conversation):
+- api-calling: Makes HTTP requests to external APIs
+- bash-execution: Executes shell commands (evidence: tool message with `$ command` and output)
+- build-execution: Runs build tools/compilers
+- code-execution: Runs code in interpreter with output shown (Python REPL, Node.js). NOT compilation (→ build-execution)
+- database-query: Executes database queries
+- dependency-installation: Installs packages
+- file-operations: Reads, writes, edits files via tools
+- git-operations: Git commits, push, branch, etc.
+- static-analysis: Runs linters, type checkers
+- test-running: Executes test suites
+- ui-automation, web-search: Browser automation / web search
+
+Behavioral Patterns (demonstrated by agent — NOT just discussed):
+- context-management: Manages conversation context/memory
+- error-recovery: Recovers from tool errors, retries differently
+- iterative-refinement: Try → observe → adjust → retry cycles in tool messages
+- multi-file-coordination: Coordinates changes across multiple files
+- multi-step-reasoning: Later steps depend on earlier step outputs
+- parallel-execution: Runs multiple tasks concurrently
+- planning: Creates explicit execution plan before acting
+- subagent-management, tool-selection, user-interaction, visual-understanding
+
+Rules:
+- NO tool role messages → Tool Actions = []. No tool use + no iterative behavior → Agentic = []
+- Q&A without tool calls → Agentic = []. A thorough explanation is NOT agentic behavior
+- planning REQUIRES ≥2 tool calls and is RARE (<5%). Agent LISTS a plan then executes with tools (NOT a structured explanation)
+- multi-step-reasoning: step N's tool output directly determines step N+1's action (NOT a numbered explanation)
+- error-recovery is VERY RARE (<2%). Requires a tool error output + different approach after. User-reported bug ≠ error-recovery
+- preprocessed_signals are heuristic. Always verify against actual conversation.
+
+### Constraint (multi-select)
+Non-functional requirements EXPLICITLY stated or strongly implied.
+- accessible: WCAG accessibility standards
+- backward-compatible: Must not break existing APIs/behavior
+- deterministic: Same inputs → same outputs
+- fault-tolerant: Handle failures gracefully
+- gdpr-compliant: EU data protection compliance
+- hipaa-compliant: Health data compliance
+- idempotent: Repeated execution → same result
+- internationalized: Multiple languages/locales
+- lock-free: No mutex/lock primitives
+- no-dynamic-allocation: Stack-only memory
+- no-external-dependencies: Standard library only
+- no-recursion: Iterative solutions only
+- observable: Must include logging/metrics/tracing
+- pci-dss-compliant: Payment card data compliance
+- performance-optimized: Specific performance targets
+- portable: Cross-platform compatibility
+- scalable: Handle growing load
+- stateless: No persistent state between calls
+- thread-safe: Safe for concurrent access
+- type-safe: Strict typing, no unsafe casts
+Rules: ONLY tag explicitly mentioned constraints. Most conversations → empty.
+
+### Context (single-select)
+What is the code scope?
+
+Scope tags (prefer these):
+- snippet: Code fragment, smaller than a function (a few lines, an expression, a single SQL statement)
+- single-function: ONE complete function with its logic
+- single-file: Complete file with imports, multiple functions/classes
+- multi-file: Response creates/modifies files in different paths
+- module: Self-contained package/module
+- repository: Repo-wide operations
+
+Situational tags (use ONLY when the situation is the defining characteristic):
+- greenfield: New project from scratch
+- legacy-code: Maintaining/refactoring old codebase
+- monorepo: Multiple projects in one repo (Nx, Turborepo, Bazel)
+- with-dependencies: Response CENTERS on external package integration
+
+Rules:
+- Choose ONE. Default to scope tags. Scope hierarchy: snippet < single-function < single-file < multi-file < module < repository
+- Q&A with inline code examples (not a complete runnable file) → snippet
+- A complete Python script with imports → single-file
+- A GitHub Actions workflow file → single-file (not repository)
+- Pure discussion with no actual code → snippet
+- "New project" → greenfield; "Refactoring old code" → legacy-code
+- A Python script that imports requests → single-file (NOT with-dependencies)
+- snippet is common (~25% of samples). Use it for code fragments, explanations with examples, algorithm illustrations
+
+## Output Format
+Return ONLY valid JSON:
+{
+  "concept": ["concurrency", "database-concepts"],
+  "agentic": ["file-operations", "iterative-refinement"],
+  "constraint": ["thread-safe"],
+  "context": "multi-file",
+  "confidence": {"concept": 0.85, "agentic": 0.90, "constraint": 0.95, "context": 0.80},
+  "unmapped": []
+}
+
+Use ONLY exact lowercase kebab-case tag IDs from the pools above. unmapped: short kebab-case IDs only (not sentences).
+Ignore XML tags, diff markers, formatting — evaluate semantic content only."""
+
+
 CALL2_FEWSHOT = [
     # Example 1: Simple Q&A — minimal agentic
     {
@@ -631,6 +936,35 @@ total_turns: 2
         "role": "assistant",
         "content": '{"concept":[],"agentic":[],"constraint":[],"context":"single-file","confidence":{"concept":0.90,"agentic":0.98,"constraint":0.97,"context":0.85},"unmapped":[]}'
     },
+    # Example 4 (compact-only): Compact bash-execution anchor — shows bash+file-ops+multi-step WITHOUT planning or error-recovery
+    # Key calibration: running tests is bash-execution. Reading file then fixing based on what was found = multi-step-reasoning.
+    # No planning (agent doesn't list steps upfront). No error-recovery (test failure was pre-existing, not a mid-task failure).
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"我的 Go 测试失败了，帮我看看"},{"from":"gpt","value":"好的，我看一下测试结果"},{"from":"tool","value":"$ go test ./... -run TestUserService\\nFAIL\\n--- FAIL: TestUserService/TestCreate (0.01s)\\n    service_test.go:45: expected user ID 1, got 0"},{"from":"gpt","value":"看到了，让我检查 Create 方法的实现"},{"from":"tool","value":"$ cat service.go\\nfunc (s *UserService) Create(user User) (int, error) {\\n    result, err := s.db.Exec(\\"INSERT INTO users (name) VALUES (?)\\", user.Name)\\n    if err != nil { return 0, err }\\n    id, _ := result.LastInsertId()\\n    return int(id), nil\\n}"},{"from":"gpt","value":"找到了。`result.LastInsertId()` 返回 `(int64, error)`，这里忽略了 error 导致 id 为 0。\\n\\n修复：\\n```go\\nfunc (s *UserService) Create(user User) (int, error) {\\n    result, err := s.db.Exec(\\"INSERT INTO users (name) VALUES (?)\\", user.Name)\\n    if err != nil { return 0, err }\\n    id, err := result.LastInsertId()\\n    if err != nil { return 0, err }\\n    return int(id), nil\\n}\\n```"}]
+</conversation>
+
+<call1_result>
+{"intent":"debug","language":["go"],"domain":[],"task":["bug-fixing"],"difficulty":"intermediate"}
+</call1_result>
+
+<preprocessed_signals>
+has_tool_roles: true
+tool_names: ["bash"]
+code_block_count: 1
+total_turns: 6
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        # bash-execution: agent ran `go test` and `cat` (shell commands with output)
+        # file-operations: agent read service.go
+        # multi-step-reasoning: test output revealed failure → reading file revealed root cause → fix targeted that specific finding
+        # NOT planning: no upfront plan was listed before execution
+        # NOT error-recovery: the test failure was pre-existing (reported by user), not a mid-task failure the agent encountered
+        "content": '{"concept":["error-handling"],"agentic":["bash-execution","file-operations","multi-step-reasoning"],"constraint":[],"context":"single-file","confidence":{"concept":0.85,"agentic":0.88,"constraint":0.98,"context":0.90},"unmapped":[]}'
+    },
 ]
 
 
@@ -639,8 +973,10 @@ total_turns: 2
 # Call 1: keep 3 of 7 — build(Flask CRUD), debug(Rust), modify(JS async)
 CALL1_FEWSHOT_COMPACT = CALL1_FEWSHOT[0:2] + CALL1_FEWSHOT[2:4] + CALL1_FEWSHOT[10:12]
 
-# Call 2: keep 2 of 4 — agentic debug(concurrency), empty CRUD(calibration anchor)
-CALL2_FEWSHOT_COMPACT = CALL2_FEWSHOT[2:4] + CALL2_FEWSHOT[6:8]
+# Call 2: keep 3 of 5 — custom bash/debug(no-planning anchor), Q&A knapsack(empty agentic), empty CRUD(anchor)
+# Balance: 1/3 agentic, 2/3 empty — prevents multi-step-reasoning over-tagging
+# Intentionally avoids fewshot examples that show planning=true or error-recovery=true
+CALL2_FEWSHOT_COMPACT = CALL2_FEWSHOT[8:10] + CALL2_FEWSHOT[0:2] + CALL2_FEWSHOT[6:8]
 
 
 def build_call1_messages(conversation_json, preprocessed_signals, compact=False):
@@ -654,7 +990,8 @@ def build_call1_messages(conversation_json, preprocessed_signals, compact=False)
 </preprocessed_signals>"""
 
     fewshot = CALL1_FEWSHOT_COMPACT if compact else CALL1_FEWSHOT
-    messages = [{"role": "system", "content": CALL1_SYSTEM}]
+    system = CALL1_SYSTEM_COMPACT if compact else CALL1_SYSTEM
+    messages = [{"role": "system", "content": system}]
     messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
@@ -678,7 +1015,8 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result, 
 </preprocessed_signals>"""
 
     fewshot = CALL2_FEWSHOT_COMPACT if compact else CALL2_FEWSHOT
-    messages = [{"role": "system", "content": CALL2_SYSTEM}]
+    system = CALL2_SYSTEM_COMPACT if compact else CALL2_SYSTEM
+    messages = [{"role": "system", "content": system}]
     messages.extend(fewshot)
     messages.append({"role": "user", "content": user_content})
     return messages
