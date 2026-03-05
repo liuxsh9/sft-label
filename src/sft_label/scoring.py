@@ -32,6 +32,7 @@ from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY,
     MAX_RETRIES, SAMPLE_MAX_RETRIES, REQUEST_TIMEOUT,
     VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA,
+    VALUE_TRUNCATION_BUDGET,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     SELECTION_INTRA_WEIGHT, SELECTION_QUALITY_WEIGHT,
@@ -783,9 +784,15 @@ async def score_one(http_client, sample, model, rarity_result,
         cot_text, _, _ = extract_cot_content(conversations)
 
     # Truncate for scoring
+    _compact = config.prompt_mode == "compact" if config else False
+    _budget = config.value_truncation_budget if config else None
+    # Compact mode: reduce budget to fit within firewall size limits
+    if _compact and config and _budget == VALUE_TRUNCATION_BUDGET:
+        from sft_label.config import COMPACT_VALUE_TRUNCATION_BUDGET
+        _budget = COMPACT_VALUE_TRUNCATION_BUDGET
     truncated = truncate_for_scoring(
         conversations, thinking_mode, cot_text=cot_text,
-        budget=config.value_truncation_budget if config else None,
+        budget=_budget,
     )
 
     # Build messages
@@ -797,8 +804,6 @@ async def score_one(http_client, sample, model, rarity_result,
     # Multi-turn slice position (for incomplete flag calibration)
     turn_index = metadata.get("turn_index")
     total_turns_meta = metadata.get("total_turns")
-
-    _compact = config.prompt_mode == "compact" if config else False
 
     messages = build_scoring_messages(
         truncated=truncated,

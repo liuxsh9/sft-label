@@ -16,19 +16,20 @@ MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
 REQUEST_TIMEOUT = 60           # seconds per LLM call (first attempt)
 REQUEST_TIMEOUT_ESCALATION = [60, 90, 120]  # per-attempt timeout escalation
-DEFAULT_RPS_LIMIT = 30         # max LLM requests/sec (0 = unlimited)
-DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
+DEFAULT_RPS_LIMIT = 80         # max LLM requests/sec (0 = unlimited)
+DEFAULT_RPS_WARMUP = 20        # seconds to ramp from 1 rps to full rps (0 = no warmup)
 
 # ═══════════════════════════════════════════════════════════
 # Pass 1: Tag Labeling
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_LABELING_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 500
+DEFAULT_CONCURRENCY = 600
 CONFIDENCE_THRESHOLD = 0.60
 
 # ─── Conversation Truncation (Pass 1) ───────────────────
 MAX_CONVERSATION_CHARS = 20000   # total budget (~5K tokens); aggressive for fast labeling
+COMPACT_CONVERSATION_CHARS = 8000  # compact mode budget; keeps CALL2 payload < 25KB
 TRUNCATION_HEAD_RATIO = 0.35     # fraction of budget for first human turn (task context)
 TRUNCATION_LAST_RESPONSE_RATIO = 0.30  # fraction of budget for last gpt turn (labeling target)
 TRUNCATION_PER_TURN_RATIO = 0.35 # max fraction of budget for any single turn
@@ -118,6 +119,7 @@ RARITY_COMBO_ALPHA = 0.7            # weight for tag IDF vs combo IDF
 
 # ─── COT-Preserving Truncation (Pass 2) ─────────────────
 VALUE_TRUNCATION_BUDGET = 20000     # total chars for scoring truncation
+COMPACT_VALUE_TRUNCATION_BUDGET = 14000  # compact mode; keeps scoring payload < 25KB
 VALUE_TRUNCATION_INSTRUCTION_RATIO = 0.15
 VALUE_TRUNCATION_COT_RATIO = 0.45
 VALUE_TRUNCATION_RESPONSE_RATIO = 0.35

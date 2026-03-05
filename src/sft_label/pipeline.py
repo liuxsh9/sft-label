@@ -732,12 +732,17 @@ def find_low_confidence_dims(labels, threshold=CONFIDENCE_THRESHOLD):
 async def label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
                     config=None, rate_limiter=None):
     """Label a single sample with sample-level retry on failure."""
-    _max_chars = config.max_conversation_chars if config else MAX_CONVERSATION_CHARS
     _max_retries_sample = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
     _max_retries = config.max_retries if config else MAX_RETRIES
     _conf_threshold = config.confidence_threshold if config else CONFIDENCE_THRESHOLD
     _compact = config.prompt_mode == "compact" if config else False
     start = time.time()
+
+    # Conversation truncation budget — compact mode uses smaller budget for firewall limits
+    _max_chars = config.max_conversation_chars if config else MAX_CONVERSATION_CHARS
+    if _compact and config and config.max_conversation_chars == MAX_CONVERSATION_CHARS:
+        from sft_label.config import COMPACT_CONVERSATION_CHARS
+        _max_chars = COMPACT_CONVERSATION_CHARS
 
     # Truncate oversized conversations before sending to LLM
     conversations = sample.get("conversations", [])
