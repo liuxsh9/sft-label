@@ -353,6 +353,11 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    # Reasoning models (o1, o3, gpt-5*) don't support temperature or max_tokens
+    _model_lower = model.lower()
+    if any(p in _model_lower for p in ("o1", "o3", "gpt-5")):
+        payload.pop("temperature", None)
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
     last_error = None
     last_error_response = None
 

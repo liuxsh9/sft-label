@@ -27,6 +27,9 @@ def cmd_run(args):
     from sft_label.pipeline import run
 
     config = PipelineConfig(prompt_mode=args.prompt_mode)
+    if args.model:
+        config.labeling_model = args.model
+        config.scoring_model = args.model
     try:
         stats = asyncio.run(run(
             input_path=args.input,
@@ -84,6 +87,8 @@ def cmd_score(args):
     from sft_label.scoring import run_scoring
 
     config = PipelineConfig(prompt_mode=args.prompt_mode)
+    if args.model:
+        config.scoring_model = args.model
     try:
         asyncio.run(run_scoring(
             input_path=args.input,
@@ -197,6 +202,8 @@ def main():
     run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
                             default="full",
                             help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
+    run_parser.add_argument("--model", type=str, default=None,
+                            help="LLM model name (default: gpt-4o-mini)")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
@@ -223,6 +230,8 @@ def main():
     score_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
                                default="full",
                                help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
+    score_parser.add_argument("--model", type=str, default=None,
+                               help="LLM model name (default: gpt-4o-mini)")
 
     # --- export-review ---
     review_parser = subparsers.add_parser("export-review",
