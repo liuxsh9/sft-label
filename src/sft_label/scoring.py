@@ -2181,13 +2181,13 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     output_dir = Path(output_dir)
 
     # Find labeled files (flat, one-level subdirs, or deeply nested)
-    # Try progressively deeper searches; also include .jsonl files
-    labeled_files = sorted(input_dir.glob("labeled*.json"))
+    # Try progressively deeper searches; include both .json and .jsonl
+    labeled_files = sorted(input_dir.glob("labeled*.json")) + sorted(input_dir.glob("labeled*.jsonl"))
     if not labeled_files:
-        labeled_files = sorted(input_dir.glob("*/labeled*.json"))
+        labeled_files = sorted(input_dir.glob("*/labeled*.json")) + sorted(input_dir.glob("*/labeled*.jsonl"))
     if not labeled_files:
         # Deep nesting: recursive glob
-        labeled_files = sorted(input_dir.glob("**/labeled*.json"))
+        labeled_files = sorted(input_dir.glob("**/labeled*.json")) + sorted(input_dir.glob("**/labeled*.jsonl"))
     # Separate .json and .jsonl: prefer .json if both exist in same dir
     json_files = [f for f in labeled_files if not f.name.endswith(".jsonl")]
     jsonl_files = [f for f in labeled_files if f.name.endswith(".jsonl")]
