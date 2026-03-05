@@ -32,6 +32,9 @@ LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label score --input la
 # Continuous mode: Pass 1 + Pass 2
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score
 
+# Compact prompt mode (reduced payload ~32% smaller, for size-limited endpoints)
+LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --prompt-mode compact
+
 # Continuous mode with external rarity stats for Pass 2
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --tag-stats global_stats.json
 

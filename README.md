@@ -31,6 +31,9 @@ sft-label score --input labeled.json --tag-stats stats.json
 
 # Pass 1 + Pass 2 in one go
 sft-label run --input data.json --score
+
+# Compact mode: reduced prompt size (~32% smaller, for size-limited endpoints)
+sft-label run --input data.json --score --prompt-mode compact
 ```
 
 ## Usage
@@ -49,6 +52,9 @@ sft-label run --input data_dir/ --resume data_dir-labeled-20250101_120000/
 
 # Continuous mode: Pass 1 + Pass 2 value scoring
 sft-label run --input data.json --score
+
+# Compact prompt mode (reduced payload size for size-limited endpoints)
+sft-label run --input data.json --score --prompt-mode compact
 
 # Continuous mode with external rarity stats
 sft-label run --input data.json --score --tag-stats global_stats.json
@@ -89,6 +95,7 @@ config = PipelineConfig(
     concurrency=50,
     litellm_base="http://localhost:4000/v1",
     litellm_key="your-key",
+    prompt_mode="compact",  # or "full" (default)
 )
 
 stats = asyncio.run(run("data.json", config=config))
