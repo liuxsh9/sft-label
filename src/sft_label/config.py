@@ -14,17 +14,17 @@ LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
 # ─── Shared Defaults ────────────────────────────────────
 MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
-REQUEST_TIMEOUT = 60           # seconds per LLM call (first attempt)
+REQUEST_TIMEOUT = 90           # seconds per LLM call (first attempt)
 REQUEST_TIMEOUT_ESCALATION = [60, 90, 120]  # per-attempt timeout escalation
-DEFAULT_RPS_LIMIT = 80         # max LLM requests/sec (0 = unlimited)
-DEFAULT_RPS_WARMUP = 20        # seconds to ramp from 1 rps to full rps (0 = no warmup)
+DEFAULT_RPS_LIMIT = 10         # max LLM requests/sec (0 = unlimited)
+DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
 
 # ═══════════════════════════════════════════════════════════
 # Pass 1: Tag Labeling
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_LABELING_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 600
+DEFAULT_CONCURRENCY = 100
 CONFIDENCE_THRESHOLD = 0.60
 
 # ─── Conversation Truncation (Pass 1) ───────────────────
