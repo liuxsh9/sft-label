@@ -15,6 +15,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from sft_label.artifacts import (
+    PASS1_STATS_FILE,
+    PASS1_STATS_FILE_LEGACY,
+    PASS2_STATS_FILE,
+    PASS2_STATS_FILE_LEGACY,
+    PASS2_DASHBOARD_FILE,
+    PASS2_DASHBOARD_FILE_LEGACY,
+)
 from sft_label.config import PipelineConfig
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -240,7 +248,8 @@ class TestE2ESingleFile:
         run_dir = Path(stats["run_dir"])
         assert (run_dir / "labeled.json").exists()
         assert (run_dir / "labeled.jsonl").exists()
-        assert (run_dir / "stats.json").exists()
+        assert (run_dir / PASS1_STATS_FILE).exists()
+        assert (run_dir / PASS1_STATS_FILE_LEGACY).exists()
         assert (run_dir / "monitor.jsonl").exists()
 
         # ── Verify labeled data ──
@@ -382,12 +391,12 @@ class TestE2EScoring:
                 assert "selection_score" in value
 
         # ── Verify stats ──
-        stats_value_path = tmp_path / "stats_value.json"
-        assert stats_value_path.exists()
+        assert (tmp_path / PASS2_STATS_FILE).exists()
+        assert (tmp_path / PASS2_STATS_FILE_LEGACY).exists()
 
         # ── Verify dashboard ──
-        dashboard_path = tmp_path / "dashboard_value.html"
-        assert dashboard_path.exists()
+        assert (tmp_path / PASS2_DASHBOARD_FILE).exists()
+        assert (tmp_path / PASS2_DASHBOARD_FILE_LEGACY).exists()
 
         # ── Verify terminal output ──
         captured = capsys.readouterr()
@@ -427,7 +436,7 @@ class TestE2EContinuousMode:
              patch("sft_label.scoring.async_llm_call", side_effect=mock_llm_call):
             score_result = await run_scoring(
                 input_path=str(run_dir / "labeled.json"),
-                tag_stats_path=str(run_dir / "stats.json"),
+                tag_stats_path=str(run_dir / PASS1_STATS_FILE),
                 config=mock_config,
             )
 

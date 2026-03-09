@@ -50,6 +50,20 @@ from sft_label.config import (
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     PipelineConfig,
 )
+from sft_label.artifacts import (
+    PASS1_STATS_FILE,
+    PASS1_STATS_FILE_LEGACY,
+    PASS1_SUMMARY_STATS_FILE,
+    PASS1_SUMMARY_STATS_FILE_LEGACY,
+    pass1_stats_filename,
+    pass1_stats_legacy_filename,
+    pass1_dashboard_filename,
+    pass1_dashboard_legacy_filename,
+    pass1_global_dashboard_filename,
+    pass1_global_dashboard_legacy_filename,
+    find_first_existing,
+    sync_legacy_aliases,
+)
 
 
 # ─────────────────────────────────────────────────────────
@@ -1082,7 +1096,7 @@ class FileCollector:
 def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     """Write all outputs for a completed file and release memory.
 
-    Writes labeled.json/jsonl, monitor.jsonl, stats.json, dashboard.
+    Writes labeled.json/jsonl, monitor.jsonl, stats_labeling.json, dashboard.
     Updates checkpoint. Deletes heavy data from collector to free memory.
     Returns the stats dict.
     """
@@ -1120,8 +1134,10 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     labeled_json = f"labeled{suffix}.json"
     labeled_jsonl = f"labeled{suffix}.jsonl"
     monitor_file = f"monitor{suffix}.jsonl"
-    stats_file = f"stats{suffix}.json"
-    dashboard_file = f"dashboard{suffix}.html"
+    stats_file = pass1_stats_filename(suffix)
+    stats_file_legacy = pass1_stats_legacy_filename(suffix)
+    dashboard_file = pass1_dashboard_filename(suffix)
+    dashboard_file_legacy = pass1_dashboard_legacy_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
 
     with open(output_dir / labeled_json, "w", encoding="utf-8") as f:
@@ -1181,14 +1197,17 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
         stats["failed"] = stats["total_samples"] - stats["success"]
         stats["success_rate"] = round(stats["success"] / max(total, 1), 4)
 
-    with open(output_dir / stats_file, "w", encoding="utf-8") as f:
+    stats_path = output_dir / stats_file
+    with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
+    sync_legacy_aliases(stats_path, [stats_file_legacy])
 
     # Per-file dashboard
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=labeled_json,
                            stats_file=stats_file, output_file=dashboard_file)
+        sync_legacy_aliases(output_dir / dashboard_file, [dashboard_file_legacy])
     except Exception:
         pass
 
@@ -1496,7 +1515,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     Processes JSONL files in chunks to bound memory usage. Each chunk is
     independently: read → slice → sparse sample → label → inherit → write.
 
-    Output: labeled.jsonl, monitor.jsonl, failed_samples.jsonl, stats.json, dashboard.html
+    Output: labeled.jsonl, monitor.jsonl, failed_samples.jsonl, stats_labeling.json, dashboard_labeling.html
     (No labeled.json — too large to hold in memory for JSON serialization)
     """
     input_path = Path(input_path)
@@ -1683,14 +1702,20 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     stats["chunk_size"] = chunk_size
     stats["chunks_processed"] = chunks_loaded
 
-    with open(output_dir / "stats.json", "w", encoding="utf-8") as f:
+    stats_path = output_dir / PASS1_STATS_FILE
+    with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
+    sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
 
     # Dashboard (stats-only mode — no labeled.json)
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=None,
-                           stats_file="stats.json", output_file="dashboard.html")
+                           stats_file=PASS1_STATS_FILE, output_file=pass1_dashboard_filename())
+        sync_legacy_aliases(
+            output_dir / pass1_dashboard_filename(),
+            [pass1_dashboard_legacy_filename()],
+        )
     except Exception:
         pass
 
@@ -1830,8 +1855,10 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     labeled_json = f"labeled{suffix}.json"
     labeled_jsonl = f"labeled{suffix}.jsonl"
     monitor_file = f"monitor{suffix}.jsonl"
-    stats_file = f"stats{suffix}.json"
-    dashboard_file = f"dashboard{suffix}.html"
+    stats_file = pass1_stats_filename(suffix)
+    stats_file_legacy = pass1_stats_legacy_filename(suffix)
+    dashboard_file = pass1_dashboard_filename(suffix)
+    dashboard_file_legacy = pass1_dashboard_legacy_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
 
     with open(output_dir / labeled_json, "w", encoding="utf-8") as f:
@@ -1888,14 +1915,17 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         stats["failed"] = stats["total_samples"] - stats["success"]
         stats["success_rate"] = round(stats["success"] / max(total, 1), 4)
 
-    with open(output_dir / stats_file, "w", encoding="utf-8") as f:
+    stats_path = output_dir / stats_file
+    with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
+    sync_legacy_aliases(stats_path, [stats_file_legacy])
 
     # Per-file dashboard
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=labeled_json,
                            stats_file=stats_file, output_file=dashboard_file)
+        sync_legacy_aliases(output_dir / dashboard_file, [dashboard_file_legacy])
     except Exception:
         pass
 
@@ -2195,16 +2225,22 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     if rate_limiter:
         summary["http_request_stats"] = rate_limiter.stats.to_dict()
 
-    with open(run_dir / "summary_stats.json", "w", encoding="utf-8") as f:
+    summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+    with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+    sync_legacy_aliases(summary_path, [PASS1_SUMMARY_STATS_FILE_LEGACY])
 
     input_name = input_path.name
-    global_dashboard = f"dashboard_{input_name}.html"
+    global_dashboard = pass1_global_dashboard_filename(input_name)
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(run_dir, labeled_file=None,
-                           stats_file="summary_stats.json",
+                           stats_file=PASS1_SUMMARY_STATS_FILE,
                            output_file=global_dashboard)
+        sync_legacy_aliases(
+            run_dir / global_dashboard,
+            [pass1_global_dashboard_legacy_filename(input_name)],
+        )
         print(f"\nGlobal dashboard generated: {run_dir / global_dashboard}")
     except Exception as e:
         print(f"\nGlobal dashboard generation skipped: {e}")
@@ -2260,8 +2296,11 @@ async def run(
             return {"status": "already_done", "run_dir": str(run_dir)}
 
         # Recover settings from summary_stats or checkpoint
-        summary_path = run_dir / "summary_stats.json"
-        if summary_path.exists():
+        summary_path = find_first_existing(
+            run_dir,
+            [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY],
+        )
+        if summary_path:
             with open(summary_path, "r", encoding="utf-8") as f:
                 prev_summary = json.load(f)
             _input_path = Path(prev_summary.get("input_path", str(input_path)))
@@ -2308,7 +2347,7 @@ async def run(
         # Write global summary
         _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start,
                               rate_limiter=rate_limiter)
-        summary_path = run_dir / "summary_stats.json"
+        summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -2364,7 +2403,7 @@ async def run(
 
         _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start,
                               rate_limiter=rate_limiter)
-        summary_path = run_dir / "summary_stats.json"
+        summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -2398,13 +2437,15 @@ async def run(
             stats["http_request_stats"] = rate_limiter.stats.to_dict()
 
         # Overwrite stats with enriched version
-        with open(run_dir / "stats.json", "w", encoding="utf-8") as f:
+        stats_path = run_dir / PASS1_STATS_FILE
+        with open(stats_path, "w", encoding="utf-8") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
+        sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
 
         print_summary(stats, run_dir)
         print(f"Output:  {run_dir / 'labeled.json'}")
         print(f"JSONL:   {run_dir / 'labeled.jsonl'}")
-        print(f"Stats:   {run_dir / 'stats.json'}")
+        print(f"Stats:   {run_dir / PASS1_STATS_FILE}")
         print(f"Monitor: {run_dir / 'monitor.jsonl'}")
         return stats
 

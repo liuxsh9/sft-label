@@ -17,12 +17,16 @@ from pathlib import Path
 from collections import Counter
 
 from sft_label.prompts import TAG_POOLS, SINGLE_SELECT, MULTI_SELECT
+from sft_label.artifacts import (
+    PASS1_STATS_FILE,
+    PASS1_STATS_FILE_LEGACY,
+)
 
 DIMENSIONS = ["intent", "difficulty", "language", "domain", "concept",
               "task", "agentic", "constraint", "context"]
 
 
-def load_run(run_dir: Path, labeled_file="labeled.json", stats_file="stats.json"):
+def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_FILE):
     """Load samples and stats from a run directory.
 
     If labeled_file is None or doesn't exist, returns empty samples list
@@ -37,6 +41,9 @@ def load_run(run_dir: Path, labeled_file="labeled.json", stats_file="stats.json"
 
     stats = {}
     stats_path = run_dir / stats_file
+    if not stats_path.exists() and stats_file == PASS1_STATS_FILE:
+        legacy = run_dir / PASS1_STATS_FILE_LEGACY
+        stats_path = legacy if legacy.exists() else stats_path
     if stats_path.exists():
         with open(stats_path, encoding="utf-8") as f:
             stats = json.load(f)
@@ -293,7 +300,7 @@ render();
 
 
 def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
-                       stats_file="stats.json", output_file="dashboard.html") -> Path:
+                       stats_file=PASS1_STATS_FILE, output_file="dashboard_labeling.html") -> Path:
     """Generate dashboard HTML. Supports stats-only mode (no labeled.json)."""
     run_dir = Path(run_dir)
     samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)

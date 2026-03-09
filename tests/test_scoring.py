@@ -13,6 +13,12 @@ import json
 import math
 from pathlib import Path
 
+from sft_label.artifacts import (
+    PASS2_STATS_FILE,
+    PASS2_STATS_FILE_LEGACY,
+    PASS2_DASHBOARD_FILE,
+    PASS2_DASHBOARD_FILE_LEGACY,
+)
 from sft_label.preprocessing import (
     detect_thinking_mode,
     extract_cot_content,
@@ -1273,9 +1279,11 @@ class TestIntegrationScoring:
         # Verify output files exist
         assert (tmp_path / "scored.json").exists()
         assert (tmp_path / "scored.jsonl").exists()
-        assert (tmp_path / "stats_value.json").exists()
+        assert (tmp_path / PASS2_STATS_FILE).exists()
+        assert (tmp_path / PASS2_STATS_FILE_LEGACY).exists()
         assert (tmp_path / "monitor_value.jsonl").exists()
-        assert (tmp_path / "dashboard_value.html").exists()
+        assert (tmp_path / PASS2_DASHBOARD_FILE).exists()
+        assert (tmp_path / PASS2_DASHBOARD_FILE_LEGACY).exists()
 
         # Verify scored.json structure
         with open(tmp_path / "scored.json", encoding="utf-8") as f:
@@ -1313,8 +1321,8 @@ class TestIntegrationScoring:
             # Flags should be a list
             assert isinstance(v["flags"], list)
 
-        # Verify stats_value.json
-        with open(tmp_path / "stats_value.json", encoding="utf-8") as f:
+        # Verify Pass 2 stats
+        with open(tmp_path / PASS2_STATS_FILE, encoding="utf-8") as f:
             stats_out = json.load(f)
         assert stats_out["total_scored"] > 0
         assert "score_distributions" in stats_out
@@ -1322,7 +1330,7 @@ class TestIntegrationScoring:
         assert "weights_used" in stats_out
 
         # Verify dashboard is valid HTML
-        html = (tmp_path / "dashboard_value.html").read_text(encoding="utf-8")
+        html = (tmp_path / PASS2_DASHBOARD_FILE).read_text(encoding="utf-8")
         assert "<!DOCTYPE html>" in html
         assert "SFT Labeling & Value Dashboard" in html or "SFT Value Scoring Dashboard" in html
 

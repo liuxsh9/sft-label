@@ -2,7 +2,7 @@
 Offline recomputation of stats and dashboards from pipeline output.
 
 Provides two features:
-  1. recompute-stats: Rebuild stats.json / stats_value.json from labeled/scored
+  1. recompute-stats: Rebuild stats_labeling.json / stats_scoring.json from labeled/scored
      output without re-running the LLM pipeline.
   2. regenerate-dashboard: Re-generate HTML dashboards from existing stats/data.
 
@@ -17,6 +17,26 @@ from pathlib import Path
 from datetime import datetime
 
 from sft_label.config import CONFIDENCE_THRESHOLD
+from sft_label.artifacts import (
+    PASS1_STATS_FILE,
+    PASS1_STATS_FILE_LEGACY,
+    PASS1_SUMMARY_STATS_FILE,
+    PASS1_SUMMARY_STATS_FILE_LEGACY,
+    PASS1_DASHBOARD_FILE,
+    PASS1_DASHBOARD_FILE_LEGACY,
+    PASS2_STATS_FILE,
+    PASS2_STATS_FILE_LEGACY,
+    PASS2_SUMMARY_STATS_FILE,
+    PASS2_SUMMARY_STATS_FILE_LEGACY,
+    PASS2_DASHBOARD_FILE,
+    PASS2_DASHBOARD_FILE_LEGACY,
+    pass1_global_dashboard_filename,
+    pass1_global_dashboard_legacy_filename,
+    pass2_global_dashboard_filename,
+    pass2_global_dashboard_legacy_filename,
+    find_first_existing,
+    sync_legacy_aliases,
+)
 
 
 # ─── Sample loading ──────────────────────────────────────
@@ -119,9 +139,9 @@ def _build_inherit_map(samples):
 
 
 def recompute_stats_from_labeled(samples):
-    """Rebuild stats.json content from labeled output samples.
+    """Rebuild Pass 1 stats content from labeled output samples.
 
-    Returns a dict matching the stats.json structure.
+    Returns a dict matching Pass 1 stats structure.
     """
     from sft_label.pipeline import compute_stats
 
@@ -161,9 +181,9 @@ def _synthesize_value_monitor(sample):
 
 
 def recompute_value_stats_from_scored(samples):
-    """Rebuild stats_value.json content from scored output samples.
+    """Rebuild Pass 2 stats content from scored output samples.
 
-    Returns a dict matching the stats_value.json structure.
+    Returns a dict matching Pass 2 stats structure.
     """
     from sft_label.scoring import compute_value_stats, compute_selection_scores
 
@@ -226,8 +246,9 @@ def _recompute_single_file(file_path, pass_num, out_dir):
         has_labels = any(s.get("labels") for s in samples)
         if has_labels:
             stats = recompute_stats_from_labeled(samples)
-            stats_path = out_dir / "stats.json"
+            stats_path = out_dir / PASS1_STATS_FILE
             _write_json(stats_path, stats)
+            sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
             written["stats"] = str(stats_path)
             print(f"  Pass 1 stats: {stats_path} "
                   f"({stats['success']}/{stats['total_samples']} success)")
@@ -237,8 +258,9 @@ def _recompute_single_file(file_path, pass_num, out_dir):
         has_scores = any(s.get("value") for s in samples)
         if has_scores:
             stats = recompute_value_stats_from_scored(samples)
-            stats_path = out_dir / "stats_value.json"
+            stats_path = out_dir / PASS2_STATS_FILE
             _write_json(stats_path, stats)
+            sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
             written["stats_value"] = str(stats_path)
             print(f"  Pass 2 stats: {stats_path} "
                   f"({stats['total_scored']} scored)")
@@ -287,8 +309,9 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 file_out_dir = out_dir / lf.parent.relative_to(input_dir) \
                     if lf.parent != input_dir else out_dir
                 file_out_dir.mkdir(parents=True, exist_ok=True)
-                stats_path = file_out_dir / "stats.json"
+                stats_path = file_out_dir / PASS1_STATS_FILE
                 _write_json(stats_path, stats)
+                sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
                 print(f"    → {stats_path} "
                       f"({stats['success']}/{stats['total_samples']} success)")
                 all_pass1_stats.append(stats)
@@ -298,8 +321,9 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 summary = merge_stats(all_pass1_stats)
                 summary["recomputed"] = True
                 summary["recomputed_at"] = datetime.now().isoformat()
-                summary_path = out_dir / "summary_stats.json"
+                summary_path = out_dir / PASS1_SUMMARY_STATS_FILE
                 _write_json(summary_path, summary)
+                sync_legacy_aliases(summary_path, [PASS1_SUMMARY_STATS_FILE_LEGACY])
                 written["summary_stats"] = str(summary_path)
                 print(f"\n  Summary: {summary_path} "
                       f"({summary.get('success', 0)} total success)")
@@ -320,8 +344,9 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 file_out_dir = out_dir / sf.parent.relative_to(input_dir) \
                     if sf.parent != input_dir else out_dir
                 file_out_dir.mkdir(parents=True, exist_ok=True)
-                stats_path = file_out_dir / "stats_value.json"
+                stats_path = file_out_dir / PASS2_STATS_FILE
                 _write_json(stats_path, stats)
+                sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
                 print(f"    → {stats_path} "
                       f"({stats['total_scored']} scored)")
                 all_pass2_stats.append(stats)
@@ -331,8 +356,9 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 summary = merge_value_stats(all_pass2_stats)
                 summary["recomputed"] = True
                 summary["recomputed_at"] = datetime.now().isoformat()
-                summary_path = out_dir / "summary_stats_value.json"
+                summary_path = out_dir / PASS2_SUMMARY_STATS_FILE
                 _write_json(summary_path, summary)
+                sync_legacy_aliases(summary_path, [PASS2_SUMMARY_STATS_FILE_LEGACY])
                 written["summary_stats_value"] = str(summary_path)
                 print(f"\n  Summary: {summary_path} "
                       f"({summary.get('total_scored', 0)} total scored)")
@@ -398,6 +424,8 @@ def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False):
 
 def _find_output_subdirs(run_dir):
     """Find subdirectories containing labeled/scored/stats files."""
+    pass1_stats_names = (PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY)
+    pass2_stats_names = (PASS2_STATS_FILE, PASS2_STATS_FILE_LEGACY)
     subdirs = []
     for child in sorted(run_dir.iterdir()):
         if not child.is_dir():
@@ -406,7 +434,7 @@ def _find_output_subdirs(run_dir):
             (child / name).exists()
             for name in ("labeled.json", "labeled.jsonl",
                          "scored.json", "scored.jsonl",
-                         "stats.json", "stats_value.json")
+                         *pass1_stats_names, *pass2_stats_names)
         )
         if has_output:
             subdirs.append(child)
@@ -417,7 +445,7 @@ def _find_output_subdirs(run_dir):
                     (grandchild / name).exists()
                     for name in ("labeled.json", "labeled.jsonl",
                                  "scored.json", "scored.jsonl",
-                                 "stats.json", "stats_value.json")
+                                 *pass1_stats_names, *pass2_stats_names)
                 )
                 if has_deep:
                     subdirs.append(grandchild)
@@ -429,19 +457,36 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
     generated = []
 
     if pass_num in ("1", "both"):
-        if (dir_path / "stats.json").exists():
+        pass1_stats_path = find_first_existing(
+            dir_path, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY]
+        )
+        if pass1_stats_path:
             try:
-                out = gen_p1(dir_path)
+                out = gen_p1(
+                    dir_path,
+                    stats_file=pass1_stats_path.name,
+                    output_file=PASS1_DASHBOARD_FILE,
+                )
+                sync_legacy_aliases(Path(out), [PASS1_DASHBOARD_FILE_LEGACY])
                 generated.append(out)
                 print(f"  Pass 1 dashboard: {out}")
             except Exception as e:
                 print(f"  Warning: Pass 1 dashboard failed for {dir_path}: {e}")
 
     if pass_num in ("2", "both"):
-        if (dir_path / "stats_value.json").exists():
+        pass2_stats_path = find_first_existing(
+            dir_path, [PASS2_STATS_FILE, PASS2_STATS_FILE_LEGACY]
+        )
+        if pass2_stats_path:
             try:
-                out_path = gen_p2(dir_path, quiet=True)
+                out_path = gen_p2(
+                    dir_path,
+                    stats_file=pass2_stats_path.name,
+                    output_file=PASS2_DASHBOARD_FILE,
+                    quiet=True,
+                )
                 if out_path:
+                    sync_legacy_aliases(Path(out_path), [PASS2_DASHBOARD_FILE_LEGACY])
                     generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
                     print(f"  Pass 2 dashboard: {out_path}")
             except Exception as e:
@@ -455,24 +500,32 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
     generated = []
 
     if pass_num in ("1", "both"):
-        if (run_dir / "summary_stats.json").exists():
+        pass1_summary_path = find_first_existing(
+            run_dir, [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY]
+        )
+        if pass1_summary_path:
             try:
                 out = gen_p1(run_dir, labeled_file=None,
-                             stats_file="summary_stats.json",
-                             output_file=f"dashboard_{run_dir.name}.html")
+                             stats_file=pass1_summary_path.name,
+                             output_file=pass1_global_dashboard_filename(run_dir.name))
+                sync_legacy_aliases(Path(out), [pass1_global_dashboard_legacy_filename(run_dir.name)])
                 generated.append(out)
                 print(f"  Global Pass 1 dashboard: {out}")
             except Exception as e:
                 print(f"  Warning: global Pass 1 dashboard failed: {e}")
 
     if pass_num in ("2", "both"):
-        if (run_dir / "summary_stats_value.json").exists():
+        pass2_summary_path = find_first_existing(
+            run_dir, [PASS2_SUMMARY_STATS_FILE, PASS2_SUMMARY_STATS_FILE_LEGACY]
+        )
+        if pass2_summary_path:
             try:
                 out_path = gen_p2(run_dir, scored_file=None,
-                                  stats_file="summary_stats_value.json",
-                                  output_file=f"dashboard_value_{run_dir.name}.html",
+                                  stats_file=pass2_summary_path.name,
+                                  output_file=pass2_global_dashboard_filename(run_dir.name),
                                   quiet=True)
                 if out_path:
+                    sync_legacy_aliases(Path(out_path), [pass2_global_dashboard_legacy_filename(run_dir.name)])
                     generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
                     print(f"  Global Pass 2 dashboard: {out_path}")
             except Exception as e:

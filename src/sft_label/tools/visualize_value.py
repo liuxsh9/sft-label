@@ -2,18 +2,28 @@
 Value Scoring Dashboard Generator
 
 Generates standalone HTML dashboards for Pass 2 value scoring results.
-When Pass 1 data (stats.json / labeled.json) is found in the same directory,
+When Pass 1 data (stats_labeling.json / labeled.json) is found in the same directory,
 the dashboard includes Pass 1 sections (tag distributions, confidence, coverage)
 at the top, with Pass 2 sections appended below.
 
-Pass 1's standalone dashboard (dashboard.html) is unaffected.
+Pass 1's standalone dashboard is unaffected.
 """
 
 import json
 from pathlib import Path
 
+from sft_label.artifacts import (
+    PASS1_STATS_FILE,
+    PASS1_STATS_FILE_LEGACY,
+    PASS1_SUMMARY_STATS_FILE,
+    PASS1_SUMMARY_STATS_FILE_LEGACY,
+    PASS2_STATS_FILE,
+    PASS2_STATS_FILE_LEGACY,
+    find_first_existing,
+)
 
-def load_value_run(run_dir, scored_file="scored.json", stats_file="stats_value.json"):
+
+def load_value_run(run_dir, scored_file="scored.json", stats_file=PASS2_STATS_FILE):
     """Load scored samples and value stats from a run directory.
 
     When scored_file is None (global/directory dashboard), automatically
@@ -73,6 +83,9 @@ def load_value_run(run_dir, scored_file="scored.json", stats_file="stats_value.j
 
     stats = {}
     stats_path = run_dir / stats_file
+    if not stats_path.exists() and stats_file == PASS2_STATS_FILE:
+        legacy = run_dir / PASS2_STATS_FILE_LEGACY
+        stats_path = legacy if legacy.exists() else stats_path
     if stats_path.exists():
         with open(stats_path, encoding="utf-8") as f:
             stats = json.load(f)
@@ -245,18 +258,21 @@ def _load_pass1_data(run_dir, is_global):
         from sft_label.tools.visualize_labels import load_run, compute_viz_data
 
         if is_global:
-            p1_stats_file = "summary_stats.json"
+            p1_stats_path = find_first_existing(
+                run_dir, [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY]
+            )
             p1_labeled_file = None
         else:
-            p1_stats_file = "stats.json"
+            p1_stats_path = find_first_existing(
+                run_dir, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY]
+            )
             p1_labeled_file = "labeled.json"
 
-        p1_stats_path = run_dir / p1_stats_file
-        if not p1_stats_path.exists():
+        if p1_stats_path is None:
             return None
 
         p1_samples, p1_stats = load_run(
-            run_dir, labeled_file=p1_labeled_file, stats_file=p1_stats_file
+            run_dir, labeled_file=p1_labeled_file, stats_file=p1_stats_path.name
         )
         if not p1_stats:
             return None
@@ -901,12 +917,12 @@ renderConversations();
 
 
 def generate_value_dashboard(run_dir, scored_file="scored.json",
-                              stats_file="stats_value.json",
-                              output_file="dashboard_value.html",
+                              stats_file=PASS2_STATS_FILE,
+                              output_file="dashboard_scoring.html",
                               quiet=False):
     """Generate a combined labeling + value scoring dashboard HTML file.
 
-    Automatically discovers Pass 1 data (stats.json / labeled.json) in the
+    Automatically discovers Pass 1 data (stats_labeling.json / labeled.json) in the
     same directory and includes labeling sections at the top. Falls back to
     Pass 2 only if Pass 1 data is not found.
 
