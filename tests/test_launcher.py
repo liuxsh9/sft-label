@@ -6,6 +6,7 @@ from sft_label.launcher import (
     build_launch_plan,
     format_command,
     format_env_prefix,
+    set_language,
     sanitize_prompt_input,
 )
 from sft_label.cli import build_parser
@@ -174,7 +175,7 @@ def test_can_back_to_workflow_selection_with_zero_in_submenu():
     )
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
     assert plan is None
-    assert any("Returned to workflow selection." in str(item) for item in io.outputs)
+    assert any("已返回任务选择" in str(item) for item in io.outputs)
 
 
 def test_can_back_to_workflow_selection_with_back_token():
@@ -188,7 +189,7 @@ def test_can_back_to_workflow_selection_with_back_token():
     )
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
     assert plan is None
-    assert any("Returned to workflow selection." in str(item) for item in io.outputs)
+    assert any("已返回任务选择" in str(item) for item in io.outputs)
 
 
 def test_format_helpers():
@@ -291,4 +292,43 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
 
     assert plan is not None
     assert plan.argv[:3] == ["run", "--input", "data.json"]
-    assert "Detected arrow/control key input and ignored." in captured.out
+    assert "检测到方向键/控制字符输入，已忽略" in captured.out
+
+
+def test_build_launch_plan_can_render_english():
+    io = StubIO(["9"])
+    try:
+        plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="en")
+        assert plan is not None
+        assert plan.argv == ["validate"]
+        assert any("Interactive task launcher" in str(item) for item in io.outputs)
+    finally:
+        set_language("zh")
+
+
+def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
+    io = StubIO(["0"])
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
+    assert plan is None
+    assert any("请选择任务编号 [0-11, 默认 1]：" in str(item) for item in io.outputs)
+    assert not any("Select workflow number" in str(item) for item in io.outputs)
+
+
+def test_chinese_llm_override_prompt_keeps_full_key_name():
+    io = StubIO(
+        [
+            "4",            # workflow: score
+            "labeled.json", # --input
+            "",             # --tag-stats
+            "",             # --limit
+            "",             # --resume
+            "",             # prompt mode
+            "",             # model
+            "n",            # env override
+            "",             # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
+    assert plan is not None
+    assert any("覆盖本次 LITELLM_BASE/LITELLM_KEY [y/N]：" in str(item) for item in io.outputs)
+    assert not any("覆盖本次 LITELLM_BASE / LITELLM_KEY" in str(item) for item in io.outputs)

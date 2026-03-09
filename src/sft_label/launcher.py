@@ -17,14 +17,44 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
+DEFAULT_LANGUAGE = "zh"
+SUPPORTED_LANGUAGES = {"zh", "en"}
+_LANG = DEFAULT_LANGUAGE
+SECTION_DIVIDER = "-" * 56
 BACK_TOKENS = {
     "b", "back", "/b", ":b",
-    "返回", "上一步", "上一步", "上一级",
+    "返回", "上一步", "上一级",
 }
 
 
 class BackRequested(Exception):
     """Raised when user asks to return to previous level."""
+
+
+def set_language(language: str):
+    """Set interactive display language."""
+    global _LANG
+    _LANG = "en" if str(language).lower() == "en" else "zh"
+
+
+def get_language() -> str:
+    """Get current interactive display language."""
+    return _LANG
+
+
+def localize_text(text: str) -> str:
+    """Select localized text from a 'zh / en' pair."""
+    if text is None:
+        return ""
+    raw = str(text)
+    if " / " not in raw:
+        return raw
+    left, right = raw.split(" / ", 1)
+    return right if _LANG == "en" else left
+
+
+def _msg(zh: str, en: str) -> str:
+    return en if _LANG == "en" else zh
 
 
 @dataclass
@@ -48,67 +78,67 @@ WORKFLOWS = [
         key="run-pass1",
         label="一阶段标注 / Pass 1 labeling",
         description="仅运行标签标注 / Run tag labeling only",
-        group="流水线 Pipeline",
+        group="流水线 / Pipeline",
     ),
     Workflow(
         key="run-pass1-pass2",
         label="一阶段 + 二阶段 / Pass 1 + Pass 2",
         description="先标注后打分 / Labeling followed by value scoring",
-        group="流水线 Pipeline",
+        group="流水线 / Pipeline",
     ),
     Workflow(
         key="run-pass1-pass2-semantic",
         label="一阶段 + 二阶段 + 四阶段 / Pass 1 + Pass 2 + Pass 4",
         description="标注、打分、语义聚类 / Labeling, scoring, then semantic clustering",
-        group="流水线 Pipeline",
+        group="流水线 / Pipeline",
     ),
     Workflow(
         key="score",
         label="仅二阶段打分 / Pass 2 scoring only",
         description="对已标注数据评分 / Score pre-labeled data",
-        group="流水线 Pipeline",
+        group="流水线 / Pipeline",
     ),
     Workflow(
         key="semantic",
         label="四阶段语义聚类 / Pass 4 semantic clustering",
         description="运行 SemHash + ANN 聚类 / Run SemHash + ANN clustering",
-        group="流水线 Pipeline",
+        group="流水线 / Pipeline",
     ),
     Workflow(
         key="filter",
         label="三阶段过滤 / Pass 3 filtering",
         description="筛选高价值训练样本 / Filter scored data for training selection",
-        group="数据整理 Data Curation",
+        group="数据整理 / Data Curation",
     ),
     Workflow(
         key="recompute-stats",
         label="重算统计 / Recompute stats",
         description="不调用 LLM 重新计算统计 / Rebuild stats without LLM calls",
-        group="维护 Maintenance",
+        group="维护 / Maintenance",
     ),
     Workflow(
         key="regenerate-dashboard",
         label="重建看板 / Regenerate dashboards",
         description="用已有统计重建 HTML 看板 / Rebuild HTML dashboards from existing stats",
-        group="维护 Maintenance",
+        group="维护 / Maintenance",
     ),
     Workflow(
         key="export-semantic",
         label="导出语义窗口 / Export semantic rows",
         description="导出代表窗口或全部窗口 / Export representative/all semantic windows",
-        group="导出 Export",
+        group="导出 / Export",
     ),
     Workflow(
         key="export-review",
         label="导出审核 CSV/TSV / Export review CSV/TSV",
         description="导出人工审核表 / Flatten labeled data for manual review",
-        group="导出 Export",
+        group="导出 / Export",
     ),
     Workflow(
         key="validate",
         label="校验 taxonomy / Validate taxonomy",
         description="校验 taxonomy 文件与一致性 / Validate taxonomy files and consistency",
-        group="维护 Maintenance",
+        group="维护 / Maintenance",
     ),
 ]
 
@@ -174,7 +204,9 @@ def interactive_input(prompt: str) -> str:
             c = ch.decode("utf-8", errors="ignore")
 
             if c in ("\r", "\n"):
-                sys.stdout.write("\n")
+                # In raw TTY mode, '\n' only moves to next line and keeps the
+                # current column. Use CRLF to avoid progressive indentation.
+                sys.stdout.write("\r\n")
                 sys.stdout.flush()
                 break
 
@@ -217,12 +249,9 @@ def is_back_token(value: str) -> bool:
 
 def _read_input(input_fn: InputFn, prompt: str, *, allow_back: bool = True) -> str:
     """Read input and sanitize terminal control sequences."""
-    value, had_control = sanitize_prompt_input(input_fn(prompt))
+    value, had_control = sanitize_prompt_input(input_fn(localize_text(prompt)))
     if had_control:
-        print(
-            "检测到方向键/控制字符输入，已忽略 / "
-            "Detected arrow/control key input and ignored."
-        )
+        print(_msg("检测到方向键/控制字符输入，已忽略。", "Detected arrow/control key input and ignored."))
     if allow_back and is_back_token(value):
         raise BackRequested
     return value
@@ -231,17 +260,35 @@ def _read_input(input_fn: InputFn, prompt: str, *, allow_back: bool = True) -> s
 def build_launch_plan(
     input_fn: InputFn = interactive_input,
     output_fn: OutputFn = print,
+    language: str | None = None,
 ) -> LaunchPlan | None:
     """Prompt for workflow/options and return executable launch plan."""
+    if language:
+        set_language(language)
+
+    _say(output_fn, SECTION_DIVIDER)
     _say(output_fn, "交互式任务启动器 / Interactive task launcher")
     _say(output_fn, "请选择任务，并只填写必要参数 / Choose a workflow and fill only required options.")
     _say(output_fn, "输入 b/back 可返回上一层，输入 0 可取消 / Type b/back to go back, 0 to cancel.")
+    _say(output_fn, SECTION_DIVIDER)
     _say(output_fn, "")
 
     while True:
         wf = _ask_workflow(input_fn, output_fn)
         if wf is None:
             return None
+
+        _say(output_fn, "")
+        _say(
+            output_fn,
+            _msg("正在配置作业：", "Configuring workflow: ") + localize_text(wf.label),
+        )
+        _say(
+            output_fn,
+            _msg("作业说明：", "Description: ") + localize_text(wf.description),
+        )
+        _say(output_fn, _msg("输入 b/back 返回任务列表。", "Type b/back to return to workflow menu."))
+        _say(output_fn, "")
 
         try:
             if wf.key == "run-pass1":
@@ -283,6 +330,7 @@ def _build_run_plan(
     argv = ["run"]
     env_overrides: dict[str, str] = {}
 
+    _section(output_fn, "基础输入 / Basic input")
     mode = _ask_choice(
         input_fn,
         output_fn,
@@ -314,6 +362,7 @@ def _build_run_plan(
     if not _ask_yes_no(input_fn, "启用仲裁补跑 / Enable arbitration pass", default=True):
         argv.append("--no-arbitration")
 
+    _section(output_fn, "模型与推理 / Model and inference")
     prompt_mode = _ask_choice(
         input_fn,
         output_fn,
@@ -332,15 +381,18 @@ def _build_run_plan(
         argv.extend(["--model", model])
 
     if chain_score:
+        _section(output_fn, "二阶段联动 / Pass 2 chaining")
         argv.append("--score")
         tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
         if tag_stats:
             argv.extend(["--tag-stats", tag_stats])
 
     if chain_semantic:
+        _section(output_fn, "四阶段联动 / Pass 4 chaining")
         argv.append("--semantic-cluster")
 
-    if _ask_yes_no(input_fn, "覆盖本次 LITELLM_BASE / LITELLM_KEY / Override LITELLM_BASE / LITELLM_KEY for this run", default=False):
+    _section(output_fn, "环境与附加参数 / Environment and extra flags")
+    if _ask_yes_no(input_fn, "覆盖本次 LITELLM_BASE/LITELLM_KEY / Override LITELLM_BASE/LITELLM_KEY for this run", default=False):
         env_overrides = _ask_llm_env_overrides(input_fn)
 
     argv.extend(_ask_extra_flags(input_fn))
@@ -348,9 +400,13 @@ def _build_run_plan(
 
 
 def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["score", "--input", _ask_required_text(input_fn, "输入已标注文件或目录 / Input labeled file/dir")]
+    argv = ["score"]
     env_overrides: dict[str, str] = {}
 
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "输入已标注文件或目录 / Input labeled file/dir")])
+
+    _section(output_fn, "评分参数 / Scoring options")
     tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
     if tag_stats:
         argv.extend(["--tag-stats", tag_stats])
@@ -375,11 +431,12 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     if prompt_mode != "full":
         argv.extend(["--prompt-mode", prompt_mode])
 
+    _section(output_fn, "模型与环境 / Model and environment")
     model = _ask_optional_text(input_fn, "LLM 模型覆盖（可选） / LLM model override (optional)")
     if model:
         argv.extend(["--model", model])
 
-    if _ask_yes_no(input_fn, "覆盖本次 LITELLM_BASE / LITELLM_KEY / Override LITELLM_BASE / LITELLM_KEY for this run", default=False):
+    if _ask_yes_no(input_fn, "覆盖本次 LITELLM_BASE/LITELLM_KEY / Override LITELLM_BASE/LITELLM_KEY for this run", default=False):
         env_overrides = _ask_llm_env_overrides(input_fn)
 
     argv.extend(_ask_extra_flags(input_fn))
@@ -387,9 +444,11 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
 
 
 def _build_semantic_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["semantic-cluster", "--input", _ask_required_text(input_fn, "输入文件或目录 / Input file/dir")]
+    argv = ["semantic-cluster"]
     env_overrides: dict[str, str] = {}
 
+    _section(output_fn, "基础参数 / Basic options")
+    argv.extend(["--input", _ask_required_text(input_fn, "输入文件或目录 / Input file/dir")])
     output_path = _ask_optional_text(input_fn, "输出目录（可选） / Output directory (optional)")
     if output_path:
         argv.extend(["--output", output_path])
@@ -406,13 +465,15 @@ def _build_semantic_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
 
     provider = "local"
     if _ask_yes_no(input_fn, "配置语义高级参数 / Configure semantic advanced parameters", default=False):
+        _section(output_fn, "语义高级参数 / Advanced semantic options")
         overrides = _ask_semantic_overrides(input_fn, output_fn)
         argv.extend(overrides["argv"])
         provider = overrides["provider"]
 
+    _section(output_fn, "环境与附加参数 / Environment and extra flags")
     if provider == "api" and _ask_yes_no(
         input_fn,
-        "provider=api，是否现在覆盖 LITELLM_BASE / LITELLM_KEY / Provider is api. Override LITELLM_BASE / LITELLM_KEY now",
+        "provider=api，是否现在覆盖 LITELLM_BASE/LITELLM_KEY / Provider is api. Override LITELLM_BASE/LITELLM_KEY now",
         default=False,
     ):
         env_overrides = _ask_llm_env_overrides(input_fn)
@@ -422,9 +483,11 @@ def _build_semantic_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
 
 
 def _build_filter_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["filter", "--input", _ask_required_text(input_fn, "输入评分文件或目录 / Input scored file/dir")]
+    argv = ["filter"]
     criteria_count = 0
 
+    _section(output_fn, "输出设置 / Output settings")
+    argv.extend(["--input", _ask_required_text(input_fn, "输入评分文件或目录 / Input scored file/dir")])
     output_path = _ask_optional_text(input_fn, "输出文件路径（可选） / Output file path (optional)")
     if output_path:
         argv.extend(["--output", output_path])
@@ -446,6 +509,7 @@ def _build_filter_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     if include_unscored:
         argv.append("--include-unscored")
 
+    _section(output_fn, "样本级筛选条件 / Sample-level criteria")
     value_min = _ask_optional_float(input_fn, "--value-min（可选） / --value-min (optional)")
     if value_min is not None:
         argv.extend(["--value-min", str(value_min)])
@@ -495,6 +559,7 @@ def _build_filter_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
         argv.extend(["--verify-source", verify_source])
         criteria_count += 1
 
+    _section(output_fn, "会话与轮次级筛选 / Conversation and turn-level criteria")
     if _ask_yes_no(input_fn, "配置会话级过滤条件 / Configure conversation-level filters", default=False):
         conv_value_min = _ask_optional_float(input_fn, "--conv-value-min（可选） / --conv-value-min (optional)")
         if conv_value_min is not None:
@@ -555,7 +620,11 @@ def _build_filter_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
 
 
 def _build_recompute_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["recompute-stats", "--input", _ask_required_text(input_fn, "输入文件或目录 / Input file/dir")]
+    argv = ["recompute-stats"]
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "输入文件或目录 / Input file/dir")])
+
+    _section(output_fn, "重算范围 / Recompute scope")
     pass_num = _ask_choice(
         input_fn,
         output_fn,
@@ -579,7 +648,11 @@ def _build_recompute_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
 
 
 def _build_regenerate_dashboard_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["regenerate-dashboard", "--input", _ask_required_text(input_fn, "运行目录 / Run directory")]
+    argv = ["regenerate-dashboard"]
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "运行目录 / Run directory")])
+
+    _section(output_fn, "看板范围 / Dashboard scope")
     pass_num = _ask_choice(
         input_fn,
         output_fn,
@@ -603,13 +676,9 @@ def _build_regenerate_dashboard_plan(input_fn: InputFn, output_fn: OutputFn) -> 
 
 def _build_export_semantic_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     del output_fn  # unused
-    argv = [
-        "export-semantic",
-        "--input",
-        _ask_required_text(input_fn, "语义产物目录 / Semantic artifacts directory"),
-        "--output",
-        _ask_required_text(input_fn, "输出 JSONL 路径 / Output JSONL path"),
-    ]
+    argv = ["export-semantic"]
+    argv.extend(["--input", _ask_required_text(input_fn, "语义产物目录 / Semantic artifacts directory")])
+    argv.extend(["--output", _ask_required_text(input_fn, "输出 JSONL 路径 / Output JSONL path")])
     if _ask_yes_no(input_fn, "包含非代表窗口 / Include non-representative windows", default=False):
         argv.append("--include-all")
     argv.extend(_ask_extra_flags(input_fn))
@@ -617,14 +686,12 @@ def _build_export_semantic_plan(input_fn: InputFn, output_fn: OutputFn) -> Launc
 
 
 def _build_export_review_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = [
-        "export-review",
-        "--input",
-        _ask_required_text(input_fn, "输入已标注 JSON 路径 / Input labeled JSON path"),
-        "--output",
-        _ask_required_text(input_fn, "输出 CSV/TSV 路径 / Output CSV/TSV path"),
-    ]
+    argv = ["export-review"]
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "输入已标注 JSON 路径 / Input labeled JSON path")])
+    argv.extend(["--output", _ask_required_text(input_fn, "输出 CSV/TSV 路径 / Output CSV/TSV path")])
 
+    _section(output_fn, "导出选项 / Export options")
     monitor = _ask_optional_text(input_fn, "监控 JSONL 路径（可选） / Monitor JSONL path (optional)")
     if monitor:
         argv.extend(["--monitor", monitor])
@@ -773,20 +840,22 @@ def _ask_workflow(input_fn: InputFn, output_fn: OutputFn) -> Workflow | None:
     index_to_workflow: dict[int, Workflow] = {}
     idx = 1
     for group in group_order:
-        _say(output_fn, f"[{group}]")
+        _say(output_fn, f"[{localize_text(group)}]")
         for wf in grouped[group]:
             index_to_workflow[idx] = wf
-            _say(output_fn, f"  {idx}. {wf.label} - {wf.description}")
+            label = localize_text(wf.label)
+            desc = localize_text(wf.description)
+            _say(output_fn, f"{idx}. {label} - {desc}")
             idx += 1
         _say(output_fn, "")
-    _say(output_fn, "  0. 取消 / Cancel")
+    _say(output_fn, "0. 取消 / 0. Cancel")
     _say(output_fn, "")
 
     max_choice = len(WORKFLOWS)
     while True:
         raw = _read_input(
             input_fn,
-            f"Select workflow number [0-{max_choice}, default 1]: ",
+            f"请选择任务编号 [0-{max_choice}, 默认 1]： / Select workflow number [0-{max_choice}, default 1]: ",
             allow_back=False,
         )
         if is_back_token(raw):
@@ -808,14 +877,15 @@ def _ask_extra_flags(input_fn: InputFn) -> list[str]:
     while True:
         raw = _read_input(
             input_fn,
-            "附加原始 CLI 参数（可选，例如 --foo 1 --bar x） / Extra raw CLI flags (optional, e.g. --foo 1 --bar x): "
+            "附加原始 CLI 参数（可选，例如 --foo 1 --bar x）： / "
+            "Extra raw CLI flags (optional, e.g. --foo 1 --bar x): "
         )
         if not raw:
             return []
         try:
             return shlex.split(raw)
         except ValueError as e:
-            print(f"无效 shell 风格参数 / Invalid shell-style flags: {e}")
+            print(_msg(f"无效 shell 风格参数：{e}", f"Invalid shell-style flags: {e}"))
 
 
 def _ask_required_text(input_fn: InputFn, prompt: str) -> str:
@@ -834,72 +904,78 @@ def _ask_text(
     required: bool = False,
 ) -> str:
     while True:
+        prompt_text = localize_text(prompt)
         suffix = f" [{default}]" if default is not None else ""
-        value = _read_input(input_fn, f"{prompt}{suffix}: ")
+        value = _read_input(input_fn, f"{prompt_text}{suffix}{_msg('：', ': ')}")
         if value:
             return value
         if default is not None:
             return default
         if not required:
             return ""
-        print("该字段必填 / This field is required.")
+        print(_msg("该字段必填。", "This field is required."))
 
 
 def _ask_int(input_fn: InputFn, prompt: str, *, default: int) -> int:
     while True:
-        raw = _read_input(input_fn, f"{prompt} [{default}]: ")
+        prompt_text = localize_text(prompt)
+        raw = _read_input(input_fn, f"{prompt_text} [{default}]{_msg('：', ': ')}")
         if raw == "":
             return default
         try:
             return int(raw)
         except ValueError:
-            print("请输入整数 / Enter an integer.")
+            print(_msg("请输入整数。", "Enter an integer."))
 
 
 def _ask_optional_int(input_fn: InputFn, prompt: str) -> int | None:
     while True:
-        raw = _read_input(input_fn, f"{prompt}: ")
+        prompt_text = localize_text(prompt)
+        raw = _read_input(input_fn, f"{prompt_text}{_msg('：', ': ')}")
         if raw == "":
             return None
         try:
             return int(raw)
         except ValueError:
-            print("请输入整数，或留空 / Enter an integer or leave blank.")
+            print(_msg("请输入整数，或留空。", "Enter an integer or leave blank."))
 
 
 def _ask_float(input_fn: InputFn, prompt: str, *, default: float) -> float:
     while True:
-        raw = _read_input(input_fn, f"{prompt} [{default}]: ")
+        prompt_text = localize_text(prompt)
+        raw = _read_input(input_fn, f"{prompt_text} [{default}]{_msg('：', ': ')}")
         if raw == "":
             return default
         try:
             return float(raw)
         except ValueError:
-            print("请输入数字 / Enter a number.")
+            print(_msg("请输入数字。", "Enter a number."))
 
 
 def _ask_optional_float(input_fn: InputFn, prompt: str) -> float | None:
     while True:
-        raw = _read_input(input_fn, f"{prompt}: ")
+        prompt_text = localize_text(prompt)
+        raw = _read_input(input_fn, f"{prompt_text}{_msg('：', ': ')}")
         if raw == "":
             return None
         try:
             return float(raw)
         except ValueError:
-            print("请输入数字，或留空 / Enter a number or leave blank.")
+            print(_msg("请输入数字，或留空。", "Enter a number or leave blank."))
 
 
 def _ask_yes_no(input_fn: InputFn, prompt: str, *, default: bool) -> bool:
     default_hint = "Y/n" if default else "y/N"
     while True:
-        raw = _read_input(input_fn, f"{prompt} [{default_hint}]: ").lower()
+        prompt_text = localize_text(prompt)
+        raw = _read_input(input_fn, f"{prompt_text} [{default_hint}]{_msg('：', ': ')}").lower()
         if raw == "":
             return default
         if raw in ("y", "yes"):
             return True
         if raw in ("n", "no"):
             return False
-        print("请输入 y 或 n / Enter y or n.")
+        print(_msg("请输入 y 或 n。", "Please enter y or n."))
 
 
 def _ask_choice(
@@ -912,14 +988,15 @@ def _ask_choice(
 ) -> str:
     _say(output_fn, "")
     _say(output_fn, title)
-    _say(output_fn, "  0. 返回上一级 / Back")
+    _say(output_fn, "0. 返回上一级 / 0. Back")
     for idx, (_, label, desc) in enumerate(options, start=1):
-        _say(output_fn, f"  {idx}. {label} - {desc}")
+        _say(output_fn, f"{idx}. {localize_text(label)} - {localize_text(desc)}")
     _say(output_fn, "")
 
     while True:
         raw = _read_input(
             input_fn,
+            f"请选择 [0-{len(options)}，默认 {default_index}]： / "
             f"Select [0-{len(options)}, default {default_index}]: ",
         )
         if raw == "0":
@@ -936,4 +1013,11 @@ def _ask_choice(
 
 
 def _say(output_fn: OutputFn, text: str):
-    output_fn(text)
+    output_fn(localize_text(text))
+
+
+def _section(output_fn: OutputFn, title: str):
+    _say(output_fn, "")
+    _say(output_fn, SECTION_DIVIDER)
+    _say(output_fn, title)
+    _say(output_fn, SECTION_DIVIDER)

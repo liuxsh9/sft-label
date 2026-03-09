@@ -23,6 +23,32 @@ import os
 import sys
 
 
+def _start_msg(lang: str, zh: str, en: str) -> str:
+    return en if lang == "en" else zh
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    upper = key.upper()
+    return any(token in upper for token in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return "(empty)"
+    if len(value) <= 6:
+        return "*" * len(value)
+    return f"{value[:2]}***{value[-2:]}"
+
+
+def _format_start_env_lines(env_overrides: dict[str, str]) -> list[str]:
+    lines: list[str] = []
+    for key in sorted(env_overrides):
+        value = env_overrides[key]
+        shown = _mask_secret(value) if _is_sensitive_env_key(key) else value
+        lines.append(f"  {key}={shown}")
+    return lines
+
+
 def cmd_run(args):
     """Run the labeling pipeline."""
     if not args.input and not args.resume:
@@ -319,40 +345,51 @@ def cmd_start(args, parser):
     from sft_label.launcher import (
         build_launch_plan,
         format_command,
-        format_env_prefix,
         interactive_input,
         is_back_token,
+        set_language,
         sanitize_prompt_input,
     )
 
-    plan = build_launch_plan(input_fn=interactive_input)
+    lang = getattr(args, "lang", "zh")
+    if getattr(args, "en", False):
+        lang = "en"
+    set_language(lang)
+
+    plan = build_launch_plan(input_fn=interactive_input, language=lang)
     if plan is None:
-        print("已取消启动 / Launch cancelled.")
+        print(_start_msg(lang, "已取消启动。", "Launch cancelled."))
         return
 
-    env_prefix = format_env_prefix(plan.env_overrides)
     cmd_preview = format_command(plan.argv)
-    preview = f"{env_prefix} {cmd_preview}".strip()
-    print("\n生成命令 / Generated command:")
-    print(f"  {preview}")
+    print(f"\n{_start_msg(lang, '执行确认', 'Launch summary')}")
+    print("-" * 56)
+    print(_start_msg(lang, "命令：", "Command:"))
+    print(f"  {cmd_preview}")
+    if plan.env_overrides:
+        print(_start_msg(lang, "环境变量覆盖（敏感值已脱敏）：", "Environment overrides (sensitive values masked):"))
+        for line in _format_start_env_lines(plan.env_overrides):
+            print(line)
+    else:
+        print(_start_msg(lang, "环境变量覆盖：无", "Environment overrides: none"))
+    print("-" * 56)
 
     if args.dry_run:
-        print("\n仅预览模式，未执行命令 / Dry run mode: command not executed.")
+        print(f"\n{_start_msg(lang, '仅预览模式，未执行命令。', 'Dry run mode: command not executed.')}")
         return
 
-    confirm_raw = interactive_input("立即执行？ / Execute now? [Y/n]: ")
+    confirm_raw = interactive_input(
+        _start_msg(lang, "立即执行？ [Y/b/n]: ", "Execute now? [Y/b/n]: ")
+    )
     confirm, had_control = sanitize_prompt_input(confirm_raw)
     if had_control:
-        print(
-            "检测到方向键/控制字符输入，已忽略 / "
-            "Detected arrow/control key input and ignored."
-        )
+        print(_start_msg(lang, "检测到方向键/控制字符输入，已忽略。", "Detected arrow/control key input and ignored."))
     if is_back_token(confirm):
-        print("已取消执行 / Launch aborted.")
+        print(_start_msg(lang, "已取消执行。", "Launch aborted."))
         return
     confirm = confirm.lower()
     if confirm in ("n", "no"):
-        print("已取消执行 / Launch aborted.")
+        print(_start_msg(lang, "已取消执行。", "Launch aborted."))
         return
 
     for key, value in plan.env_overrides.items():
@@ -361,11 +398,15 @@ def cmd_start(args, parser):
     try:
         launched_args = parser.parse_args(plan.argv)
     except SystemExit:
-        print("生成参数解析失败，请重试 `sft-label start` / Generated arguments failed to parse. Re-run `sft-label start`.")
+        print(_start_msg(
+            lang,
+            "生成参数解析失败，请重试 `sft-label start`。",
+            "Generated arguments failed to parse. Re-run `sft-label start`.",
+        ))
         return
 
     if launched_args.command == "start":
-        print("交互启动器不能再次启动自身 / Interactive launcher cannot launch itself.")
+        print(_start_msg(lang, "交互启动器不能再次启动自身。", "Interactive launcher cannot launch itself."))
         return
 
     dispatch_command(launched_args, parser=parser)
@@ -389,6 +430,10 @@ def build_parser():
     )
     start_parser.add_argument("--dry-run", action="store_true",
                               help="Only print generated command; do not execute it")
+    start_parser.add_argument("--lang", choices=["zh", "en"], default="zh",
+                              help="Language for interactive prompts (default: zh)")
+    start_parser.add_argument("--en", action="store_true",
+                              help=argparse.SUPPRESS)
 
     # --- run ---
     run_parser = subparsers.add_parser(
