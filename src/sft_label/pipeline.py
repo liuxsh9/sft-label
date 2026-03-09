@@ -1651,7 +1651,7 @@ def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
 async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  enable_arbitration=True, limit=0, shuffle=False,
                                  progress=None, sample_task=None, config=None,
-                                 rate_limiter=None):
+                                 rate_limiter=None, llm_progress_cb=None):
     """Chunked JSONL labeling: watermark-based processing for large files.
 
     Processes JSONL files in chunks to bound memory usage. Each chunk is
@@ -1807,6 +1807,10 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                     info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [chunk {c.chunk_idx + 1}]"
                     if rate_limiter:
                         info += f" | {rate_limiter.stats.summary_line()}"
+                    if llm_progress_cb and monitor:
+                        ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                        if ginfo:
+                            info += f" | {ginfo}"
                     progress.update(sample_task, advance=1, info=info)
 
                 # Check if chunk is fully done
@@ -1870,7 +1874,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 async def run_one_file(input_path, output_dir, http_client, sem, model,
                        enable_arbitration=True, limit=0, shuffle=False,
                        file_prefix=None, progress=None, sample_task=None,
-                       config=None, rate_limiter=None):
+                       config=None, rate_limiter=None, llm_progress_cb=None):
     """Label a single file. Writes outputs to output_dir. Returns stats dict.
 
     file_prefix: if set, output files are named e.g. labeled_<prefix>.json
@@ -1882,7 +1886,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             input_path, output_dir, http_client, sem, model,
             enable_arbitration=enable_arbitration, limit=limit, shuffle=shuffle,
             progress=progress, sample_task=sample_task, config=config,
-            rate_limiter=rate_limiter,
+            rate_limiter=rate_limiter, llm_progress_cb=llm_progress_cb,
         )
 
     # Load input — streaming for JSONL
@@ -1947,6 +1951,10 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             info = f"✓{ok_count}" + (f" ✗{fail_count}" if fail_count else "") + sparse_info
             if rate_limiter:
                 info += f" | {rate_limiter.stats.summary_line()}"
+            if llm_progress_cb and monitor:
+                ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                if ginfo:
+                    info += f" | {ginfo}"
             progress.update(sample_task, advance=1, info=info)
         else:
             # Fallback: per-sample print (no progress bar)
@@ -2114,7 +2122,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                                  progress=None, file_task=None, sample_task=None,
                                  http_client=None, sem=None, enable_arbitration=True,
                                  config=None, rate_limiter=None,
-                                 llm_task=None, workload_estimate=None):
+                                 llm_task=None, workload_estimate=None,
+                                 llm_progress_cb=None):
     """Cross-file pipeline with watermark-based file loading.
 
     Instead of processing files serially, loads new files whenever in-flight
@@ -2283,6 +2292,10 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [{c.rel_path.name}]" + c.sparse_info
                 if rate_limiter:
                     info += f" | {rate_limiter.stats.summary_line()}"
+                if llm_progress_cb and monitor:
+                    ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                    if ginfo:
+                        info += f" | {ginfo}"
                 progress.update(sample_task, advance=1, info=info)
             if eta_tracker:
                 eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
@@ -2438,6 +2451,7 @@ async def run(
     shuffle: bool = False,
     enable_arbitration: bool = True,
     config: PipelineConfig | None = None,
+    llm_progress_cb=None,
 ) -> dict:
     """Library entry point for the labeling pipeline.
 
@@ -2553,6 +2567,7 @@ async def run(
                     http_client=http_client, sem=sem,
                     enable_arbitration=enable_arbitration,
                     config=config, rate_limiter=rate_limiter,
+                    llm_progress_cb=llm_progress_cb,
                 )
 
         # Write global summary
@@ -2640,6 +2655,7 @@ async def run(
                     http_client=http_client, sem=sem,
                     enable_arbitration=enable_arbitration,
                     config=config, rate_limiter=rate_limiter,
+                    llm_progress_cb=llm_progress_cb,
                 )
 
         _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start,
@@ -2668,6 +2684,7 @@ async def run(
                     limit=limit, shuffle=shuffle,
                     progress=progress, sample_task=sample_task,
                     config=config, rate_limiter=rate_limiter,
+                    llm_progress_cb=llm_progress_cb,
                 )
 
         stats["model"] = config.labeling_model

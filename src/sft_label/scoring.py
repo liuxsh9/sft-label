@@ -1170,7 +1170,7 @@ def _create_progress():
 
 
 async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
-                      limit=0, config=None, resume=False):
+                      limit=0, config=None, resume=False, llm_progress_cb=None):
     """Run value scoring (Pass 2) on pre-labeled data.
 
     Args:
@@ -1188,13 +1188,19 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
 
     # Determine if directory or single file
     if input_path.is_dir():
-        return await _run_scoring_directory(input_path, output_dir, tag_stats_path, limit, config)
+        return await _run_scoring_directory(
+            input_path, output_dir, tag_stats_path, limit, config,
+            llm_progress_cb=llm_progress_cb,
+        )
     else:
-        return await _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=resume)
+        return await _run_scoring_file(
+            input_path, output_dir, tag_stats_path, limit, config,
+            resume=resume, llm_progress_cb=llm_progress_cb,
+        )
 
 
 async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
-                                     limit, config):
+                                     limit, config, llm_progress_cb=None):
     """Score a JSONL labeled file in chunks to bound memory.
 
     Two-pass approach:
@@ -1458,6 +1464,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         _info = f"ok={scored_count + (1 if value else 0)} fail={failed_count + (0 if value else 1)}"
                         if rate_limiter:
                             _info += f" | {rate_limiter.stats.summary_line()}"
+                        if llm_progress_cb and monitor:
+                            ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                            if ginfo:
+                                _info += f" | {ginfo}"
                         progress.update(task, advance=1, info=_info)
 
                         # Check if chunk is done
@@ -1799,7 +1809,8 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
     print(f"\nRun dir: {run_dir}")
 
 
-async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=False):
+async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=False,
+                            llm_progress_cb=None):
     """Score a single labeled file."""
     input_path = Path(input_path)
 
@@ -1807,6 +1818,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     if input_path.suffix == ".jsonl":
         return await _run_scoring_file_chunked(
             input_path, output_dir, tag_stats_path, limit, config,
+            llm_progress_cb=llm_progress_cb,
         )
 
     if output_dir is None:
@@ -1955,6 +1967,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                 _info = f"ok={scored_count} fail={failed_count}"
                 if rate_limiter:
                     _info += f" | {rate_limiter.stats.summary_line()}"
+                monitor = all_monitors[idx]
+                if llm_progress_cb and monitor:
+                    ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                    if ginfo:
+                        _info += f" | {ginfo}"
                 progress.update(task, advance=1, info=_info)
 
     elapsed = time.time() - start_time
@@ -2255,7 +2272,8 @@ def _flush_scoring_file(collector, config, pprint=print):
     return stats
 
 
-async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, config):
+async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, config,
+                                 llm_progress_cb=None):
     """Score all labeled files in a directory with cross-file parallelism.
 
     Uses watermark-based file loading (same pattern as Pass 1's
@@ -2498,6 +2516,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     _info = f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]"
                     if rate_limiter:
                         _info += f" | {rate_limiter.stats.summary_line()}"
+                    if llm_progress_cb and monitor:
+                        ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                        if ginfo:
+                            _info += f" | {ginfo}"
                     progress.update(sample_task, advance=1, info=_info)
                     eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
                     progress.update(

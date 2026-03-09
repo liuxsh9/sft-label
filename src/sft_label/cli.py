@@ -21,6 +21,9 @@ import argparse
 import asyncio
 import os
 import sys
+import time
+import random
+from pathlib import Path
 
 
 def _start_msg(lang: str, zh: str, en: str) -> str:
@@ -71,6 +74,134 @@ def _apply_runtime_overrides(config, args):
             setattr(config, attr, val)
 
 
+def _format_eta(seconds) -> str:
+    if seconds is None:
+        return "--:--"
+    sec = max(int(seconds), 0)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+class _CombinedLLMProgressTracker:
+    """Track global LLM call progress across Pass 1 and Pass 2."""
+
+    def __init__(self, planned_total_calls: int):
+        self.planned_total_calls = max(int(planned_total_calls), 1)
+        self.calls_done = 0
+        self.pass1_calls = 0
+        self.pass2_calls = 0
+        self._start_time = time.time()
+        self._smoothed_cps = 0.0
+
+    def update(self, delta_calls: int, stage: str) -> str:
+        delta = max(int(delta_calls or 0), 0)
+        self.calls_done += delta
+        if stage == "pass1":
+            self.pass1_calls += delta
+        elif stage == "pass2":
+            self.pass2_calls += delta
+
+        elapsed = max(time.time() - self._start_time, 1e-6)
+        instant_cps = self.calls_done / elapsed
+        if self._smoothed_cps <= 0:
+            self._smoothed_cps = instant_cps
+        else:
+            self._smoothed_cps = 0.2 * instant_cps + 0.8 * self._smoothed_cps
+
+        return self.summary_line()
+
+    def eta_seconds(self):
+        if self._smoothed_cps <= 0:
+            return None
+        remaining = max(self.planned_total_calls - self.calls_done, 0)
+        return remaining / self._smoothed_cps
+
+    def summary_line(self) -> str:
+        pct = min(self.calls_done / max(self.planned_total_calls, 1) * 100, 100.0)
+        cps = f"{self._smoothed_cps:.1f}/s" if self._smoothed_cps > 0 else "warming"
+        eta = _format_eta(self.eta_seconds())
+        return (
+            f"global={self.calls_done}/{self.planned_total_calls} ({pct:.1f}%) "
+            f"eta {eta} rate {cps} p1={self.pass1_calls} p2={self.pass2_calls}"
+        )
+
+
+def _estimate_pass2_calls(total_samples: int, sample_max_retries: int) -> int:
+    retries = max(int(sample_max_retries), 1)
+    retry_factor = 1.0 + min(0.2, 0.05 * (retries - 1))
+    est = int(round(total_samples * retry_factor))
+    return max(est, total_samples)
+
+
+def _estimate_end_to_end_llm_calls(args, config):
+    """Estimate Pass1+Pass2 total LLM calls for run --score mode."""
+    if args.resume or not args.input:
+        return None
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        return None
+
+    from sft_label.pipeline import (
+        discover_input_files,
+        estimate_directory_workload,
+        iter_samples_from_file,
+        apply_sparse_sampling,
+    )
+
+    if input_path.is_dir():
+        files = discover_input_files(input_path)
+        dir_files = [(a, r) for a, r in files if r is not None]
+        if not dir_files:
+            return None
+        est = estimate_directory_workload(
+            dir_files,
+            limit=args.limit,
+            shuffle=args.shuffle,
+            config=config,
+            enable_arbitration=not args.no_arbitration,
+        )
+        pass1_calls = est.initial_estimated_llm_calls
+        pass1_labeled = est.total_labeled_samples
+        pass2_samples = est.total_samples
+    else:
+        rng_state = random.getstate()
+        try:
+            samples, _ = iter_samples_from_file(
+                input_path,
+                limit=args.limit,
+                shuffle=args.shuffle,
+            )
+        finally:
+            random.setstate(rng_state)
+
+        sparse_kw = dict(
+            full_label_count=config.sparse_full_label_count,
+            gap_multiplier=config.sparse_gap_multiplier,
+            min_gap=config.sparse_min_gap,
+            max_gap=config.sparse_max_gap,
+            threshold=config.sparse_threshold,
+        )
+        label_indices, _ = apply_sparse_sampling(samples, **sparse_kw)
+        pass1_labeled = len(label_indices)
+        pass2_samples = len(samples)
+        baseline = pass1_labeled * 2
+        calls_per_sample = 2.2 if not args.no_arbitration else 2.0
+        pass1_calls = max(int(round(pass1_labeled * calls_per_sample)), baseline)
+
+    pass2_calls = _estimate_pass2_calls(pass2_samples, config.sample_max_retries)
+    return {
+        "pass1_labeled_samples": pass1_labeled,
+        "pass2_samples": pass2_samples,
+        "pass1_est_calls": pass1_calls,
+        "pass2_est_calls": pass2_calls,
+        "total_est_calls": pass1_calls + pass2_calls,
+    }
+
+
 def cmd_run(args):
     """Run the labeling pipeline."""
     if not args.input and not args.resume:
@@ -85,6 +216,22 @@ def cmd_run(args):
     if args.model:
         config.labeling_model = args.model
         config.scoring_model = args.model
+
+    llm_progress_cb = None
+    global_tracker = None
+    if getattr(args, "score", False):
+        plan = _estimate_end_to_end_llm_calls(args, config)
+        if plan:
+            global_tracker = _CombinedLLMProgressTracker(plan["total_est_calls"])
+            print(
+                "Global LLM plan | "
+                f"pass1~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled) + "
+                f"pass2~{plan['pass2_est_calls']} ({plan['pass2_samples']} samples) = "
+                f"{plan['total_est_calls']} calls"
+            )
+            llm_progress_cb = global_tracker.update
+        else:
+            print("Global LLM plan skipped (unable to estimate from current arguments)")
     try:
         stats = asyncio.run(run(
             input_path=args.input,
@@ -94,6 +241,7 @@ def cmd_run(args):
             shuffle=args.shuffle,
             enable_arbitration=not args.no_arbitration,
             config=config,
+            llm_progress_cb=llm_progress_cb,
         ))
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -110,7 +258,10 @@ def cmd_run(args):
                 output_dir=run_dir,
                 tag_stats_path=getattr(args, "tag_stats", None),
                 config=config,
+                llm_progress_cb=llm_progress_cb,
             ))
+            if global_tracker:
+                print(f"\nGlobal LLM progress: {global_tracker.summary_line()}")
 
     # Optional semantic clustering pass (trajectory-level)
     if getattr(args, "semantic_cluster", False) and stats:
