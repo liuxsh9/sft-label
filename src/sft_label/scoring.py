@@ -43,7 +43,12 @@ from sft_label.preprocessing import (
     detect_thinking_mode, extract_cot_content, truncate_for_scoring,
     count_code_blocks,
 )
-from sft_label.pipeline import async_llm_call, AsyncRateLimiter, RequestStats
+from sft_label.pipeline import (
+    async_llm_call,
+    AsyncRateLimiter,
+    RequestStats,
+    RuntimeEtaEstimator,
+)
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
     PASS1_STATS_FILE_LEGACY,
@@ -2081,6 +2086,62 @@ class _ScoringFileCollector:
         self.monitors = [None] * self.total
 
 
+@dataclass
+class ScoringDirectoryWorkloadEstimate:
+    """Pre-run workload estimate for directory scoring."""
+    files_planned: int
+    total_samples: int
+    baseline_total_llm_calls: int
+    initial_estimated_llm_calls: int
+    scan_elapsed_seconds: float
+
+
+def _count_scoring_samples_in_file(labeled_path, limit=0):
+    """Count samples in a labeled file with per-file limit applied."""
+    if labeled_path.suffix == ".jsonl":
+        count = 0
+        with open(labeled_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+                    if limit > 0 and count >= limit:
+                        break
+        return count
+
+    with open(labeled_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        total = len(data)
+    else:
+        total = 1 if data else 0
+    if limit > 0:
+        total = min(total, limit)
+    return total
+
+
+def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
+    """Estimate scoring workload before directory-mode execution."""
+    start = time.time()
+    total_samples = 0
+    for labeled_path in labeled_files:
+        total_samples += _count_scoring_samples_in_file(labeled_path, limit=limit)
+
+    baseline_calls = total_samples
+    # Pass 2 has 1 guaranteed scoring call per sample; retries may increase calls.
+    sample_retries = max(getattr(config, "sample_max_retries", SAMPLE_MAX_RETRIES), 1)
+    retry_factor = 1.0 + min(0.2, 0.05 * (sample_retries - 1))
+    initial_est_calls = int(round(total_samples * retry_factor))
+    initial_est_calls = max(initial_est_calls, baseline_calls)
+
+    return ScoringDirectoryWorkloadEstimate(
+        files_planned=len(labeled_files),
+        total_samples=total_samples,
+        baseline_total_llm_calls=baseline_calls,
+        initial_estimated_llm_calls=initial_est_calls,
+        scan_elapsed_seconds=round(time.time() - start, 2),
+    )
+
+
 def _flush_scoring_file(collector, config, pprint=print):
     """Write all scoring outputs for a completed file and release memory.
 
@@ -2228,6 +2289,20 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         return {}
 
     print(f"Found {len(labeled_files)} labeled files in {input_dir}")
+    print("  planning scoring workload estimate...")
+    workload_estimate = estimate_scoring_directory_workload(
+        labeled_files,
+        limit=limit,
+        config=config,
+    )
+    print(
+        "  plan: "
+        f"{workload_estimate.files_planned} files, "
+        f"{workload_estimate.total_samples} samples, "
+        f"LLM calls ~{workload_estimate.initial_estimated_llm_calls} "
+        f"(baseline {workload_estimate.baseline_total_llm_calls}), "
+        f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
+    )
 
     # Use Pass 1 summary stats for rarity if no explicit stats provided
     if tag_stats_path is None:
@@ -2361,6 +2436,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     all_file_stats = []
     next_to_load = 0
     first_error_logged = False
+    eta_tracker = RuntimeEtaEstimator(
+        total_labeled_samples=workload_estimate.total_samples,
+        initial_estimated_calls=workload_estimate.initial_estimated_llm_calls,
+    )
 
     async with httpx.AsyncClient(
         proxy=None,
@@ -2372,15 +2451,22 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     ) as client:
         with _create_progress() as progress:
             file_task = progress.add_task("Files", total=len(labeled_files), info="")
-            sample_task = progress.add_task("Scoring", total=0, visible=True, info="loading...")
+            sample_task = progress.add_task(
+                "Scoring",
+                total=workload_estimate.total_samples,
+                visible=workload_estimate.total_samples > 0,
+                info="starting...",
+            )
+            llm_task = progress.add_task(
+                "LLM calls",
+                total=max(workload_estimate.initial_estimated_llm_calls, 1),
+                visible=workload_estimate.total_samples > 0,
+                info=eta_tracker.info_line(),
+            )
             pprint = progress.console.print
 
             # Initial load
             next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
-
-            # Update total for progress bar
-            total_samples = sum(c.total for c in collectors.values())
-            progress.update(sample_task, total=total_samples)
 
             while pending_futures:
                 done, pending_futures = await asyncio.wait(
@@ -2413,6 +2499,13 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     if rate_limiter:
                         _info += f" | {rate_limiter.stats.summary_line()}"
                     progress.update(sample_task, advance=1, info=_info)
+                    eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                    progress.update(
+                        llm_task,
+                        total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                        completed=eta_tracker.calls_done,
+                        info=eta_tracker.info_line(),
+                    )
 
                     # Check if file is fully done
                     if c.done >= c.total and not c.completed:
@@ -2422,12 +2515,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         progress.update(file_task, advance=1)
 
                 # After processing batch, check if we should load more files
-                prev_load = next_to_load
                 next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
-                # Update sample progress total if new files loaded
-                if next_to_load > prev_load:
-                    new_total = sum(c.total for c in collectors.values())
-                    progress.update(sample_task, total=new_total)
 
                 active_names = [c.labeled_path.name for c in collectors.values()
                                 if not c.completed]
@@ -2442,6 +2530,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         summary["model"] = config.scoring_model
         summary["input_path"] = str(input_dir)
         summary["files_processed"] = len(all_file_stats)
+        summary["planned_files"] = workload_estimate.files_planned
+        summary["planned_samples"] = workload_estimate.total_samples
+        summary["planned_baseline_llm_calls"] = workload_estimate.baseline_total_llm_calls
+        summary["planned_initial_llm_calls"] = workload_estimate.initial_estimated_llm_calls
+        summary["planning_elapsed_seconds"] = workload_estimate.scan_elapsed_seconds
         if rate_limiter:
             summary["http_request_stats"] = rate_limiter.stats.to_dict()
 

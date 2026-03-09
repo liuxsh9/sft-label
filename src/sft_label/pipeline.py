@@ -1093,6 +1093,148 @@ class FileCollector:
         self.monitors = [None] * self.total
 
 
+@dataclass
+class DirectoryWorkloadEstimate:
+    """Pre-run workload estimate for directory mode."""
+    files_planned: int
+    total_raw_conversations: int
+    total_samples: int
+    total_labeled_samples: int
+    total_inherited_samples: int
+    baseline_total_llm_calls: int
+    initial_estimated_llm_calls: int
+    scan_elapsed_seconds: float
+
+
+class RuntimeEtaEstimator:
+    """Adaptive ETA tracker based on observed LLM-call throughput."""
+
+    def __init__(self, total_labeled_samples: int, initial_estimated_calls: int):
+        self.total_labeled_samples = max(int(total_labeled_samples), 0)
+        self.samples_done = 0
+        self.calls_done = 0
+        self.avg_calls_per_sample = 0.0
+        self.calls_per_sec = 0.0
+        self.estimated_total_calls = max(int(initial_estimated_calls), 0)
+        self._start_time = time.time()
+        self._smoothed_cps = 0.0
+        self._warmup_samples = min(max(8, self.total_labeled_samples // 50), 30)
+
+    @staticmethod
+    def _fmt_duration(seconds):
+        if seconds is None:
+            return "--:--"
+        sec = max(int(seconds), 0)
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    def update(self, sample_llm_calls: int):
+        calls = max(int(sample_llm_calls or 0), 0)
+        self.samples_done += 1
+        self.calls_done += calls
+
+        if self.samples_done > 0:
+            self.avg_calls_per_sample = self.calls_done / self.samples_done
+
+        if self.total_labeled_samples > 0 and self.samples_done >= self._warmup_samples:
+            target_total = int(round(self.avg_calls_per_sample * self.total_labeled_samples))
+            target_total = max(target_total, self.calls_done)
+            alpha = 0.2
+            blended = int(round((1.0 - alpha) * self.estimated_total_calls + alpha * target_total))
+            self.estimated_total_calls = max(blended, self.calls_done)
+        else:
+            self.estimated_total_calls = max(self.estimated_total_calls, self.calls_done)
+
+        elapsed = max(time.time() - self._start_time, 1e-6)
+        instant_cps = self.calls_done / elapsed
+        if self._smoothed_cps <= 0:
+            self._smoothed_cps = instant_cps
+        else:
+            self._smoothed_cps = 0.2 * instant_cps + 0.8 * self._smoothed_cps
+        self.calls_per_sec = self._smoothed_cps
+
+    def eta_seconds(self):
+        if self.calls_per_sec <= 0:
+            return None
+        remaining = max(self.estimated_total_calls - self.calls_done, 0)
+        return remaining / self.calls_per_sec
+
+    def info_line(self):
+        rate = f"{self.calls_per_sec:.1f} calls/s" if self.calls_per_sec > 0 else "warming"
+        eta = self._fmt_duration(self.eta_seconds())
+        avg = f"{self.avg_calls_per_sample:.2f} calls/sample" if self.samples_done > 0 else "n/a"
+        return f"{rate} | eta {eta} | avg {avg}"
+
+
+def estimate_directory_workload(
+    dir_files,
+    *,
+    limit=0,
+    shuffle=False,
+    config=None,
+    completed_set=None,
+    enable_arbitration=True,
+):
+    """Estimate global workload before directory-mode execution."""
+    completed_set = completed_set or set()
+    start = time.time()
+    total_raw = 0
+    total_samples = 0
+    total_labeled = 0
+    total_inherited = 0
+    files_planned = 0
+
+    _sparse_kw = {}
+    if config:
+        _sparse_kw = dict(
+            full_label_count=config.sparse_full_label_count,
+            gap_multiplier=config.sparse_gap_multiplier,
+            min_gap=config.sparse_min_gap,
+            max_gap=config.sparse_max_gap,
+            threshold=config.sparse_threshold,
+        )
+
+    # Preserve RNG state so pre-scan doesn't perturb runtime shuffle behavior.
+    rng_state = random.getstate()
+    try:
+        for abs_path, rel_path in dir_files:
+            rel_str = str(rel_path)
+            if rel_str in completed_set:
+                continue
+            files_planned += 1
+
+            samples, n_raw = iter_samples_from_file(abs_path, limit=limit, shuffle=shuffle)
+            label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
+
+            total_raw += n_raw
+            total_samples += len(samples)
+            total_labeled += len(label_indices)
+            total_inherited += len(inherit_map)
+            del samples
+    finally:
+        random.setstate(rng_state)
+
+    baseline_calls = total_labeled * 2
+    # Call1 + Call2 are guaranteed. Arbitration may add extra calls.
+    initial_calls_per_sample = 2.2 if enable_arbitration else 2.0
+    initial_est_calls = int(round(total_labeled * initial_calls_per_sample))
+    initial_est_calls = max(initial_est_calls, baseline_calls)
+
+    return DirectoryWorkloadEstimate(
+        files_planned=files_planned,
+        total_raw_conversations=total_raw,
+        total_samples=total_samples,
+        total_labeled_samples=total_labeled,
+        total_inherited_samples=total_inherited,
+        baseline_total_llm_calls=baseline_calls,
+        initial_estimated_llm_calls=initial_est_calls,
+        scan_elapsed_seconds=round(time.time() - start, 2),
+    )
+
+
 def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     """Write all outputs for a completed file and release memory.
 
@@ -1971,7 +2113,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                                  limit=0, shuffle=False,
                                  progress=None, file_task=None, sample_task=None,
                                  http_client=None, sem=None, enable_arbitration=True,
-                                 config=None, rate_limiter=None):
+                                 config=None, rate_limiter=None,
+                                 llm_task=None, workload_estimate=None):
     """Cross-file pipeline with watermark-based file loading.
 
     Instead of processing files serially, loads new files whenever in-flight
@@ -2047,8 +2190,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             sparse_info=f" ({len(samples)} total, {round(sparse_inherited/len(samples)*100)}% sparse)" if sparse_inherited > 0 else "",
         )
 
-        # Update samples progress bar total (use label_count, not total samples)
-        if progress and sample_task is not None:
+        # Fallback behavior: if no pre-scan estimate, grow total dynamically.
+        if progress and sample_task is not None and workload_estimate is None:
             current_total = progress.tasks[sample_task].total or 0
             progress.update(sample_task, total=current_total + label_count, visible=True)
 
@@ -2085,9 +2228,29 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     all_file_stats = list(skipped_stats)
     file_queue = list(pending_files)
     next_to_load = 0
+    eta_tracker = None
+    if workload_estimate and workload_estimate.total_labeled_samples > 0:
+        eta_tracker = RuntimeEtaEstimator(
+            total_labeled_samples=workload_estimate.total_labeled_samples,
+            initial_estimated_calls=workload_estimate.initial_estimated_llm_calls,
+        )
 
     if progress and sample_task is not None:
-        progress.update(sample_task, total=0, completed=0, visible=True, info="starting...")
+        initial_sample_total = (
+            workload_estimate.total_labeled_samples if workload_estimate else 0
+        )
+        progress.update(sample_task, total=initial_sample_total, completed=0, visible=True, info="starting...")
+    if progress and llm_task is not None:
+        if eta_tracker:
+            progress.update(
+                llm_task,
+                total=max(eta_tracker.estimated_total_calls, 1),
+                completed=0,
+                visible=True,
+                info=eta_tracker.info_line(),
+            )
+        else:
+            progress.update(llm_task, visible=False)
 
     # Initial load
     next_to_load = maybe_load_more(pending_futures, collectors, file_queue, next_to_load)
@@ -2121,6 +2284,15 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 if rate_limiter:
                     info += f" | {rate_limiter.stats.summary_line()}"
                 progress.update(sample_task, advance=1, info=info)
+            if eta_tracker:
+                eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                if progress and llm_task is not None:
+                    progress.update(
+                        llm_task,
+                        total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                        completed=eta_tracker.calls_done,
+                        info=eta_tracker.info_line(),
+                    )
 
             # Check if this file is fully done (compare against label_count, not total)
             if c.done >= c.label_count and not c.completed:
@@ -2207,7 +2379,7 @@ def print_summary(stats, run_dir, is_batch=False):
 
 
 def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrency, batch_start,
-                          rate_limiter=None):
+                          rate_limiter=None, workload_estimate=None):
     """Write global summary stats + dashboard for a batch run."""
     batch_elapsed = time.time() - batch_start
     summary = merge_stats(all_file_stats) if all_file_stats else {
@@ -2222,6 +2394,15 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     summary["timestamp"] = datetime.now().isoformat()
     summary["input_path"] = str(input_path)
     summary["run_dir"] = str(run_dir)
+    if workload_estimate is not None:
+        summary["planned_files"] = workload_estimate.files_planned
+        summary["planned_raw_conversations"] = workload_estimate.total_raw_conversations
+        summary["planned_samples"] = workload_estimate.total_samples
+        summary["planned_labeled_samples"] = workload_estimate.total_labeled_samples
+        summary["planned_inherited_samples"] = workload_estimate.total_inherited_samples
+        summary["planned_baseline_llm_calls"] = workload_estimate.baseline_total_llm_calls
+        summary["planned_initial_llm_calls"] = workload_estimate.initial_estimated_llm_calls
+        summary["planning_elapsed_seconds"] = workload_estimate.scan_elapsed_seconds
     if rate_limiter:
         summary["http_request_stats"] = rate_limiter.stats.to_dict()
 
@@ -2318,6 +2499,24 @@ async def run(
         _concurrency = config.concurrency
 
         print(f"Pipeline RESUME | {run_dir} | model={_model} concurrency={_concurrency} | {len(completed)}/{len(dir_files)} files done")
+        print("  planning workload estimate...")
+        workload_estimate = estimate_directory_workload(
+            dir_files,
+            limit=limit,
+            shuffle=shuffle,
+            config=config,
+            completed_set=completed,
+            enable_arbitration=enable_arbitration,
+        )
+        print(
+            "  plan: "
+            f"{workload_estimate.files_planned} pending files, "
+            f"{workload_estimate.total_samples} samples "
+            f"({workload_estimate.total_labeled_samples} labeled, {workload_estimate.total_inherited_samples} inherited), "
+            f"LLM calls ~{workload_estimate.initial_estimated_llm_calls} "
+            f"(baseline {workload_estimate.baseline_total_llm_calls}), "
+            f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
+        )
 
         batch_start = time.time()
 
@@ -2333,12 +2532,24 @@ async def run(
             n = len(dir_files)
             with create_progress() as progress:
                 file_task = progress.add_task("Files", total=n, info="")
-                sample_task = progress.add_task("Samples", total=0, visible=False, info="starting...")
+                sample_task = progress.add_task(
+                    "Samples",
+                    total=workload_estimate.total_labeled_samples,
+                    visible=workload_estimate.total_labeled_samples > 0,
+                    info="starting...",
+                )
+                llm_task = progress.add_task(
+                    "LLM calls",
+                    total=max(workload_estimate.initial_estimated_llm_calls, 1),
+                    visible=workload_estimate.total_labeled_samples > 0,
+                    info="starting...",
+                )
                 all_file_stats = await run_directory_pipeline(
                     dir_files, run_dir, _model, _concurrency,
                     checkpoint_path, completed_set=completed,
                     limit=limit, shuffle=shuffle,
                     progress=progress, file_task=file_task, sample_task=sample_task,
+                    llm_task=llm_task, workload_estimate=workload_estimate,
                     http_client=http_client, sem=sem,
                     enable_arbitration=enable_arbitration,
                     config=config, rate_limiter=rate_limiter,
@@ -2346,7 +2557,7 @@ async def run(
 
         # Write global summary
         _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start,
-                              rate_limiter=rate_limiter)
+                              rate_limiter=rate_limiter, workload_estimate=workload_estimate)
         summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -2376,6 +2587,24 @@ async def run(
 
         checkpoint_path = run_dir / "checkpoint.json"
         create_checkpoint(checkpoint_path, dir_files)
+        print("  planning workload estimate...")
+        workload_estimate = estimate_directory_workload(
+            dir_files,
+            limit=limit,
+            shuffle=shuffle,
+            config=config,
+            completed_set=None,
+            enable_arbitration=enable_arbitration,
+        )
+        print(
+            "  plan: "
+            f"{workload_estimate.files_planned} files, "
+            f"{workload_estimate.total_samples} samples "
+            f"({workload_estimate.total_labeled_samples} labeled, {workload_estimate.total_inherited_samples} inherited), "
+            f"LLM calls ~{workload_estimate.initial_estimated_llm_calls} "
+            f"(baseline {workload_estimate.baseline_total_llm_calls}), "
+            f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
+        )
         batch_start = time.time()
 
         async with httpx.AsyncClient(
@@ -2390,19 +2619,31 @@ async def run(
             n = len(dir_files)
             with create_progress() as progress:
                 file_task = progress.add_task("Files", total=n, info="")
-                sample_task = progress.add_task("Samples", total=0, visible=False, info="starting...")
+                sample_task = progress.add_task(
+                    "Samples",
+                    total=workload_estimate.total_labeled_samples,
+                    visible=workload_estimate.total_labeled_samples > 0,
+                    info="starting...",
+                )
+                llm_task = progress.add_task(
+                    "LLM calls",
+                    total=max(workload_estimate.initial_estimated_llm_calls, 1),
+                    visible=workload_estimate.total_labeled_samples > 0,
+                    info="starting...",
+                )
                 all_file_stats = await run_directory_pipeline(
                     dir_files, run_dir, config.labeling_model, _concurrency,
                     checkpoint_path,
                     limit=limit, shuffle=shuffle,
                     progress=progress, file_task=file_task, sample_task=sample_task,
+                    llm_task=llm_task, workload_estimate=workload_estimate,
                     http_client=http_client, sem=sem,
                     enable_arbitration=enable_arbitration,
                     config=config, rate_limiter=rate_limiter,
                 )
 
         _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start,
-                              rate_limiter=rate_limiter)
+                              rate_limiter=rate_limiter, workload_estimate=workload_estimate)
         summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
