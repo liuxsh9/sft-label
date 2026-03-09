@@ -16,7 +16,7 @@ MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
 REQUEST_TIMEOUT = 90           # seconds per LLM call (first attempt)
 REQUEST_TIMEOUT_ESCALATION = [60, 90, 120]  # per-attempt timeout escalation
-DEFAULT_RPS_LIMIT = 10         # max LLM requests/sec (0 = unlimited)
+DEFAULT_RPS_LIMIT = 20         # max LLM requests/sec (0 = unlimited)
 DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
 
 # ═══════════════════════════════════════════════════════════
