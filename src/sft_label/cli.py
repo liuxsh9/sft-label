@@ -128,6 +128,7 @@ def cmd_filter(args):
         turn_quality_min=args.turn_quality_min,
         max_pruned_ratio=args.max_pruned_ratio,
         keep_first_last=not args.no_keep_first_last,
+        preserve_structure=args.preserve_structure,
     )
 
     # Validate: at least one criterion must be set
@@ -294,6 +295,8 @@ def main():
                                 help="Max fraction of turns to prune per conversation (default: 0.5)")
     filter_parser.add_argument("--no-keep-first-last", action="store_true",
                                 help="Allow pruning first/last turns in conversations")
+    filter_parser.add_argument("--preserve-structure", action="store_true",
+                                help="Directory input only: mirror input folder structure and file count")
 
     args = parser.parse_args()
 
