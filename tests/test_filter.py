@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sft_label.tools.filter_value import (
     filter_samples, run_filter, matches_filter, FilterConfig,
-    _find_scored_files, _convert_to_training_format,
+    _find_scored_files,
     _load_conversation_scores,
 )
 
@@ -407,6 +407,17 @@ class TestDirectoryModeComplex:
         assert "c1" in lookup
         assert lookup["c1"]["conv_value"] == 8.0
 
+    def test_conversation_scores_nested_deep_levels(self, tmp_path):
+        """conversation_scores.json deeper than 2 levels should be discovered."""
+        deep = tmp_path / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        conv_data = [{"conversation_id": "deep-c1", "conv_value": 9.0}]
+        (deep / "conversation_scores.json").write_text(json.dumps(conv_data))
+
+        lookup = _load_conversation_scores(str(tmp_path))
+        assert "deep-c1" in lookup
+        assert lookup["deep-c1"]["conv_value"] == 9.0
+
     def test_directory_empty_files(self, tmp_path):
         """Directory with empty scored files."""
         (tmp_path / "scored.json").write_text(json.dumps([]))
@@ -490,6 +501,14 @@ class TestFindScoredFiles:
     def test_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             _find_scored_files(tmp_path / "nonexistent")
+
+    def test_finds_scored_files_deep_levels(self, tmp_path):
+        deep = tmp_path / "x" / "y" / "z" / "k"
+        deep.mkdir(parents=True)
+        target = deep / "scored.json"
+        target.write_text(json.dumps([_scored(7.0)]))
+        files = _find_scored_files(tmp_path)
+        assert files == [target]
 
 
 # ── Source verification ──
@@ -666,6 +685,43 @@ class TestConversationFilter:
         config = FilterConfig(conv_value_min=5.0, difficulty=["advanced"])
         summary = run_filter(str(input_file), config=config)
         # Conv passes, but only 1 slice has difficulty=advanced
+        assert summary["retained"] == 1
+
+    def test_conv_and_sample_score_criteria_and_logic(self, tmp_path):
+        """Conversation gates must be combined with sample score filters using AND."""
+        samples = [
+            {
+                "id": "c1_t1",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "metadata": {"source_id": "c1", "turn_index": 1, "total_turns": 3},
+                "labels": {"difficulty": "advanced"},
+                "value": {"value_score": 9.0, "selection_score": 9.0},
+            },
+            {
+                "id": "c1_t2",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "metadata": {"source_id": "c1", "turn_index": 2, "total_turns": 3},
+                "labels": {"difficulty": "advanced"},
+                "value": {"value_score": 7.0, "selection_score": 9.0},
+            },
+            {
+                "id": "c1_t3",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "metadata": {"source_id": "c1", "turn_index": 3, "total_turns": 3},
+                "labels": {"difficulty": "advanced"},
+                "value": {"value_score": 9.0, "selection_score": 7.0},
+            },
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.5, "conv_selection": 8.5, "peak_complexity": 7},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(
+            conv_value_min=8.0,
+            value_min=8.0,
+            selection_min=8.0,
+        )
+        summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 1
 
     def test_missing_conversation_scores(self, tmp_path):
@@ -860,6 +916,65 @@ class TestTurnLevelPruning:
         config = FilterConfig(turn_value_min=5.0, keep_first_last=True)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 1
+
+
+class TestPreserveStructure:
+    def test_preserve_structure_scored_format(self, tmp_path):
+        root_samples = [_full_sample(5.0), _full_sample(8.0)]
+        sub_samples = [_full_sample(7.0), _full_sample(3.0)]
+
+        (tmp_path / "scored.json").write_text(json.dumps(root_samples))
+        sub = tmp_path / "nested" / "leaf"
+        sub.mkdir(parents=True)
+        with open(sub / "scored_extra.jsonl", "w", encoding="utf-8") as f:
+            for sample in sub_samples:
+                f.write(json.dumps(sample) + "\n")
+
+        out_root = tmp_path / "filtered_struct"
+        config = FilterConfig(value_min=6.0, preserve_structure=True, output_format="scored")
+        summary = run_filter(str(tmp_path), output_path=str(out_root), config=config)
+
+        assert summary["files_written"] == 2
+        assert summary["output_root"] == str(out_root)
+
+        out_root_json = out_root / "scored.json"
+        out_nested_jsonl = out_root / "nested" / "leaf" / "scored_extra.jsonl"
+        assert out_root_json.exists()
+        assert out_nested_jsonl.exists()
+
+        with open(out_root_json, encoding="utf-8") as f:
+            root_retained = json.load(f)
+        assert len(root_retained) == 1
+
+        with open(out_nested_jsonl, encoding="utf-8") as f:
+            nested_retained = [json.loads(line) for line in f if line.strip()]
+        assert len(nested_retained) == 1
+
+    def test_preserve_structure_training_format(self, tmp_path):
+        root_samples = [_full_sample(5.0), _full_sample(9.0)]
+        sub_samples = [_full_sample(7.0), _full_sample(4.0)]
+
+        (tmp_path / "scored.json").write_text(json.dumps(root_samples))
+        sub = tmp_path / "nested"
+        sub.mkdir(parents=True)
+        (sub / "scored_more.json").write_text(json.dumps(sub_samples))
+
+        out_root = tmp_path / "filtered_training_struct"
+        config = FilterConfig(value_min=6.0, preserve_structure=True, output_format="training")
+        summary = run_filter(str(tmp_path), output_path=str(out_root), config=config)
+
+        assert summary["files_written"] == 2
+
+        out_root_jsonl = out_root / "scored.jsonl"
+        out_sub_jsonl = out_root / "nested" / "scored_more.jsonl"
+        assert out_root_jsonl.exists()
+        assert out_sub_jsonl.exists()
+
+        with open(out_root_jsonl, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert "id" in record
+        assert "conversations" in record
+        assert "labels" not in record
 
 
 def _load_retained(tmp_path):

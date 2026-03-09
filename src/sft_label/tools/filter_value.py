@@ -44,6 +44,7 @@ class FilterConfig:
     turn_quality_min: float | None = None   # min per-slice quality.overall
     max_pruned_ratio: float = 0.5           # don't prune more than 50% of turns
     keep_first_last: bool = True            # always keep first and last turns
+    preserve_structure: bool = False        # directory mode: mirror input tree
 
 
 def _parse_dim_tag(dim_tag):
@@ -176,15 +177,9 @@ def _load_conversation_scores(input_path):
 
     paths_to_try = []
     if input_path.is_file():
-        parent = input_path.parent
-        paths_to_try.append(parent / "conversation_scores.json")
+        paths_to_try.append(input_path.parent / "conversation_scores.json")
     elif input_path.is_dir():
-        for pattern in ("conversation_scores.json",
-                         "*/conversation_scores.json",
-                         "*/*/conversation_scores.json"):
-            for p in sorted(input_path.glob(pattern)):
-                if p not in paths_to_try:
-                    paths_to_try.append(p)
+        paths_to_try.extend(sorted(input_path.rglob("conversation_scores.json")))
 
     for p in paths_to_try:
         if not p.exists():
@@ -291,22 +286,17 @@ def _find_scored_files(input_path: Path):
         return [input_path]
 
     if input_path.is_dir():
-        files = []
-        for pattern in ("scored*.json", "scored*.jsonl",
-                         "*/scored*.json", "*/scored*.jsonl",
-                         "*/*/scored*.json", "*/*/scored*.jsonl"):
-            files.extend(input_path.glob(pattern))
+        files = sorted(set(input_path.rglob("scored*.json")) | set(input_path.rglob("scored*.jsonl")))
         # Deduplicate: when both .json and .jsonl exist for the same stem
-        # in the same directory, prefer .json (avoids double-counting)
+        # in the same directory, prefer .jsonl for streaming scalability.
         seen_stems = {}
-        for f in sorted(set(files)):
+        for f in files:
             key = (f.parent, f.stem)
             if key in seen_stems:
-                # Keep .json over .jsonl
+                # Keep .jsonl over .json
                 existing = seen_stems[key]
-                if existing.suffix == ".jsonl" and f.suffix == ".json":
+                if existing.suffix == ".json" and f.suffix == ".jsonl":
                     seen_stems[key] = f
-                # else keep existing (.json already there)
             else:
                 seen_stems[key] = f
         return sorted(seen_stems.values())
@@ -326,17 +316,138 @@ def _iter_samples_streaming(path: Path):
                     continue
 
 
+def _iter_json_array_streaming(path: Path, chunk_size: int = 1024 * 1024):
+    """Yield items from a JSON array without loading the full file into memory."""
+    decoder = json.JSONDecoder()
+    buffer = ""
+    started = False
+    expect_value = False
+    done = False
+
+    with open(path, encoding="utf-8") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            buffer += chunk
+            idx = 0
+
+            while True:
+                # Skip whitespace
+                while idx < len(buffer) and buffer[idx].isspace():
+                    idx += 1
+
+                if not started:
+                    if idx >= len(buffer):
+                        break
+                    if buffer[idx] != "[":
+                        raise ValueError(f"Expected JSON array in {path}")
+                    started = True
+                    expect_value = True
+                    idx += 1
+                    continue
+
+                if expect_value:
+                    # Could be empty array or end after comma-separated values
+                    if idx >= len(buffer):
+                        break
+                    if buffer[idx] == "]":
+                        done = True
+                        idx += 1
+                        break
+
+                    try:
+                        item, next_idx = decoder.raw_decode(buffer, idx)
+                    except json.JSONDecodeError:
+                        # Need more bytes for current item
+                        break
+                    yield item
+                    idx = next_idx
+                    expect_value = False
+                    continue
+
+                # Expect comma or closing bracket
+                if idx >= len(buffer):
+                    break
+                if buffer[idx] == ",":
+                    idx += 1
+                    expect_value = True
+                    continue
+                if buffer[idx] == "]":
+                    done = True
+                    idx += 1
+                    break
+                if buffer[idx].isspace():
+                    idx += 1
+                    continue
+                raise ValueError(f"Invalid JSON array syntax in {path}")
+
+            # Keep unconsumed suffix for next chunk
+            buffer = buffer[idx:]
+            if done:
+                # Ensure trailing bytes are just whitespace
+                if buffer.strip():
+                    raise ValueError(f"Unexpected trailing content in {path}")
+                break
+
+    if not done:
+        # Handle tiny files where closing bracket is in remaining buffer
+        idx = 0
+        while idx < len(buffer) and buffer[idx].isspace():
+            idx += 1
+        if not started:
+            if idx >= len(buffer):
+                raise ValueError(f"Empty file: {path}")
+            if buffer[idx] != "[":
+                raise ValueError(f"Expected JSON array in {path}")
+            started = True
+            expect_value = True
+            idx += 1
+        while True:
+            while idx < len(buffer) and buffer[idx].isspace():
+                idx += 1
+            if expect_value:
+                if idx < len(buffer) and buffer[idx] == "]":
+                    done = True
+                    idx += 1
+                    break
+                if idx >= len(buffer):
+                    break
+                try:
+                    item, next_idx = decoder.raw_decode(buffer, idx)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Malformed JSON array in {path}") from e
+                yield item
+                idx = next_idx
+                expect_value = False
+                continue
+            if idx >= len(buffer):
+                break
+            if buffer[idx] == ",":
+                idx += 1
+                expect_value = True
+                continue
+            if buffer[idx] == "]":
+                done = True
+                idx += 1
+                break
+            if buffer[idx].isspace():
+                idx += 1
+                continue
+            raise ValueError(f"Invalid JSON array syntax in {path}")
+
+        if not done:
+            raise ValueError(f"Unterminated JSON array in {path}")
+        if buffer[idx:].strip():
+            raise ValueError(f"Unexpected trailing content in {path}")
+
+
 def _load_samples(path: Path):
     """Load all samples from a JSON or JSONL file."""
     if path.suffix == ".jsonl":
         return list(_iter_samples_streaming(path))
 
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-
-    if isinstance(data, list):
-        return data
-    raise ValueError(f"Expected list in {path}, got {type(data).__name__}")
+    return list(_iter_json_array_streaming(path))
 
 
 def _iter_samples_from_files(paths):
@@ -346,11 +457,8 @@ def _iter_samples_from_files(paths):
             yield from _iter_samples_streaming(path)
         else:
             try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    yield from data
-            except (json.JSONDecodeError, OSError):
+                yield from _iter_json_array_streaming(path)
+            except (ValueError, OSError):
                 continue
 
 
@@ -385,6 +493,19 @@ def _generate_output_name(config, input_path):
     Uses 'filtered-' prefix to avoid being re-discovered by _find_scored_files
     when output lands in the same directory as input.
     """
+    suffix = _build_suffix(config)
+
+    if input_path.is_file():
+        parent = input_path.parent
+    else:
+        parent = input_path
+
+    fmt_ext = ".jsonl" if config.output_format == "training" else ".json"
+    return parent / f"filtered-{suffix}{fmt_ext}"
+
+
+def _build_suffix(config):
+    """Build filename suffix from active filter criteria."""
     parts = []
     if config.value_min is not None:
         parts.append(f"v{config.value_min:g}")
@@ -410,18 +531,317 @@ def _generate_output_name(config, input_path):
         parts.append(f"tv{config.turn_value_min:g}")
     if config.turn_quality_min is not None:
         parts.append(f"tq{config.turn_quality_min:g}")
+    return "-".join(parts) if parts else "all"
 
-    suffix = "-".join(parts) if parts else "all"
 
-    if input_path.is_file():
-        stem = input_path.stem
-        parent = input_path.parent
+def _build_filter_desc(config):
+    """Human-readable filter description."""
+    criteria = []
+    if config.value_min is not None:
+        criteria.append(f"value >= {config.value_min:g}")
+    if config.selection_min is not None:
+        criteria.append(f"selection >= {config.selection_min:g}")
+    if config.difficulty:
+        criteria.append(f"difficulty in [{', '.join(config.difficulty)}]")
+    if config.thinking_mode:
+        criteria.append(f"thinking = {config.thinking_mode}")
+    if config.include_tags:
+        criteria.append(f"include_tags = {config.include_tags}")
+    if config.exclude_tags:
+        criteria.append(f"exclude_tags = {config.exclude_tags}")
+    if config.exclude_inherited:
+        criteria.append("exclude inherited")
+    if config.conv_value_min is not None:
+        criteria.append(f"conv_value >= {config.conv_value_min:g}")
+    if config.conv_selection_min is not None:
+        criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
+    if config.peak_complexity_min is not None:
+        criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
+    if config.turn_count_min is not None:
+        criteria.append(f"turn_count >= {config.turn_count_min}")
+    if config.turn_count_max is not None:
+        criteria.append(f"turn_count <= {config.turn_count_max}")
+    if config.correctness_min is not None:
+        criteria.append(f"correctness >= {config.correctness_min:g}")
+    if config.turn_value_min is not None:
+        criteria.append(f"turn_value >= {config.turn_value_min:g}")
+    if config.turn_quality_min is not None:
+        criteria.append(f"turn_quality >= {config.turn_quality_min:g}")
+    return " AND ".join(criteria) if criteria else "none"
+
+
+def _passes_with_conv(sample, config, use_conv, conv_lookup):
+    """Apply conversation-level gate (if enabled) + full sample-level filter."""
+    if use_conv and _is_multi_turn(sample):
+        source_id = (sample.get("metadata") or {}).get("source_id")
+        conv_rec = conv_lookup.get(source_id) if source_id else None
+        if conv_rec is None or not _matches_conv_criteria(conv_rec, config):
+            return False
+    return matches_filter(sample, config)
+
+
+def _prune_turns(retained, config):
+    """Turn-level pruning: prune low-value slices within conversations."""
+    n_turn_pruned = 0
+    if not (_has_turn_criteria(config) and retained):
+        return retained, n_turn_pruned
+
+    mt_groups = {}  # source_id -> [(index_in_retained, sample)]
+    final_retained = []
+    for i, sample in enumerate(retained):
+        if _is_multi_turn(sample):
+            source_id = (sample.get("metadata") or {}).get("source_id")
+            mt_groups.setdefault(source_id, []).append((i, sample))
+        else:
+            if _passes_turn_criteria(sample, config):
+                final_retained.append(sample)
+            else:
+                n_turn_pruned += 1
+
+    for members in mt_groups.values():
+        n = len(members)
+        if n <= 1:
+            final_retained.extend(s for _, s in members)
+            continue
+
+        members.sort(key=lambda x: (x[1].get("metadata") or {}).get("turn_index", 0))
+
+        max_prune = int(n * config.max_pruned_ratio)
+        candidates_to_prune = []
+        for j, (_orig_idx, sample) in enumerate(members):
+            is_first = (j == 0)
+            is_last = (j == n - 1)
+            if config.keep_first_last and (is_first or is_last):
+                continue
+            if not _passes_turn_criteria(sample, config):
+                vs = (sample.get("value") or {}).get("value_score", 0.0) or 0.0
+                candidates_to_prune.append((j, vs))
+
+        if max_prune == 0:
+            candidates_to_prune = []
+        elif len(candidates_to_prune) > max_prune:
+            candidates_to_prune.sort(key=lambda x: x[1], reverse=True)
+            candidates_to_prune = candidates_to_prune[-max_prune:]
+
+        prune_set = {j for j, _ in candidates_to_prune}
+        n_turn_pruned += len(prune_set)
+
+        for j, (_orig_idx, sample) in enumerate(members):
+            if j not in prune_set:
+                final_retained.append(sample)
+
+    return final_retained, n_turn_pruned
+
+
+def _init_stream_stats():
+    """Initialize mutable stats used by streaming filter paths."""
+    return {
+        "total": 0,
+        "retained": 0,
+        "value_sum": 0.0,
+        "value_count": 0,
+        "inherited_retained": 0,
+        "verify_matched": 0,
+        "verify_no_meta": 0,
+    }
+
+
+def _accumulate_retained_stats(sample, config, stats):
+    """Update retained-sample stats for one sample."""
+    value = sample.get("value") or {}
+    score = value.get("value_score")
+    if score is not None:
+        stats["value_sum"] += score
+        stats["value_count"] += 1
+
+    if (sample.get("labels") or {}).get("inherited"):
+        stats["inherited_retained"] += 1
+
+    if config.verify_source:
+        if (sample.get("metadata") or {}).get("source_file"):
+            stats["verify_matched"] += 1
+        else:
+            stats["verify_no_meta"] += 1
+
+
+def _iter_filtered_samples(scored_files, config, use_conv, conv_lookup, stats):
+    """Stream filtered samples and update stats in-place."""
+    for sample in _iter_samples_from_files(scored_files):
+        stats["total"] += 1
+        if not _passes_with_conv(sample, config, use_conv, conv_lookup):
+            continue
+        stats["retained"] += 1
+        _accumulate_retained_stats(sample, config, stats)
+        yield sample
+
+
+def _collect_filtered_samples(scored_files, config, use_conv, conv_lookup):
+    """Collect filtered samples (needed for turn-level pruning path)."""
+    retained = []
+    total = 0
+    for sample in _iter_samples_from_files(scored_files):
+        total += 1
+        if _passes_with_conv(sample, config, use_conv, conv_lookup):
+            retained.append(sample)
+    retained, n_turn_pruned = _prune_turns(retained, config)
+    return total, retained, n_turn_pruned
+
+
+def _write_json_array(samples, json_path):
+    """Write samples as JSON array."""
+    with open(json_path, "w", encoding="utf-8") as f:
+        f.write("[\n")
+        first = True
+        for s in samples:
+            if not first:
+                f.write(",\n")
+            f.write(json.dumps(s, ensure_ascii=False))
+            first = False
+        f.write("\n]\n")
+
+
+def _write_jsonl(samples, jsonl_path, convert_training=False):
+    """Write samples as JSONL."""
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        for s in samples:
+            item = _convert_to_training_format(s) if convert_training else s
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def _write_outputs(retained_samples, output_path, config):
+    """Write output files for default mode."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if config.output_format == "training":
+        _write_jsonl(retained_samples, output_path, convert_training=True)
+        return None, output_path
+
+    json_path = output_path if output_path.suffix == ".json" else output_path.with_suffix(".json")
+    jsonl_path = json_path.with_suffix(".jsonl")
+    _write_json_array(retained_samples, json_path)
+    _write_jsonl(retained_samples, jsonl_path, convert_training=False)
+    return json_path, jsonl_path
+
+
+def _write_outputs_streaming(filtered_iter, output_path, config):
+    """Write output files in streaming mode (no in-memory retained list)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if config.output_format == "training":
+        with open(output_path, "w", encoding="utf-8") as out_jsonl:
+            for s in filtered_iter:
+                out_jsonl.write(json.dumps(_convert_to_training_format(s), ensure_ascii=False) + "\n")
+        return None, output_path
+
+    json_path = output_path if output_path.suffix == ".json" else output_path.with_suffix(".json")
+    jsonl_path = json_path.with_suffix(".jsonl")
+    with open(json_path, "w", encoding="utf-8") as out_json, \
+         open(jsonl_path, "w", encoding="utf-8") as out_jsonl:
+        out_json.write("[\n")
+        first = True
+        for s in filtered_iter:
+            if not first:
+                out_json.write(",\n")
+            payload = json.dumps(s, ensure_ascii=False)
+            out_json.write(payload)
+            out_jsonl.write(payload + "\n")
+            first = False
+        out_json.write("\n]\n")
+    return json_path, jsonl_path
+
+
+def _mirror_output_path(root_output, input_root, scored_file, config):
+    """Compute mirrored output path for one scored file."""
+    rel = scored_file.relative_to(input_root)
+    out = root_output / rel
+    if config.output_format == "training":
+        out = out.with_suffix(".jsonl")
+    return out
+
+
+def _run_filter_preserve_structure(input_path, scored_files, output_path, config, use_conv, conv_lookup):
+    """Directory mode: mirror input folder structure and file count."""
+    suffix = _build_suffix(config)
+    if output_path is None:
+        output_root = input_path / f"filtered-{suffix}"
     else:
-        stem = "scored"
-        parent = input_path
+        output_root = Path(output_path)
+    output_root.mkdir(parents=True, exist_ok=True)
 
-    fmt_ext = ".jsonl" if config.output_format == "training" else ".json"
-    return parent / f"filtered-{suffix}{fmt_ext}"
+    total = 0
+    retained = 0
+    value_sum = 0.0
+    value_count = 0
+    inherited_retained = 0
+    turn_pruned = 0
+    files_written = 0
+    verify_matched = 0
+    verify_no_meta = 0
+    output_files = []
+
+    for scored_file in scored_files:
+        out_file = _mirror_output_path(output_root, input_path, scored_file, config)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+
+        if _has_turn_criteria(config):
+            file_total, file_retained, file_turn_pruned = _collect_filtered_samples(
+                [scored_file], config, use_conv, conv_lookup
+            )
+            turn_pruned += file_turn_pruned
+            total += file_total
+            file_stats = _init_stream_stats()
+            retained += len(file_retained)
+            for s in file_retained:
+                file_stats["retained"] += 1
+                _accumulate_retained_stats(s, config, file_stats)
+            value_sum += file_stats["value_sum"]
+            value_count += file_stats["value_count"]
+            inherited_retained += file_stats["inherited_retained"]
+            verify_matched += file_stats["verify_matched"]
+            verify_no_meta += file_stats["verify_no_meta"]
+
+            if config.output_format == "training" or out_file.suffix == ".jsonl":
+                _write_jsonl(file_retained, out_file, convert_training=(config.output_format == "training"))
+            else:
+                _write_json_array(file_retained, out_file)
+        else:
+            file_stats = _init_stream_stats()
+            stream = _iter_filtered_samples([scored_file], config, use_conv, conv_lookup, file_stats)
+            if config.output_format == "training" or out_file.suffix == ".jsonl":
+                _write_jsonl(stream, out_file, convert_training=(config.output_format == "training"))
+            else:
+                _write_json_array(stream, out_file)
+            total += file_stats["total"]
+            retained += file_stats["retained"]
+            value_sum += file_stats["value_sum"]
+            value_count += file_stats["value_count"]
+            inherited_retained += file_stats["inherited_retained"]
+            verify_matched += file_stats["verify_matched"]
+            verify_no_meta += file_stats["verify_no_meta"]
+
+        files_written += 1
+        output_files.append(str(out_file))
+
+    summary = {
+        "total": total,
+        "retained": retained,
+        "dropped": total - retained,
+        "retention_rate": retained / total if total > 0 else 0.0,
+        "mean_value_retained": (value_sum / value_count) if value_count else 0.0,
+        "inherited_retained": inherited_retained,
+        "turn_pruned": turn_pruned,
+        "threshold": config.value_min,
+        "filter_criteria": _build_filter_desc(config),
+        "output_format": config.output_format,
+        "output_json": None,
+        "output_jsonl": None,
+        "output_root": str(output_root),
+        "output_files": output_files,
+        "files_written": files_written,
+    }
+    if config.verify_source:
+        summary["verify_source"] = {"matched": verify_matched, "no_metadata": verify_no_meta}
+    return summary
 
 
 # ── Main entry point ──
@@ -460,210 +880,99 @@ def run_filter(input_path, threshold=None, output_path=None,
     if use_conv:
         conv_lookup = _load_conversation_scores(input_path)
 
-    # Filter using streaming iteration
-    retained = []
-    total = 0
-
-    for sample in _iter_samples_from_files(scored_files):
-        total += 1
-        if use_conv and _is_multi_turn(sample):
-            # Multi-turn: check conv criteria first
-            source_id = (sample.get("metadata") or {}).get("source_id")
-            conv_rec = conv_lookup.get(source_id) if source_id else None
-            if conv_rec is None or not _matches_conv_criteria(conv_rec, config):
-                continue
-            # Still apply shared slice criteria (tags, difficulty, thinking_mode)
-            # but skip slice-level value_min/selection_min
-            shared_config = FilterConfig(
-                include_tags=config.include_tags,
-                exclude_tags=config.exclude_tags,
-                difficulty=config.difficulty,
-                thinking_mode=config.thinking_mode,
-                exclude_inherited=config.exclude_inherited,
-                include_unscored=True,
-                verify_source=config.verify_source,
-                correctness_min=config.correctness_min,
-            )
-            if matches_filter(sample, shared_config):
-                retained.append(sample)
-        else:
-            if matches_filter(sample, config):
-                retained.append(sample)
-
-    n_retained = len(retained)
-    n_dropped = total - n_retained
-    n_turn_pruned = 0
-
-    # Turn-level pruning: prune low-value slices within retained conversations
-    if _has_turn_criteria(config) and retained:
-        # Group multi-turn samples by source_id for per-conversation pruning
-        mt_groups = {}  # source_id -> [(index_in_retained, sample)]
-        final_retained = []
-        for i, sample in enumerate(retained):
-            if _is_multi_turn(sample):
-                source_id = (sample.get("metadata") or {}).get("source_id")
-                mt_groups.setdefault(source_id, []).append((i, sample))
-            else:
-                # Single-turn: apply turn criteria as simple filter
-                if _passes_turn_criteria(sample, config):
-                    final_retained.append(sample)
-                else:
-                    n_turn_pruned += 1
-
-        # Per-conversation pruning
-        for source_id, members in mt_groups.items():
-            n = len(members)
-            if n <= 1:
-                final_retained.extend(s for _, s in members)
-                continue
-
-            # Sort by turn_index for position-aware pruning
-            members.sort(key=lambda x: (x[1].get("metadata") or {}).get("turn_index", 0))
-
-            # Determine which slices to keep/prune
-            max_prune = int(n * config.max_pruned_ratio)
-            candidates_to_prune = []
-
-            for j, (orig_idx, sample) in enumerate(members):
-                is_first = (j == 0)
-                is_last = (j == n - 1)
-                if config.keep_first_last and (is_first or is_last):
-                    continue  # protected
-                if not _passes_turn_criteria(sample, config):
-                    vs = (sample.get("value") or {}).get("value_score", 0.0) or 0.0
-                    candidates_to_prune.append((j, vs))
-
-            # If too many to prune, rescue highest-scoring ones
-            if max_prune == 0:
-                candidates_to_prune = []
-            elif len(candidates_to_prune) > max_prune:
-                # Sort by value_score descending, rescue the top ones
-                candidates_to_prune.sort(key=lambda x: x[1], reverse=True)
-                candidates_to_prune = candidates_to_prune[-max_prune:]  # keep lowest-scoring
-
-            prune_set = {j for j, _ in candidates_to_prune}
-            n_turn_pruned += len(prune_set)
-
-            for j, (orig_idx, sample) in enumerate(members):
-                if j not in prune_set:
-                    final_retained.append(sample)
-
-        retained = final_retained
-        n_retained = len(retained)
-        n_dropped = total - n_retained
+    if config.preserve_structure and input_path.is_dir():
+        summary = _run_filter_preserve_structure(
+            input_path=input_path,
+            scored_files=scored_files,
+            output_path=output_path,
+            config=config,
+            use_conv=use_conv,
+            conv_lookup=conv_lookup,
+        )
+        _print_summary(summary)
+        return summary
 
     # Compute output path
     if output_path is None:
         output_path = _generate_output_name(config, input_path)
     output_path = Path(output_path)
 
-    # Write output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if config.output_format == "training":
-        # Training format: JSONL only
-        with open(output_path, "w", encoding="utf-8") as f:
-            for s in retained:
-                converted = _convert_to_training_format(s)
-                f.write(json.dumps(converted, ensure_ascii=False) + "\n")
-        jsonl_path = output_path
-        json_path = None
+    if _has_turn_criteria(config):
+        total, retained, n_turn_pruned = _collect_filtered_samples(
+            scored_files, config, use_conv, conv_lookup
+        )
+        n_retained = len(retained)
+        retained_stats = _init_stream_stats()
+        for s in retained:
+            retained_stats["retained"] += 1
+            _accumulate_retained_stats(s, config, retained_stats)
+        mean_value = (
+            retained_stats["value_sum"] / retained_stats["value_count"]
+            if retained_stats["value_count"] else 0.0
+        )
+        inherited_count = retained_stats["inherited_retained"]
+        verify_matched = retained_stats["verify_matched"]
+        verify_no_meta = retained_stats["verify_no_meta"]
+        json_path, jsonl_path = _write_outputs(retained, output_path, config)
     else:
-        # Scored format: JSON + JSONL
-        json_path = output_path if output_path.suffix == ".json" else output_path.with_suffix(".json")
-        jsonl_path = json_path.with_suffix(".jsonl")
-
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(retained, f, ensure_ascii=False, indent=2)
-        with open(jsonl_path, "w", encoding="utf-8") as f:
-            for s in retained:
-                f.write(json.dumps(s, ensure_ascii=False) + "\n")
-
-    # Compute summary
-    scored_retained = [s for s in retained if (s.get("value") or {}).get("value_score") is not None]
-    mean_value = (
-        sum(s["value"]["value_score"] for s in scored_retained) / len(scored_retained)
-        if scored_retained else 0.0
-    )
-    inherited_count = sum(1 for s in retained if (s.get("labels") or {}).get("inherited"))
-
-    # Source verification stats
-    verify_stats = {}
-    if config.verify_source:
-        matched = sum(1 for s in retained
-                      if (s.get("metadata") or {}).get("source_file"))
-        no_meta = sum(1 for s in retained
-                      if not (s.get("metadata") or {}).get("source_file"))
-        verify_stats = {"matched": matched, "no_metadata": no_meta}
-
-    # Build filter description
-    criteria = []
-    if config.value_min is not None:
-        criteria.append(f"value >= {config.value_min:g}")
-    if config.selection_min is not None:
-        criteria.append(f"selection >= {config.selection_min:g}")
-    if config.difficulty:
-        criteria.append(f"difficulty in [{', '.join(config.difficulty)}]")
-    if config.thinking_mode:
-        criteria.append(f"thinking = {config.thinking_mode}")
-    if config.include_tags:
-        criteria.append(f"include_tags = {config.include_tags}")
-    if config.exclude_tags:
-        criteria.append(f"exclude_tags = {config.exclude_tags}")
-    if config.exclude_inherited:
-        criteria.append("exclude inherited")
-    if config.conv_value_min is not None:
-        criteria.append(f"conv_value >= {config.conv_value_min:g}")
-    if config.conv_selection_min is not None:
-        criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
-    if config.peak_complexity_min is not None:
-        criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
-    if config.turn_count_min is not None:
-        criteria.append(f"turn_count >= {config.turn_count_min}")
-    if config.turn_count_max is not None:
-        criteria.append(f"turn_count <= {config.turn_count_max}")
-    if config.correctness_min is not None:
-        criteria.append(f"correctness >= {config.correctness_min:g}")
-    if config.turn_value_min is not None:
-        criteria.append(f"turn_value >= {config.turn_value_min:g}")
-    if config.turn_quality_min is not None:
-        criteria.append(f"turn_quality >= {config.turn_quality_min:g}")
-    filter_desc = " AND ".join(criteria) if criteria else "none"
+        stream_stats = _init_stream_stats()
+        stream = _iter_filtered_samples(scored_files, config, use_conv, conv_lookup, stream_stats)
+        json_path, jsonl_path = _write_outputs_streaming(stream, output_path, config)
+        total = stream_stats["total"]
+        n_retained = stream_stats["retained"]
+        n_turn_pruned = 0
+        mean_value = (
+            stream_stats["value_sum"] / stream_stats["value_count"]
+            if stream_stats["value_count"] else 0.0
+        )
+        inherited_count = stream_stats["inherited_retained"]
+        verify_matched = stream_stats["verify_matched"]
+        verify_no_meta = stream_stats["verify_no_meta"]
 
     summary = {
         "total": total,
         "retained": n_retained,
-        "dropped": n_dropped,
+        "dropped": total - n_retained,
         "retention_rate": n_retained / total if total > 0 else 0.0,
         "mean_value_retained": mean_value,
         "inherited_retained": inherited_count,
         "turn_pruned": n_turn_pruned,
         "threshold": config.value_min,
-        "filter_criteria": filter_desc,
+        "filter_criteria": _build_filter_desc(config),
         "output_format": config.output_format,
         "output_json": str(json_path) if json_path else None,
-        "output_jsonl": str(jsonl_path),
+        "output_jsonl": str(jsonl_path) if jsonl_path else None,
     }
-    if verify_stats:
-        summary["verify_source"] = verify_stats
+    if config.verify_source:
+        summary["verify_source"] = {"matched": verify_matched, "no_metadata": verify_no_meta}
 
-    # Print summary
-    print(f"\n  Filter Summary ({filter_desc})")
-    print(f"  {'Total samples:':<24} {total}")
-    print(f"  {'Retained:':<24} {n_retained}")
-    print(f"  {'Dropped:':<24} {n_dropped}")
-    if total:
-        print(f"  {'Retention rate:':<24} {n_retained / total * 100:.1f}%")
-    print(f"  {'Mean value (retained):':<24} {mean_value:.2f}")
-    if inherited_count:
-        print(f"  {'Inherited (retained):':<24} {inherited_count}")
-    if n_turn_pruned:
-        print(f"  {'Turn-pruned:':<24} {n_turn_pruned}")
-    if verify_stats:
-        print(f"  {'Source verified:':<24} {verify_stats['matched']} matched, {verify_stats['no_metadata']} no metadata")
-    print(f"  {'Format:':<24} {config.output_format}")
-    if json_path:
-        print(f"  Output: {json_path}")
-    print(f"  Output: {jsonl_path}")
-
+    _print_summary(summary)
     return summary
+
+
+def _print_summary(summary):
+    """Print summary in a stable format."""
+    print(f"\n  Filter Summary ({summary['filter_criteria']})")
+    print(f"  {'Total samples:':<24} {summary['total']}")
+    print(f"  {'Retained:':<24} {summary['retained']}")
+    print(f"  {'Dropped:':<24} {summary['dropped']}")
+    total = summary["total"]
+    if total:
+        print(f"  {'Retention rate:':<24} {summary['retention_rate'] * 100:.1f}%")
+    print(f"  {'Mean value (retained):':<24} {summary['mean_value_retained']:.2f}")
+    if summary.get("inherited_retained"):
+        print(f"  {'Inherited (retained):':<24} {summary['inherited_retained']}")
+    if summary.get("turn_pruned"):
+        print(f"  {'Turn-pruned:':<24} {summary['turn_pruned']}")
+    if summary.get("verify_source"):
+        verify = summary["verify_source"]
+        print(f"  {'Source verified:':<24} {verify['matched']} matched, {verify['no_metadata']} no metadata")
+    print(f"  {'Format:':<24} {summary['output_format']}")
+    if summary.get("output_root"):
+        print(f"  {'Output root:':<24} {summary['output_root']}")
+        print(f"  {'Files written:':<24} {summary.get('files_written', 0)}")
+    else:
+        if summary.get("output_json"):
+            print(f"  Output: {summary['output_json']}")
+        if summary.get("output_jsonl"):
+            print(f"  Output: {summary['output_jsonl']}")
