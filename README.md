@@ -236,6 +236,86 @@ Conversation-level criteria (multi-turn):
 | Turn count | `--turn-count-min/max` | `--turn-count-min 3 --turn-count-max 20` |
 | Turn-level pruning | `--turn-value-min` | `--turn-value-min 5` (prune low-value turns) |
 
+## Incremental Update Workflow
+
+### Recompute Statistics
+
+After manually editing labels, merging runs, or changing datasets, recompute stats without re-running the LLM pipeline:
+
+```bash
+# Single file
+uv run sft-label recompute-stats --input run_dir/labeled.json
+uv run sft-label recompute-stats --input run_dir/scored.json --pass 2
+
+# Entire run directory (recomputes per-file + summary stats)
+uv run sft-label recompute-stats --input run_dir/
+uv run sft-label recompute-stats --input run_dir/ --pass 1
+
+# Custom output directory
+uv run sft-label recompute-stats --input run_dir/ --output /path/to/output/
+```
+
+Recomputed stats are marked with `"recomputed": true`. LLM token usage fields will be zero (not preserved in pipeline output).
+
+### Regenerate Dashboards
+
+Re-generate HTML dashboards from existing stats and data files:
+
+```bash
+# Regenerate all dashboards in a run directory
+uv run sft-label regenerate-dashboard --input run_dir/
+
+# Pass 1 only, and open in browser
+uv run sft-label regenerate-dashboard --input run_dir/ --pass 1 --open
+
+# Pass 2 only
+uv run sft-label regenerate-dashboard --input run_dir/ --pass 2
+```
+
+Requires stats files to exist — run `recompute-stats` first if they are missing.
+
+### Cross-Dataset Rarity with `--tag-stats`
+
+Use a historical or global stats.json as the rarity baseline when scoring new data:
+
+```bash
+# Score new data using global tag distributions for rarity
+uv run sft-label score --input new_labeled.json --tag-stats global_stats.json
+
+# Continuous mode with external rarity baseline
+uv run sft-label run --input data.json --score --tag-stats /path/to/reference_stats.json
+```
+
+### Where to Find stats.json
+
+| Mode | Pass 1 | Pass 2 |
+|------|--------|--------|
+| Single file | `<run_dir>/stats.json` | `<run_dir>/stats_value.json` |
+| Directory | `<run_dir>/<subdir>/stats.json` | `<run_dir>/<subdir>/stats_value.json` |
+| Directory summary | `<run_dir>/summary_stats.json` | `<run_dir>/summary_stats_value.json` |
+
+### Typical Workflows
+
+1. **Edit labels → refresh stats/dashboards:**
+   ```bash
+   # Edit labeled.json manually, then:
+   uv run sft-label recompute-stats --input run_dir/ --pass 1
+   uv run sft-label regenerate-dashboard --input run_dir/ --pass 1
+   ```
+
+2. **Merge multiple runs → build combined reference:**
+   ```bash
+   # Copy scored files into a single directory, then:
+   uv run sft-label recompute-stats --input merged_dir/
+   # Use the merged stats as rarity baseline for new scoring:
+   uv run sft-label score --input new_data.json --tag-stats merged_dir/summary_stats.json
+   ```
+
+3. **Lost dashboards → regenerate:**
+   ```bash
+   uv run sft-label regenerate-dashboard --input run_dir/ --open
+   ```
+
 ## Development
 
 ```bash

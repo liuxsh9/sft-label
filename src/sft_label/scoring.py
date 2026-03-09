@@ -2615,3 +2615,7 @@ def _merge_value_stats(file_stats_list):
     merged["selection_by_tag"] = merged_sel_by_tag
 
     return merged
+
+
+# Public alias for external use (recompute module)
+merge_value_stats = _merge_value_stats

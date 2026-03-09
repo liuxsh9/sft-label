@@ -2,11 +2,15 @@
 CLI entry point for sft-label.
 
 Subcommands:
-  sft-label run            — Run Pass 1 tag labeling (optionally + Pass 2)
-  sft-label score          — Run Pass 2 value scoring on pre-labeled data
-  sft-label filter         — Filter scored data by value threshold
-  sft-label validate       — Validate taxonomy definitions
-  sft-label export-review  — Export labeled data to review CSV
+  sft-label run                  — Run Pass 1 tag labeling (optionally + Pass 2)
+  sft-label score                — Run Pass 2 value scoring on pre-labeled data
+  sft-label semantic-cluster     — Run trajectory SemHash + ANN clustering
+  sft-label export-semantic      — Export representative windows from clustering artifacts
+  sft-label filter               — Filter scored data by value threshold
+  sft-label validate             — Validate taxonomy definitions
+  sft-label export-review        — Export labeled data to review CSV
+  sft-label recompute-stats      — Recompute stats from labeled/scored output (no LLM)
+  sft-label regenerate-dashboard — Regenerate HTML dashboards from stats/data
 
 Model and concurrency are configured in config.py (PipelineConfig),
 not via CLI flags. Override via library API if needed.
@@ -56,6 +60,23 @@ def cmd_run(args):
                 tag_stats_path=getattr(args, "tag_stats", None),
                 config=config,
             ))
+
+    # Optional semantic clustering pass (trajectory-level)
+    if getattr(args, "semantic_cluster", False) and stats:
+        run_dir = stats.get("run_dir")
+        if run_dir:
+            print("\n── Trajectory Semantic Clustering ──\n")
+            from sft_label.semantic_clustering import (
+                run_semantic_clustering,
+                format_semantic_summary,
+            )
+            sc_stats = run_semantic_clustering(
+                input_path=run_dir,
+                output_dir=run_dir,
+                config=config,
+                export_representatives=True,
+            )
+            print(format_semantic_summary(sc_stats))
 
 
 def cmd_validate(args):
@@ -165,6 +186,118 @@ def cmd_filter(args):
         sys.exit(1)
 
 
+def _apply_semantic_overrides(config, args):
+    """Apply CLI semantic options onto PipelineConfig."""
+    for key in (
+        "semantic_long_turn_threshold",
+        "semantic_window_size",
+        "semantic_window_stride",
+        "semantic_pinned_prefix_max_turns",
+        "semantic_embedding_provider",
+        "semantic_embedding_model",
+        "semantic_embedding_dim",
+        "semantic_embedding_batch_size",
+        "semantic_embedding_max_workers",
+        "semantic_semhash_bits",
+        "semantic_semhash_seed",
+        "semantic_semhash_bands",
+        "semantic_hamming_radius",
+        "semantic_ann_top_k",
+        "semantic_ann_sim_threshold",
+        "semantic_output_prefix",
+    ):
+        val = getattr(args, key, None)
+        if val is not None:
+            setattr(config, key, val)
+
+
+def cmd_semantic_cluster(args):
+    """Run trajectory-level semantic clustering."""
+    from sft_label.config import PipelineConfig
+    from sft_label.semantic_clustering import (
+        run_semantic_clustering,
+        format_semantic_summary,
+        validate_semantic_config,
+    )
+
+    config = PipelineConfig()
+    _apply_semantic_overrides(config, args)
+
+    try:
+        validate_semantic_config(config)
+        stats = run_semantic_clustering(
+            input_path=args.input,
+            output_dir=args.output,
+            limit=args.limit,
+            config=config,
+            resume=args.resume,
+            export_representatives=not args.no_export_representatives,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print(format_semantic_summary(stats))
+
+
+def cmd_recompute_stats(args):
+    """Recompute stats from labeled/scored pipeline output."""
+    from sft_label.tools.recompute import run_recompute
+
+    try:
+        written = run_recompute(
+            input_path=args.input,
+            pass_num=args.pass_num,
+            output_dir=args.output,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if not written:
+        print("No stats files generated. Check that input contains "
+              "labeled/scored output.")
+        sys.exit(1)
+    print(f"\nDone. Wrote {len(written)} file(s).")
+
+
+def cmd_regenerate_dashboard(args):
+    """Regenerate HTML dashboards from existing stats and data."""
+    from sft_label.tools.recompute import run_regenerate_dashboard
+
+    try:
+        generated = run_regenerate_dashboard(
+            input_path=args.input,
+            pass_num=args.pass_num,
+            open_browser=getattr(args, "open", False),
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if not generated:
+        print("No dashboards generated. Check that input directory "
+              "contains stats files.")
+        sys.exit(1)
+    print(f"\nDone. Generated {len(generated)} dashboard(s).")
+
+
+def cmd_export_semantic(args):
+    """Export representative windows from semantic clustering artifacts."""
+    from sft_label.tools.export_semantic_clusters import run_export_semantic_clusters
+
+    try:
+        count = run_export_semantic_clusters(
+            input_dir=args.input,
+            output_path=args.output,
+            include_non_representative=args.include_all,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"Exported {count} semantic window rows to {args.output}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="sft-label",
@@ -197,6 +330,8 @@ def main():
                             help="Disable low-confidence arbitration pass")
     run_parser.add_argument("--score", action="store_true",
                             help="Chain Pass 2 value scoring after labeling")
+    run_parser.add_argument("--semantic-cluster", action="store_true",
+                            help="Chain trajectory semantic clustering after labeling/scoring")
     run_parser.add_argument("--tag-stats", type=str, default=None,
                             help="Path to stats.json for Pass 2 rarity (used with --score)")
     run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
@@ -232,6 +367,101 @@ def main():
                                help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
     score_parser.add_argument("--model", type=str, default=None,
                                help="LLM model name (default: gpt-4o-mini)")
+
+    # --- semantic-cluster ---
+    semantic_parser = subparsers.add_parser(
+        "semantic-cluster",
+        help="Run trajectory SemHash + ANN clustering",
+        description="Segment long trajectories with pinned prefix, compute semantic embeddings, "
+                    "build SemHash + ANN clusters, and select representative windows by SNR.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    semantic_parser.add_argument("--input", type=str, required=True,
+                                 help="Input file/dir (prefers scored/labeled outputs)")
+    semantic_parser.add_argument("--output", type=str, default=None,
+                                 help="Output directory (default: input dir)")
+    semantic_parser.add_argument("--limit", type=int, default=0,
+                                 help="Max samples to process, 0 = all")
+    semantic_parser.add_argument("--resume", action="store_true",
+                                 help="Check compatibility against existing manifest before run")
+    semantic_parser.add_argument("--no-export-representatives", action="store_true",
+                                 help="Do not write representative windows output file")
+    semantic_parser.add_argument("--semantic-long-turn-threshold", type=int, default=None,
+                                 help="Only trajectories above this turn count use sliding windows")
+    semantic_parser.add_argument("--semantic-window-size", type=int, default=None,
+                                 help="Window body size in turns")
+    semantic_parser.add_argument("--semantic-window-stride", type=int, default=None,
+                                 help="Sliding stride in turns")
+    semantic_parser.add_argument("--semantic-pinned-prefix-max-turns", type=int, default=None,
+                                 help="Max turns kept in pinned task-definition prefix")
+    semantic_parser.add_argument("--semantic-embedding-provider", choices=["local", "api"], default=None,
+                                 help="Embedding backend: local or api")
+    semantic_parser.add_argument("--semantic-embedding-model", type=str, default=None,
+                                 help="Embedding model id")
+    semantic_parser.add_argument("--semantic-embedding-dim", type=int, default=None,
+                                 help="Embedding vector dimension (local backend)")
+    semantic_parser.add_argument("--semantic-embedding-batch-size", type=int, default=None,
+                                 help="Embedding batch size")
+    semantic_parser.add_argument("--semantic-embedding-max-workers", type=int, default=None,
+                                 help="Embedding worker count for local backend")
+    semantic_parser.add_argument("--semantic-semhash-bits", type=int, default=None,
+                                 help="SemHash bit width (64/128/256/512)")
+    semantic_parser.add_argument("--semantic-semhash-seed", type=int, default=None,
+                                 help="SemHash random seed")
+    semantic_parser.add_argument("--semantic-semhash-bands", type=int, default=None,
+                                 help="SemHash band count")
+    semantic_parser.add_argument("--semantic-hamming-radius", type=int, default=None,
+                                 help="Hamming radius for coarse candidate filtering")
+    semantic_parser.add_argument("--semantic-ann-top-k", type=int, default=None,
+                                 help="Max refined neighbors per window")
+    semantic_parser.add_argument("--semantic-ann-sim-threshold", type=float, default=None,
+                                 help="Cosine similarity threshold for refined links")
+    semantic_parser.add_argument("--semantic-output-prefix", type=str, default=None,
+                                 help="Artifact filename prefix")
+
+    # --- export-semantic ---
+    export_sem_parser = subparsers.add_parser(
+        "export-semantic",
+        help="Export semantic clustering rows for review/training",
+    )
+    export_sem_parser.add_argument("--input", type=str, required=True,
+                                   help="Directory containing semantic clustering artifacts")
+    export_sem_parser.add_argument("--output", type=str, required=True,
+                                   help="Output JSONL path")
+    export_sem_parser.add_argument("--include-all", action="store_true",
+                                   help="Include non-representative rows (default: representatives only)")
+
+    # --- recompute-stats ---
+    recompute_parser = subparsers.add_parser(
+        "recompute-stats",
+        help="Recompute stats from labeled/scored output (no LLM)",
+        description="Rebuild stats.json / stats_value.json from existing pipeline output. "
+                    "Useful after manually editing labels or merging runs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    recompute_parser.add_argument("--input", type=str, required=True,
+                                   help="Labeled/scored file or run directory")
+    recompute_parser.add_argument("--pass", type=str, default="both",
+                                   choices=["1", "2", "both"], dest="pass_num",
+                                   help="Which pass stats to recompute (default: both)")
+    recompute_parser.add_argument("--output", type=str, default=None,
+                                   help="Output directory (default: same as input)")
+
+    # --- regenerate-dashboard ---
+    regen_parser = subparsers.add_parser(
+        "regenerate-dashboard",
+        help="Regenerate HTML dashboards from existing stats/data",
+        description="Re-generate HTML dashboards from existing stats and data files. "
+                    "Requires stats files to exist (run recompute-stats first if needed).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    regen_parser.add_argument("--input", type=str, required=True,
+                               help="Run directory containing stats/data files")
+    regen_parser.add_argument("--pass", type=str, default="both",
+                               choices=["1", "2", "both"], dest="pass_num",
+                               help="Which dashboards to regenerate (default: both)")
+    regen_parser.add_argument("--open", action="store_true",
+                               help="Open dashboards in browser after generation")
 
     # --- export-review ---
     review_parser = subparsers.add_parser("export-review",
@@ -307,10 +537,18 @@ def main():
         cmd_validate(args)
     elif args.command == "score":
         cmd_score(args)
+    elif args.command == "semantic-cluster":
+        cmd_semantic_cluster(args)
+    elif args.command == "export-semantic":
+        cmd_export_semantic(args)
     elif args.command == "filter":
         cmd_filter(args)
     elif args.command == "export-review":
         cmd_export_review(args)
+    elif args.command == "recompute-stats":
+        cmd_recompute_stats(args)
+    elif args.command == "regenerate-dashboard":
+        cmd_regenerate_dashboard(args)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,14 @@ uv run sft-label filter --input scored.json --value-min 6 --exclude-inherited --
 uv run sft-label filter --input scored.json --conv-value-min 7
 uv run sft-label filter --input run_dir/ --conv-value-min 6 --conv-selection-min 5
 uv run sft-label filter --input scored.json --conv-value-min 7 --peak-complexity-min 6 --format training
+
+# Recompute stats offline (no LLM, after editing/merging outputs)
+uv run sft-label recompute-stats --input run_dir/
+uv run sft-label recompute-stats --input scored.json --pass 2
+
+# Regenerate dashboards from existing stats
+uv run sft-label regenerate-dashboard --input run_dir/ --open
+uv run sft-label regenerate-dashboard --input run_dir/ --pass 1
 ```
 
 ## Architecture
@@ -120,8 +128,9 @@ This is a standalone extraction of the labeling subsystem from `build-user-query
 | `src/sft_label/prompts.py` | Pass 1 system prompts, TAG_POOLS |
 | `src/sft_label/prompts_value.py` | Pass 2 scoring prompts, few-shot examples |
 | `src/sft_label/config.py` | All configuration constants + PipelineConfig |
-| `src/sft_label/cli.py` | CLI entry point (run, validate, score, filter, export-review) |
+| `src/sft_label/cli.py` | CLI entry point (run, validate, score, filter, recompute-stats, regenerate-dashboard, export-review) |
 | `src/sft_label/tools/filter_value.py` | Multi-condition sample filtering + training format output |
+| `src/sft_label/tools/recompute.py` | Offline stats recomputation + dashboard regeneration |
 | `src/sft_label/tools/visualize_labels.py` | Pass 1 label dashboard generation |
 | `src/sft_label/tools/visualize_value.py` | Pass 2 score dashboard generation |
 
