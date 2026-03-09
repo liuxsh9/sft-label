@@ -2,6 +2,7 @@
 CLI entry point for sft-label.
 
 Subcommands:
+  sft-label start                — Interactive launcher for grouped workflows
   sft-label run                  — Run Pass 1 tag labeling (optionally + Pass 2)
   sft-label score                — Run Pass 2 value scoring on pre-labeled data
   sft-label semantic-cluster     — Run trajectory SemHash + ANN clustering
@@ -18,6 +19,7 @@ not via CLI flags. Override via library API if needed.
 
 import argparse
 import asyncio
+import os
 import sys
 
 
@@ -98,8 +100,21 @@ def cmd_export_review(args):
     """Export labeled data to review CSV."""
     from sft_label.tools.export_review import main as export_main
     # Patch sys.argv for the tool's own argparse
-    sys.argv = ["sft-label export-review"] + args.tool_args
-    export_main()
+    patched = [
+        "sft-label export-review",
+        "--input", args.input,
+        "--output", args.output,
+    ]
+    if args.monitor:
+        patched.extend(["--monitor", args.monitor])
+    if args.output_format:
+        patched.extend(["--format", args.output_format])
+    sys.argv = patched
+    try:
+        export_main()
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
 
 def cmd_score(args):
@@ -299,12 +314,68 @@ def cmd_export_semantic(args):
     print(f"Exported {count} semantic window rows to {args.output}")
 
 
-def main():
+def cmd_start(args, parser):
+    """Interactive launcher for grouped workflows."""
+    from sft_label.launcher import (
+        build_launch_plan,
+        format_command,
+        format_env_prefix,
+    )
+
+    plan = build_launch_plan()
+    if plan is None:
+        print("Launch cancelled.")
+        return
+
+    env_prefix = format_env_prefix(plan.env_overrides)
+    cmd_preview = format_command(plan.argv)
+    preview = f"{env_prefix} {cmd_preview}".strip()
+    print("\nGenerated command:")
+    print(f"  {preview}")
+
+    if args.dry_run:
+        print("\nDry run mode: command not executed.")
+        return
+
+    confirm = input("Execute now? [Y/n]: ").strip().lower()
+    if confirm in ("n", "no"):
+        print("Launch aborted.")
+        return
+
+    for key, value in plan.env_overrides.items():
+        os.environ[key] = value
+
+    try:
+        launched_args = parser.parse_args(plan.argv)
+    except SystemExit:
+        print("Generated arguments failed to parse. Re-run `sft-label start`.")
+        return
+
+    if launched_args.command == "start":
+        print("Interactive launcher cannot launch itself.")
+        return
+
+    dispatch_command(launched_args, parser=parser)
+
+
+def build_parser():
+    """Build CLI parser for all subcommands."""
     parser = argparse.ArgumentParser(
         prog="sft-label",
         description="SFT Capability Taxonomy & Auto-Labeling Pipeline",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- start ---
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Interactive launcher for grouped workflows",
+        description="Interactive task launcher that groups pipeline features "
+                    "and builds a runnable command for you.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    start_parser.add_argument("--dry-run", action="store_true",
+                              help="Only print generated command; do not execute it")
 
     # --- run ---
     run_parser = subparsers.add_parser(
@@ -465,10 +536,19 @@ def main():
                                help="Open dashboards in browser after generation")
 
     # --- export-review ---
-    review_parser = subparsers.add_parser("export-review",
-                                          help="Export labeled data to review CSV")
-    review_parser.add_argument("tool_args", nargs=argparse.REMAINDER,
-                               help="Arguments passed to export_review tool")
+    review_parser = subparsers.add_parser(
+        "export-review",
+        help="Export labeled data to review CSV",
+    )
+    review_parser.add_argument("--input", type=str, required=True,
+                               help="Input labeled JSON file")
+    review_parser.add_argument("--monitor", type=str, default="",
+                               help="Monitor JSONL file (optional)")
+    review_parser.add_argument("--output", type=str, required=True,
+                               help="Output CSV/TSV path")
+    review_parser.add_argument("--format", choices=["csv", "tsv"], default=None,
+                               dest="output_format",
+                               help="Output format override (default: infer from extension)")
 
     # --- filter ---
     filter_parser = subparsers.add_parser(
@@ -528,13 +608,14 @@ def main():
     filter_parser.add_argument("--preserve-structure", action="store_true",
                                 help="Directory input only: mirror input folder structure and file count")
 
-    args = parser.parse_args()
+    return parser
 
-    if args.command is None:
-        parser.print_help()
-        sys.exit(1)
 
-    if args.command == "run":
+def dispatch_command(args, parser):
+    """Dispatch parsed args to command handlers."""
+    if args.command == "start":
+        cmd_start(args, parser)
+    elif args.command == "run":
         cmd_run(args)
     elif args.command == "validate":
         cmd_validate(args)
@@ -552,6 +633,17 @@ def main():
         cmd_recompute_stats(args)
     elif args.command == "regenerate-dashboard":
         cmd_regenerate_dashboard(args)
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+
+    dispatch_command(args, parser=parser)
 
 
 if __name__ == "__main__":

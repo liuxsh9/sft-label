@@ -24,6 +24,12 @@ uv sync
 export LITELLM_BASE="http://localhost:4000/v1"
 export LITELLM_KEY="your-key"
 
+# Recommended: interactive launcher (grouped by workflow)
+sft-label start
+
+# Preview generated command without executing
+sft-label start --dry-run
+
 # Pass 1: Tag labeling
 sft-label run --input data.json
 
@@ -47,6 +53,19 @@ sft-label export-semantic --input run_dir/ --output representatives.jsonl
 ## Usage
 
 ### CLI
+
+```bash
+# Interactive launcher (recommended when unsure about flags)
+sft-label start
+```
+
+The interactive launcher groups commands by workflow:
+- Pipeline: Pass 1/2/4 combinations, standalone scoring, standalone semantic clustering
+- Data curation: filtering
+- Maintenance: stats recompute, dashboard regeneration, taxonomy validation
+- Export: semantic rows, review CSV/TSV
+
+It also supports advanced tuning via optional raw flags input, so all existing CLI flags remain available.
 
 ```bash
 # Run labeling pipeline (Pass 1)
