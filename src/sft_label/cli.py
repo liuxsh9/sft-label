@@ -13,8 +13,8 @@ Subcommands:
   sft-label recompute-stats      — Recompute stats from labeled/scored output (no LLM)
   sft-label regenerate-dashboard — Regenerate HTML dashboards from stats/data
 
-Model and concurrency are configured in config.py (PipelineConfig),
-not via CLI flags. Override via library API if needed.
+Most defaults come from config.py (PipelineConfig).
+Selected runtime knobs (concurrency/rps/timeout/retries) can be overridden via CLI flags.
 """
 
 import argparse
@@ -49,6 +49,28 @@ def _format_start_env_lines(env_overrides: dict[str, str]) -> list[str]:
     return lines
 
 
+def _apply_runtime_overrides(config, args):
+    """Apply optional runtime overrides from CLI args onto PipelineConfig."""
+    shared_concurrency = getattr(args, "concurrency", None)
+    legacy_scoring_concurrency = getattr(args, "scoring_concurrency", None)
+    if shared_concurrency is None and legacy_scoring_concurrency is not None:
+        shared_concurrency = legacy_scoring_concurrency
+    if shared_concurrency is not None:
+        # One shared LLM concurrency setting for Pass 1 and Pass 2.
+        config.concurrency = shared_concurrency
+        config.scoring_concurrency = shared_concurrency
+
+    for attr, arg_name in (
+        ("rps_limit", "rps_limit"),
+        ("rps_warmup", "rps_warmup"),
+        ("request_timeout", "request_timeout"),
+        ("max_retries", "max_retries"),
+    ):
+        val = getattr(args, arg_name, None)
+        if val is not None:
+            setattr(config, attr, val)
+
+
 def cmd_run(args):
     """Run the labeling pipeline."""
     if not args.input and not args.resume:
@@ -59,6 +81,7 @@ def cmd_run(args):
     from sft_label.pipeline import run
 
     config = PipelineConfig(prompt_mode=args.prompt_mode)
+    _apply_runtime_overrides(config, args)
     if args.model:
         config.labeling_model = args.model
         config.scoring_model = args.model
@@ -149,6 +172,7 @@ def cmd_score(args):
     from sft_label.scoring import run_scoring
 
     config = PipelineConfig(prompt_mode=args.prompt_mode)
+    _apply_runtime_overrides(config, args)
     if args.model:
         config.scoring_model = args.model
     try:
@@ -469,6 +493,18 @@ def build_parser():
                             help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
     run_parser.add_argument("--model", type=str, default=None,
                             help="LLM model name (default: gpt-4o-mini)")
+    run_parser.add_argument("--concurrency", type=int, default=None,
+                            help="Override pass1 labeling concurrency")
+    run_parser.add_argument("--scoring-concurrency", type=int, default=None,
+                            help=argparse.SUPPRESS)
+    run_parser.add_argument("--rps-limit", type=float, default=None,
+                            help="Override global LLM requests/sec limit")
+    run_parser.add_argument("--rps-warmup", type=float, default=None,
+                            help="Override RPS warmup seconds")
+    run_parser.add_argument("--request-timeout", type=int, default=None,
+                            help="Override per-request timeout seconds")
+    run_parser.add_argument("--max-retries", type=int, default=None,
+                            help="Override max retries per request")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
@@ -497,6 +533,18 @@ def build_parser():
                                help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
     score_parser.add_argument("--model", type=str, default=None,
                                help="LLM model name (default: gpt-4o-mini)")
+    score_parser.add_argument("--concurrency", type=int, default=None,
+                               help="Override shared LLM concurrency (used by pass1/pass2)")
+    score_parser.add_argument("--scoring-concurrency", type=int, default=None,
+                               help=argparse.SUPPRESS)
+    score_parser.add_argument("--rps-limit", type=float, default=None,
+                               help="Override global LLM requests/sec limit")
+    score_parser.add_argument("--rps-warmup", type=float, default=None,
+                               help="Override RPS warmup seconds")
+    score_parser.add_argument("--request-timeout", type=int, default=None,
+                               help="Override per-request timeout seconds")
+    score_parser.add_argument("--max-retries", type=int, default=None,
+                               help="Override max retries per request")
 
     # --- semantic-cluster ---
     semantic_parser = subparsers.add_parser(

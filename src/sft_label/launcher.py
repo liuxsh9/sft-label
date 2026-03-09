@@ -11,6 +11,14 @@ import sys
 from dataclasses import dataclass, field
 from typing import Callable
 
+from sft_label.config import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_RPS_LIMIT,
+    DEFAULT_RPS_WARMUP,
+    DEFAULT_SCORING_CONCURRENCY,
+    MAX_RETRIES,
+    REQUEST_TIMEOUT,
+)
 
 DEFAULT_LITELLM_BASE = "http://localhost:4000/v1"
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -22,6 +30,7 @@ DEFAULT_LANGUAGE = "zh"
 SUPPORTED_LANGUAGES = {"zh", "en"}
 _LANG = DEFAULT_LANGUAGE
 SECTION_DIVIDER = "-" * 56
+INTERACTIVE_DEFAULT_PROMPT_MODE = "compact"
 BACK_TOKENS = {
     "b", "back", "/b", ":b",
     "返回", "上一步", "上一级",
@@ -72,6 +81,28 @@ class Workflow:
     label: str
     description: str
     group: str
+
+
+@dataclass(frozen=True)
+class SwitchOption:
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
+class SwitchField:
+    key: str
+    label: str
+    options: list[SwitchOption]
+    default_value: str
+
+
+def _format_default_value(value: int | float | str) -> str:
+    if isinstance(value, float) and value.is_integer():
+        v = str(int(value))
+    else:
+        v = str(value)
+    return f"{v}（默认） / {v} (default)"
 
 
 WORKFLOWS = [
@@ -179,6 +210,21 @@ def _consume_escape_sequence(fd: int, max_bytes: int = 8, timeout: float = 0.003
             break
 
 
+def _drain_pending_input(max_bytes: int = 64, timeout: float = 0.001):
+    """Drain any pending stdin bytes to avoid accidental key carry-over."""
+    if not sys.stdin.isatty():
+        return
+    fd = sys.stdin.fileno()
+    for _ in range(max_bytes):
+        readable, _, _ = select.select([fd], [], [], timeout)
+        if not readable:
+            break
+        try:
+            os.read(fd, 1)
+        except OSError:
+            break
+
+
 def _decode_utf8_input_byte(
     decoder: codecs.IncrementalDecoder,
     data: bytes,
@@ -257,6 +303,177 @@ def interactive_input(prompt: str) -> str:
     return "".join(chars)
 
 
+def _supports_switch_panel(input_fn: InputFn) -> bool:
+    return (
+        input_fn is interactive_input
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
+
+
+def _read_switch_key(fd: int, decoder: codecs.IncrementalDecoder) -> str:
+    """Read one key token for interactive switch panel."""
+    raw = os.read(fd, 1)
+    if not raw:
+        raise EOFError
+
+    if raw in (b"\r", b"\n"):
+        return "enter"
+    if raw == b"\x03":
+        raise KeyboardInterrupt
+    if raw == b"\x1b":
+        suffix = b""
+        for _ in range(2):
+            readable, _, _ = select.select([fd], [], [], 0.01)
+            if not readable:
+                break
+            suffix += os.read(fd, 1)
+        arrow_map = {
+            b"[A": "up",
+            b"[B": "down",
+            b"[C": "right",
+            b"[D": "left",
+            b"OA": "up",
+            b"OB": "down",
+            b"OC": "right",
+            b"OD": "left",
+        }
+        decoder.reset()
+        return arrow_map.get(suffix, "escape")
+
+    text = _decode_utf8_input_byte(decoder, raw)
+    if not text:
+        return "noop"
+    ch = text.lower()
+    if ch == "b":
+        return "back"
+    return "noop"
+
+
+def _build_switch_panel_lines(
+    title: str,
+    fields: list[SwitchField],
+    current_row: int,
+    current_option_indices: list[int],
+) -> list[str]:
+    lines = [
+        SECTION_DIVIDER,
+        localize_text(title),
+        _msg(
+            "上下选择字段，左右切换值，回车确认，按 b 返回上一级。",
+            "Use Up/Down to select field, Left/Right to switch value, Enter to confirm, b to go back.",
+        ),
+        SECTION_DIVIDER,
+        "",
+    ]
+    for idx, switch_field in enumerate(fields):
+        marker = ">" if idx == current_row else " "
+        selected = switch_field.options[current_option_indices[idx]]
+        lines.append(f"{marker} {localize_text(switch_field.label)}: {localize_text(selected.label)}")
+    return lines
+
+
+def _write_switch_panel_lines(lines: list[str]):
+    panel = "\r\n".join(lines) + "\r\n"
+    sys.stdout.write(panel)
+    sys.stdout.flush()
+
+
+def _refresh_switch_panel_lines(lines: list[str]):
+    # Move cursor back to the start of panel block, then rewrite in place.
+    line_count = len(lines)
+    if line_count > 0:
+        sys.stdout.write(f"\x1b[{line_count}A")
+    for line in lines:
+        sys.stdout.write(f"\r\x1b[2K{line}\r\n")
+    sys.stdout.flush()
+
+
+def _ask_switch_panel(
+    input_fn: InputFn,
+    output_fn: OutputFn,
+    title: str,
+    fields: list[SwitchField],
+) -> dict[str, str]:
+    if not _supports_switch_panel(input_fn):
+        values: dict[str, str] = {}
+        for field in fields:
+            default_index = 1
+            for i, opt in enumerate(field.options, start=1):
+                if opt.value == field.default_value:
+                    default_index = i
+                    break
+            choice = _ask_choice(
+                input_fn,
+                output_fn,
+                field.label,
+                [(opt.value, opt.label, "") for opt in field.options],
+                default_index=default_index,
+            )
+            values[field.key] = choice
+        return values
+
+    try:
+        import termios
+        import tty
+    except Exception:
+        values: dict[str, str] = {}
+        for field in fields:
+            values[field.key] = field.default_value
+        return values
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    current_row = 0
+    current_option_indices = []
+    for field in fields:
+        default_idx = 0
+        for idx, opt in enumerate(field.options):
+            if opt.value == field.default_value:
+                default_idx = idx
+                break
+        current_option_indices.append(default_idx)
+
+    try:
+        tty.setraw(fd)
+        lines = _build_switch_panel_lines(title, fields, current_row, current_option_indices)
+        _write_switch_panel_lines(lines)
+        while True:
+            token = _read_switch_key(fd, decoder)
+            changed = False
+            if token == "up":
+                current_row = (current_row - 1) % len(fields)
+                changed = True
+            elif token == "down":
+                current_row = (current_row + 1) % len(fields)
+                changed = True
+            elif token == "left":
+                current_option_indices[current_row] = (
+                    current_option_indices[current_row] - 1
+                ) % len(fields[current_row].options)
+                changed = True
+            elif token == "right":
+                current_option_indices[current_row] = (
+                    current_option_indices[current_row] + 1
+                ) % len(fields[current_row].options)
+                changed = True
+            elif token == "enter":
+                break
+            elif token == "back":
+                raise BackRequested
+            if changed:
+                lines = _build_switch_panel_lines(title, fields, current_row, current_option_indices)
+                _refresh_switch_panel_lines(lines)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+    return {
+        field.key: field.options[current_option_indices[idx]].value
+        for idx, field in enumerate(fields)
+    }
+
+
 def is_back_token(value: str) -> bool:
     """Check whether an input value means 'go back'."""
     if value is None:
@@ -333,12 +550,411 @@ def build_launch_plan(
                 return LaunchPlan(argv=["validate"])
             raise ValueError(f"Unknown workflow key: {wf.key}")
         except BackRequested:
+            if input_fn is interactive_input:
+                _drain_pending_input()
             _say(output_fn, "")
             _say(output_fn, "已返回任务选择 / Returned to workflow selection.")
             _say(output_fn, "")
 
 
 def _build_run_plan(
+    input_fn: InputFn,
+    output_fn: OutputFn,
+    *,
+    chain_score: bool,
+    chain_semantic: bool,
+) -> LaunchPlan:
+    if not _supports_switch_panel(input_fn):
+        return _build_run_plan_legacy(
+            input_fn,
+            output_fn,
+            chain_score=chain_score,
+            chain_semantic=chain_semantic,
+        )
+
+    argv = ["run"]
+    env_overrides: dict[str, str] = {}
+
+    _section(output_fn, "基础输入 / Basic input")
+    mode = _ask_choice(
+        input_fn,
+        output_fn,
+        "运行模式 / Run mode",
+        [
+            ("new", "新建运行 / Start new run", "使用 --input，可选 --output / Use --input and optional --output"),
+            ("resume", "续跑已有任务 / Resume existing run", "使用 --resume 继续中断任务 / Use --resume and continue an interrupted run"),
+        ],
+        default_index=1,
+    )
+    if mode == "new":
+        argv.extend(["--input", _ask_required_text(input_fn, "输入文件或目录路径 / Input file/dir path")])
+    else:
+        argv.extend(["--resume", _ask_required_text(input_fn, "续跑目录 / Run directory to resume")])
+        if _ask_yes_no(input_fn, "是否同时设置 --input 路径 / Also set --input path", default=False):
+            argv.extend(["--input", _ask_required_text(input_fn, "输入文件或目录路径 / Input file/dir path")])
+
+    output_path = _ask_optional_text(input_fn, "输出目录（可选） / Output directory (optional)")
+    if output_path:
+        argv.extend(["--output", output_path])
+
+    if chain_score:
+        argv.append("--score")
+        tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
+        if tag_stats:
+            argv.extend(["--tag-stats", tag_stats])
+
+    if chain_semantic:
+        _section(output_fn, "四阶段联动 / Pass 4 chaining")
+        argv.append("--semantic-cluster")
+
+    switch_fields = [
+        SwitchField(
+            key="prompt_mode",
+            label="Prompt 模式 / Prompt mode",
+            options=[
+                SwitchOption("compact", "compact（默认） / compact (default)"),
+                SwitchOption("full", "full"),
+            ],
+            default_value=INTERACTIVE_DEFAULT_PROMPT_MODE,
+        ),
+        SwitchField(
+            key="shuffle",
+            label="处理前打乱样本 / Shuffle samples before processing",
+            options=[
+                SwitchOption("off", "关闭 / Off"),
+                SwitchOption("on", "开启 / On"),
+            ],
+            default_value="off",
+        ),
+        SwitchField(
+            key="arbitration",
+            label="启用仲裁补跑 / Enable arbitration pass",
+            options=[
+                SwitchOption("on", "开启 / On"),
+                SwitchOption("off", "关闭 / Off"),
+            ],
+            default_value="on",
+        ),
+        SwitchField(
+            key="limit",
+            label="每个文件采样上限 / Sample limit per file",
+            options=[
+                SwitchOption("", _format_default_value(0)),
+                SwitchOption("10", "10"),
+                SwitchOption("50", "50"),
+                SwitchOption("100", "100"),
+                SwitchOption("200", "200"),
+                SwitchOption("500", "500"),
+                SwitchOption("1000", "1000"),
+            ],
+            default_value="",
+        ),
+        SwitchField(
+            key="concurrency",
+            label="LLM 并发（阶段一/二共用） / Shared LLM concurrency (pass1/pass2)",
+            options=[
+                SwitchOption("", _format_default_value(DEFAULT_CONCURRENCY)),
+                SwitchOption("0", "0"),
+                SwitchOption("50", "50"),
+                SwitchOption("100", "100"),
+                SwitchOption("150", "150"),
+                SwitchOption("200", "200"),
+                SwitchOption("250", "250"),
+                SwitchOption("300", "300"),
+                SwitchOption("400", "400"),
+                SwitchOption("500", "500"),
+            ],
+            default_value="",
+        ),
+        SwitchField(
+            key="rps_limit",
+            label="RPS 限流 / RPS limit",
+            options=[
+                SwitchOption("", _format_default_value(DEFAULT_RPS_LIMIT)),
+                SwitchOption("0", "0"),
+                SwitchOption("10", "10"),
+                SwitchOption("20", "20"),
+                SwitchOption("30", "30"),
+                SwitchOption("40", "40"),
+                SwitchOption("50", "50"),
+                SwitchOption("75", "75"),
+                SwitchOption("100", "100"),
+            ],
+            default_value="",
+        ),
+        SwitchField(
+            key="rps_warmup",
+            label="RPS 预热秒数 / RPS warmup seconds",
+            options=[
+                SwitchOption("", _format_default_value(DEFAULT_RPS_WARMUP)),
+                SwitchOption("0", "0"),
+                SwitchOption("10", "10"),
+                SwitchOption("20", "20"),
+                SwitchOption("30", "30"),
+                SwitchOption("40", "40"),
+                SwitchOption("50", "50"),
+                SwitchOption("60", "60"),
+            ],
+            default_value="",
+        ),
+        SwitchField(
+            key="request_timeout",
+            label="请求超时秒数 / Request timeout seconds",
+            options=[
+                SwitchOption("", _format_default_value(REQUEST_TIMEOUT)),
+                SwitchOption("60", "60"),
+                SwitchOption("90", "90"),
+                SwitchOption("120", "120"),
+                SwitchOption("180", "180"),
+            ],
+            default_value="",
+        ),
+        SwitchField(
+            key="max_retries",
+            label="最大重试次数 / Max retries",
+            options=[
+                SwitchOption("", _format_default_value(MAX_RETRIES)),
+                SwitchOption("1", "1"),
+                SwitchOption("3", "3"),
+                SwitchOption("5", "5"),
+            ],
+            default_value="",
+        ),
+        SwitchField(
+            key="model_override",
+            label="覆盖 LLM 模型 / Override LLM model",
+            options=[
+                SwitchOption("no", "否 / No"),
+                SwitchOption("yes", "是 / Yes"),
+            ],
+            default_value="no",
+        ),
+        SwitchField(
+            key="env_override",
+            label="覆盖 LITELLM_BASE/LITELLM_KEY / Override LITELLM_BASE/LITELLM_KEY",
+            options=[
+                SwitchOption("no", "否 / No"),
+                SwitchOption("yes", "是 / Yes"),
+            ],
+            default_value="no",
+        ),
+    ]
+    switch_values = _ask_switch_panel(
+        input_fn,
+        output_fn,
+        "运行配置（上下选择，左右切值） / Run config (Up/Down select, Left/Right switch)",
+        switch_fields,
+    )
+
+    if switch_values["prompt_mode"] != "full":
+        argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
+    if switch_values["shuffle"] == "on":
+        argv.append("--shuffle")
+    if switch_values["arbitration"] == "off":
+        argv.append("--no-arbitration")
+
+    if switch_values["model_override"] == "yes":
+        model = _ask_required_text(input_fn, "输入覆盖模型名 / Enter override model name")
+        argv.extend(["--model", model])
+
+    limit = switch_values.get("limit", "")
+    if limit != "":
+        argv.extend(["--limit", limit])
+
+    for key, flag in (
+        ("concurrency", "--concurrency"),
+        ("rps_limit", "--rps-limit"),
+        ("rps_warmup", "--rps-warmup"),
+        ("request_timeout", "--request-timeout"),
+        ("max_retries", "--max-retries"),
+    ):
+        val = switch_values.get(key, "")
+        if val != "":
+            argv.extend([flag, val])
+
+    _section(output_fn, "环境与附加参数 / Environment and extra flags")
+    if switch_values["env_override"] == "yes":
+        env_overrides = _ask_llm_env_overrides(input_fn)
+
+    argv.extend(_ask_extra_flags(input_fn))
+    return LaunchPlan(argv=argv, env_overrides=env_overrides)
+
+
+def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+    if not _supports_switch_panel(input_fn):
+        return _build_score_plan_legacy(input_fn, output_fn)
+
+    argv = ["score"]
+    env_overrides: dict[str, str] = {}
+
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "输入已标注文件或目录 / Input labeled file/dir")])
+
+    _section(output_fn, "评分参数 / Scoring options")
+    tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
+    if tag_stats:
+        argv.extend(["--tag-stats", tag_stats])
+
+    switch_values = _ask_switch_panel(
+        input_fn,
+        output_fn,
+        "评分配置（上下选择，左右切值） / Score config (Up/Down select, Left/Right switch)",
+        [
+            SwitchField(
+                key="prompt_mode",
+                label="Prompt 模式 / Prompt mode",
+                options=[
+                    SwitchOption("compact", "compact（默认） / compact (default)"),
+                    SwitchOption("full", "full"),
+                ],
+                default_value=INTERACTIVE_DEFAULT_PROMPT_MODE,
+            ),
+            SwitchField(
+                key="resume",
+                label="续跑并跳过已存在样本 / Resume and skip existing samples",
+                options=[
+                    SwitchOption("off", "关闭 / Off"),
+                    SwitchOption("on", "开启 / On"),
+                ],
+                default_value="off",
+            ),
+            SwitchField(
+                key="limit",
+                label="采样上限 / Sample limit",
+                options=[
+                    SwitchOption("", _format_default_value(0)),
+                    SwitchOption("10", "10"),
+                    SwitchOption("50", "50"),
+                    SwitchOption("100", "100"),
+                    SwitchOption("200", "200"),
+                    SwitchOption("500", "500"),
+                    SwitchOption("1000", "1000"),
+                ],
+                default_value="",
+            ),
+            SwitchField(
+                key="concurrency",
+                label="LLM 并发（阶段一/二共用） / Shared LLM concurrency (pass1/pass2)",
+                options=[
+                    SwitchOption("", _format_default_value(DEFAULT_SCORING_CONCURRENCY)),
+                    SwitchOption("0", "0"),
+                    SwitchOption("50", "50"),
+                    SwitchOption("100", "100"),
+                    SwitchOption("150", "150"),
+                    SwitchOption("200", "200"),
+                    SwitchOption("250", "250"),
+                    SwitchOption("300", "300"),
+                    SwitchOption("400", "400"),
+                    SwitchOption("500", "500"),
+                ],
+                default_value="",
+            ),
+            SwitchField(
+                key="rps_limit",
+                label="RPS 限流 / RPS limit",
+                options=[
+                    SwitchOption("", _format_default_value(DEFAULT_RPS_LIMIT)),
+                    SwitchOption("0", "0"),
+                    SwitchOption("10", "10"),
+                    SwitchOption("20", "20"),
+                    SwitchOption("30", "30"),
+                    SwitchOption("40", "40"),
+                    SwitchOption("50", "50"),
+                    SwitchOption("75", "75"),
+                    SwitchOption("100", "100"),
+                ],
+                default_value="",
+            ),
+            SwitchField(
+                key="rps_warmup",
+                label="RPS 预热秒数 / RPS warmup seconds",
+                options=[
+                    SwitchOption("", _format_default_value(DEFAULT_RPS_WARMUP)),
+                    SwitchOption("0", "0"),
+                    SwitchOption("10", "10"),
+                    SwitchOption("20", "20"),
+                    SwitchOption("30", "30"),
+                    SwitchOption("40", "40"),
+                    SwitchOption("50", "50"),
+                    SwitchOption("60", "60"),
+                ],
+                default_value="",
+            ),
+            SwitchField(
+                key="request_timeout",
+                label="请求超时秒数 / Request timeout seconds",
+                options=[
+                    SwitchOption("", _format_default_value(REQUEST_TIMEOUT)),
+                    SwitchOption("60", "60"),
+                    SwitchOption("90", "90"),
+                    SwitchOption("120", "120"),
+                    SwitchOption("180", "180"),
+                ],
+                default_value="",
+            ),
+            SwitchField(
+                key="max_retries",
+                label="最大重试次数 / Max retries",
+                options=[
+                    SwitchOption("", _format_default_value(MAX_RETRIES)),
+                    SwitchOption("1", "1"),
+                    SwitchOption("3", "3"),
+                    SwitchOption("5", "5"),
+                ],
+                default_value="",
+            ),
+            SwitchField(
+                key="model_override",
+                label="覆盖 LLM 模型 / Override LLM model",
+                options=[
+                    SwitchOption("no", "否 / No"),
+                    SwitchOption("yes", "是 / Yes"),
+                ],
+                default_value="no",
+            ),
+            SwitchField(
+                key="env_override",
+                label="覆盖 LITELLM_BASE/LITELLM_KEY / Override LITELLM_BASE/LITELLM_KEY",
+                options=[
+                    SwitchOption("no", "否 / No"),
+                    SwitchOption("yes", "是 / Yes"),
+                ],
+                default_value="no",
+            ),
+        ],
+    )
+    if switch_values["prompt_mode"] != "full":
+        argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
+    if switch_values["resume"] == "on":
+        argv.append("--resume")
+
+    if switch_values["model_override"] == "yes":
+        model = _ask_required_text(input_fn, "输入覆盖模型名 / Enter override model name")
+        argv.extend(["--model", model])
+
+    limit = switch_values.get("limit", "")
+    if limit != "":
+        argv.extend(["--limit", limit])
+
+    for key, flag in (
+        ("concurrency", "--concurrency"),
+        ("rps_limit", "--rps-limit"),
+        ("rps_warmup", "--rps-warmup"),
+        ("request_timeout", "--request-timeout"),
+        ("max_retries", "--max-retries"),
+    ):
+        val = switch_values.get(key, "")
+        if val != "":
+            argv.extend([flag, val])
+
+    if switch_values["env_override"] == "yes":
+        env_overrides = _ask_llm_env_overrides(input_fn)
+
+    argv.extend(_ask_extra_flags(input_fn))
+    return LaunchPlan(argv=argv, env_overrides=env_overrides)
+
+
+def _build_run_plan_legacy(
     input_fn: InputFn,
     output_fn: OutputFn,
     *,
@@ -417,7 +1033,7 @@ def _build_run_plan(
     return LaunchPlan(argv=argv, env_overrides=env_overrides)
 
 
-def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     argv = ["score"]
     env_overrides: dict[str, str] = {}
 
