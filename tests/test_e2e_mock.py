@@ -510,3 +510,75 @@ class TestE2EDirectoryScoring:
         assert "conversations →" not in captured.out
         assert "Tag stats loaded" not in captured.out
         assert "Computing selection scores" not in captured.out
+
+
+class TestE2EMalformedSingleSelect:
+    """End-to-end: malformed single-select output degrades without crashing."""
+
+    @pytest.mark.asyncio
+    async def test_pass1_malformed_single_select_degrades_gracefully(
+        self, single_file_input, tmp_path, mock_config
+    ):
+        from sft_label.pipeline import run
+
+        async def malformed_single_select_call(
+            http_client,
+            messages,
+            model,
+            temperature=0.1,
+            max_tokens=1000,
+            max_retries=3,
+            config=None,
+            rate_limiter=None,
+        ):
+            msg_text = json.dumps(messages, ensure_ascii=False)
+            is_call2 = (
+                "Call 1 结果" in msg_text
+                or "call_1_result" in msg_text
+                or "Call 1 result" in msg_text
+            )
+
+            if is_call2:
+                parsed = dict(CALL2_RESPONSE)
+                parsed["context"] = {"kind": "snippet"}
+            else:
+                parsed = dict(CALL1_RESPONSES["default"])
+                parsed["intent"] = ["build"]
+                parsed["difficulty"] = {"level": "advanced"}
+
+            raw = json.dumps(parsed, ensure_ascii=False)
+            usage = {"prompt_tokens": 300, "completion_tokens": 120, "total_tokens": 420}
+            await asyncio.sleep(0.001)
+            return parsed, raw, usage
+
+        output_dir = tmp_path / "output"
+        with patch("sft_label.pipeline.async_llm_call", side_effect=malformed_single_select_call):
+            stats = await run(
+                input_path=str(single_file_input),
+                output=str(output_dir),
+                config=mock_config,
+            )
+
+        assert stats["success"] > 0
+        assert stats["failed"] == 0
+        assert stats["validation_issue_count"] > 0
+
+        run_dir = Path(stats["run_dir"])
+        with open(run_dir / "labeled.json", "r", encoding="utf-8") as f:
+            labeled = json.load(f)
+
+        assert len(labeled) > 0
+        assert all(isinstance(s["labels"]["intent"], str) for s in labeled)
+        assert all(isinstance(s["labels"]["difficulty"], str) for s in labeled)
+        assert all(isinstance(s["labels"]["context"], str) for s in labeled)
+        assert any(s["labels"]["intent"] == "" for s in labeled)
+        assert any(s["labels"]["difficulty"] == "" for s in labeled)
+        assert any(s["labels"]["context"] == "" for s in labeled)
+
+        with open(run_dir / "monitor.jsonl", "r", encoding="utf-8") as f:
+            monitors = [json.loads(line) for line in f if line.strip()]
+        assert any(
+            "malformed single-select type" in issue
+            for m in monitors
+            for issue in m.get("validation_issues", [])
+        )

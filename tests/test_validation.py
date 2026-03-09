@@ -1,5 +1,7 @@
 """Tests for taxonomy validation."""
 
+import pytest
+
 from sft_label.validate import run_validation, ValidationReport
 from sft_label._resources import load_taxonomy_yaml, load_all_tag_yamls
 from sft_label.pipeline import validate_tags, TAG_ALIASES, CROSS_CATEGORY_CORRECTIONS, check_consistency
@@ -186,3 +188,70 @@ class TestModifyConsistency:
                   "concept": [], "agentic": [], "constraint": [], "context": "single-file"}
         warnings = check_consistency(labels)
         assert not any("modify" in w.lower() for w in warnings)
+
+
+class TestSingleSelectHardening:
+    def _call1_payload(self):
+        return {
+            "intent": "build",
+            "language": ["python"],
+            "domain": ["web-backend"],
+            "task": ["feature-implementation"],
+            "difficulty": "intermediate",
+            "confidence": {},
+            "unmapped": [],
+        }
+
+    def _call2_payload(self):
+        return {
+            "concept": ["algorithms"],
+            "agentic": [],
+            "constraint": [],
+            "context": "snippet",
+            "confidence": {},
+            "unmapped": [],
+        }
+
+    @pytest.mark.parametrize(
+        "call_name,dim,malformed,type_name",
+        [
+            ("call1", "intent", ["build"], "list"),
+            ("call1", "difficulty", {"level": "advanced"}, "dict"),
+            ("call2", "context", True, "bool"),
+        ],
+    )
+    def test_malformed_single_select_values_degrade_gracefully(
+        self, call_name, dim, malformed, type_name
+    ):
+        result = self._call1_payload() if call_name == "call1" else self._call2_payload()
+        result[dim] = malformed
+
+        cleaned, issues = validate_tags(result, call_name)
+
+        assert cleaned[dim] == ""
+        assert any(f"{dim}: malformed single-select type '{type_name}'" in i for i in issues)
+        assert {"dimension": dim, "value": f"<invalid-type:{type_name}>"} in cleaned["unmapped"]
+
+    def test_no_typeerror_for_unhashable_single_select_values(self):
+        result = self._call1_payload()
+        result["intent"] = ["build"]
+        result["difficulty"] = {"value": "advanced"}
+
+        cleaned, issues = validate_tags(result, "call1")
+
+        assert cleaned["intent"] == ""
+        assert cleaned["difficulty"] == ""
+        assert len(issues) >= 2
+
+    def test_unmapped_entries_are_json_safe_strings(self):
+        result = self._call1_payload()
+        result["unmapped"] = [
+            {"dimension": False, "value": {"bad": ["value"]}},
+            {"dimension": "intent", "value": True},
+            123,
+        ]
+
+        cleaned, _ = validate_tags(result, "call1")
+
+        assert all(isinstance(item.get("dimension"), str) for item in cleaned["unmapped"])
+        assert all(isinstance(item.get("value"), str) for item in cleaned["unmapped"])

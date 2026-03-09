@@ -342,7 +342,9 @@ def cmd_score(args):
 
 def cmd_filter(args):
     """Filter scored data by value threshold and other criteria."""
-    from sft_label.tools.filter_value import run_filter, FilterConfig
+    from sft_label.tools.filter_value import (
+        run_filter, FilterConfig, _validate_missing_gate_policy,
+    )
 
     # Build FilterConfig from CLI args
     config = FilterConfig(
@@ -362,12 +364,19 @@ def cmd_filter(args):
         turn_count_min=args.turn_count_min,
         turn_count_max=args.turn_count_max,
         correctness_min=args.correctness_min,
+        missing_gate_policy=args.missing_gate_policy,
         turn_value_min=args.turn_value_min,
         turn_quality_min=args.turn_quality_min,
         max_pruned_ratio=args.max_pruned_ratio,
         keep_first_last=not args.no_keep_first_last,
         preserve_structure=args.preserve_structure,
     )
+
+    try:
+        _validate_missing_gate_policy(config.missing_gate_policy)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     # Validate: at least one criterion must be set
     has_criterion = any([
@@ -899,6 +908,9 @@ def build_parser():
                                 help="Max total turns in conversation (multi-turn)")
     filter_parser.add_argument("--correctness-min", type=float, default=None,
                                 help="Min quality.correctness score (hard floor)")
+    filter_parser.add_argument("--missing-gate-policy", type=str, choices=["fail", "ignore"],
+                                default="fail",
+                                help="When hard-gate fields are missing: 'fail' (default) or 'ignore'")
     filter_parser.add_argument("--turn-value-min", type=float, default=None,
                                 help="Min per-turn value_score (turn-level pruning)")
     filter_parser.add_argument("--turn-quality-min", type=float, default=None,

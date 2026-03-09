@@ -508,6 +508,47 @@ _SELECTION_DIMS = ["intent", "language", "domain", "concept", "task",
                    "agentic", "constraint", "context", "difficulty"]
 
 
+def _resolve_selection_smoothing_prior(config=None):
+    """Resolve smoothing prior from config with safe fallback."""
+    raw = (
+        getattr(config, "selection_smoothing_prior", None)
+        if config is not None
+        else None
+    )
+    if raw is None:
+        raw = SELECTION_SMOOTHING_PRIOR
+    try:
+        prior = int(raw)
+    except (TypeError, ValueError):
+        prior = SELECTION_SMOOTHING_PRIOR
+    return max(1, prior)
+
+
+def _selection_config_snapshot(config=None):
+    """Selection-ranking config values used at runtime (for stats traceability)."""
+    intra_weight = (
+        getattr(config, "selection_intra_weight", None)
+        if config is not None
+        else None
+    )
+    quality_weight = (
+        getattr(config, "selection_quality_weight", None)
+        if config is not None
+        else None
+    )
+    min_group_size = (
+        getattr(config, "selection_min_group_size", None)
+        if config is not None
+        else None
+    )
+    return {
+        "intra_weight": intra_weight if intra_weight is not None else SELECTION_INTRA_WEIGHT,
+        "quality_weight": quality_weight if quality_weight is not None else SELECTION_QUALITY_WEIGHT,
+        "min_group_size": min_group_size if min_group_size is not None else SELECTION_MIN_GROUP_SIZE,
+        "smoothing_prior": _resolve_selection_smoothing_prior(config),
+    }
+
+
 def _extract_pure_quality(value_dict, quality_weights=None):
     """Compute quality score without rarity from a value dict.
 
@@ -594,7 +635,7 @@ def compute_selection_scores(samples, rarity_weights=None,
             global_percentiles[idx] = rank / max(n_global - 1, 1)
 
     # Step 3: Per-dimension, per-tag quality percentile with Bayesian shrinkage
-    smoothing_prior = SELECTION_SMOOTHING_PRIOR
+    smoothing_prior = _resolve_selection_smoothing_prior(config)
     dim_percentiles = [{} for _ in samples]  # [{dim: (percentile_sum, count)}, ...]
 
     for dim in _SELECTION_DIMS:
@@ -743,7 +784,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
             global_percentiles[idx] = rank / max(n_global - 1, 1)
 
     # Step 3: Per-tag percentile with Bayesian shrinkage
-    smoothing_prior = SELECTION_SMOOTHING_PRIOR
+    smoothing_prior = _resolve_selection_smoothing_prior(config)
     dim_percentiles = [{} for _ in summaries]
 
     for dim in _SELECTION_DIMS:
@@ -845,7 +886,13 @@ async def score_one(http_client, sample, model, rarity_result,
     """
     from sft_label.prompts_value import build_scoring_messages
 
-    _max_retries = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
+    _raw_retries = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
+    try:
+        _configured_retries = int(_raw_retries)
+    except (TypeError, ValueError):
+        _configured_retries = SAMPLE_MAX_RETRIES
+    _configured_retries = max(_configured_retries, 0)
+    _max_attempts = _configured_retries + 1
     _weights = config.value_weights if config and config.value_weights else VALUE_WEIGHTS
 
     sample_id = sample.get("id", f"sample-{sample_idx}")
@@ -911,7 +958,7 @@ async def score_one(http_client, sample, model, rarity_result,
     )
 
     # LLM call with retry — retry OUTSIDE semaphore
-    for attempt in range(_max_retries):
+    for attempt in range(_max_attempts):
         if attempt > 0:
             # Backoff outside semaphore so slot is free for others
             base_wait = 2 ** attempt * 2
@@ -1635,6 +1682,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         "combo_alpha": config.rarity_combo_alpha,
         "score_mode": rarity_mode,
     }
+    stats["selection_config"] = _selection_config_snapshot(config)
     stats["chunked"] = True
 
     stats_path = output_dir / PASS2_STATS_FILE
@@ -2166,6 +2214,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         "combo_alpha": config.rarity_combo_alpha,
         "score_mode": rarity_mode,
     }
+    stats["selection_config"] = _selection_config_snapshot(config)
 
     stats_path = output_dir / PASS2_STATS_FILE
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
@@ -2268,10 +2317,22 @@ def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
         total_samples += _count_scoring_samples_in_file(labeled_path, limit=limit)
 
     baseline_calls = total_samples
-    # Pass 2 has 1 guaranteed scoring call per sample; retries may increase calls.
-    sample_retries = max(getattr(config, "sample_max_retries", SAMPLE_MAX_RETRIES), 1)
-    retry_factor = 1.0 + min(0.2, 0.05 * (sample_retries - 1))
-    initial_est_calls = int(round(total_samples * retry_factor))
+    # sample_max_retries means "additional retries" (initial + retries).
+    raw_retries = getattr(config, "sample_max_retries", SAMPLE_MAX_RETRIES)
+    try:
+        sample_retries = int(raw_retries)
+    except (TypeError, ValueError):
+        sample_retries = SAMPLE_MAX_RETRIES
+    sample_retries = max(sample_retries, 0)
+
+    # Initial estimate assumes only a fraction of samples consume retries.
+    expected_retry_fraction = min(0.3, 0.1 * sample_retries)
+    expected_retry_calls = int(math.ceil(total_samples * expected_retry_fraction))
+    initial_est_calls = baseline_calls + expected_retry_calls
+
+    # Hard cap to semantic max: total_samples * (1 + retries).
+    max_calls = baseline_calls * (sample_retries + 1)
+    initial_est_calls = min(initial_est_calls, max_calls)
     initial_est_calls = max(initial_est_calls, baseline_calls)
 
     return ScoringDirectoryWorkloadEstimate(
@@ -2359,6 +2420,7 @@ def _flush_scoring_file(collector, config, pprint=print):
         "combo_alpha": config.rarity_combo_alpha,
         "score_mode": resolve_rarity_mode(config),
     }
+    stats["selection_config"] = _selection_config_snapshot(config)
 
     stats_path = output_dir / PASS2_STATS_FILE
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
@@ -2397,6 +2459,24 @@ def _flush_scoring_file(collector, config, pprint=print):
     return stats
 
 
+def _discover_scored_outputs(root_dir):
+    """Recursively discover scored outputs, preferring JSON over JSONL per dir."""
+    root_dir = Path(root_dir)
+    candidates = sorted(root_dir.rglob("scored.json")) + sorted(root_dir.rglob("scored.jsonl"))
+
+    # Deduplicate within each directory: prefer scored.json when both exist.
+    per_dir = {}
+    for path in sorted(candidates):
+        current = per_dir.get(path.parent)
+        if current is None:
+            per_dir[path.parent] = path
+            continue
+        if current.suffix == ".jsonl" and path.suffix == ".json":
+            per_dir[path.parent] = path
+
+    return [per_dir[d] for d in sorted(per_dir)]
+
+
 async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, config,
                                  llm_progress_cb=None):
     """Score all labeled files in a directory with cross-file parallelism.
@@ -2405,9 +2485,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     run_directory_pipeline) to keep the semaphore saturated across files.
     """
     input_dir = Path(input_dir)
+    explicit_output = output_dir is not None
     if output_dir is None:
         output_dir = input_dir
     output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Find labeled files (flat, one-level subdirs, or deeply nested)
     # Try progressively deeper searches; include both .json and .jsonl
@@ -2585,7 +2667,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             total_samples=global_total_stats_samples,
         )
 
-        file_output_dir = labeled_path.parent
+        if explicit_output:
+            rel_parent = labeled_path.parent.relative_to(input_dir)
+            file_output_dir = output_dir / rel_parent
+        else:
+            # Backward-compatible behavior when output_dir is omitted.
+            file_output_dir = labeled_path.parent
         collector = _ScoringFileCollector(
             file_idx=file_idx,
             labeled_path=labeled_path,
@@ -2731,6 +2818,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         summary["planned_baseline_llm_calls"] = workload_estimate.baseline_total_llm_calls
         summary["planned_initial_llm_calls"] = workload_estimate.initial_estimated_llm_calls
         summary["planning_elapsed_seconds"] = workload_estimate.scan_elapsed_seconds
+        summary["selection_config"] = _selection_config_snapshot(config)
         if rate_limiter:
             summary["http_request_stats"] = rate_limiter.stats.to_dict()
 
@@ -2743,24 +2831,18 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         try:
             from sft_label.conversation import aggregate_conversations, write_conversation_scores
             all_conv_samples = []
-            for sub in sorted(output_dir.iterdir()):
-                if not sub.is_dir():
-                    continue
-                for pattern in ("scored.json", "scored.jsonl"):
-                    p = sub / pattern
-                    if p.exists():
-                        if p.suffix == ".jsonl":
-                            with open(p, encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if line:
-                                        all_conv_samples.append(json.loads(line))
-                        else:
-                            with open(p, encoding="utf-8") as f:
-                                data = json.load(f)
-                            if isinstance(data, list):
-                                all_conv_samples.extend(data)
-                        break  # prefer .json, skip .jsonl if .json found
+            for scored_file in _discover_scored_outputs(output_dir):
+                if scored_file.suffix == ".jsonl":
+                    with open(scored_file, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                all_conv_samples.append(json.loads(line))
+                else:
+                    with open(scored_file, encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        all_conv_samples.extend(data)
             conv_records = aggregate_conversations(all_conv_samples)
             if conv_records:
                 write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
@@ -2798,6 +2880,8 @@ def _merge_value_stats(file_stats_list):
         "total_completion_tokens": sum(s.get("total_completion_tokens", 0) for s in file_stats_list),
         "total_tokens": sum(s.get("total_tokens", 0) for s in file_stats_list),
     }
+    if file_stats_list and file_stats_list[0].get("selection_config"):
+        merged["selection_config"] = file_stats_list[0]["selection_config"]
 
     # Per-file summary
     merged["per_file_summary"] = [

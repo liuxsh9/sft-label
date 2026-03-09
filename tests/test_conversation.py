@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sft_label.conversation import (
     group_by_conversation,
+    build_conversation_key,
     _position_weight,
     _effective_weights,
     _weighted_average,
@@ -25,7 +26,8 @@ from sft_label.conversation import (
 
 def _slice(source_id, turn_index, total_turns, value_score=6.0,
            complexity=5, quality=6, reasoning=5, rarity=4.0,
-           inherited=False, flags=None, labels=None, thinking_mode=None):
+           inherited=False, flags=None, labels=None, thinking_mode=None,
+           source_file=None):
     """Build a minimal multi-turn slice sample."""
     s = {
         "id": f"{source_id}_t{turn_index}",
@@ -47,6 +49,8 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
             "flags": flags or [],
         },
     }
+    if source_file:
+        s["metadata"]["source_file"] = source_file
     if inherited:
         s["labels"]["inherited"] = True
     if thinking_mode:
@@ -67,6 +71,13 @@ def _single_turn_sample(score=7.0):
 # ── TestGroupByConversation ──
 
 class TestGroupByConversation:
+    def test_build_conversation_key(self):
+        assert build_conversation_key({"source_id": "c1"}) == "c1"
+        assert build_conversation_key(
+            {"source_file": "multi_turn/data.jsonl", "source_id": "c1"}
+        ) == "multi_turn/data.jsonl::c1"
+        assert build_conversation_key({"source_file": "x"}) is None
+
     def test_groups_multi_turn(self):
         samples = [
             _slice("conv1", 1, 3), _slice("conv1", 2, 3), _slice("conv1", 3, 3),
@@ -94,6 +105,20 @@ class TestGroupByConversation:
     def test_no_source_id(self):
         sample = {"id": "x", "metadata": {"total_turns": 3}, "value": {}}
         assert group_by_conversation([sample]) == {}
+
+    def test_cross_file_source_id_collision(self):
+        samples = [
+            _slice("dup", 1, 2, source_file="code/a.jsonl"),
+            _slice("dup", 2, 2, source_file="code/a.jsonl"),
+            _slice("dup", 1, 2, source_file="code/b.jsonl"),
+            _slice("dup", 2, 2, source_file="code/b.jsonl"),
+        ]
+        groups = group_by_conversation(samples)
+        assert len(groups) == 2
+        assert set(groups.keys()) == {
+            "code/a.jsonl::dup",
+            "code/b.jsonl::dup",
+        }
 
 
 # ── TestPositionWeight ──
@@ -312,6 +337,15 @@ class TestAggregateConversations:
     def test_single_turn_only_returns_empty(self):
         samples = [_single_turn_sample(), _single_turn_sample()]
         assert aggregate_conversations(samples) == []
+
+    def test_emits_canonical_conversation_id(self):
+        samples = [
+            _slice("c1", 1, 2, source_file="multi_turn/traj.jsonl"),
+            _slice("c1", 2, 2, source_file="multi_turn/traj.jsonl"),
+        ]
+        records = aggregate_conversations(samples)
+        assert len(records) == 1
+        assert records[0]["conversation_id"] == "multi_turn/traj.jsonl::c1"
 
 
 # ── TestWriteConversationScores ──

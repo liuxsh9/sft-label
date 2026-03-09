@@ -11,11 +11,13 @@ Covers:
 
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 
 from sft_label.artifacts import (
     PASS2_STATS_FILE,
     PASS2_STATS_FILE_LEGACY,
+    PASS2_SUMMARY_STATS_FILE,
     PASS2_DASHBOARD_FILE,
     PASS2_DASHBOARD_FILE_LEGACY,
 )
@@ -1128,11 +1130,291 @@ class TestResumeScoringFile:
         assert rarity_by_id["rare-1"] > rarity_by_id["common-1"]
 
 
+class TestRunScoringDirectoryOutputRouting:
+    """Directory-mode output routing and aggregation path tests."""
+
+    @staticmethod
+    def _labels():
+        return {
+            "intent": "build",
+            "difficulty": "advanced",
+            "context": "snippet",
+            "language": ["python"],
+            "domain": ["web-backend"],
+            "task": ["feature-implementation"],
+            "concept": ["algorithms"],
+            "agentic": [],
+            "constraint": [],
+        }
+
+    @staticmethod
+    def _single_turn(sample_id):
+        return {
+            "id": sample_id,
+            "conversations": [
+                {"from": "human", "value": "question"},
+                {"from": "gpt", "value": "answer"},
+            ],
+            "metadata": {},
+            "labels": TestRunScoringDirectoryOutputRouting._labels(),
+        }
+
+    @staticmethod
+    def _multi_turn_slice(source_id, turn_index, total_turns):
+        convs = [{"from": "human", "value": "q1"}, {"from": "gpt", "value": "a1"}]
+        if turn_index == 2:
+            convs.extend([{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}])
+        return {
+            "id": f"{source_id}_t{turn_index}",
+            "conversations": convs,
+            "metadata": {"source_id": source_id, "turn_index": turn_index, "total_turns": total_turns},
+            "labels": TestRunScoringDirectoryOutputRouting._labels(),
+        }
+
+    @staticmethod
+    async def _mock_score_one(http_client, sample, model, rarity_result,
+                              sample_idx, total, sem, config=None, rate_limiter=None):
+        value = {
+            "complexity": {"instruction": 7, "analytical_depth": 7, "implementation": 7, "overall": 7},
+            "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+            "reasoning": {"clarity": 7, "consistency": 7, "self_correction": False, "overall": 7},
+            "rarity": rarity_result,
+            "flags": [],
+            "thinking_mode": "fast",
+            "value_score": 7.0 + sample_idx * 0.1,
+            "confidence": 0.9,
+        }
+        monitor = {
+            "sample_id": sample.get("id"),
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 10,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+        return value, monitor
+
+    def test_directory_scoring_creates_missing_output_root(self, tmp_path):
+        from sft_label.config import PipelineConfig
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        labeled_path = input_dir / "labeled.json"
+        with open(labeled_path, "w", encoding="utf-8") as f:
+            json.dump([self._single_turn("s1")], f)
+
+        output_dir = tmp_path / "new-output-root"  # intentionally not created
+        config = PipelineConfig(scoring_concurrency=1, sample_max_retries=1)
+
+        with patch("sft_label.scoring.score_one", side_effect=self._mock_score_one):
+            summary = asyncio.run(run_scoring(
+                input_path=str(input_dir),
+                output_dir=str(output_dir),
+                config=config,
+            ))
+
+        assert output_dir.exists()
+        assert (output_dir / PASS2_SUMMARY_STATS_FILE).exists()
+        assert summary.get("files_processed") == 1
+
+    def test_directory_scoring_writes_per_file_outputs_under_output_root(self, tmp_path):
+        from sft_label.config import PipelineConfig
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        input_dir = tmp_path / "input"
+        nested = input_dir / "level1" / "level2"
+        nested.mkdir(parents=True)
+        labeled_path = nested / "labeled.json"
+        with open(labeled_path, "w", encoding="utf-8") as f:
+            json.dump([self._single_turn("s1")], f)
+
+        output_dir = tmp_path / "output"
+        config = PipelineConfig(scoring_concurrency=1, sample_max_retries=1)
+
+        with patch("sft_label.scoring.score_one", side_effect=self._mock_score_one):
+            asyncio.run(run_scoring(
+                input_path=str(input_dir),
+                output_dir=str(output_dir),
+                config=config,
+            ))
+
+        assert (output_dir / "level1" / "level2" / "scored.json").exists()
+        assert (output_dir / "level1" / "level2" / "scored.jsonl").exists()
+        assert not (input_dir / "level1" / "level2" / "scored.json").exists()
+        assert not (input_dir / "level1" / "level2" / "scored.jsonl").exists()
+
+    def test_directory_scoring_global_conversation_aggregation_scans_nested_outputs(self, tmp_path):
+        from sft_label.config import PipelineConfig
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        input_dir = tmp_path / "input"
+        nested = input_dir / "a" / "b"
+        nested.mkdir(parents=True)
+        labeled_path = nested / "labeled.json"
+        samples = [
+            self._multi_turn_slice("conv-1", 1, 2),
+            self._multi_turn_slice("conv-1", 2, 2),
+        ]
+        with open(labeled_path, "w", encoding="utf-8") as f:
+            json.dump(samples, f)
+
+        output_dir = tmp_path / "output"
+        config = PipelineConfig(scoring_concurrency=1, sample_max_retries=1)
+
+        with patch("sft_label.scoring.score_one", side_effect=self._mock_score_one):
+            asyncio.run(run_scoring(
+                input_path=str(input_dir),
+                output_dir=str(output_dir),
+                config=config,
+            ))
+
+        conv_scores = output_dir / "conversation_scores.json"
+        assert conv_scores.exists()
+        with open(conv_scores, encoding="utf-8") as f:
+            records = json.load(f)
+
+        # Recursive discovery should include nested outputs.
+        assert len(records) == 1
+        # Dedup of scored.json + scored.jsonl should avoid double counting turns.
+        assert records[0]["turn_count"] == 2
+
+
+# ─────────────────────────────────────────────────────────
+# Retry semantics
+# ─────────────────────────────────────────────────────────
+
+class TestPass2RetrySemantics:
+    @staticmethod
+    def _sample():
+        return {
+            "id": "retry-sample",
+            "conversations": [
+                {"from": "human", "value": "question"},
+                {"from": "gpt", "value": "answer"},
+            ],
+            "labels": {"intent": "build", "difficulty": "intermediate"},
+            "metadata": {},
+        }
+
+    @staticmethod
+    def _valid_score_payload():
+        return {
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+            "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+            "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+            "flags": [],
+            "confidence": 0.8,
+        }
+
+    @pytest.mark.asyncio
+    async def test_sample_max_retries_one_allows_two_attempts(self):
+        from sft_label.config import PipelineConfig
+        from unittest.mock import AsyncMock, patch
+
+        calls = {"n": 0}
+
+        async def mock_llm_call(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None, "transient error", {"prompt_tokens": 3, "completion_tokens": 1}
+            return self._valid_score_payload(), "ok", {"prompt_tokens": 3, "completion_tokens": 1}
+
+        config = PipelineConfig(sample_max_retries=1, scoring_concurrency=1)
+        sem = asyncio.Semaphore(1)
+        rarity = {"score": 5.0}
+
+        with patch("sft_label.scoring.async_llm_call", side_effect=mock_llm_call), \
+             patch("sft_label.scoring.asyncio.sleep", new=AsyncMock(return_value=None)):
+            value, monitor = await score_one(
+                None,
+                self._sample(),
+                "mock-model",
+                rarity,
+                sample_idx=0,
+                total=1,
+                sem=sem,
+                config=config,
+            )
+
+        assert value is not None
+        assert monitor["status"] == "success"
+        assert monitor["attempts"] == 2
+        assert monitor["llm_calls"] == 2
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_failure_exits_early(self):
+        from sft_label.config import PipelineConfig
+        from unittest.mock import patch
+
+        calls = {"n": 0}
+
+        async def mock_llm_call(*args, **kwargs):
+            calls["n"] += 1
+            return None, "blocked", {
+                "prompt_tokens": 2,
+                "completion_tokens": 0,
+                "non_retryable": True,
+            }
+
+        config = PipelineConfig(sample_max_retries=3, scoring_concurrency=1)
+        sem = asyncio.Semaphore(1)
+        rarity = {"score": 5.0}
+
+        with patch("sft_label.scoring.async_llm_call", side_effect=mock_llm_call):
+            value, monitor = await score_one(
+                None,
+                self._sample(),
+                "mock-model",
+                rarity,
+                sample_idx=0,
+                total=1,
+                sem=sem,
+                config=config,
+            )
+
+        assert value is None
+        assert monitor["status"] == "failed"
+        assert monitor["attempts"] == 1
+        assert monitor["llm_calls"] == 1
+        assert calls["n"] == 1
+
+    def test_workload_estimate_increases_when_retries_enabled(self, tmp_path):
+        from sft_label.config import PipelineConfig
+        from sft_label.scoring import estimate_scoring_directory_workload
+
+        labeled = tmp_path / "labeled.json"
+        samples = [{"id": f"s{i}", "labels": {"intent": "build"}} for i in range(10)]
+        with open(labeled, "w", encoding="utf-8") as f:
+            json.dump(samples, f)
+
+        no_retry = estimate_scoring_directory_workload(
+            [labeled],
+            config=PipelineConfig(sample_max_retries=0),
+        )
+        one_retry = estimate_scoring_directory_workload(
+            [labeled],
+            config=PipelineConfig(sample_max_retries=1),
+        )
+
+        assert no_retry.initial_estimated_llm_calls == no_retry.baseline_total_llm_calls
+        assert one_retry.initial_estimated_llm_calls > one_retry.baseline_total_llm_calls
+
+
 # ─────────────────────────────────────────────────────────
 # 8.6  Selection Scores
 # ─────────────────────────────────────────────────────────
 
-from sft_label.scoring import compute_selection_scores
+from sft_label.scoring import (
+    compute_selection_scores,
+    compute_selection_scores_from_summaries,
+    score_one,
+)
 
 
 class TestComputeSelectionScores:
@@ -1209,6 +1491,34 @@ class TestComputeSelectionScores:
         for s in samples:
             assert s["value"].get("selection_score") is not None
 
+    def test_custom_smoothing_prior_changes_shrinkage_path(self):
+        """Configured smoothing prior should affect intra-class shrinkage."""
+        from sft_label.config import PipelineConfig
+
+        base_samples = []
+        qualities = [1, 2, 3, 8, 9, 10]
+        for i, q in enumerate(qualities):
+            intent = "build" if i < 3 else "learn"
+            labels = {"intent": intent, "language": ["python"]}
+            base_samples.append(
+                self._make_sample(i, labels, complexity=q, quality=q, reasoning=q, value_score=float(q))
+            )
+
+        low_prior_samples = deepcopy(base_samples)
+        high_prior_samples = deepcopy(base_samples)
+
+        low_cfg = PipelineConfig(selection_min_group_size=1, selection_smoothing_prior=1)
+        high_cfg = PipelineConfig(selection_min_group_size=1, selection_smoothing_prior=100)
+
+        compute_selection_scores(low_prior_samples, config=low_cfg)
+        compute_selection_scores(high_prior_samples, config=high_cfg)
+
+        # Middle sample in "build" group: tag-percentile (0.5) > global percentile (~0.2).
+        # Lower prior keeps more tag signal, so intra-class rank should be higher.
+        low_rank = low_prior_samples[1]["value"]["intra_class_rank"]
+        high_rank = high_prior_samples[1]["value"]["intra_class_rank"]
+        assert low_rank > high_rank
+
     def test_multi_tag_averaging(self):
         """Multiple tags within a dimension → percentiles averaged."""
         samples = []
@@ -1246,6 +1556,32 @@ class TestComputeSelectionScores:
                                       value_score=6.0)]
         compute_selection_scores(samples, min_group_size=1)
         assert samples[0]["value"].get("selection_score") is not None
+
+
+class TestComputeSelectionScoresFromSummaries:
+    def test_custom_smoothing_prior_applies_in_chunked_path(self):
+        from sft_label.config import PipelineConfig
+
+        summaries = []
+        qualities = [1, 2, 3, 8, 9, 10]
+        for i, q in enumerate(qualities):
+            intent = "build" if i < 3 else "learn"
+            summaries.append({
+                "complexity_overall": q,
+                "quality_overall": q,
+                "reasoning_overall": q,
+                "rarity_score": 5.0,
+                "labels": {"intent": intent, "language": ["python"]},
+                "value_score": float(q),
+            })
+
+        low_cfg = PipelineConfig(selection_min_group_size=1, selection_smoothing_prior=1)
+        high_cfg = PipelineConfig(selection_min_group_size=1, selection_smoothing_prior=100)
+
+        low = compute_selection_scores_from_summaries(summaries, config=low_cfg)
+        high = compute_selection_scores_from_summaries(summaries, config=high_cfg)
+
+        assert low[1]["intra_class_rank"] > high[1]["intra_class_rank"]
 
 
 # ─────────────────────────────────────────────────────────

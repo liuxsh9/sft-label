@@ -660,6 +660,58 @@ def _resolve_aliases(dim, values):
     return resolved
 
 
+def _stringify_unmapped_value(value):
+    """Convert unmapped payloads to JSON-safe strings."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _normalize_unmapped_item(item):
+    """Normalize unmapped item to {'dimension': str, 'value': str}."""
+    if isinstance(item, dict):
+        dimension = item.get("dimension", "?")
+        value = item.get("value", "")
+    else:
+        dimension = "?"
+        value = item
+
+    dimension_str = _stringify_unmapped_value(dimension) or "?"
+    value_str = _stringify_unmapped_value(value)
+    return {"dimension": dimension_str, "value": value_str}
+
+
+def _normalize_single_select(dim, raw_val, pool, unmapped, issues):
+    """Normalize single-select dim value with type-safe validation."""
+    if raw_val is None:
+        return ""
+
+    if not isinstance(raw_val, str):
+        type_name = type(raw_val).__name__
+        issues.append(f"{dim}: malformed single-select type '{type_name}'")
+        unmapped.append({"dimension": dim, "value": f"<invalid-type:{type_name}>"})
+        return ""
+
+    val = raw_val.strip()
+    if not val:
+        return ""
+
+    resolved = val if val in pool else TAG_ALIASES.get(val, val)
+    if resolved not in pool:
+        issues.append(f"{dim}: '{resolved}' not in pool")
+        unmapped.append({"dimension": dim, "value": resolved})
+        return ""
+
+    return resolved
+
+
 def validate_tags(result, call_name="call1"):
     issues = []
     unmapped = result.get("unmapped", [])
@@ -678,14 +730,13 @@ def validate_tags(result, call_name="call1"):
 
         pool = TAG_POOLS.get(dim, set())
         if dim in SINGLE_SELECT:
-            raw_val = result[dim]
-            val = raw_val if (not raw_val or raw_val in pool) else TAG_ALIASES.get(raw_val, raw_val)
-            if val and val not in pool:
-                issues.append(f"{dim}: '{val}' not in pool")
-                unmapped.append({"dimension": dim, "value": val})
-                cleaned[dim] = ""
-            else:
-                cleaned[dim] = val
+            cleaned[dim] = _normalize_single_select(
+                dim=dim,
+                raw_val=result[dim],
+                pool=pool,
+                unmapped=unmapped,
+                issues=issues,
+            )
         else:
             raw = result[dim] if isinstance(result[dim], list) else [result[dim]]
             resolved = _resolve_aliases(dim, raw)
@@ -699,14 +750,11 @@ def validate_tags(result, call_name="call1"):
             cleaned[dim] = valid
 
     # Normalize string items to dict format (LLM may return plain strings)
-    unmapped = [
-        item if isinstance(item, dict) else {"dimension": "?", "value": item}
-        for item in unmapped
-    ]
+    unmapped = [_normalize_unmapped_item(item) for item in unmapped]
     # Filter out LLM explanation sentences — unmapped should be short tag IDs
     unmapped = [
         item for item in unmapped
-        if len(item.get("value", "")) <= 60 and item.get("value", "").count(" ") <= 3
+        if len(item["value"]) <= 60 and item["value"].count(" ") <= 3
     ]
 
     cleaned["unmapped"] = unmapped

@@ -16,6 +16,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sft_label.conversation import build_conversation_key
+
+VALID_MISSING_GATE_POLICIES = {"fail", "ignore"}
+
 
 @dataclass
 class FilterConfig:
@@ -39,12 +43,42 @@ class FilterConfig:
     turn_count_max: int | None = None       # max total_turns in conversation
     # Sub-score hard floors
     correctness_min: float | None = None    # min quality.correctness (hard floor)
+    missing_gate_policy: str = "fail"       # "fail" or "ignore" when gate fields are missing
     # Turn-level pruning (within conversations that pass conv-level criteria)
     turn_value_min: float | None = None     # min per-slice value_score
     turn_quality_min: float | None = None   # min per-slice quality.overall
     max_pruned_ratio: float = 0.5           # don't prune more than 50% of turns
     keep_first_last: bool = True            # always keep first and last turns
     preserve_structure: bool = False        # directory mode: mirror input tree
+
+
+def _validate_missing_gate_policy(policy: str):
+    """Validate policy used when required hard-gate fields are missing."""
+    if policy not in VALID_MISSING_GATE_POLICIES:
+        allowed = ", ".join(sorted(VALID_MISSING_GATE_POLICIES))
+        raise ValueError(f"Invalid missing_gate_policy '{policy}'. Expected one of: {allowed}")
+
+
+def _init_missing_gate_drop_counts():
+    """Initialize per-criterion drop counters for missing gate fields."""
+    return {
+        "correctness_min": 0,
+        "thinking_mode": 0,
+        "turn_value_min": 0,
+        "turn_quality_min": 0,
+    }
+
+
+def _record_missing_drop(missing_gate_drops, criterion):
+    """Increment a missing-field drop counter."""
+    if missing_gate_drops is not None and criterion in missing_gate_drops:
+        missing_gate_drops[criterion] += 1
+
+
+def _record_missing_drop_reasons(missing_gate_drops, reasons):
+    """Increment counters for all missing reasons attached to one dropped sample."""
+    for criterion in reasons:
+        _record_missing_drop(missing_gate_drops, criterion)
 
 
 def _parse_dim_tag(dim_tag):
@@ -75,7 +109,7 @@ def _sample_has_tag(labels, dim, tag):
     return False
 
 
-def matches_filter(sample, config):
+def matches_filter(sample, config, missing_gate_drops=None):
     """Check if a sample matches all filter criteria.
 
     Returns True if the sample should be retained.
@@ -129,13 +163,21 @@ def matches_filter(sample, config):
     if config.correctness_min is not None:
         quality = value.get("quality") or value.get("scores", {}).get("quality") or {}
         correctness = quality.get("correctness") if isinstance(quality, dict) else None
-        if correctness is not None and correctness < config.correctness_min:
+        if correctness is None:
+            if config.missing_gate_policy == "fail":
+                _record_missing_drop(missing_gate_drops, "correctness_min")
+                return False
+        elif correctness < config.correctness_min:
             return False
 
     # Check thinking_mode
     if config.thinking_mode:
         sample_mode = value.get("thinking_mode") or metadata.get("thinking_mode", "")
-        if sample_mode and sample_mode != config.thinking_mode:
+        if sample_mode:
+            if sample_mode != config.thinking_mode:
+                return False
+        elif config.missing_gate_policy == "fail":
+            _record_missing_drop(missing_gate_drops, "thinking_mode")
             return False
 
     # Check difficulty
@@ -236,7 +278,46 @@ def _has_conv_criteria(config):
 def _is_multi_turn(sample):
     """Check if a sample is from a multi-turn conversation."""
     meta = sample.get("metadata") or {}
-    return meta.get("source_id") and meta.get("total_turns", 1) > 1
+    return bool(meta.get("source_id")) and meta.get("total_turns", 1) > 1
+
+
+def _init_conv_lookup_stats():
+    """Initialize diagnostics for conversation record lookup."""
+    return {
+        "canonical_hits": 0,
+        "legacy_fallback_hits": 0,
+        "missing_identity": 0,
+        "missing_record": 0,
+    }
+
+
+def _resolve_conversation_record(sample, conv_lookup, conv_stats):
+    """Resolve conversation score record using canonical key + legacy fallback."""
+    meta = sample.get("metadata") or {}
+    source_id = meta.get("source_id")
+    canonical_id = build_conversation_key(meta)
+
+    if not canonical_id:
+        if conv_stats is not None:
+            conv_stats["missing_identity"] += 1
+        return None
+
+    conv_rec = conv_lookup.get(canonical_id)
+    if conv_rec is not None:
+        if conv_stats is not None:
+            conv_stats["canonical_hits"] += 1
+        return conv_rec
+
+    if canonical_id != source_id and source_id:
+        legacy_rec = conv_lookup.get(source_id)
+        if legacy_rec is not None:
+            if conv_stats is not None:
+                conv_stats["legacy_fallback_hits"] += 1
+            return legacy_rec
+
+    if conv_stats is not None:
+        conv_stats["missing_record"] += 1
+    return None
 
 
 def _has_turn_criteria(config):
@@ -245,18 +326,34 @@ def _has_turn_criteria(config):
 
 
 def _passes_turn_criteria(sample, config):
-    """Check if a single slice passes turn-level thresholds."""
+    """Check if a single slice passes turn-level thresholds.
+
+    Returns tuple:
+      (passes: bool, missing_reasons: list[str])
+    where missing_reasons includes criteria that failed due to missing fields
+    under strict missing_gate_policy=fail.
+    """
     value = sample.get("value") or {}
+    missing_reasons = []
+    failed = False
     if config.turn_value_min is not None:
         vs = value.get("value_score")
-        if vs is not None and vs < config.turn_value_min:
-            return False
+        if vs is None:
+            if config.missing_gate_policy == "fail":
+                missing_reasons.append("turn_value_min")
+                failed = True
+        elif vs < config.turn_value_min:
+            failed = True
     if config.turn_quality_min is not None:
         quality = value.get("quality") or value.get("scores", {}).get("quality") or {}
         qo = quality.get("overall") if isinstance(quality, dict) else None
-        if qo is not None and qo < config.turn_quality_min:
-            return False
-    return True
+        if qo is None:
+            if config.missing_gate_policy == "fail":
+                missing_reasons.append("turn_quality_min")
+                failed = True
+        elif qo < config.turn_quality_min:
+            failed = True
+    return not failed, missing_reasons
 
 
 def filter_samples(samples, threshold=None, include_unscored=False, config=None):
@@ -266,6 +363,7 @@ def filter_samples(samples, threshold=None, include_unscored=False, config=None)
     """
     if config is None:
         config = FilterConfig(value_min=threshold, include_unscored=include_unscored)
+    _validate_missing_gate_policy(config.missing_gate_policy)
 
     retained = []
     dropped = []
@@ -567,20 +665,27 @@ def _build_filter_desc(config):
         criteria.append(f"turn_value >= {config.turn_value_min:g}")
     if config.turn_quality_min is not None:
         criteria.append(f"turn_quality >= {config.turn_quality_min:g}")
+    if (
+        config.correctness_min is not None
+        or config.thinking_mode
+        or config.turn_value_min is not None
+        or config.turn_quality_min is not None
+    ):
+        criteria.append(f"missing_gate_policy = {config.missing_gate_policy}")
     return " AND ".join(criteria) if criteria else "none"
 
 
-def _passes_with_conv(sample, config, use_conv, conv_lookup):
+def _passes_with_conv(sample, config, use_conv, conv_lookup, conv_stats, missing_gate_drops=None):
     """Apply conversation-level gate (if enabled) + full sample-level filter."""
-    if use_conv and _is_multi_turn(sample):
-        source_id = (sample.get("metadata") or {}).get("source_id")
-        conv_rec = conv_lookup.get(source_id) if source_id else None
+    total_turns = (sample.get("metadata") or {}).get("total_turns", 1)
+    if use_conv and total_turns > 1:
+        conv_rec = _resolve_conversation_record(sample, conv_lookup, conv_stats)
         if conv_rec is None or not _matches_conv_criteria(conv_rec, config):
             return False
-    return matches_filter(sample, config)
+    return matches_filter(sample, config, missing_gate_drops=missing_gate_drops)
 
 
-def _prune_turns(retained, config):
+def _prune_turns(retained, config, missing_gate_drops=None):
     """Turn-level pruning: prune low-value slices within conversations."""
     n_turn_pruned = 0
     if not (_has_turn_criteria(config) and retained):
@@ -593,10 +698,12 @@ def _prune_turns(retained, config):
             source_id = (sample.get("metadata") or {}).get("source_id")
             mt_groups.setdefault(source_id, []).append((i, sample))
         else:
-            if _passes_turn_criteria(sample, config):
+            passes, missing_reasons = _passes_turn_criteria(sample, config)
+            if passes:
                 final_retained.append(sample)
             else:
                 n_turn_pruned += 1
+                _record_missing_drop_reasons(missing_gate_drops, missing_reasons)
 
     for members in mt_groups.values():
         n = len(members)
@@ -608,14 +715,18 @@ def _prune_turns(retained, config):
 
         max_prune = int(n * config.max_pruned_ratio)
         candidates_to_prune = []
+        missing_reasons_by_turn = {}
         for j, (_orig_idx, sample) in enumerate(members):
             is_first = (j == 0)
             is_last = (j == n - 1)
             if config.keep_first_last and (is_first or is_last):
                 continue
-            if not _passes_turn_criteria(sample, config):
+            passes, missing_reasons = _passes_turn_criteria(sample, config)
+            if not passes:
                 vs = (sample.get("value") or {}).get("value_score", 0.0) or 0.0
                 candidates_to_prune.append((j, vs))
+                if missing_reasons:
+                    missing_reasons_by_turn[j] = missing_reasons
 
         if max_prune == 0:
             candidates_to_prune = []
@@ -625,6 +736,8 @@ def _prune_turns(retained, config):
 
         prune_set = {j for j, _ in candidates_to_prune}
         n_turn_pruned += len(prune_set)
+        for j in prune_set:
+            _record_missing_drop_reasons(missing_gate_drops, missing_reasons_by_turn.get(j, []))
 
         for j, (_orig_idx, sample) in enumerate(members):
             if j not in prune_set:
@@ -664,26 +777,34 @@ def _accumulate_retained_stats(sample, config, stats):
             stats["verify_no_meta"] += 1
 
 
-def _iter_filtered_samples(scored_files, config, use_conv, conv_lookup, stats):
+def _iter_filtered_samples(
+    scored_files, config, use_conv, conv_lookup, conv_stats, stats, missing_gate_drops=None
+):
     """Stream filtered samples and update stats in-place."""
     for sample in _iter_samples_from_files(scored_files):
         stats["total"] += 1
-        if not _passes_with_conv(sample, config, use_conv, conv_lookup):
+        if not _passes_with_conv(
+            sample, config, use_conv, conv_lookup, conv_stats, missing_gate_drops=missing_gate_drops
+        ):
             continue
         stats["retained"] += 1
         _accumulate_retained_stats(sample, config, stats)
         yield sample
 
 
-def _collect_filtered_samples(scored_files, config, use_conv, conv_lookup):
+def _collect_filtered_samples(
+    scored_files, config, use_conv, conv_lookup, conv_stats, missing_gate_drops=None
+):
     """Collect filtered samples (needed for turn-level pruning path)."""
     retained = []
     total = 0
     for sample in _iter_samples_from_files(scored_files):
         total += 1
-        if _passes_with_conv(sample, config, use_conv, conv_lookup):
+        if _passes_with_conv(
+            sample, config, use_conv, conv_lookup, conv_stats, missing_gate_drops=missing_gate_drops
+        ):
             retained.append(sample)
-    retained, n_turn_pruned = _prune_turns(retained, config)
+    retained, n_turn_pruned = _prune_turns(retained, config, missing_gate_drops=missing_gate_drops)
     return total, retained, n_turn_pruned
 
 
@@ -759,7 +880,16 @@ def _mirror_output_path(root_output, input_root, scored_file, config):
     return out
 
 
-def _run_filter_preserve_structure(input_path, scored_files, output_path, config, use_conv, conv_lookup):
+def _run_filter_preserve_structure(
+    input_path,
+    scored_files,
+    output_path,
+    config,
+    use_conv,
+    conv_lookup,
+    conv_stats,
+    missing_gate_drops,
+):
     """Directory mode: mirror input folder structure and file count."""
     suffix = _build_suffix(config)
     if output_path is None:
@@ -785,7 +915,8 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
 
         if _has_turn_criteria(config):
             file_total, file_retained, file_turn_pruned = _collect_filtered_samples(
-                [scored_file], config, use_conv, conv_lookup
+                [scored_file], config, use_conv, conv_lookup, conv_stats,
+                missing_gate_drops=missing_gate_drops,
             )
             turn_pruned += file_turn_pruned
             total += file_total
@@ -806,7 +937,10 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
                 _write_json_array(file_retained, out_file)
         else:
             file_stats = _init_stream_stats()
-            stream = _iter_filtered_samples([scored_file], config, use_conv, conv_lookup, file_stats)
+            stream = _iter_filtered_samples(
+                [scored_file], config, use_conv, conv_lookup, conv_stats, file_stats,
+                missing_gate_drops=missing_gate_drops,
+            )
             if config.output_format == "training" or out_file.suffix == ".jsonl":
                 _write_jsonl(stream, out_file, convert_training=(config.output_format == "training"))
             else:
@@ -838,9 +972,12 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
         "output_root": str(output_root),
         "output_files": output_files,
         "files_written": files_written,
+        "missing_gate_drops": dict(missing_gate_drops),
     }
     if config.verify_source:
         summary["verify_source"] = {"matched": verify_matched, "no_metadata": verify_no_meta}
+    if use_conv and conv_stats is not None:
+        summary["conversation_lookup"] = dict(conv_stats)
     return summary
 
 
@@ -868,6 +1005,8 @@ def run_filter(input_path, threshold=None, output_path=None,
             value_min=threshold,
             include_unscored=include_unscored,
         )
+    _validate_missing_gate_policy(config.missing_gate_policy)
+    missing_gate_drops = _init_missing_gate_drop_counts()
 
     scored_files = _find_scored_files(input_path)
 
@@ -877,6 +1016,7 @@ def run_filter(input_path, threshold=None, output_path=None,
     # Load conversation scores if conv criteria are set
     use_conv = _has_conv_criteria(config)
     conv_lookup = {}
+    conv_stats = _init_conv_lookup_stats() if use_conv else None
     if use_conv:
         conv_lookup = _load_conversation_scores(input_path)
 
@@ -888,6 +1028,8 @@ def run_filter(input_path, threshold=None, output_path=None,
             config=config,
             use_conv=use_conv,
             conv_lookup=conv_lookup,
+            conv_stats=conv_stats,
+            missing_gate_drops=missing_gate_drops,
         )
         _print_summary(summary)
         return summary
@@ -899,7 +1041,8 @@ def run_filter(input_path, threshold=None, output_path=None,
 
     if _has_turn_criteria(config):
         total, retained, n_turn_pruned = _collect_filtered_samples(
-            scored_files, config, use_conv, conv_lookup
+            scored_files, config, use_conv, conv_lookup, conv_stats,
+            missing_gate_drops=missing_gate_drops,
         )
         n_retained = len(retained)
         retained_stats = _init_stream_stats()
@@ -916,7 +1059,10 @@ def run_filter(input_path, threshold=None, output_path=None,
         json_path, jsonl_path = _write_outputs(retained, output_path, config)
     else:
         stream_stats = _init_stream_stats()
-        stream = _iter_filtered_samples(scored_files, config, use_conv, conv_lookup, stream_stats)
+        stream = _iter_filtered_samples(
+            scored_files, config, use_conv, conv_lookup, conv_stats, stream_stats,
+            missing_gate_drops=missing_gate_drops,
+        )
         json_path, jsonl_path = _write_outputs_streaming(stream, output_path, config)
         total = stream_stats["total"]
         n_retained = stream_stats["retained"]
@@ -942,9 +1088,12 @@ def run_filter(input_path, threshold=None, output_path=None,
         "output_format": config.output_format,
         "output_json": str(json_path) if json_path else None,
         "output_jsonl": str(jsonl_path) if jsonl_path else None,
+        "missing_gate_drops": dict(missing_gate_drops),
     }
     if config.verify_source:
         summary["verify_source"] = {"matched": verify_matched, "no_metadata": verify_no_meta}
+    if use_conv and conv_stats is not None:
+        summary["conversation_lookup"] = dict(conv_stats)
 
     _print_summary(summary)
     return summary
@@ -967,6 +1116,26 @@ def _print_summary(summary):
     if summary.get("verify_source"):
         verify = summary["verify_source"]
         print(f"  {'Source verified:':<24} {verify['matched']} matched, {verify['no_metadata']} no metadata")
+    if summary.get("missing_gate_drops"):
+        missing = summary["missing_gate_drops"]
+        missing_total = sum(missing.values())
+        if missing_total:
+            print(
+                f"  {'Missing gate drops:':<24} "
+                f"correctness={missing['correctness_min']}, "
+                f"thinking_mode={missing['thinking_mode']}, "
+                f"turn_value={missing['turn_value_min']}, "
+                f"turn_quality={missing['turn_quality_min']}"
+            )
+    if summary.get("conversation_lookup"):
+        conv = summary["conversation_lookup"]
+        print(
+            f"  {'Conv lookup:':<24} "
+            f"canonical={conv['canonical_hits']}, "
+            f"legacy_fallback={conv['legacy_fallback_hits']}, "
+            f"missing_id={conv['missing_identity']}, "
+            f"missing_record={conv['missing_record']}"
+        )
     print(f"  {'Format:':<24} {summary['output_format']}")
     if summary.get("output_root"):
         print(f"  {'Output root:':<24} {summary['output_root']}")

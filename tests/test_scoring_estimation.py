@@ -33,7 +33,7 @@ def test_estimate_scoring_directory_workload_with_limit(tmp_path):
     assert est.files_planned == 2
     assert est.total_samples == 4
     assert est.baseline_total_llm_calls == 4
-    assert est.initial_estimated_llm_calls == 4
+    assert est.initial_estimated_llm_calls == 5
 
 
 def test_estimate_scoring_directory_workload_retry_factor(tmp_path):
@@ -48,4 +48,4 @@ def test_estimate_scoring_directory_workload_retry_factor(tmp_path):
     assert est.files_planned == 1
     assert est.total_samples == 10
     assert est.baseline_total_llm_calls == 10
-    assert est.initial_estimated_llm_calls == 12
+    assert est.initial_estimated_llm_calls == 13

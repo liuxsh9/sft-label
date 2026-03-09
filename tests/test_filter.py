@@ -121,6 +121,26 @@ class TestMatchesFilter:
         sample = _full_sample(7.0, metadata={"thinking_mode": "slow"})
         assert matches_filter(sample, config) is True
 
+    def test_strict_policy_drops_missing_correctness(self):
+        config = FilterConfig(correctness_min=6.0)
+        sample_missing = _full_sample(7.0, value_extra={"quality": {"overall": 7.0}})
+        assert matches_filter(sample_missing, config) is False
+
+    def test_strict_policy_drops_missing_thinking_mode(self):
+        config = FilterConfig(thinking_mode="slow")
+        sample_missing = _full_sample(7.0)
+        assert matches_filter(sample_missing, config) is False
+
+    def test_ignore_policy_keeps_missing_correctness(self):
+        config = FilterConfig(correctness_min=6.0, missing_gate_policy="ignore")
+        sample_missing = _full_sample(7.0, value_extra={"quality": {"overall": 7.0}})
+        assert matches_filter(sample_missing, config) is True
+
+    def test_ignore_policy_keeps_missing_thinking_mode(self):
+        config = FilterConfig(thinking_mode="slow", missing_gate_policy="ignore")
+        sample_missing = _full_sample(7.0)
+        assert matches_filter(sample_missing, config) is True
+
     def test_difficulty_filter(self):
         config = FilterConfig(difficulty=["advanced", "expert"])
         sample_adv = _full_sample(7.0, labels={"difficulty": "advanced"})
@@ -222,6 +242,11 @@ class TestFilterConfig:
         assert len(retained) == 1
         assert retained[0]["value"]["value_score"] == 7.0
 
+    def test_filter_samples_rejects_invalid_missing_gate_policy(self):
+        config = FilterConfig(value_min=6.0, missing_gate_policy="invalid")
+        with pytest.raises(ValueError, match="Invalid missing_gate_policy"):
+            filter_samples([_scored(7.0)], config=config)
+
 
 # ── run_filter (integration) ──
 
@@ -295,6 +320,13 @@ class TestRunFilter:
         summary = run_filter(str(input_file), threshold=5.0)
         assert summary["total"] == 0
         assert summary["retained"] == 0
+
+    def test_run_filter_rejects_invalid_missing_gate_policy(self, tmp_path):
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps([_scored(8.0)]))
+        config = FilterConfig(value_min=5.0, missing_gate_policy="invalid")
+        with pytest.raises(ValueError, match="Invalid missing_gate_policy"):
+            run_filter(str(input_file), config=config)
 
 
 # ── Directory mode (complex scenarios) ──
@@ -595,9 +627,9 @@ class TestOutputPathGeneration:
 
 # ── Conversation-level filtering ──
 
-def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None):
+def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None, source_file=None):
     """Create a multi-turn slice sample."""
-    return {
+    sample = {
         "id": f"{source_id}_t{turn_index}",
         "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
         "metadata": {
@@ -608,6 +640,9 @@ def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None):
         "labels": labels or {"difficulty": "advanced"},
         "value": {"value_score": score},
     }
+    if source_file:
+        sample["metadata"]["source_file"] = source_file
+    return sample
 
 
 class TestConversationFilter:
@@ -635,6 +670,41 @@ class TestConversationFilter:
         summary = run_filter(str(input_file), config=config)
         # Only c2 slices retained
         assert summary["retained"] == 2
+
+    def test_canonical_conversation_id_lookup(self, tmp_path):
+        samples = [
+            _mt_sample("c1", 1, 2, source_file="multi_turn/a.jsonl"),
+            _mt_sample("c1", 2, 2, source_file="multi_turn/a.jsonl"),
+        ]
+        conv_records = [
+            {
+                "conversation_id": "multi_turn/a.jsonl::c1",
+                "conv_value": 8.0,
+                "conv_selection": 8.0,
+                "peak_complexity": 6,
+            },
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=7.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 2
+        assert summary["conversation_lookup"]["canonical_hits"] == 2
+        assert summary["conversation_lookup"]["legacy_fallback_hits"] == 0
+
+    def test_legacy_fallback_lookup(self, tmp_path):
+        samples = [
+            _mt_sample("c1", 1, 2, source_file="multi_turn/a.jsonl"),
+            _mt_sample("c1", 2, 2, source_file="multi_turn/a.jsonl"),
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 7.0, "peak_complexity": 6},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=7.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 2
+        assert summary["conversation_lookup"]["canonical_hits"] == 0
+        assert summary["conversation_lookup"]["legacy_fallback_hits"] == 2
 
     def test_conv_selection_min(self, tmp_path):
         samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
@@ -733,6 +803,25 @@ class TestConversationFilter:
         config = FilterConfig(conv_value_min=5.0)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 0
+
+    def test_missing_identity_metadata_is_diagnostic(self, tmp_path):
+        samples = [
+            {
+                "id": "missing-id-t1",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "metadata": {"turn_index": 1, "total_turns": 2},
+                "labels": {"difficulty": "advanced"},
+                "value": {"value_score": 8.0},
+            }
+        ]
+        conv_records = [
+            {"conversation_id": "c1", "conv_value": 8.0, "conv_selection": 8.0, "peak_complexity": 6},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=7.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+        assert summary["conversation_lookup"]["missing_identity"] == 1
 
     def test_turn_count_min_filters_short_conversations(self, tmp_path):
         """turn_count_min should filter out conversations with fewer turns."""
@@ -916,6 +1005,120 @@ class TestTurnLevelPruning:
         config = FilterConfig(turn_value_min=5.0, keep_first_last=True)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 1
+
+
+class TestMissingGatePolicy:
+    def test_strict_policy_records_missing_sample_level_drops(self, tmp_path):
+        samples = [
+            _full_sample(
+                8.0,
+                value_extra={"quality": {"correctness": 8.0}, "thinking_mode": "slow"},
+            ),
+            _full_sample(
+                8.0,
+                value_extra={"quality": {"overall": 8.0}, "thinking_mode": "slow"},
+            ),
+            _full_sample(
+                8.0,
+                value_extra={"quality": {"correctness": 8.0}},
+            ),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(
+            correctness_min=6.0,
+            thinking_mode="slow",
+            missing_gate_policy="fail",
+        )
+        summary = run_filter(str(input_file), config=config)
+
+        assert summary["retained"] == 1
+        assert summary["missing_gate_drops"]["correctness_min"] == 1
+        assert summary["missing_gate_drops"]["thinking_mode"] == 1
+
+    def test_ignore_policy_preserves_sample_level_missing_fields(self, tmp_path):
+        samples = [
+            _full_sample(
+                8.0,
+                value_extra={"quality": {"correctness": 8.0}, "thinking_mode": "slow"},
+            ),
+            _full_sample(
+                8.0,
+                value_extra={"quality": {"overall": 8.0}, "thinking_mode": "slow"},
+            ),
+            _full_sample(
+                8.0,
+                value_extra={"quality": {"correctness": 8.0}},
+            ),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(
+            correctness_min=6.0,
+            thinking_mode="slow",
+            missing_gate_policy="ignore",
+        )
+        summary = run_filter(str(input_file), config=config)
+
+        assert summary["retained"] == 3
+        assert summary["missing_gate_drops"]["correctness_min"] == 0
+        assert summary["missing_gate_drops"]["thinking_mode"] == 0
+
+    def test_strict_policy_turn_level_missing_fields(self, tmp_path):
+        samples = [
+            _full_sample(8.0, value_extra={"quality": {"overall": 8.0}}),
+            {
+                "id": "missing-turn-value",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "labels": {},
+                "metadata": {},
+                "value": {"quality": {"overall": 8.0}},
+            },
+            _full_sample(8.0),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(
+            turn_value_min=5.0,
+            turn_quality_min=6.0,
+            missing_gate_policy="fail",
+        )
+        summary = run_filter(str(input_file), config=config)
+
+        assert summary["retained"] == 1
+        assert summary["turn_pruned"] == 2
+        assert summary["missing_gate_drops"]["turn_value_min"] == 1
+        assert summary["missing_gate_drops"]["turn_quality_min"] == 1
+
+    def test_ignore_policy_turn_level_missing_fields(self, tmp_path):
+        samples = [
+            _full_sample(8.0, value_extra={"quality": {"overall": 8.0}}),
+            {
+                "id": "missing-turn-value",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "labels": {},
+                "metadata": {},
+                "value": {"quality": {"overall": 8.0}},
+            },
+            _full_sample(8.0),
+        ]
+        input_file = tmp_path / "scored.json"
+        input_file.write_text(json.dumps(samples))
+
+        config = FilterConfig(
+            turn_value_min=5.0,
+            turn_quality_min=6.0,
+            missing_gate_policy="ignore",
+        )
+        summary = run_filter(str(input_file), config=config)
+
+        assert summary["retained"] == 3
+        assert summary["turn_pruned"] == 0
+        assert summary["missing_gate_drops"]["turn_value_min"] == 0
+        assert summary["missing_gate_drops"]["turn_quality_min"] == 0
 
 
 class TestPreserveStructure:

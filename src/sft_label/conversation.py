@@ -31,23 +31,40 @@ from sft_label.config import (
 
 # ─── Grouping ────────────────────────────────────────────
 
+def build_conversation_key(metadata):
+    """Build canonical conversation identity from sample metadata.
+
+    Canonical form is ``source_file::source_id`` when both fields exist.
+    Falls back to ``source_id`` for legacy data without source_file.
+    """
+    source_id = (metadata or {}).get("source_id")
+    if not source_id:
+        return None
+
+    source_file = (metadata or {}).get("source_file")
+    if source_file:
+        return f"{source_file}::{source_id}"
+
+    return source_id
+
+
 def group_by_conversation(samples):
     """Group samples by conversation, filter to multi-turn only.
 
-    Returns dict {source_id: [slices sorted by turn_index]}.
+    Returns dict {conversation_id: [slices sorted by turn_index]}.
     Only includes conversations where total_turns > 1.
     """
     groups = defaultdict(list)
     for s in samples:
         meta = s.get("metadata") or {}
-        source_id = meta.get("source_id")
+        conv_id = build_conversation_key(meta)
         total_turns = meta.get("total_turns", 1)
-        if source_id and total_turns > 1:
-            groups[source_id].append(s)
+        if conv_id and total_turns > 1:
+            groups[conv_id].append(s)
 
     # Sort each group by turn_index
-    for source_id in groups:
-        groups[source_id].sort(
+    for conv_id in groups:
+        groups[conv_id].sort(
             key=lambda s: (s.get("metadata") or {}).get("turn_index", 0)
         )
 
@@ -232,7 +249,7 @@ def _compute_pure_quality_from_slice(s):
 
 # ─── Per-conversation aggregation ────────────────────────
 
-def aggregate_conversation(source_id, slices):
+def aggregate_conversation(conversation_id, slices):
     """Aggregate scores for a single conversation.
 
     Returns a record dict, or None if insufficient data (e.g. single slice).
@@ -318,7 +335,7 @@ def aggregate_conversation(source_id, slices):
         })
 
     return {
-        "conversation_id": source_id,
+        "conversation_id": conversation_id,
         "turn_count": turn_count,
         "conv_value": round(conv_value, 2),
         "conv_selection": None,  # filled by compute_conv_selection_scores
@@ -463,8 +480,8 @@ def aggregate_conversations(samples):
         return []
 
     records = []
-    for source_id, slices in groups.items():
-        rec = aggregate_conversation(source_id, slices)
+    for conv_id, slices in groups.items():
+        rec = aggregate_conversation(conv_id, slices)
         if rec is not None:
             records.append(rec)
 
