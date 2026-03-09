@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import os
+import re
+import select
 import shlex
+import sys
 from dataclasses import dataclass, field
 from typing import Callable
 
 
 DEFAULT_LITELLM_BASE = "http://localhost:4000/v1"
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
+BACK_TOKENS = {
+    "b", "back", "/b", ":b",
+    "返回", "上一步", "上一步", "上一级",
+}
+
+
+class BackRequested(Exception):
+    """Raised when user asks to return to previous level."""
 
 
 @dataclass
@@ -115,42 +127,150 @@ def format_env_prefix(env_overrides: dict[str, str]) -> str:
     )
 
 
+def sanitize_prompt_input(raw: str) -> tuple[str, bool]:
+    """Remove terminal control/escape sequences from user input."""
+    text = "" if raw is None else str(raw)
+    cleaned = ANSI_ESCAPE_RE.sub("", text).replace("\x1b", "")
+    filtered = "".join(ch for ch in cleaned if ch == "\t" or ord(ch) >= 32)
+    had_control = filtered != text
+    return filtered.strip(), had_control
+
+
+def _consume_escape_sequence(fd: int, max_bytes: int = 8, timeout: float = 0.003):
+    """Best-effort consume of pending terminal escape sequence bytes."""
+    for _ in range(max_bytes):
+        readable, _, _ = select.select([fd], [], [], timeout)
+        if not readable:
+            break
+        try:
+            os.read(fd, 1)
+        except OSError:
+            break
+
+
+def interactive_input(prompt: str) -> str:
+    """TTY-friendly input that suppresses arrow/control key escape echoes."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return input(prompt)
+
+    try:
+        import termios
+        import tty
+    except Exception:
+        return input(prompt)
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    chars: list[str] = []
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = os.read(fd, 1)
+            if not ch:
+                raise EOFError
+            c = ch.decode("utf-8", errors="ignore")
+
+            if c in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                break
+
+            if c == "\x03":
+                raise KeyboardInterrupt
+
+            if c == "\x04":
+                if not chars:
+                    raise EOFError
+                continue
+
+            if c in ("\x7f", "\b"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+
+            if c == "\x1b":
+                _consume_escape_sequence(fd)
+                continue
+
+            if c and ord(c) >= 32:
+                chars.append(c)
+                sys.stdout.write(c)
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+    return "".join(chars)
+
+
+def is_back_token(value: str) -> bool:
+    """Check whether an input value means 'go back'."""
+    if value is None:
+        return False
+    token = str(value).strip().lower()
+    return token in BACK_TOKENS
+
+
+def _read_input(input_fn: InputFn, prompt: str, *, allow_back: bool = True) -> str:
+    """Read input and sanitize terminal control sequences."""
+    value, had_control = sanitize_prompt_input(input_fn(prompt))
+    if had_control:
+        print(
+            "检测到方向键/控制字符输入，已忽略 / "
+            "Detected arrow/control key input and ignored."
+        )
+    if allow_back and is_back_token(value):
+        raise BackRequested
+    return value
+
+
 def build_launch_plan(
-    input_fn: InputFn = input,
+    input_fn: InputFn = interactive_input,
     output_fn: OutputFn = print,
 ) -> LaunchPlan | None:
     """Prompt for workflow/options and return executable launch plan."""
     _say(output_fn, "交互式任务启动器 / Interactive task launcher")
     _say(output_fn, "请选择任务，并只填写必要参数 / Choose a workflow and fill only required options.")
+    _say(output_fn, "输入 b/back 可返回上一层，输入 0 可取消 / Type b/back to go back, 0 to cancel.")
     _say(output_fn, "")
 
-    wf = _ask_workflow(input_fn, output_fn)
-    if wf is None:
-        return None
+    while True:
+        wf = _ask_workflow(input_fn, output_fn)
+        if wf is None:
+            return None
 
-    if wf.key == "run-pass1":
-        return _build_run_plan(input_fn, output_fn, chain_score=False, chain_semantic=False)
-    if wf.key == "run-pass1-pass2":
-        return _build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=False)
-    if wf.key == "run-pass1-pass2-semantic":
-        return _build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=True)
-    if wf.key == "score":
-        return _build_score_plan(input_fn, output_fn)
-    if wf.key == "semantic":
-        return _build_semantic_plan(input_fn, output_fn)
-    if wf.key == "filter":
-        return _build_filter_plan(input_fn, output_fn)
-    if wf.key == "recompute-stats":
-        return _build_recompute_plan(input_fn, output_fn)
-    if wf.key == "regenerate-dashboard":
-        return _build_regenerate_dashboard_plan(input_fn, output_fn)
-    if wf.key == "export-semantic":
-        return _build_export_semantic_plan(input_fn, output_fn)
-    if wf.key == "export-review":
-        return _build_export_review_plan(input_fn, output_fn)
-    if wf.key == "validate":
-        return LaunchPlan(argv=["validate"])
-    raise ValueError(f"Unknown workflow key: {wf.key}")
+        try:
+            if wf.key == "run-pass1":
+                return _build_run_plan(input_fn, output_fn, chain_score=False, chain_semantic=False)
+            if wf.key == "run-pass1-pass2":
+                return _build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=False)
+            if wf.key == "run-pass1-pass2-semantic":
+                return _build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=True)
+            if wf.key == "score":
+                return _build_score_plan(input_fn, output_fn)
+            if wf.key == "semantic":
+                return _build_semantic_plan(input_fn, output_fn)
+            if wf.key == "filter":
+                return _build_filter_plan(input_fn, output_fn)
+            if wf.key == "recompute-stats":
+                return _build_recompute_plan(input_fn, output_fn)
+            if wf.key == "regenerate-dashboard":
+                return _build_regenerate_dashboard_plan(input_fn, output_fn)
+            if wf.key == "export-semantic":
+                return _build_export_semantic_plan(input_fn, output_fn)
+            if wf.key == "export-review":
+                return _build_export_review_plan(input_fn, output_fn)
+            if wf.key == "validate":
+                return LaunchPlan(argv=["validate"])
+            raise ValueError(f"Unknown workflow key: {wf.key}")
+        except BackRequested:
+            _say(output_fn, "")
+            _say(output_fn, "已返回任务选择 / Returned to workflow selection.")
+            _say(output_fn, "")
 
 
 def _build_run_plan(
@@ -626,7 +746,10 @@ def _ask_llm_env_overrides(input_fn: InputFn) -> dict[str, str]:
     key_default = os.environ.get("LITELLM_KEY", "")
     base = _ask_text(input_fn, "LITELLM_BASE", default=base_default)
     if key_default:
-        raw = input_fn("LITELLM_KEY [回车=保持当前, '-'=清空 / enter=keep current, '-'=clear]: ").strip()
+        raw = _read_input(
+            input_fn,
+            "LITELLM_KEY [回车=保持当前, '-'=清空 / enter=keep current, '-'=clear]: ",
+        )
         if raw == "":
             key = key_default
         elif raw == "-":
@@ -661,7 +784,13 @@ def _ask_workflow(input_fn: InputFn, output_fn: OutputFn) -> Workflow | None:
 
     max_choice = len(WORKFLOWS)
     while True:
-        raw = input_fn(f"Select workflow number [0-{max_choice}, default 1]: ").strip()
+        raw = _read_input(
+            input_fn,
+            f"Select workflow number [0-{max_choice}, default 1]: ",
+            allow_back=False,
+        )
+        if is_back_token(raw):
+            return None
         if raw == "":
             raw = "1"
         if not raw.isdigit():
@@ -677,9 +806,10 @@ def _ask_workflow(input_fn: InputFn, output_fn: OutputFn) -> Workflow | None:
 
 def _ask_extra_flags(input_fn: InputFn) -> list[str]:
     while True:
-        raw = input_fn(
+        raw = _read_input(
+            input_fn,
             "附加原始 CLI 参数（可选，例如 --foo 1 --bar x） / Extra raw CLI flags (optional, e.g. --foo 1 --bar x): "
-        ).strip()
+        )
         if not raw:
             return []
         try:
@@ -705,7 +835,7 @@ def _ask_text(
 ) -> str:
     while True:
         suffix = f" [{default}]" if default is not None else ""
-        value = input_fn(f"{prompt}{suffix}: ").strip()
+        value = _read_input(input_fn, f"{prompt}{suffix}: ")
         if value:
             return value
         if default is not None:
@@ -717,7 +847,7 @@ def _ask_text(
 
 def _ask_int(input_fn: InputFn, prompt: str, *, default: int) -> int:
     while True:
-        raw = input_fn(f"{prompt} [{default}]: ").strip()
+        raw = _read_input(input_fn, f"{prompt} [{default}]: ")
         if raw == "":
             return default
         try:
@@ -728,7 +858,7 @@ def _ask_int(input_fn: InputFn, prompt: str, *, default: int) -> int:
 
 def _ask_optional_int(input_fn: InputFn, prompt: str) -> int | None:
     while True:
-        raw = input_fn(f"{prompt}: ").strip()
+        raw = _read_input(input_fn, f"{prompt}: ")
         if raw == "":
             return None
         try:
@@ -739,7 +869,7 @@ def _ask_optional_int(input_fn: InputFn, prompt: str) -> int | None:
 
 def _ask_float(input_fn: InputFn, prompt: str, *, default: float) -> float:
     while True:
-        raw = input_fn(f"{prompt} [{default}]: ").strip()
+        raw = _read_input(input_fn, f"{prompt} [{default}]: ")
         if raw == "":
             return default
         try:
@@ -750,7 +880,7 @@ def _ask_float(input_fn: InputFn, prompt: str, *, default: float) -> float:
 
 def _ask_optional_float(input_fn: InputFn, prompt: str) -> float | None:
     while True:
-        raw = input_fn(f"{prompt}: ").strip()
+        raw = _read_input(input_fn, f"{prompt}: ")
         if raw == "":
             return None
         try:
@@ -762,7 +892,7 @@ def _ask_optional_float(input_fn: InputFn, prompt: str) -> float | None:
 def _ask_yes_no(input_fn: InputFn, prompt: str, *, default: bool) -> bool:
     default_hint = "Y/n" if default else "y/N"
     while True:
-        raw = input_fn(f"{prompt} [{default_hint}]: ").strip().lower()
+        raw = _read_input(input_fn, f"{prompt} [{default_hint}]: ").lower()
         if raw == "":
             return default
         if raw in ("y", "yes"):
@@ -782,14 +912,18 @@ def _ask_choice(
 ) -> str:
     _say(output_fn, "")
     _say(output_fn, title)
+    _say(output_fn, "  0. 返回上一级 / Back")
     for idx, (_, label, desc) in enumerate(options, start=1):
         _say(output_fn, f"  {idx}. {label} - {desc}")
     _say(output_fn, "")
 
     while True:
-        raw = input_fn(
-            f"Select [1-{len(options)}, default {default_index}]: "
-        ).strip()
+        raw = _read_input(
+            input_fn,
+            f"Select [0-{len(options)}, default {default_index}]: ",
+        )
+        if raw == "0":
+            raise BackRequested
         if raw == "":
             raw = str(default_index)
         if not raw.isdigit():

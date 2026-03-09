@@ -6,6 +6,7 @@ from sft_label.launcher import (
     build_launch_plan,
     format_command,
     format_env_prefix,
+    sanitize_prompt_input,
 )
 from sft_label.cli import build_parser
 
@@ -163,12 +164,49 @@ def test_build_launch_plan_can_cancel():
     assert build_launch_plan(input_fn=io.input, output_fn=io.output) is None
 
 
+def test_can_back_to_workflow_selection_with_zero_in_submenu():
+    io = StubIO(
+        [
+            "1",  # select run-pass1 workflow
+            "0",  # back from run mode selection
+            "0",  # cancel at workflow menu
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is None
+    assert any("Returned to workflow selection." in str(item) for item in io.outputs)
+
+
+def test_can_back_to_workflow_selection_with_back_token():
+    io = StubIO(
+        [
+            "1",          # select run-pass1 workflow
+            "1",          # run mode: new
+            "b",          # back from required input prompt
+            "0",          # cancel at workflow menu
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is None
+    assert any("Returned to workflow selection." in str(item) for item in io.outputs)
+
+
 def test_format_helpers():
     assert format_command(["score", "--input", "a b.json"]) == "sft-label score --input 'a b.json'"
     assert (
         format_env_prefix({"LITELLM_KEY": "abc", "LITELLM_BASE": "http://x/v1"})
         == "LITELLM_BASE=http://x/v1 LITELLM_KEY=abc"
     )
+
+
+def test_sanitize_prompt_input_removes_arrow_escape_sequences():
+    clean, had_control = sanitize_prompt_input("\x1b[A")
+    assert clean == ""
+    assert had_control is True
+
+    clean2, had_control2 = sanitize_prompt_input("abc\x1b[D")
+    assert clean2 == "abc"
+    assert had_control2 is True
 
 
 def test_all_workflows_generate_parseable_argv():
@@ -229,3 +267,28 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
     assert plan is not None
     assert plan.env_overrides["LITELLM_BASE"] == "http://example/v1"
     assert plan.env_overrides["LITELLM_KEY"] == ""
+
+
+def test_required_text_prompt_ignores_arrow_key_input(capsys):
+    io = StubIO(
+        [
+            "1",          # workflow: run-pass1
+            "1",          # run mode: new
+            "\x1b[A",     # arrow key input on required --input field
+            "data.json",  # actual --input
+            "",           # --output
+            "",           # --limit
+            "",           # --shuffle
+            "",           # --arbitration
+            "",           # --prompt mode
+            "",           # --model
+            "n",          # env override
+            "",           # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    captured = capsys.readouterr()
+
+    assert plan is not None
+    assert plan.argv[:3] == ["run", "--input", "data.json"]
+    assert "Detected arrow/control key input and ignored." in captured.out

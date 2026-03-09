@@ -320,9 +320,12 @@ def cmd_start(args, parser):
         build_launch_plan,
         format_command,
         format_env_prefix,
+        interactive_input,
+        is_back_token,
+        sanitize_prompt_input,
     )
 
-    plan = build_launch_plan()
+    plan = build_launch_plan(input_fn=interactive_input)
     if plan is None:
         print("已取消启动 / Launch cancelled.")
         return
@@ -337,7 +340,17 @@ def cmd_start(args, parser):
         print("\n仅预览模式，未执行命令 / Dry run mode: command not executed.")
         return
 
-    confirm = input("立即执行？ / Execute now? [Y/n]: ").strip().lower()
+    confirm_raw = interactive_input("立即执行？ / Execute now? [Y/n]: ")
+    confirm, had_control = sanitize_prompt_input(confirm_raw)
+    if had_control:
+        print(
+            "检测到方向键/控制字符输入，已忽略 / "
+            "Detected arrow/control key input and ignored."
+        )
+    if is_back_token(confirm):
+        print("已取消执行 / Launch aborted.")
+        return
+    confirm = confirm.lower()
     if confirm in ("n", "no"):
         print("已取消执行 / Launch aborted.")
         return
