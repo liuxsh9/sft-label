@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import select
@@ -178,6 +179,18 @@ def _consume_escape_sequence(fd: int, max_bytes: int = 8, timeout: float = 0.003
             break
 
 
+def _decode_utf8_input_byte(
+    decoder: codecs.IncrementalDecoder,
+    data: bytes,
+) -> str:
+    """Decode one raw input byte with incremental UTF-8 state."""
+    try:
+        return decoder.decode(data, final=False)
+    except UnicodeDecodeError:
+        decoder.reset()
+        return ""
+
+
 def interactive_input(prompt: str) -> str:
     """TTY-friendly input that suppresses arrow/control key escape echoes."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -192,47 +205,52 @@ def interactive_input(prompt: str) -> str:
     fd = sys.stdin.fileno()
     old_attrs = termios.tcgetattr(fd)
     chars: list[str] = []
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
 
     sys.stdout.write(prompt)
     sys.stdout.flush()
     try:
         tty.setraw(fd)
         while True:
-            ch = os.read(fd, 1)
-            if not ch:
+            raw = os.read(fd, 1)
+            if not raw:
                 raise EOFError
-            c = ch.decode("utf-8", errors="ignore")
 
-            if c in ("\r", "\n"):
+            if raw in (b"\r", b"\n"):
                 # In raw TTY mode, '\n' only moves to next line and keeps the
                 # current column. Use CRLF to avoid progressive indentation.
                 sys.stdout.write("\r\n")
                 sys.stdout.flush()
                 break
 
-            if c == "\x03":
+            if raw == b"\x03":
                 raise KeyboardInterrupt
 
-            if c == "\x04":
+            if raw == b"\x04":
                 if not chars:
                     raise EOFError
                 continue
 
-            if c in ("\x7f", "\b"):
+            if raw in (b"\x7f", b"\x08"):
                 if chars:
                     chars.pop()
                     sys.stdout.write("\b \b")
                     sys.stdout.flush()
                 continue
 
-            if c == "\x1b":
+            if raw == b"\x1b":
                 _consume_escape_sequence(fd)
+                decoder.reset()
                 continue
 
-            if c and ord(c) >= 32:
-                chars.append(c)
-                sys.stdout.write(c)
-                sys.stdout.flush()
+            text = _decode_utf8_input_byte(decoder, raw)
+            if not text:
+                continue
+            for c in text:
+                if ord(c) >= 32:
+                    chars.append(c)
+                    sys.stdout.write(c)
+                    sys.stdout.flush()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 

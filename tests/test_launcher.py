@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sft_label.launcher import (
+    _decode_utf8_input_byte,
     build_launch_plan,
     format_command,
     format_env_prefix,
@@ -208,6 +209,16 @@ def test_sanitize_prompt_input_removes_arrow_escape_sequences():
     clean2, had_control2 = sanitize_prompt_input("abc\x1b[D")
     assert clean2 == "abc"
     assert had_control2 is True
+
+
+def test_decode_utf8_input_byte_keeps_multibyte_chars():
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    parts = []
+    for b in "中文路径".encode("utf-8"):
+        parts.append(_decode_utf8_input_byte(decoder, bytes([b])))
+    assert "".join(parts) == "中文路径"
 
 
 def test_all_workflows_generate_parseable_argv():
