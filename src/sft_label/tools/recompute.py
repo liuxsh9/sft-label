@@ -236,6 +236,220 @@ def run_recompute(input_path, pass_num="both", output_dir=None):
     return written
 
 
+def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=None):
+    """Refresh Pass 2 rarity/value fields offline from existing scored output.
+
+    Recomputes per-sample:
+      - value.rarity
+      - value.value_score (rarity-aware composite)
+      - value.selection_score / value.intra_class_rank
+    and rewrites Pass 2 stats + conversation aggregation.
+
+    Args:
+        input_path: scored file or run directory.
+        tag_stats_path: optional external Pass 1 stats path for cross-dataset rarity.
+        output_dir: output root (default: in-place).
+        config: PipelineConfig override; only rarity/value settings are used.
+
+    Returns:
+        dict with written artifact paths/counts.
+    """
+    from sft_label.config import PipelineConfig, VALUE_WEIGHTS, RARITY_WEIGHTS
+    from sft_label.scoring import (
+        load_tag_stats, compute_tag_idf, compute_sample_rarity,
+        build_combo_counts, normalize_rarity_scores, resolve_rarity_mode,
+        build_tag_distributions, compute_value_score, compute_selection_scores,
+        merge_value_stats,
+    )
+
+    if config is None:
+        config = PipelineConfig()
+
+    in_path = Path(input_path)
+    if not in_path.exists():
+        raise FileNotFoundError(f"Input path not found: {in_path}")
+
+    out_root = Path(output_dir) if output_dir else in_path.parent if in_path.is_file() else in_path
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    def _merge_distributions(base, incoming):
+        for dim, counts in incoming.items():
+            dim_base = base.setdefault(dim, {})
+            for tag, count in counts.items():
+                dim_base[tag] = dim_base.get(tag, 0) + count
+
+    def _resolve_stats_source():
+        if tag_stats_path:
+            p = Path(tag_stats_path)
+            if not p.exists():
+                raise FileNotFoundError(f"tag stats not found: {p}")
+            return p
+        if in_path.is_file():
+            return find_first_existing(in_path.parent, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY])
+        summary = find_first_existing(
+            in_path, [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY]
+        )
+        if summary:
+            return summary
+        return find_first_existing(in_path, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY])
+
+    stats_source_path = _resolve_stats_source()
+    rarity_mode = resolve_rarity_mode(config)
+
+    scored_files = [in_path] if in_path.is_file() else discover_scored_files(in_path)
+    if not scored_files:
+        return {}
+
+    distributions = None
+    total_stats_samples = 0
+    stats_timestamp = None
+    stats_source_str = None
+
+    if stats_source_path:
+        dists, total, ts = load_tag_stats(stats_source_path)
+        if dists:
+            distributions = dists
+            total_stats_samples = total
+            stats_timestamp = ts
+            stats_source_str = str(stats_source_path)
+        else:
+            print(f"  Warning: {stats_source_path} has no tag_distributions, fallback to local baseline")
+
+    # Local fallback baseline (aggregated across all scored files in scope)
+    if not distributions:
+        agg_distributions = {}
+        agg_total = 0
+        rw = config.rarity_weights or RARITY_WEIGHTS
+        for sf in scored_files:
+            samples = load_samples(sf)
+            local_dist, local_total = build_tag_distributions(samples, rarity_weights=rw)
+            if local_dist:
+                _merge_distributions(agg_distributions, local_dist)
+            agg_total += local_total
+        if agg_distributions and agg_total > 0:
+            distributions = agg_distributions
+            total_stats_samples = agg_total
+            stats_timestamp = datetime.now().isoformat()
+            stats_source_str = f"{in_path}#local"
+            print(f"  Using local rarity baseline ({agg_total} samples)")
+        else:
+            raise ValueError("No valid labels found to build rarity baseline")
+
+    idf_map = compute_tag_idf(distributions, total_stats_samples)
+    stats_ref_info = {
+        "source": stats_source_str,
+        "total_samples": total_stats_samples,
+        "timestamp": stats_timestamp or datetime.now().isoformat(),
+    }
+
+    def _write_scored_outputs(samples, target_dir):
+        scored_json = target_dir / "scored.json"
+        scored_jsonl = target_dir / "scored.jsonl"
+        _write_json(scored_json, samples)
+        with open(scored_jsonl, "w", encoding="utf-8") as f:
+            for s in samples:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+        return scored_json, scored_jsonl
+
+    def _refresh_one(samples):
+        rarity_results = []
+        combo_counts = build_combo_counts(samples) if idf_map else None
+        rw = config.rarity_weights or RARITY_WEIGHTS
+        for s in samples:
+            labels = s.get("labels") or {}
+            rarity = compute_sample_rarity(
+                labels,
+                idf_map,
+                total_stats_samples,
+                rarity_weights=rw,
+                combo_alpha=config.rarity_combo_alpha,
+                combo_counts=combo_counts,
+                stats_ref_info=stats_ref_info,
+            )
+            rarity_results.append(rarity)
+        normalize_rarity_scores(
+            rarity_results,
+            mode=rarity_mode,
+            total_samples=total_stats_samples,
+        )
+
+        weights = config.value_weights or VALUE_WEIGHTS
+        refreshed = 0
+        for i, s in enumerate(samples):
+            value = s.get("value")
+            if not isinstance(value, dict):
+                continue
+            rarity = rarity_results[i]
+            value["rarity"] = rarity
+            value["value_score"] = compute_value_score(value, rarity, weights=weights)
+            refreshed += 1
+
+        compute_selection_scores(samples, config=config)
+        stats = recompute_value_stats_from_scored(samples)
+        stats["rarity_config"] = {
+            "stats_ref": stats_source_str,
+            "total_samples_in_distribution": total_stats_samples,
+            "dimension_weights": rw,
+            "combo_alpha": config.rarity_combo_alpha,
+            "score_mode": rarity_mode,
+        }
+        return refreshed, stats
+
+    written = {}
+    all_file_stats = []
+    all_samples = []
+    refreshed_total = 0
+
+    for sf in scored_files:
+        samples = load_samples(sf)
+        refreshed_count, stats = _refresh_one(samples)
+        refreshed_total += refreshed_count
+        all_samples.extend(samples)
+
+        if in_path.is_file():
+            target_dir = out_root
+        else:
+            rel = sf.parent.relative_to(in_path)
+            target_dir = out_root / rel if rel != Path(".") else out_root
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        scored_json, scored_jsonl = _write_scored_outputs(samples, target_dir)
+        stats_path = target_dir / PASS2_STATS_FILE
+        _write_json(stats_path, stats)
+        sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
+
+        if in_path.is_file():
+            written["scored_json"] = str(scored_json)
+            written["scored_jsonl"] = str(scored_jsonl)
+            written["stats_value"] = str(stats_path)
+            written.update(_recompute_conversations(samples, target_dir))
+        else:
+            stats["file"] = sf.name
+            all_file_stats.append(stats)
+
+    if in_path.is_dir() and all_file_stats:
+        summary = merge_value_stats(all_file_stats)
+        summary["recomputed"] = True
+        summary["recomputed_at"] = datetime.now().isoformat()
+        summary["rarity_config"] = {
+            "stats_ref": stats_source_str,
+            "total_samples_in_distribution": total_stats_samples,
+            "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
+            "combo_alpha": config.rarity_combo_alpha,
+            "score_mode": rarity_mode,
+        }
+        summary_path = out_root / PASS2_SUMMARY_STATS_FILE
+        _write_json(summary_path, summary)
+        sync_legacy_aliases(summary_path, [PASS2_SUMMARY_STATS_FILE_LEGACY])
+        written["summary_stats_value"] = str(summary_path)
+        written["files_refreshed"] = str(len(all_file_stats))
+        if all_samples:
+            written.update(_recompute_conversations(all_samples, out_root))
+
+    written["rarity_refreshed_samples"] = str(refreshed_total)
+    return written
+
+
 def _recompute_single_file(file_path, pass_num, out_dir):
     """Recompute stats for a single labeled/scored file."""
     written = {}
@@ -537,8 +751,10 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
 # ─── Helpers ─────────────────────────────────────────────
 
 def _write_json(path, data):
-    """Write dict to JSON file, stripping non-serializable internal keys."""
-    # Remove internal keys like _raw_scores
-    clean = {k: v for k, v in data.items() if not k.startswith("_")}
+    """Write JSON file, stripping internal keys for dict payloads."""
+    if isinstance(data, dict):
+        clean = {k: v for k, v in data.items() if not k.startswith("_")}
+    else:
+        clean = data
     with open(path, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)

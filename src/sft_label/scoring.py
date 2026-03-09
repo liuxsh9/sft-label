@@ -31,7 +31,7 @@ from rich.progress import (
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY,
     MAX_RETRIES, SAMPLE_MAX_RETRIES, REQUEST_TIMEOUT,
-    VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA,
+    VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA, RARITY_SCORE_MODE,
     VALUE_TRUNCATION_BUDGET,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
@@ -107,7 +107,9 @@ def compute_tag_idf(distributions, total_samples):
     for dim, tag_counts in distributions.items():
         idf_map[dim] = {}
         for tag, count in tag_counts.items():
-            idf_map[dim][tag] = math.log2(total_samples / (count + 1))
+            # Multi-select dimensions can have count >= total_samples; clamp at 0
+            # because "negative rarity" is not meaningful for downstream scoring.
+            idf_map[dim][tag] = max(0.0, math.log2(total_samples / (count + 1)))
 
     return idf_map
 
@@ -191,15 +193,75 @@ def build_combo_counts(samples):
     return counts
 
 
-def normalize_rarity_scores(rarity_results):
-    """Normalize raw rarity scores to 1-10 scale via percentile mapping.
+def build_tag_distributions(samples, rarity_weights=None):
+    """Build per-dimension tag distributions from labeled samples."""
+    dims = list((rarity_weights or RARITY_WEIGHTS).keys())
+    distributions = {dim: {} for dim in dims}
+    total = 0
+
+    for s in samples:
+        labels = s.get("labels") or {}
+        total += 1
+        for dim in dims:
+            tags = labels.get(dim)
+            if tags is None:
+                continue
+            if isinstance(tags, list):
+                if not tags:
+                    continue
+                for tag in tags:
+                    if not isinstance(tag, str) or not tag:
+                        continue
+                    distributions[dim][tag] = distributions[dim].get(tag, 0) + 1
+            else:
+                if isinstance(tags, str) and tags:
+                    distributions[dim][tags] = distributions[dim].get(tags, 0) + 1
+
+    # Remove empty dimensions
+    distributions = {dim: counts for dim, counts in distributions.items() if counts}
+    return distributions, total
+
+
+def _update_distributions_from_labels(distributions, labels, dims):
+    """In-place update for streaming distribution construction."""
+    for dim in dims:
+        tags = labels.get(dim)
+        if tags is None:
+            continue
+        dim_dist = distributions.setdefault(dim, {})
+        if isinstance(tags, list):
+            for tag in tags:
+                if not isinstance(tag, str) or not tag:
+                    continue
+                dim_dist[tag] = dim_dist.get(tag, 0) + 1
+        else:
+            if isinstance(tags, str) and tags:
+                dim_dist[tags] = dim_dist.get(tags, 0) + 1
+
+
+def normalize_rarity_scores(rarity_results, mode="percentile", total_samples=0):
+    """Normalize raw rarity scores to 1-10 scale.
+
+    Modes:
+      - percentile: within-batch percentile mapping (legacy behavior)
+      - absolute: absolute mapping by log2(total_samples) ceiling
 
     Modifies rarity dicts in-place, setting score to normalized value.
-    Returns the percentile breakpoints used.
+    Returns normalization metadata.
     """
     raw_scores = [r["score"] for r in rarity_results if r["score"] is not None]
     if not raw_scores:
         return {}
+
+    if mode == "absolute":
+        n = max(int(total_samples), 2)
+        raw_ceiling = max(math.log2(n), 1e-9)
+        for r in rarity_results:
+            if r["score"] is None:
+                continue
+            raw = max(0.0, min(float(r["score"]), raw_ceiling))
+            r["score"] = round(1 + (raw / raw_ceiling) * 9, 1)
+        return {"mode": "absolute", "raw_ceiling": round(raw_ceiling, 4), "total_samples": n}
 
     raw_scores_sorted = sorted(raw_scores)
     n = len(raw_scores_sorted)
@@ -224,7 +286,17 @@ def normalize_rarity_scores(rarity_results):
     for pct in [10, 25, 50, 75, 90]:
         idx = int(n * pct / 100)
         breakpoints[f"p{pct}"] = raw_scores_sorted[min(idx, n - 1)]
+    breakpoints["mode"] = "percentile"
     return breakpoints
+
+
+def resolve_rarity_mode(config):
+    """Resolve rarity normalization mode from config with safe fallback."""
+    mode = getattr(config, "rarity_score_mode", RARITY_SCORE_MODE) or RARITY_SCORE_MODE
+    mode = str(mode).strip().lower()
+    if mode not in {"absolute", "percentile"}:
+        return RARITY_SCORE_MODE
+    return mode
 
 
 # ─────────────────────────────────────────────────────────
@@ -1220,6 +1292,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
 
     # ── Load tag stats for rarity ──
+    rarity_mode = resolve_rarity_mode(config)
     stats_ref_info = None
     idf_map = {}
     total_stats_samples = 0
@@ -1243,14 +1316,16 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 "timestamp": ts or datetime.now().isoformat(),
             }
         else:
-            print(f"  Warning: {stats_source} has no tag_distributions, rarity will be null")
+            print(f"  Warning: {stats_source} has no tag_distributions, fallback to local baseline")
     else:
-        print("  No tag stats found, rarity will be null")
+        print("  No external tag stats found, fallback to local rarity baseline")
 
     # ── Pass A: Compute rarity (stream, no LLM) ──
     raw_rarities = []
     combo_counts = {}
     sample_count = 0
+    local_dims = list((config.rarity_weights or RARITY_WEIGHTS).keys())
+    local_distributions = {dim: {} for dim in local_dims}
     with open(input_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -1258,6 +1333,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 continue
             sample = json.loads(line)
             labels = sample.get("labels") or {}
+            _update_distributions_from_labels(local_distributions, labels, local_dims)
             # Build combo counts on the fly
             intent = labels.get("intent", "")
             difficulty = labels.get("difficulty", "")
@@ -1268,6 +1344,24 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             del sample
             if limit > 0 and sample_count >= limit:
                 break
+
+    if not idf_map and sample_count > 0:
+        # Fallback: build IDF from current labeled file so duplicates do not
+        # collapse into pseudo-uniform percentile-only rarity.
+        local_distributions = {d: c for d, c in local_distributions.items() if c}
+        if local_distributions:
+            total_stats_samples = sample_count
+            idf_map = compute_tag_idf(local_distributions, total_stats_samples)
+            stats_source = f"{input_path}#local"
+            stats_ref_info = {
+                "source": stats_source,
+                "total_samples": total_stats_samples,
+                "timestamp": datetime.now().isoformat(),
+            }
+            print(f"  Using local rarity baseline ({total_stats_samples} samples)")
+
+    if not idf_map:
+        print("  Warning: rarity unavailable (no valid tag distributions)")
 
     # Second lightweight pass to compute per-sample rarity (needs combo_counts)
     sample_idx = 0
@@ -1291,7 +1385,11 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if limit > 0 and sample_idx >= limit:
                 break
 
-    normalize_rarity_scores(raw_rarities)
+    normalize_rarity_scores(
+        raw_rarities,
+        mode=rarity_mode,
+        total_samples=total_stats_samples,
+    )
     total = len(raw_rarities)
 
     # ── Pass B: Chunked LLM scoring ──
@@ -1535,6 +1633,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         "total_samples_in_distribution": total_stats_samples,
         "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
         "combo_alpha": config.rarity_combo_alpha,
+        "score_mode": rarity_mode,
     }
     stats["chunked"] = True
 
@@ -1854,6 +1953,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                 print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
 
     # Load tag stats for rarity
+    rarity_mode = resolve_rarity_mode(config)
     stats_ref_info = None
     idf_map = {}
     total_stats_samples = 0
@@ -1880,9 +1980,28 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             }
             combo_counts = build_combo_counts(samples)
         else:
-            print(f"  Warning: {stats_source} has no tag_distributions, rarity will be null")
+            print(f"  Warning: {stats_source} has no tag_distributions, fallback to local baseline")
     else:
-        print("  No tag stats found, rarity will be null")
+        print("  No external tag stats found, fallback to local rarity baseline")
+
+    if not idf_map and samples:
+        local_distributions, local_total = build_tag_distributions(
+            samples, rarity_weights=config.rarity_weights or RARITY_WEIGHTS
+        )
+        if local_distributions and local_total > 0:
+            total_stats_samples = local_total
+            idf_map = compute_tag_idf(local_distributions, total_stats_samples)
+            stats_source = f"{input_path}#local"
+            stats_ref_info = {
+                "source": stats_source,
+                "total_samples": total_stats_samples,
+                "timestamp": datetime.now().isoformat(),
+            }
+            combo_counts = build_combo_counts(samples)
+            print(f"  Using local rarity baseline ({total_stats_samples} samples)")
+
+    if not idf_map:
+        print("  Warning: rarity unavailable (no valid tag distributions)")
 
     # Compute rarity for all samples
     rarity_results = []
@@ -1898,7 +2017,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         rarity_results.append(rarity)
 
     # Normalize rarity to 1-10
-    normalize_rarity_scores(rarity_results)
+    normalize_rarity_scores(
+        rarity_results,
+        mode=rarity_mode,
+        total_samples=total_stats_samples,
+    )
 
     # Run LLM scoring
     rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
@@ -2041,6 +2164,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         "total_samples_in_distribution": total_stats_samples,
         "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
         "combo_alpha": config.rarity_combo_alpha,
+        "score_mode": rarity_mode,
     }
 
     stats_path = output_dir / PASS2_STATS_FILE
@@ -2233,6 +2357,7 @@ def _flush_scoring_file(collector, config, pprint=print):
         "total_samples_in_distribution": collector.total_stats_samples,
         "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
         "combo_alpha": config.rarity_combo_alpha,
+        "score_mode": resolve_rarity_mode(config),
     }
 
     stats_path = output_dir / PASS2_STATS_FILE
@@ -2306,6 +2431,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         print(f"No labeled*.json/jsonl files found in {input_dir}")
         return {}
 
+    rarity_mode = resolve_rarity_mode(config)
+
     print(f"Found {len(labeled_files)} labeled files in {input_dir}")
     print("  planning scoring workload estimate...")
     workload_estimate = estimate_scoring_directory_workload(
@@ -2348,6 +2475,36 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     global_idf_map = {}
     global_total_stats_samples = 0
     global_stats_ref_info = None
+    global_stats_source = str(tag_stats_path) if tag_stats_path else None
+
+    def _scan_local_distributions():
+        dims = list((config.rarity_weights or RARITY_WEIGHTS).keys())
+        distributions = {dim: {} for dim in dims}
+        total = 0
+        for labeled_path in labeled_files:
+            if labeled_path.suffix == ".jsonl":
+                with open(labeled_path, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f):
+                        if limit > 0 and i >= limit:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        sample = json.loads(line)
+                        labels = sample.get("labels") or {}
+                        _update_distributions_from_labels(distributions, labels, dims)
+                        total += 1
+            else:
+                with open(labeled_path, "r", encoding="utf-8") as f:
+                    samples = json.load(f)
+                if limit > 0:
+                    samples = samples[:limit]
+                for sample in samples:
+                    labels = sample.get("labels") or {}
+                    _update_distributions_from_labels(distributions, labels, dims)
+                    total += 1
+        distributions = {d: c for d, c in distributions.items() if c}
+        return distributions, total
 
     if tag_stats_path:
         distributions, global_total_stats_samples, ts = load_tag_stats(tag_stats_path)
@@ -2359,9 +2516,22 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 "timestamp": ts or datetime.now().isoformat(),
             }
         else:
-            print(f"  Warning: {tag_stats_path} has no tag_distributions, rarity will be null")
-    else:
-        print("  No tag stats found, rarity will be null")
+            print(f"  Warning: {tag_stats_path} has no tag_distributions, fallback to local baseline")
+
+    if not global_idf_map:
+        local_distributions, local_total = _scan_local_distributions()
+        if local_distributions and local_total > 0:
+            global_total_stats_samples = local_total
+            global_idf_map = compute_tag_idf(local_distributions, local_total)
+            global_stats_source = f"{input_dir}#local"
+            global_stats_ref_info = {
+                "source": global_stats_source,
+                "total_samples": global_total_stats_samples,
+                "timestamp": datetime.now().isoformat(),
+            }
+            print(f"  Using local rarity baseline ({local_total} samples)")
+        else:
+            print("  Warning: rarity unavailable (no valid tag distributions)")
 
     concurrency = config.scoring_concurrency
     watermark = int(concurrency * config.dir_pipeline_watermark)
@@ -2409,7 +2579,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 stats_ref_info=global_stats_ref_info,
             )
             rarity_results.append(rarity)
-        normalize_rarity_scores(rarity_results)
+        normalize_rarity_scores(
+            rarity_results,
+            mode=rarity_mode,
+            total_samples=global_total_stats_samples,
+        )
 
         file_output_dir = labeled_path.parent
         collector = _ScoringFileCollector(
@@ -2419,7 +2593,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             samples=samples,
             rarity_results=rarity_results,
             total=total,
-            stats_source=str(tag_stats_path) if tag_stats_path else None,
+            stats_source=global_stats_source,
             idf_map=global_idf_map,
             total_stats_samples=global_total_stats_samples,
             stats_ref_info=global_stats_ref_info,

@@ -149,6 +149,12 @@ WORKFLOWS = [
         group="维护 / Maintenance",
     ),
     Workflow(
+        key="refresh-rarity",
+        label="刷新稀有度 / Refresh rarity",
+        description="离线重算 rarity/value 分数 / Recompute rarity/value fields offline",
+        group="维护 / Maintenance",
+    ),
+    Workflow(
         key="regenerate-dashboard",
         label="重建看板 / Regenerate dashboards",
         description="用已有统计重建 HTML 看板 / Rebuild HTML dashboards from existing stats",
@@ -540,6 +546,8 @@ def build_launch_plan(
                 return _build_filter_plan(input_fn, output_fn)
             if wf.key == "recompute-stats":
                 return _build_recompute_plan(input_fn, output_fn)
+            if wf.key == "refresh-rarity":
+                return _build_refresh_rarity_plan(input_fn, output_fn)
             if wf.key == "regenerate-dashboard":
                 return _build_regenerate_dashboard_plan(input_fn, output_fn)
             if wf.key == "export-semantic":
@@ -1303,6 +1311,38 @@ def _build_regenerate_dashboard_plan(input_fn: InputFn, output_fn: OutputFn) -> 
 
     if _ask_yes_no(input_fn, "生成后自动打开浏览器 / Open dashboards in browser", default=False):
         argv.append("--open")
+
+    argv.extend(_ask_extra_flags(input_fn))
+    return LaunchPlan(argv=argv)
+
+
+def _build_refresh_rarity_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+    argv = ["refresh-rarity"]
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "Scored 文件或运行目录 / Scored file or run directory")])
+
+    _section(output_fn, "稀有度基准 / Rarity baseline")
+    tag_stats = _ask_optional_text(input_fn, "全量 stats 路径（可选） / Global stats path (optional)")
+    if tag_stats:
+        argv.extend(["--tag-stats", tag_stats])
+
+    mode = _ask_choice(
+        input_fn,
+        output_fn,
+        "归一化模式 / Normalization mode",
+        [
+            ("absolute", "absolute（默认） / absolute (default)",
+             "跨数据集绝对刻度 / Cross-dataset absolute scale"),
+            ("percentile", "percentile", "批内百分位映射 / Within-batch percentile mapping"),
+        ],
+        default_index=1,
+    )
+    if mode != "absolute":
+        argv.extend(["--mode", mode])
+
+    output_dir = _ask_optional_text(input_fn, "输出目录覆盖（可选） / Output directory override (optional)")
+    if output_dir:
+        argv.extend(["--output", output_dir])
 
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)

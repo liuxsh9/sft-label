@@ -24,6 +24,7 @@ from sft_label.tools.recompute import (
     recompute_stats_from_labeled,
     recompute_value_stats_from_scored,
     run_recompute,
+    run_refresh_rarity,
     run_regenerate_dashboard,
     _build_inherit_map,
     _synthesize_monitor,
@@ -368,6 +369,71 @@ class TestRunRecompute:
     def test_nonexistent_path_raises(self):
         with pytest.raises(FileNotFoundError):
             run_recompute("/nonexistent/path")
+
+
+class TestRefreshRarity:
+    def test_single_file_refresh_local_baseline(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        samples = [
+            _make_scored_sample("common-1", intent="build", difficulty="beginner"),
+            _make_scored_sample("common-2", intent="build", difficulty="beginner"),
+            _make_scored_sample("rare-1", intent="debug", difficulty="expert"),
+        ]
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps(samples))
+
+        written = run_refresh_rarity(
+            str(path),
+            config=PipelineConfig(rarity_score_mode="absolute"),
+        )
+        assert "scored_json" in written
+        assert "stats_value" in written
+        assert int(written.get("rarity_refreshed_samples", "0")) == 3
+
+        refreshed = json.loads((tmp_path / "scored.json").read_text())
+        rarity_by_id = {
+            s["id"]: (s.get("value") or {}).get("rarity", {}).get("score")
+            for s in refreshed
+        }
+        assert rarity_by_id["rare-1"] > rarity_by_id["common-1"]
+        assert rarity_by_id["common-1"] == rarity_by_id["common-2"]
+
+    def test_directory_refresh_with_external_stats(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        sub = tmp_path / "code" / "part1"
+        sub.mkdir(parents=True)
+        samples = [
+            _make_scored_sample("s1", intent="build", difficulty="beginner"),
+            _make_scored_sample("s2", intent="debug", difficulty="expert"),
+        ]
+        (sub / "scored.json").write_text(json.dumps(samples))
+
+        stats = {
+            "total_samples": 1000,
+            "tag_distributions": {
+                "intent": {"build": 600, "debug": 40},
+                "difficulty": {"beginner": 700, "expert": 20},
+                "concept": {"api-design": 300},
+            },
+        }
+        stats_path = tmp_path / "global_stats.json"
+        stats_path.write_text(json.dumps(stats))
+
+        written = run_refresh_rarity(
+            str(tmp_path),
+            tag_stats_path=str(stats_path),
+            config=PipelineConfig(rarity_score_mode="absolute"),
+        )
+        assert "summary_stats_value" in written
+        assert int(written.get("files_refreshed", "0")) == 1
+
+        refreshed = json.loads((sub / "scored.json").read_text())
+        for sample in refreshed:
+            rarity = (sample.get("value") or {}).get("rarity") or {}
+            stats_ref = rarity.get("stats_ref") or {}
+            assert stats_ref.get("source") == str(stats_path)
 
 
 # ─── Test run_regenerate_dashboard ───────────────────────

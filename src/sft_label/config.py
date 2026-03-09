@@ -116,6 +116,10 @@ RARITY_WEIGHTS = {
     "constraint": 1.0,
 }
 RARITY_COMBO_ALPHA = 0.7            # weight for tag IDF vs combo IDF
+# Rarity score normalization:
+#   - absolute: map raw IDF-based rarity to 1-10 using log2(total_samples) as ceiling
+#   - percentile: map rarity to 1-10 by within-batch percentile (legacy behavior)
+RARITY_SCORE_MODE = "absolute"
 
 # ─── COT-Preserving Truncation (Pass 2) ─────────────────
 VALUE_TRUNCATION_BUDGET = 20000     # total chars for scoring truncation
@@ -227,6 +231,7 @@ class PipelineConfig:
     value_weights: dict = None  # defaults to VALUE_WEIGHTS
     rarity_weights: dict = None  # defaults to RARITY_WEIGHTS
     rarity_combo_alpha: float = RARITY_COMBO_ALPHA
+    rarity_score_mode: str = RARITY_SCORE_MODE
     value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
     selection_intra_weight: float = SELECTION_INTRA_WEIGHT
     selection_quality_weight: float = SELECTION_QUALITY_WEIGHT

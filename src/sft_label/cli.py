@@ -5,6 +5,7 @@ Subcommands:
   sft-label start                — Interactive launcher for grouped workflows
   sft-label run                  — Run Pass 1 tag labeling (optionally + Pass 2)
   sft-label score                — Run Pass 2 value scoring on pre-labeled data
+  sft-label refresh-rarity       — Refresh Pass 2 rarity/value fields (no LLM)
   sft-label semantic-cluster     — Run trajectory SemHash + ANN clustering
   sft-label export-semantic      — Export representative windows from clustering artifacts
   sft-label filter               — Filter scored data by value threshold
@@ -478,6 +479,32 @@ def cmd_recompute_stats(args):
     print(f"\nDone. Wrote {len(written)} file(s).")
 
 
+def cmd_refresh_rarity(args):
+    """Refresh Pass 2 rarity/value fields from existing scored output."""
+    from sft_label.config import PipelineConfig
+    from sft_label.tools.recompute import run_refresh_rarity
+
+    config = PipelineConfig()
+    if getattr(args, "mode", None):
+        config.rarity_score_mode = args.mode
+
+    try:
+        written = run_refresh_rarity(
+            input_path=args.input,
+            tag_stats_path=getattr(args, "tag_stats", None),
+            output_dir=args.output,
+            config=config,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if not written:
+        print("No rarity updates generated. Check that input contains scored output.")
+        sys.exit(1)
+    print(f"\nDone. Refreshed rarity for {written.get('rarity_refreshed_samples', '0')} sample(s).")
+
+
 def cmd_regenerate_dashboard(args):
     """Regenerate HTML dashboards from existing stats and data."""
     from sft_label.tools.recompute import run_regenerate_dashboard
@@ -776,6 +803,24 @@ def build_parser():
     recompute_parser.add_argument("--output", type=str, default=None,
                                    help="Output directory (default: same as input)")
 
+    # --- refresh-rarity ---
+    refresh_parser = subparsers.add_parser(
+        "refresh-rarity",
+        help="Refresh Pass 2 rarity/value fields from existing scored output (no LLM)",
+        description="Recompute value.rarity, value_score, selection_score and Pass 2 stats "
+                    "from existing scored output without LLM calls.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    refresh_parser.add_argument("--input", type=str, required=True,
+                                help="Scored file (.json/.jsonl) or run directory")
+    refresh_parser.add_argument("--tag-stats", type=str, default=None,
+                                help="Path to Pass 1 stats for cross-dataset rarity baseline")
+    refresh_parser.add_argument("--output", type=str, default=None,
+                                help="Output directory (default: in-place)")
+    refresh_parser.add_argument("--mode", type=str, default=None,
+                                choices=["absolute", "percentile"],
+                                help="Rarity score normalization mode override")
+
     # --- regenerate-dashboard ---
     regen_parser = subparsers.add_parser(
         "regenerate-dashboard",
@@ -888,6 +933,8 @@ def dispatch_command(args, parser):
         cmd_export_review(args)
     elif args.command == "recompute-stats":
         cmd_recompute_stats(args)
+    elif args.command == "refresh-rarity":
+        cmd_refresh_rarity(args)
     elif args.command == "regenerate-dashboard":
         cmd_regenerate_dashboard(args)
 

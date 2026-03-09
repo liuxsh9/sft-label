@@ -431,6 +431,22 @@ class TestNormalizeRarityScores:
         normalize_rarity_scores(rarity_results)
         assert rarity_results[0]["score"] == 1.0  # percentile 0/0 → 0 → 1.0
 
+    def test_absolute_mode_maps_by_total_samples(self):
+        rarity_results = [
+            {"score": 0.0, "tag_rarity": 0, "combo_rarity": 0},
+            {"score": 5.0, "tag_rarity": 5, "combo_rarity": 0},
+            {"score": 10.0, "tag_rarity": 10, "combo_rarity": 0},
+        ]
+        meta = normalize_rarity_scores(
+            rarity_results,
+            mode="absolute",
+            total_samples=1024,  # log2 ceiling = 10
+        )
+        assert meta["mode"] == "absolute"
+        assert rarity_results[0]["score"] == 1.0
+        assert rarity_results[1]["score"] == 5.5
+        assert rarity_results[2]["score"] == 10.0
+
 
 class TestBuildComboCounts:
     def test_basic_counting(self):
@@ -1015,6 +1031,101 @@ class TestResumeScoringFile:
         # sample-1 and sample-2 should have been scored
         assert "sample-1" in scored_ids
         assert "sample-2" in scored_ids
+
+    def test_no_stats_uses_local_rarity_baseline(self, tmp_path):
+        """Without --tag-stats, rarity should still be computed from local labels."""
+        from sft_label.scoring import _run_scoring_file
+        from sft_label.config import PipelineConfig
+        from unittest.mock import patch
+
+        samples = [
+            {
+                "id": "common-1",
+                "conversations": [
+                    {"from": "human", "value": "Q1"},
+                    {"from": "gpt", "value": "A1"},
+                ],
+                "labels": {
+                    "intent": "build",
+                    "difficulty": "beginner",
+                    "language": ["python"],
+                    "domain": ["web-backend"],
+                    "task": ["feature-implementation"],
+                    "concept": ["data-types"],
+                    "context": "snippet",
+                },
+            },
+            {
+                "id": "common-2",
+                "conversations": [
+                    {"from": "human", "value": "Q2"},
+                    {"from": "gpt", "value": "A2"},
+                ],
+                "labels": {
+                    "intent": "build",
+                    "difficulty": "beginner",
+                    "language": ["python"],
+                    "domain": ["web-backend"],
+                    "task": ["feature-implementation"],
+                    "concept": ["data-types"],
+                    "context": "snippet",
+                },
+            },
+            {
+                "id": "rare-1",
+                "conversations": [
+                    {"from": "human", "value": "Q3"},
+                    {"from": "gpt", "value": "A3"},
+                ],
+                "labels": {
+                    "intent": "debug",
+                    "difficulty": "expert",
+                    "language": ["rust"],
+                    "domain": ["security"],
+                    "task": ["debugging"],
+                    "concept": ["concurrency"],
+                    "context": "single-file",
+                },
+            },
+        ]
+        labeled_path = tmp_path / "labeled.json"
+        with open(labeled_path, "w", encoding="utf-8") as f:
+            json.dump(samples, f)
+
+        rarity_by_id = {}
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                  sample_idx, total, sem, config=None, rate_limiter=None):
+            rarity_by_id[sample["id"]] = (rarity_result or {}).get("score")
+            value = {
+                "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }
+            monitor = {"sample_id": sample.get("id"), "status": "success",
+                        "llm_calls": 1, "prompt_tokens": 100, "completion_tokens": 50,
+                        "attempts": 1, "validation_issues": []}
+            return value, monitor
+
+        config = PipelineConfig(
+            scoring_concurrency=2,
+            sample_max_retries=1,
+            rarity_score_mode="absolute",
+        )
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            asyncio.run(_run_scoring_file(
+                labeled_path, tmp_path, None, 0, config, resume=False,
+            ))
+
+        assert rarity_by_id["common-1"] is not None
+        assert rarity_by_id["common-2"] is not None
+        assert rarity_by_id["rare-1"] is not None
+        assert rarity_by_id["rare-1"] > rarity_by_id["common-1"]
 
 
 # ─────────────────────────────────────────────────────────

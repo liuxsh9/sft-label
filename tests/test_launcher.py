@@ -238,14 +238,16 @@ def test_all_workflows_generate_parseable_argv():
         6: ["scored.json", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
         # 7. recompute-stats
         7: ["run_dir/", "", "", ""],
-        # 8. regenerate-dashboard
-        8: ["run_dir/", "", "", ""],
-        # 9. validate
-        9: [],
-        # 10. export-semantic
-        10: ["run_dir/", "out.jsonl", "", ""],
-        # 11. export-review
-        11: ["labeled.json", "review.csv", "", "", ""],
+        # 8. refresh-rarity
+        8: ["run_dir/", "", "", "", ""],
+        # 9. regenerate-dashboard
+        9: ["run_dir/", "", "", ""],
+        # 10. validate
+        10: [],
+        # 11. export-semantic
+        11: ["run_dir/", "out.jsonl", "", ""],
+        # 12. export-review
+        12: ["labeled.json", "review.csv", "", "", ""],
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -307,7 +309,7 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
 
 
 def test_build_launch_plan_can_render_english():
-    io = StubIO(["9"])
+    io = StubIO(["10"])
     try:
         plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="en")
         assert plan is not None
@@ -321,7 +323,7 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
     io = StubIO(["0"])
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
     assert plan is None
-    assert any("请选择任务编号 [0-11, 默认 1]：" in str(item) for item in io.outputs)
+    assert any("请选择任务编号 [0-12, 默认 1]：" in str(item) for item in io.outputs)
     assert not any("Select workflow number" in str(item) for item in io.outputs)
 
 
