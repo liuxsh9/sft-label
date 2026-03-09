@@ -154,6 +154,32 @@ CONV_AGENTIC_QUALITY_PERCENTILE = 0.1     # use p10 instead of min for agentic c
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)
 
+# ═══════════════════════════════════════════════════════════
+# Trajectory SemHash + ANN Clustering
+# ═══════════════════════════════════════════════════════════
+
+SEMANTIC_LONG_TURN_THRESHOLD = 50         # trajectories above this are windowed
+SEMANTIC_WINDOW_SIZE = 50                 # turns per window body
+SEMANTIC_WINDOW_STRIDE = 30               # turn stride between adjacent windows
+SEMANTIC_PINNED_PREFIX_MAX_TURNS = 3      # max turns in pinned task-definition prefix
+
+SEMANTIC_EMBEDDING_PROVIDER = "local"     # "local" or "api"
+SEMANTIC_EMBEDDING_MODEL = "hash-multilingual-v1"
+SEMANTIC_EMBEDDING_DIM = 384
+SEMANTIC_EMBEDDING_BATCH_SIZE = 256
+SEMANTIC_EMBEDDING_MAX_WORKERS = 8
+
+SEMANTIC_SEMHASH_BITS = 256
+SEMANTIC_SEMHASH_SEED = 42
+SEMANTIC_SEMHASH_BANDS = 8
+SEMANTIC_HAMMING_RADIUS = 64
+
+SEMANTIC_ANN_TOP_K = 32
+SEMANTIC_ANN_SIM_THRESHOLD = 0.82
+
+SEMANTIC_OUTPUT_PREFIX = "trajectory"
+SEMANTIC_MANIFEST_VERSION = "1.0"
+
 
 # ═══════════════════════════════════════════════════════════
 # Runtime-Overridable Config
@@ -208,3 +234,22 @@ class PipelineConfig:
     selection_smoothing_prior: int = SELECTION_SMOOTHING_PRIOR
     enable_rationale: bool = ENABLE_RATIONALE
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
+
+    # Trajectory SemHash + ANN Clustering
+    semantic_long_turn_threshold: int = SEMANTIC_LONG_TURN_THRESHOLD
+    semantic_window_size: int = SEMANTIC_WINDOW_SIZE
+    semantic_window_stride: int = SEMANTIC_WINDOW_STRIDE
+    semantic_pinned_prefix_max_turns: int = SEMANTIC_PINNED_PREFIX_MAX_TURNS
+    semantic_embedding_provider: str = SEMANTIC_EMBEDDING_PROVIDER
+    semantic_embedding_model: str = SEMANTIC_EMBEDDING_MODEL
+    semantic_embedding_dim: int = SEMANTIC_EMBEDDING_DIM
+    semantic_embedding_batch_size: int = SEMANTIC_EMBEDDING_BATCH_SIZE
+    semantic_embedding_max_workers: int = SEMANTIC_EMBEDDING_MAX_WORKERS
+    semantic_semhash_bits: int = SEMANTIC_SEMHASH_BITS
+    semantic_semhash_seed: int = SEMANTIC_SEMHASH_SEED
+    semantic_semhash_bands: int = SEMANTIC_SEMHASH_BANDS
+    semantic_hamming_radius: int = SEMANTIC_HAMMING_RADIUS
+    semantic_ann_top_k: int = SEMANTIC_ANN_TOP_K
+    semantic_ann_sim_threshold: float = SEMANTIC_ANN_SIM_THRESHOLD
+    semantic_output_prefix: str = SEMANTIC_OUTPUT_PREFIX
+    semantic_manifest_version: str = SEMANTIC_MANIFEST_VERSION

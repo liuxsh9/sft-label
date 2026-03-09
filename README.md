@@ -2,11 +2,12 @@
 
 SFT Capability Taxonomy & Auto-Labeling Pipeline.
 
-Two-pass automated labeling pipeline for SFT code-generation training data:
+Multi-pass automated labeling pipeline for SFT code-generation training data:
 - **Pass 1 (Tag Labeling)**: 9-category taxonomy (224 tags) via LLM calls
 - **Pass 2 (Value Scoring)**: Complexity, quality, reasoning, and rarity scoring for data selection
 - **Pass 2.5 (Conversation Aggregation)**: Conversation-level metrics from multi-turn slices (no LLM)
 - **Pass 3 (Filtering & Selection)**: Multi-condition sample and conversation filtering
+- **Pass 4 (Trajectory Semantic Clustering)**: Pinned-prefix windowing + SemHash + ANN clustering + SNR representative selection
 
 ## Install
 
@@ -34,6 +35,13 @@ sft-label run --input data.json --score
 
 # Compact mode: reduced prompt size (~32% smaller, for size-limited endpoints)
 sft-label run --input data.json --score --prompt-mode compact
+
+# Pass 1 + Pass 2 + Pass 4 in one go
+sft-label run --input data.json --score --semantic-cluster
+
+# Standalone Pass 4
+sft-label semantic-cluster --input run_dir/
+sft-label export-semantic --input run_dir/ --output representatives.jsonl
 ```
 
 ## Usage
@@ -53,6 +61,9 @@ sft-label run --input data_dir/ --resume data_dir-labeled-20250101_120000/
 # Continuous mode: Pass 1 + Pass 2 value scoring
 sft-label run --input data.json --score
 
+# Continuous mode: Pass 1 + Pass 2 + trajectory semantic clustering
+sft-label run --input data.json --score --semantic-cluster
+
 # Compact prompt mode (reduced payload size for size-limited endpoints)
 sft-label run --input data.json --score --prompt-mode compact
 
@@ -63,6 +74,31 @@ sft-label run --input data.json --score --tag-stats global_stats.json
 sft-label score --input labeled.json
 sft-label score --input labeled.json --tag-stats global_stats.json
 sft-label score --input results_dir/
+
+# Standalone trajectory semantic clustering (Pass 4)
+sft-label semantic-cluster --input run_dir/
+sft-label semantic-cluster --input run_dir/ --output semantic_out/
+sft-label semantic-cluster --input run_dir/ --resume
+
+# Tune clustering parameters (CPU-first local embedding backend)
+sft-label semantic-cluster --input run_dir/ \
+  --semantic-embedding-provider local \
+  --semantic-window-size 50 \
+  --semantic-window-stride 30 \
+  --semantic-semhash-bits 256 \
+  --semantic-semhash-bands 8 \
+  --semantic-hamming-radius 64 \
+  --semantic-ann-top-k 32 \
+  --semantic-ann-sim-threshold 0.82
+
+# API embedding fallback (OpenAI-compatible /v1/embeddings)
+sft-label semantic-cluster --input run_dir/ --semantic-embedding-provider api
+
+# Export representative windows (default: representatives only)
+sft-label export-semantic --input run_dir/ --output representatives.jsonl
+
+# Export all windows (including non-representatives)
+sft-label export-semantic --input run_dir/ --output all_windows.jsonl --include-all
 
 # Filter high-value samples from scored data
 sft-label filter --input scored.json --value-min 6.0
@@ -146,13 +182,23 @@ Input (ShareGPT JSON / Pangu JSONL)
   │   ├─ Quality floor + negative flag penalties
   │   └─ Output: conversation_scores.json (conv_value, conv_selection)
   │
-  └─ Pass 3: Filtering & Selection (tools/filter_value.py)
-      ├─ Sample-level: value_min, selection_min, difficulty, thinking_mode
-      ├─ Conversation-level: conv_value_min, conv_selection_min, peak_complexity_min
-      ├─ Turn-level: turn_value_min, turn_count_min/max, keep_first_last
-      ├─ Tag filtering: include_tags / exclude_tags (dim:tag format)
-      ├─ Source control: exclude_inherited, verify_source
-      └─ Output formats: scored (preserves metadata) or training (stripped)
+  ├─ Pass 3: Filtering & Selection (tools/filter_value.py)
+  │   ├─ Sample-level: value_min, selection_min, difficulty, thinking_mode
+  │   ├─ Conversation-level: conv_value_min, conv_selection_min, peak_complexity_min
+  │   ├─ Turn-level: turn_value_min, turn_count_min/max, keep_first_last
+  │   ├─ Tag filtering: include_tags / exclude_tags (dim:tag format)
+  │   ├─ Source control: exclude_inherited, verify_source
+  │   └─ Output formats: scored (preserves metadata) or training (stripped)
+  │
+  └─ Pass 4: Trajectory Semantic Clustering (semantic_clustering.py)
+      ├─ Long trajectory segmentation (>50 turns) with pinned task-definition prefix
+      ├─ Bilingual role-aware rendering for embedding text
+      ├─ Lightweight embedding backend (local CPU hash model) or API fallback
+      ├─ Deterministic SemHash (seeded random hyperplanes)
+      ├─ Coarse candidate retrieval (banded SemHash + hamming radius)
+      ├─ ANN refinement (cosine threshold + top-k)
+      ├─ Union-find cluster assembly
+      └─ Representative selection by SNR (action/observation), tie-break by value_score
 ```
 
 ## Taxonomy (Pass 1)
@@ -198,6 +244,52 @@ Additional outputs per sample:
 | `dashboard_value.html` | Self-contained interactive dashboard |
 | `monitor_value.jsonl` | Per-sample LLM call metadata |
 | `failed_value.jsonl` | Samples that failed scoring |
+
+## Trajectory Semantic Clustering (Pass 4)
+
+### What It Does
+
+- Segments long trajectories into logically complete sliding windows.
+- Preserves a pinned task-definition prefix for windows from long trajectories.
+- Computes semantic fingerprints and clusters windows with SemHash + ANN.
+- Selects one representative per cluster using:
+  `snr = action_tokens / max(observation_tokens, 1)`.
+
+### Output Files (Per Run)
+
+| File | Contents |
+|------|----------|
+| `trajectory_windows.jsonl` | Windowed trajectory records with source linkage + turn ranges |
+| `trajectory_embeddings.jsonl` | Normalized embedding vectors per window |
+| `trajectory_semhash.jsonl` | SemHash bits + band values per window |
+| `trajectory_cluster_membership.jsonl` | Cluster membership + SNR + representative flag |
+| `trajectory_clusters.json` | Cluster-to-window map |
+| `trajectory_representatives.jsonl` | Representative windows only |
+| `semantic_cluster_stats.json` | Cluster diagnostics and throughput metrics |
+| `semantic_cluster_manifest.json` | Versioned state manifest for compatibility/resume |
+
+### Key Configs (PipelineConfig)
+
+- `semantic_long_turn_threshold` (default `50`)
+- `semantic_window_size` (default `50`)
+- `semantic_window_stride` (default `30`)
+- `semantic_pinned_prefix_max_turns` (default `3`)
+- `semantic_embedding_provider` (`local` or `api`, default `local`)
+- `semantic_embedding_model`
+- `semantic_embedding_dim` (default `384`)
+- `semantic_semhash_bits` (default `256`)
+- `semantic_semhash_bands` (default `8`)
+- `semantic_hamming_radius` (default `64`)
+- `semantic_ann_top_k` (default `32`)
+- `semantic_ann_sim_threshold` (default `0.82`)
+
+### CPU Benchmark
+
+```bash
+python3 scripts/benchmark_semantic_clustering.py --samples 5000 --out /tmp/sc-bench
+```
+
+See [benchmark_semantic_clustering_report.md](scripts/benchmark_semantic_clustering_report.md) for projection assumptions.
 
 ### Dashboard Sections
 

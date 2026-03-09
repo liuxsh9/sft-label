@@ -1,0 +1,33 @@
+[
+  {
+    "id": "fixture_s1",
+    "conversations": [
+      {"from": "system", "value": "You are a bilingual coding assistant."},
+      {"from": "human", "value": "Build a script and explain the tradeoffs."},
+      {"from": "gpt", "value": "I will provide a practical implementation."},
+      {"from": "human", "value": "Step 1: parse the file list"},
+      {"from": "gpt", "value": "Use a streaming iterator and validate each record."},
+      {"from": "human", "value": "Step 2: cluster similar trajectories"},
+      {"from": "gpt", "value": "Use semantic hashing and cosine refinement."}
+    ],
+    "value": {"value_score": 7.2}
+  },
+  {
+    "id": "fixture_s2",
+    "conversations": [
+      {"from": "human", "value": "请给我一个多轮轨迹切分方案"},
+      {"from": "gpt", "value": "可以，先保留任务前缀，再进行滑动窗口切分。"},
+      {"from": "human", "value": "然后如何做聚类？"},
+      {"from": "gpt", "value": "先做语义哈希召回，再做近邻精排。"}
+    ],
+    "value": {"value_score": 6.6}
+  },
+  {
+    "id": "fixture_s3",
+    "conversations": [
+      {"from": "human", "value": "Write a robust retry policy for HTTP calls."},
+      {"from": "gpt", "value": "Use exponential backoff with capped jitter."}
+    ],
+    "value": {"value_score": 5.8}
+  }
+]
