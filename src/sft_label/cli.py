@@ -324,22 +324,22 @@ def cmd_start(args, parser):
 
     plan = build_launch_plan()
     if plan is None:
-        print("Launch cancelled.")
+        print("已取消启动 / Launch cancelled.")
         return
 
     env_prefix = format_env_prefix(plan.env_overrides)
     cmd_preview = format_command(plan.argv)
     preview = f"{env_prefix} {cmd_preview}".strip()
-    print("\nGenerated command:")
+    print("\n生成命令 / Generated command:")
     print(f"  {preview}")
 
     if args.dry_run:
-        print("\nDry run mode: command not executed.")
+        print("\n仅预览模式，未执行命令 / Dry run mode: command not executed.")
         return
 
-    confirm = input("Execute now? [Y/n]: ").strip().lower()
+    confirm = input("立即执行？ / Execute now? [Y/n]: ").strip().lower()
     if confirm in ("n", "no"):
-        print("Launch aborted.")
+        print("已取消执行 / Launch aborted.")
         return
 
     for key, value in plan.env_overrides.items():
@@ -348,11 +348,11 @@ def cmd_start(args, parser):
     try:
         launched_args = parser.parse_args(plan.argv)
     except SystemExit:
-        print("Generated arguments failed to parse. Re-run `sft-label start`.")
+        print("生成参数解析失败，请重试 `sft-label start` / Generated arguments failed to parse. Re-run `sft-label start`.")
         return
 
     if launched_args.command == "start":
-        print("Interactive launcher cannot launch itself.")
+        print("交互启动器不能再次启动自身 / Interactive launcher cannot launch itself.")
         return
 
     dispatch_command(launched_args, parser=parser)
