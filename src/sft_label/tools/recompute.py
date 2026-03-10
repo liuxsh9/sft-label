@@ -50,14 +50,24 @@ def load_samples(path):
     if path.suffix == ".jsonl":
         samples = []
         with open(path, encoding="utf-8") as f:
-            for line in f:
+            for line_no, line in enumerate(f, start=1):
                 line = line.strip()
                 if line:
-                    samples.append(json.loads(line))
+                    try:
+                        samples.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        raise ValueError(
+                            f"Invalid JSONL in {path}:{line_no}:{e.colno}: {e.msg}"
+                        ) from e
         return samples
 
     with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Invalid JSON in {path}:{e.lineno}:{e.colno}: {e.msg}"
+            ) from e
     if isinstance(data, list):
         return data
     raise ValueError(f"Expected list in {path}, got {type(data).__name__}")
@@ -97,6 +107,55 @@ def _dedup_json_jsonl(files):
         else:
             seen[key] = f
     return sorted(seen.values())
+
+
+def _log_refresh_rarity(message):
+    """Emit a flushed progress line for refresh-rarity."""
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[refresh-rarity {stamp}] {message}", flush=True)
+
+
+def _log_regenerate_dashboard(message):
+    """Emit a flushed progress line for regenerate-dashboard."""
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[regenerate-dashboard {stamp}] {message}", flush=True)
+
+
+def _format_file_size(path):
+    """Best-effort human-readable file size string."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size)
+    unit = units[0]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            break
+        value /= 1024.0
+
+    if unit == "B":
+        return f"{int(value)} {unit}"
+    return f"{value:.1f} {unit}"
+
+
+def _refresh_progress_interval(total):
+    """Choose a progress cadence that stays readable on large files."""
+    if total < 100:
+        return 0
+    return min(5000, max(100, total // 10))
+
+
+def _relative_file_label(path, root):
+    """Render a stable file label relative to the run root when possible."""
+    path = Path(path)
+    root = Path(root)
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
 
 
 # ─── Pass 1: Recompute stats from labeled output ────────
@@ -300,28 +359,70 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
     if not scored_files:
         return {}
 
+    def _display_path(path):
+        path = Path(path)
+        if in_path.is_dir():
+            try:
+                return str(path.relative_to(in_path))
+            except ValueError:
+                return str(path)
+        return path.name
+
+    def _file_phase_label(path, index, total):
+        return f"[file {index}/{total}] {_display_path(path)}"
+
+    _log_refresh_rarity(
+        f"Starting rarity refresh: input={in_path} output={out_root} "
+        f"mode={rarity_mode} files={len(scored_files)}"
+    )
+
     distributions = None
     total_stats_samples = 0
     stats_timestamp = None
     stats_source_str = None
 
     if stats_source_path:
+        _log_refresh_rarity(f"Loading rarity baseline stats from {stats_source_path}")
         dists, total, ts = load_tag_stats(stats_source_path)
         if dists:
             distributions = dists
             total_stats_samples = total
             stats_timestamp = ts
             stats_source_str = str(stats_source_path)
+            _log_refresh_rarity(
+                f"Using external rarity baseline: {stats_source_path} "
+                f"({total_stats_samples} samples)"
+            )
         else:
-            print(f"  Warning: {stats_source_path} has no tag_distributions, fallback to local baseline")
+            _log_refresh_rarity(
+                f"Warning: {stats_source_path} has no tag_distributions; "
+                "falling back to local baseline"
+            )
 
     # Local fallback baseline (aggregated across all scored files in scope)
     if not distributions:
         agg_distributions = {}
         agg_total = 0
         rw = config.rarity_weights or RARITY_WEIGHTS
-        for sf in scored_files:
-            samples = load_samples(sf)
+        _log_refresh_rarity(
+            f"Building local rarity baseline from {len(scored_files)} scored file(s)"
+        )
+        for index, sf in enumerate(scored_files, start=1):
+            phase = f"[baseline {index}/{len(scored_files)}] {_display_path(sf)}"
+            size_hint = _format_file_size(sf)
+            size_msg = f" ({size_hint})" if size_hint else ""
+            _log_refresh_rarity(f"{phase}: loading samples{size_msg}")
+            try:
+                samples = load_samples(sf)
+            except Exception as e:
+                _log_refresh_rarity(
+                    f"{phase}: failed while loading baseline source: "
+                    f"{type(e).__name__}: {e}"
+                )
+                raise
+            _log_refresh_rarity(
+                f"{phase}: loaded {len(samples)} sample(s); updating tag distributions"
+            )
             local_dist, local_total = build_tag_distributions(samples, rarity_weights=rw)
             if local_dist:
                 _merge_distributions(agg_distributions, local_dist)
@@ -331,7 +432,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             total_stats_samples = agg_total
             stats_timestamp = datetime.now().isoformat()
             stats_source_str = f"{in_path}#local"
-            print(f"  Using local rarity baseline ({agg_total} samples)")
+            _log_refresh_rarity(f"Using local rarity baseline ({agg_total} samples)")
         else:
             raise ValueError("No valid labels found to build rarity baseline")
 
@@ -351,11 +452,16 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
                 f.write(json.dumps(s, ensure_ascii=False) + "\n")
         return scored_json, scored_jsonl
 
-    def _refresh_one(samples):
+    def _refresh_one(samples, phase):
         rarity_results = []
         combo_counts = build_combo_counts(samples) if idf_map else None
         rw = config.rarity_weights or RARITY_WEIGHTS
-        for s in samples:
+        total_samples_in_file = len(samples)
+        progress_interval = _refresh_progress_interval(total_samples_in_file)
+        _log_refresh_rarity(
+            f"{phase}: computing rarity for {total_samples_in_file} sample(s)"
+        )
+        for index, s in enumerate(samples, start=1):
             labels = s.get("labels") or {}
             rarity = compute_sample_rarity(
                 labels,
@@ -367,6 +473,14 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
                 stats_ref_info=stats_ref_info,
             )
             rarity_results.append(rarity)
+            if progress_interval and (
+                index % progress_interval == 0 or index == total_samples_in_file
+            ):
+                pct = index / total_samples_in_file * 100.0
+                _log_refresh_rarity(
+                    f"{phase}: rarity {index}/{total_samples_in_file} ({pct:.1f}%)"
+                )
+        _log_refresh_rarity(f"{phase}: normalizing rarity scores (mode={rarity_mode})")
         normalize_rarity_scores(
             rarity_results,
             mode=rarity_mode,
@@ -375,6 +489,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
 
         weights = config.value_weights or VALUE_WEIGHTS
         refreshed = 0
+        _log_refresh_rarity(f"{phase}: updating value_score fields")
         for i, s in enumerate(samples):
             value = s.get("value")
             if not isinstance(value, dict):
@@ -384,7 +499,9 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             value["value_score"] = compute_value_score(value, rarity, weights=weights)
             refreshed += 1
 
+        _log_refresh_rarity(f"{phase}: recomputing selection scores")
         compute_selection_scores(samples, config=config)
+        _log_refresh_rarity(f"{phase}: recomputing pass2 statistics")
         stats = recompute_value_stats_from_scored(samples)
         stats["rarity_config"] = {
             "stats_ref": stats_source_str,
@@ -393,6 +510,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             "combo_alpha": config.rarity_combo_alpha,
             "score_mode": rarity_mode,
         }
+        _log_refresh_rarity(f"{phase}: refreshed {refreshed} scored sample(s)")
         return refreshed, stats
 
     written = {}
@@ -400,9 +518,26 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
     all_samples = []
     refreshed_total = 0
 
-    for sf in scored_files:
-        samples = load_samples(sf)
-        refreshed_count, stats = _refresh_one(samples)
+    for index, sf in enumerate(scored_files, start=1):
+        phase = _file_phase_label(sf, index, len(scored_files))
+        size_hint = _format_file_size(sf)
+        size_msg = f" ({size_hint})" if size_hint else ""
+        _log_refresh_rarity(f"{phase}: loading scored file{size_msg}")
+        try:
+            samples = load_samples(sf)
+        except Exception as e:
+            _log_refresh_rarity(
+                f"{phase}: failed while loading samples: {type(e).__name__}: {e}"
+            )
+            raise
+        _log_refresh_rarity(f"{phase}: loaded {len(samples)} sample(s)")
+        try:
+            refreshed_count, stats = _refresh_one(samples, phase)
+        except Exception as e:
+            _log_refresh_rarity(
+                f"{phase}: failed while refreshing rarity: {type(e).__name__}: {e}"
+            )
+            raise
         refreshed_total += refreshed_count
         all_samples.extend(samples)
 
@@ -413,21 +548,41 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             target_dir = out_root / rel if rel != Path(".") else out_root
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        scored_json, scored_jsonl = _write_scored_outputs(samples, target_dir)
+        _log_refresh_rarity(f"{phase}: writing scored outputs to {target_dir}")
+        try:
+            scored_json, scored_jsonl = _write_scored_outputs(samples, target_dir)
+        except Exception as e:
+            _log_refresh_rarity(
+                f"{phase}: failed while writing scored outputs: {type(e).__name__}: {e}"
+            )
+            raise
         stats_path = target_dir / PASS2_STATS_FILE
-        _write_json(stats_path, stats)
+        try:
+            _write_json(stats_path, stats)
+        except Exception as e:
+            _log_refresh_rarity(
+                f"{phase}: failed while writing stats: {type(e).__name__}: {e}"
+            )
+            raise
         sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
+        _log_refresh_rarity(
+            f"{phase}: wrote {scored_json.name}, {scored_jsonl.name}, {stats_path.name}"
+        )
 
         if in_path.is_file():
             written["scored_json"] = str(scored_json)
             written["scored_jsonl"] = str(scored_jsonl)
             written["stats_value"] = str(stats_path)
+            _log_refresh_rarity(f"{phase}: recomputing conversation aggregation")
             written.update(_recompute_conversations(samples, target_dir))
         else:
-            stats["file"] = sf.name
+            stats["file"] = _relative_file_label(sf, in_path)
             all_file_stats.append(stats)
 
     if in_path.is_dir() and all_file_stats:
+        _log_refresh_rarity(
+            f"Writing merged Pass 2 summary for {len(all_file_stats)} file(s)"
+        )
         summary = merge_value_stats(all_file_stats)
         summary["recomputed"] = True
         summary["recomputed_at"] = datetime.now().isoformat()
@@ -443,10 +598,17 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
         sync_legacy_aliases(summary_path, [PASS2_SUMMARY_STATS_FILE_LEGACY])
         written["summary_stats_value"] = str(summary_path)
         written["files_refreshed"] = str(len(all_file_stats))
+        _log_refresh_rarity(f"Wrote summary stats: {summary_path}")
         if all_samples:
+            _log_refresh_rarity(
+                f"Recomputing global conversation aggregation from {len(all_samples)} sample(s)"
+            )
             written.update(_recompute_conversations(all_samples, out_root))
 
     written["rarity_refreshed_samples"] = str(refreshed_total)
+    _log_refresh_rarity(
+        f"Completed rarity refresh: refreshed {refreshed_total} sample(s)"
+    )
     return written
 
 
@@ -517,7 +679,7 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 print(f"\n  Processing: {lf.name}")
                 samples = load_samples(lf)
                 stats = recompute_stats_from_labeled(samples)
-                stats["file"] = lf.name
+                stats["file"] = _relative_file_label(lf, input_dir)
 
                 # Write per-file stats alongside the labeled file
                 file_out_dir = out_dir / lf.parent.relative_to(input_dir) \
@@ -553,7 +715,7 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 samples = load_samples(sf)
                 all_scored_samples.extend(samples)
                 stats = recompute_value_stats_from_scored(samples)
-                stats["file"] = sf.name
+                stats["file"] = _relative_file_label(sf, input_dir)
 
                 file_out_dir = out_dir / sf.parent.relative_to(input_dir) \
                     if sf.parent != input_dir else out_dir
@@ -607,32 +769,52 @@ def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False):
         raise ValueError(f"Expected a directory, got: {input_path}")
 
     generated = []
+    _log_regenerate_dashboard(
+        f"Starting dashboard regeneration: input={input_path} pass={pass_num}"
+    )
 
     # Discover subdirectories that contain pipeline output
     subdirs = _find_output_subdirs(input_path)
     is_batch = len(subdirs) > 0
 
     if is_batch:
+        _log_regenerate_dashboard(
+            f"Detected batch mode with {len(subdirs)} output directorie(s)"
+        )
         # Per-subdir dashboards
-        for subdir in subdirs:
+        for index, subdir in enumerate(subdirs, start=1):
+            _log_regenerate_dashboard(
+                f"[dir {index}/{len(subdirs)}] Regenerating dashboards for {subdir}"
+            )
             generated.extend(
                 _regenerate_for_dir(subdir, pass_num, generate_dashboard,
                                     generate_value_dashboard))
 
         # Global dashboards at top level
+        _log_regenerate_dashboard(
+            f"Regenerating global dashboards for {input_path}"
+        )
         generated.extend(
             _regenerate_global(input_path, pass_num, generate_dashboard,
                                generate_value_dashboard))
     else:
         # Single-file run: output is directly in input_path
+        _log_regenerate_dashboard(
+            f"Detected single-directory mode for {input_path}"
+        )
         generated.extend(
             _regenerate_for_dir(input_path, pass_num, generate_dashboard,
                                 generate_value_dashboard))
 
     if open_browser:
         for path in generated:
-            webbrowser.open(f"file://{path.resolve()}")
+            resolved = Path(path).resolve()
+            _log_regenerate_dashboard(f"Opening dashboard in browser: {resolved}")
+            webbrowser.open(f"file://{resolved}")
 
+    _log_regenerate_dashboard(
+        f"Completed dashboard regeneration: generated {len(generated)} dashboard(s)"
+    )
     return generated
 
 
@@ -676,6 +858,9 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
         )
         if pass1_stats_path:
             try:
+                _log_regenerate_dashboard(
+                    f"{dir_path}: generating Pass 1 dashboard from {pass1_stats_path.name}"
+                )
                 out = gen_p1(
                     dir_path,
                     stats_file=pass1_stats_path.name,
@@ -683,9 +868,14 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
                 )
                 sync_legacy_aliases(Path(out), [PASS1_DASHBOARD_FILE_LEGACY])
                 generated.append(out)
-                print(f"  Pass 1 dashboard: {out}")
+                _log_regenerate_dashboard(f"{dir_path}: wrote Pass 1 dashboard {out}")
             except Exception as e:
-                print(f"  Warning: Pass 1 dashboard failed for {dir_path}: {e}")
+                _log_regenerate_dashboard(
+                    f"Warning: Pass 1 dashboard failed for {dir_path}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        else:
+            _log_regenerate_dashboard(f"{dir_path}: skipped Pass 1 dashboard (no stats file)")
 
     if pass_num in ("2", "both"):
         pass2_stats_path = find_first_existing(
@@ -693,6 +883,9 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
         )
         if pass2_stats_path:
             try:
+                _log_regenerate_dashboard(
+                    f"{dir_path}: generating Pass 2 dashboard from {pass2_stats_path.name}"
+                )
                 out_path = gen_p2(
                     dir_path,
                     stats_file=pass2_stats_path.name,
@@ -702,9 +895,18 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
                 if out_path:
                     sync_legacy_aliases(Path(out_path), [PASS2_DASHBOARD_FILE_LEGACY])
                     generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
-                    print(f"  Pass 2 dashboard: {out_path}")
+                    _log_regenerate_dashboard(f"{dir_path}: wrote Pass 2 dashboard {out_path}")
+                else:
+                    _log_regenerate_dashboard(
+                        f"{dir_path}: Pass 2 dashboard generator returned no output"
+                    )
             except Exception as e:
-                print(f"  Warning: Pass 2 dashboard failed for {dir_path}: {e}")
+                _log_regenerate_dashboard(
+                    f"Warning: Pass 2 dashboard failed for {dir_path}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        else:
+            _log_regenerate_dashboard(f"{dir_path}: skipped Pass 2 dashboard (no stats file)")
 
     return generated
 
@@ -719,14 +921,22 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
         )
         if pass1_summary_path:
             try:
+                _log_regenerate_dashboard(
+                    f"{run_dir}: generating global Pass 1 dashboard from {pass1_summary_path.name}"
+                )
                 out = gen_p1(run_dir, labeled_file=None,
                              stats_file=pass1_summary_path.name,
                              output_file=pass1_global_dashboard_filename(run_dir.name))
                 sync_legacy_aliases(Path(out), [pass1_global_dashboard_legacy_filename(run_dir.name)])
                 generated.append(out)
-                print(f"  Global Pass 1 dashboard: {out}")
+                _log_regenerate_dashboard(f"{run_dir}: wrote global Pass 1 dashboard {out}")
             except Exception as e:
-                print(f"  Warning: global Pass 1 dashboard failed: {e}")
+                _log_regenerate_dashboard(
+                    f"Warning: global Pass 1 dashboard failed for {run_dir}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        else:
+            _log_regenerate_dashboard(f"{run_dir}: skipped global Pass 1 dashboard (no summary stats)")
 
     if pass_num in ("2", "both"):
         pass2_summary_path = find_first_existing(
@@ -734,6 +944,9 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
         )
         if pass2_summary_path:
             try:
+                _log_regenerate_dashboard(
+                    f"{run_dir}: generating global Pass 2 dashboard from {pass2_summary_path.name}"
+                )
                 out_path = gen_p2(run_dir, scored_file=None,
                                   stats_file=pass2_summary_path.name,
                                   output_file=pass2_global_dashboard_filename(run_dir.name),
@@ -741,9 +954,18 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                 if out_path:
                     sync_legacy_aliases(Path(out_path), [pass2_global_dashboard_legacy_filename(run_dir.name)])
                     generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
-                    print(f"  Global Pass 2 dashboard: {out_path}")
+                    _log_regenerate_dashboard(f"{run_dir}: wrote global Pass 2 dashboard {out_path}")
+                else:
+                    _log_regenerate_dashboard(
+                        f"{run_dir}: global Pass 2 dashboard generator returned no output"
+                    )
             except Exception as e:
-                print(f"  Warning: global Pass 2 dashboard failed: {e}")
+                _log_regenerate_dashboard(
+                    f"Warning: global Pass 2 dashboard failed for {run_dir}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        else:
+            _log_regenerate_dashboard(f"{run_dir}: skipped global Pass 2 dashboard (no summary stats)")
 
     return generated
 

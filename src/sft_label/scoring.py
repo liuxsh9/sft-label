@@ -72,6 +72,15 @@ from sft_label.labels import is_partial_labels, is_usable_labels
 # Rarity computation
 # ─────────────────────────────────────────────────────────
 
+def _relative_file_label(path, root):
+    """Render a stable file label relative to the batch input root."""
+    path = Path(path)
+    root = Path(root)
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
+
 def load_tag_stats(stats_path):
     """Load tag_distributions from a Pass 1 stats file.
 
@@ -2700,7 +2709,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 config,
                 llm_progress_cb=llm_progress_cb,
             )
-            stats["file"] = labeled_path.name
+            stats["file"] = _relative_file_label(labeled_path, input_dir)
             all_file_stats.append(stats)
 
         if resident_files:
@@ -2782,7 +2791,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                             # Check if file is fully done
                             if c.done >= c.total and not c.completed:
                                 stats = _flush_scoring_file(c, config, pprint=pprint)
-                                stats["file"] = c.labeled_path.name
+                                stats["file"] = _relative_file_label(c.labeled_path, input_dir)
                                 all_file_stats.append(stats)
                                 progress.update(file_task, advance=1)
 

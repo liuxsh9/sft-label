@@ -29,6 +29,7 @@ from sft_label.tools.recompute import (
     _build_inherit_map,
     _synthesize_monitor,
     _dedup_json_jsonl,
+    _regenerate_for_dir,
 )
 
 
@@ -125,6 +126,12 @@ class TestLoadSamples:
         path = tmp_path / "test.jsonl"
         path.write_text('{"id": "a"}\n\n{"id": "b"}\n\n')
         assert len(load_samples(path)) == 2
+
+    def test_load_jsonl_error_reports_path_and_line(self, tmp_path):
+        path = tmp_path / "broken.jsonl"
+        path.write_text('{"id": "a"}\n{"id": }\n')
+        with pytest.raises(ValueError, match=r"broken\.jsonl:2:"):
+            load_samples(path)
 
     def test_load_non_list_json_raises(self, tmp_path):
         path = tmp_path / "test.json"
@@ -345,6 +352,18 @@ class TestRunRecompute:
         summary = json.loads(Path(written["summary_stats"]).read_text())
         assert summary.get("recomputed") is True
 
+    def test_directory_scored_summary_uses_relative_paths(self, tmp_path):
+        for sub in ("code/part1", "multi_turn/part1"):
+            sub_path = tmp_path / sub
+            sub_path.mkdir(parents=True)
+            samples = [_make_scored_sample(f"{sub}-s{i}") for i in range(2)]
+            (sub_path / "scored.json").write_text(json.dumps(samples))
+
+        written = run_recompute(str(tmp_path), pass_num="2")
+        summary = json.loads(Path(written["summary_stats_value"]).read_text())
+        files = {row["file"] for row in summary.get("per_file_summary", [])}
+        assert files == {"code/part1/scored.json", "multi_turn/part1/scored.json"}
+
     def test_directory_scored_with_conversations(self, tmp_path):
         # Multi-turn samples for conversation recomputation
         samples = _make_multiturn_scored_samples("conv-1", n_turns=3)
@@ -372,6 +391,36 @@ class TestRunRecompute:
 
 
 class TestRefreshRarity:
+    def test_refresh_logs_progress_for_large_file(self, tmp_path, capsys):
+        from sft_label.config import PipelineConfig
+
+        samples = [_make_scored_sample(f"s{i}") for i in range(120)]
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps(samples))
+
+        run_refresh_rarity(
+            str(path),
+            config=PipelineConfig(rarity_score_mode="absolute"),
+        )
+        out = capsys.readouterr().out
+        assert "Starting rarity refresh" in out
+        assert "loading scored file" in out
+        assert "loaded 120 sample(s)" in out
+        assert "computing rarity for 120 sample(s)" in out
+        assert "rarity 120/120 (100.0%)" in out
+        assert "writing scored outputs" in out
+        assert "Completed rarity refresh: refreshed 120 sample(s)" in out
+
+    def test_refresh_logs_context_on_bad_input(self, tmp_path, capsys):
+        path = tmp_path / "scored.json"
+        path.write_text("[")
+
+        with pytest.raises(ValueError, match=r"Invalid JSON in .*scored\.json:1:2:"):
+            run_refresh_rarity(str(path))
+        out = capsys.readouterr().out
+        assert "failed while loading baseline source" in out
+        assert "scored.json" in out
+
     def test_single_file_refresh_local_baseline(self, tmp_path):
         from sft_label.config import PipelineConfig
 
@@ -402,13 +451,14 @@ class TestRefreshRarity:
     def test_directory_refresh_with_external_stats(self, tmp_path):
         from sft_label.config import PipelineConfig
 
-        sub = tmp_path / "code" / "part1"
-        sub.mkdir(parents=True)
-        samples = [
-            _make_scored_sample("s1", intent="build", difficulty="beginner"),
-            _make_scored_sample("s2", intent="debug", difficulty="expert"),
-        ]
-        (sub / "scored.json").write_text(json.dumps(samples))
+        for sub in ("code/part1", "multi_turn/part1"):
+            sub_path = tmp_path / sub
+            sub_path.mkdir(parents=True)
+            samples = [
+                _make_scored_sample(f"{sub}-s1", intent="build", difficulty="beginner"),
+                _make_scored_sample(f"{sub}-s2", intent="debug", difficulty="expert"),
+            ]
+            (sub_path / "scored.json").write_text(json.dumps(samples))
 
         stats = {
             "total_samples": 1000,
@@ -427,13 +477,18 @@ class TestRefreshRarity:
             config=PipelineConfig(rarity_score_mode="absolute"),
         )
         assert "summary_stats_value" in written
-        assert int(written.get("files_refreshed", "0")) == 1
+        assert int(written.get("files_refreshed", "0")) == 2
 
-        refreshed = json.loads((sub / "scored.json").read_text())
-        for sample in refreshed:
-            rarity = (sample.get("value") or {}).get("rarity") or {}
-            stats_ref = rarity.get("stats_ref") or {}
-            assert stats_ref.get("source") == str(stats_path)
+        summary = json.loads(Path(written["summary_stats_value"]).read_text())
+        files = {row["file"] for row in summary.get("per_file_summary", [])}
+        assert files == {"code/part1/scored.json", "multi_turn/part1/scored.json"}
+
+        for sub in ("code/part1", "multi_turn/part1"):
+            refreshed = json.loads((tmp_path / sub / "scored.json").read_text())
+            for sample in refreshed:
+                rarity = (sample.get("value") or {}).get("rarity") or {}
+                stats_ref = rarity.get("stats_ref") or {}
+                assert stats_ref.get("source") == str(stats_path)
 
 
 # ─── Test run_regenerate_dashboard ───────────────────────
@@ -452,6 +507,17 @@ class TestRegenerateDashboard:
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
         assert len(generated) >= 1
         assert any("dashboard" in str(p) for p in generated)
+
+    def test_pass1_dashboard_logs_progress(self, tmp_path, capsys):
+        self._setup_stats_dir(tmp_path)
+        generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
+        out = capsys.readouterr().out
+        assert len(generated) >= 1
+        assert "Starting dashboard regeneration" in out
+        assert "Detected single-directory mode" in out
+        assert "generating Pass 1 dashboard from stats.json" in out
+        assert "wrote Pass 1 dashboard" in out
+        assert "Completed dashboard regeneration" in out
 
     def test_no_stats_no_dashboard(self, tmp_path):
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
@@ -474,3 +540,16 @@ class TestRegenerateDashboard:
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
         assert len(generated) >= 1
+
+    def test_regenerate_for_dir_logs_failure_context(self, tmp_path, capsys):
+        self._setup_stats_dir(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        generated = _regenerate_for_dir(tmp_path, "1", _boom, None)
+        out = capsys.readouterr().out
+        assert generated == []
+        assert "Warning: Pass 1 dashboard failed" in out
+        assert "RuntimeError: boom" in out
+        assert str(tmp_path) in out

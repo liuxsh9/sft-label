@@ -1019,6 +1019,7 @@ class TestResumeScoringFile:
 
         assert mock_chunked.call_count == 1
         assert result["files_processed"] == 1
+        assert result["per_file_summary"][0]["file"] == "batch/labeled.jsonl"
 
     def test_resume_skips_prescored(self, tmp_path):
         """Partially scored.jsonl should let resume skip those samples."""
