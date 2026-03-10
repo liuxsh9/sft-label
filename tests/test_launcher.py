@@ -42,6 +42,7 @@ def test_build_run_pass1_pass2_semantic_plan():
             "",           # prompt mode (full)
             "",           # model
             "",           # tag-stats
+            "",           # rarity mode (default absolute)
             "n",          # env override
             "",           # extra flags
         ]
@@ -65,6 +66,7 @@ def test_build_score_plan_with_llm_env_override():
             "4",                      # workflow: score
             "labeled.json",           # --input
             "",                       # --tag-stats
+            "",                       # rarity mode (default absolute)
             "",                       # --limit
             "",                       # --resume
             "",                       # prompt mode
@@ -227,11 +229,11 @@ def test_all_workflows_generate_parseable_argv():
         # 1. run-pass1
         1: ["1", "data.json", "", "", "", "", "", "", "n", ""],
         # 2. run-pass1-pass2
-        2: ["1", "data.json", "", "", "", "", "", "", "stats.json", "n", ""],
+        2: ["1", "data.json", "", "", "", "", "", "", "stats.json", "", "n", ""],
         # 3. run-pass1-pass2-semantic
-        3: ["1", "data.json", "", "", "", "", "", "", "", "n", ""],
+        3: ["1", "data.json", "", "", "", "", "", "", "", "", "n", ""],
         # 4. score
-        4: ["labeled.json", "", "", "", "", "", "n", ""],
+        4: ["labeled.json", "", "", "", "", "", "", "n", ""],
         # 5. semantic
         5: ["run_dir", "", "", "", "", "", ""],
         # 6. filter
@@ -269,6 +271,7 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
             "4",            # score
             "labeled.json", # --input
             "",             # --tag-stats
+            "",             # rarity mode (default absolute)
             "",             # --limit
             "",             # --resume
             "",             # prompt mode
@@ -335,6 +338,7 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
             "4",            # workflow: score
             "labeled.json", # --input
             "",             # --tag-stats
+            "",             # rarity mode (default absolute)
             "",             # --limit
             "",             # --resume
             "",             # prompt mode
@@ -370,4 +374,30 @@ def test_build_optimize_layout_plan():
         "--prune-legacy",
         "--manifest",
         "plan.json",
+    ]
+
+
+def test_build_score_plan_can_set_percentile_rarity_mode():
+    io = StubIO(
+        [
+            "4",            # workflow: score
+            "labeled.json", # --input
+            "",             # --tag-stats
+            "2",            # rarity mode: percentile
+            "",             # --limit
+            "",             # --resume
+            "",             # prompt mode
+            "",             # model
+            "n",            # env override
+            "",             # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "score",
+        "--input",
+        "labeled.json",
+        "--rarity-mode",
+        "percentile",
     ]

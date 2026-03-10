@@ -618,6 +618,20 @@ def _build_run_plan(
         tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
         if tag_stats:
             argv.extend(["--tag-stats", tag_stats])
+        rarity_mode = _ask_choice(
+            input_fn,
+            output_fn,
+            "稀有度归一化模式 / Rarity normalization mode",
+            [
+                ("absolute", "absolute（默认） / absolute (default)",
+                 "跨数据集绝对刻度 / Cross-dataset absolute scale"),
+                ("percentile", "percentile",
+                 "批内百分位映射 / Within-batch percentile mapping"),
+            ],
+            default_index=1,
+        )
+        if rarity_mode != "absolute":
+            argv.extend(["--rarity-mode", rarity_mode])
 
     if chain_semantic:
         _section(output_fn, "四阶段联动 / Pass 4 chaining")
@@ -835,6 +849,15 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
                 default_value="off",
             ),
             SwitchField(
+                key="rarity_mode",
+                label="稀有度归一化 / Rarity normalization",
+                options=[
+                    SwitchOption("absolute", "absolute（默认） / absolute (default)"),
+                    SwitchOption("percentile", "percentile"),
+                ],
+                default_value="absolute",
+            ),
+            SwitchField(
                 key="limit",
                 label="采样上限 / Sample limit",
                 options=[
@@ -943,6 +966,8 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
     if switch_values["resume"] == "on":
         argv.append("--resume")
+    if switch_values.get("rarity_mode") == "percentile":
+        argv.extend(["--rarity-mode", "percentile"])
 
     if switch_values["model_override"] == "yes":
         model = _ask_required_text(input_fn, "输入覆盖模型名 / Enter override model name")
@@ -1036,6 +1061,20 @@ def _build_run_plan_legacy(
         tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
         if tag_stats:
             argv.extend(["--tag-stats", tag_stats])
+        rarity_mode = _ask_choice(
+            input_fn,
+            output_fn,
+            "稀有度归一化模式 / Rarity normalization mode",
+            [
+                ("absolute", "absolute（默认） / absolute (default)",
+                 "跨数据集绝对刻度 / Cross-dataset absolute scale"),
+                ("percentile", "percentile",
+                 "批内百分位映射 / Within-batch percentile mapping"),
+            ],
+            default_index=1,
+        )
+        if rarity_mode != "absolute":
+            argv.extend(["--rarity-mode", rarity_mode])
 
     if chain_semantic:
         _section(output_fn, "四阶段联动 / Pass 4 chaining")
@@ -1060,6 +1099,20 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
     tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
     if tag_stats:
         argv.extend(["--tag-stats", tag_stats])
+    rarity_mode = _ask_choice(
+        input_fn,
+        output_fn,
+        "稀有度归一化模式 / Rarity normalization mode",
+        [
+            ("absolute", "absolute（默认） / absolute (default)",
+             "跨数据集绝对刻度 / Cross-dataset absolute scale"),
+            ("percentile", "percentile",
+             "批内百分位映射 / Within-batch percentile mapping"),
+        ],
+        default_index=1,
+    )
+    if rarity_mode != "absolute":
+        argv.extend(["--rarity-mode", rarity_mode])
 
     limit = _ask_int(input_fn, "采样上限（0=全部） / Sample limit (0 = all)", default=0)
     if limit:

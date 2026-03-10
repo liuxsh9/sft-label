@@ -70,6 +70,7 @@ def _apply_runtime_overrides(config, args):
         ("rps_warmup", "rps_warmup"),
         ("request_timeout", "request_timeout"),
         ("max_retries", "max_retries"),
+        ("rarity_score_mode", "rarity_mode"),
     ):
         val = getattr(args, arg_name, None)
         if val is not None:
@@ -689,6 +690,9 @@ def build_parser():
                             help="Chain trajectory semantic clustering after labeling/scoring")
     run_parser.add_argument("--tag-stats", type=str, default=None,
                             help="Path to stats.json for Pass 2 rarity (used with --score)")
+    run_parser.add_argument("--rarity-mode", type=str, default=None,
+                            choices=["absolute", "percentile"],
+                            help="Rarity normalization mode for Pass 2 (used with --score)")
     run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
                             default="full",
                             help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
@@ -725,6 +729,9 @@ def build_parser():
                                help="Path to labeled.json or directory of labeled files")
     score_parser.add_argument("--tag-stats", type=str, default=None,
                                help="Path to stats.json for rarity (default: auto-discover)")
+    score_parser.add_argument("--rarity-mode", type=str, default=None,
+                               choices=["absolute", "percentile"],
+                               help="Rarity normalization mode override")
     score_parser.add_argument("--limit", type=int, default=0,
                                help="Max samples to score, 0 = all (default: 0)")
     score_parser.add_argument("--resume", action="store_true",

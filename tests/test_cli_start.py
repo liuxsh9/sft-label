@@ -49,6 +49,7 @@ def test_apply_runtime_overrides_updates_pipeline_config():
         rps_warmup=12.0,
         request_timeout=77,
         max_retries=4,
+        rarity_mode="percentile",
     )
     _apply_runtime_overrides(config, args)
     assert config.concurrency == 123
@@ -57,6 +58,7 @@ def test_apply_runtime_overrides_updates_pipeline_config():
     assert config.rps_warmup == 12.0
     assert config.request_timeout == 77
     assert config.max_retries == 4
+    assert config.rarity_score_mode == "percentile"
 
 
 def test_apply_runtime_overrides_uses_legacy_scoring_alias_when_needed():
@@ -68,6 +70,7 @@ def test_apply_runtime_overrides_uses_legacy_scoring_alias_when_needed():
         rps_warmup=None,
         request_timeout=None,
         max_retries=None,
+        rarity_mode=None,
     )
     _apply_runtime_overrides(config, args)
     assert config.concurrency == 220
@@ -91,6 +94,8 @@ def test_parser_accepts_runtime_override_flags():
             "120",
             "--max-retries",
             "5",
+            "--rarity-mode",
+            "percentile",
         ]
     )
     assert run_args.concurrency == 80
@@ -98,6 +103,7 @@ def test_parser_accepts_runtime_override_flags():
     assert run_args.rps_warmup == 20
     assert run_args.request_timeout == 120
     assert run_args.max_retries == 5
+    assert run_args.rarity_mode == "percentile"
 
     score_args = parser.parse_args(
         [
@@ -114,6 +120,8 @@ def test_parser_accepts_runtime_override_flags():
             "90",
             "--max-retries",
             "3",
+            "--rarity-mode",
+            "percentile",
         ]
     )
     assert score_args.concurrency == 700
@@ -121,6 +129,7 @@ def test_parser_accepts_runtime_override_flags():
     assert score_args.rps_warmup == 10
     assert score_args.request_timeout == 90
     assert score_args.max_retries == 3
+    assert score_args.rarity_mode == "percentile"
 
 
 def test_parser_keeps_scoring_concurrency_legacy_alias():
