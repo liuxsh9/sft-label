@@ -135,6 +135,31 @@ class _CombinedLLMProgressTracker:
         return f"run {self.calls_done}/{self.planned_total_calls} ({pct:.1f}%)"
 
 
+class _SemanticProgressPrinter:
+    """Print semantic clustering progress in CLI-friendly format."""
+
+    def __init__(self):
+        self._last_percent: dict[str, int] = {}
+        self._last_message: dict[str, str] = {}
+
+    def __call__(self, stage: str, message: str, current=None, total=None):
+        prefix = f"[semantic:{stage}]"
+        if current is not None and total is not None and total > 0:
+            percent = min(int((current / total) * 100), 100)
+            last = self._last_percent.get(stage, -1)
+            if percent <= last and current != total:
+                return
+            self._last_percent[stage] = percent
+            print(f"{prefix} {message} {current}/{total} ({percent}%)")
+            return
+
+        last_msg = self._last_message.get(stage)
+        if last_msg == message:
+            return
+        self._last_message[stage] = message
+        print(f"{prefix} {message}")
+
+
 def _estimate_pass2_calls(total_samples: int, sample_max_retries: int) -> int:
     retries = max(int(sample_max_retries), 1)
     retry_factor = 1.0 + min(0.2, 0.05 * (retries - 1))
@@ -274,12 +299,18 @@ def cmd_run(args):
                 run_semantic_clustering,
                 format_semantic_summary,
             )
-            sc_stats = run_semantic_clustering(
-                input_path=run_dir,
-                output_dir=run_dir,
-                config=config,
-                export_representatives=True,
-            )
+            semantic_progress_cb = _SemanticProgressPrinter()
+            try:
+                sc_stats = run_semantic_clustering(
+                    input_path=run_dir,
+                    output_dir=run_dir,
+                    config=config,
+                    export_representatives=True,
+                    progress_cb=semantic_progress_cb,
+                )
+            except (FileNotFoundError, ValueError) as e:
+                print(f"Error: {e}")
+                sys.exit(1)
             print(format_semantic_summary(sc_stats))
 
 
@@ -444,6 +475,7 @@ def cmd_semantic_cluster(args):
 
     try:
         validate_semantic_config(config)
+        semantic_progress_cb = _SemanticProgressPrinter()
         stats = run_semantic_clustering(
             input_path=args.input,
             output_dir=args.output,
@@ -451,6 +483,7 @@ def cmd_semantic_cluster(args):
             config=config,
             resume=args.resume,
             export_representatives=not args.no_export_representatives,
+            progress_cb=semantic_progress_cb,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")

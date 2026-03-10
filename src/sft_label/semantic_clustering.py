@@ -13,20 +13,24 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import heapq
 import json
 import math
 import random
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Callable, Iterable, Sequence
 
 import httpx
 
 from sft_label.config import PipelineConfig
 from sft_label.preprocessing import estimate_tokens, normalize_sample
+
+
+SemanticProgressCb = Callable[[str, str, int | None, int | None], None]
 
 
 ROLE_LABELS = {
@@ -182,11 +186,19 @@ class APIEmbeddingProvider(EmbeddingProvider):
             resp.raise_for_status()
             data = resp.json().get("data") or []
 
+        if not isinstance(data, list):
+            raise ValueError("Invalid embedding response format: 'data' must be a list")
+        if data and all(isinstance(d, dict) and isinstance(d.get("index"), int) for d in data):
+            data = sorted(data, key=lambda d: d["index"])
+
         vectors = [d.get("embedding") for d in data]
         if len(vectors) != len(texts):
             raise ValueError(
                 f"Embedding API returned {len(vectors)} vectors for {len(texts)} inputs"
             )
+        dims = {len(v) for v in vectors if isinstance(v, list)}
+        if len(dims) > 1:
+            raise ValueError(f"Inconsistent embedding dimensions from API: {sorted(dims)}")
         normalized = []
         for vec in vectors:
             if not isinstance(vec, list):
@@ -259,32 +271,50 @@ def _load_json(path: Path):
     raise ValueError(f"Unsupported JSON structure in {path}")
 
 
+def _dedupe_by_stem_prefer_jsonl(files: Sequence[Path]) -> list[Path]:
+    grouped: dict[str, Path] = {}
+    for file_path in (f.resolve() for f in files if f.is_file()):
+        key = str(file_path.with_suffix(""))
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = file_path
+            continue
+        # Prefer jsonl over json when both variants exist for the same stem.
+        if file_path.suffix == ".jsonl" and existing.suffix != ".jsonl":
+            grouped[key] = file_path
+    return sorted(grouped.values())
+
+
 def discover_input_files(input_path: Path) -> list[Path]:
     if input_path.is_file():
-        return [input_path]
+        return [input_path.resolve()]
 
     # Prefer scored files when present; fallback to labeled files.
-    patterns = (
+    scored_patterns = (
         "scored*.jsonl", "scored*.json",
         "**/scored*.jsonl", "**/scored*.json",
+    )
+    scored_files = []
+    for ptn in scored_patterns:
+        scored_files.extend(input_path.glob(ptn))
+    dedup_scored = _dedupe_by_stem_prefer_jsonl(scored_files)
+    if dedup_scored:
+        return dedup_scored
+
+    labeled_patterns = (
         "labeled*.jsonl", "labeled*.json",
         "**/labeled*.jsonl", "**/labeled*.json",
     )
-    files = []
-    for ptn in patterns:
-        files.extend(input_path.glob(ptn))
-    dedup = sorted(set(f.resolve() for f in files if f.is_file()))
-    if dedup:
-        return dedup
+    labeled_files = []
+    for ptn in labeled_patterns:
+        labeled_files.extend(input_path.glob(ptn))
+    dedup_labeled = _dedupe_by_stem_prefer_jsonl(labeled_files)
+    if dedup_labeled:
+        return dedup_labeled
 
     # Final fallback: generic JSON/JSONL
-    generic = sorted(set(
-        list(input_path.glob("*.jsonl")) +
-        list(input_path.glob("*.json")) +
-        list(input_path.glob("**/*.jsonl")) +
-        list(input_path.glob("**/*.json"))
-    ))
-    return [f.resolve() for f in generic if f.is_file()]
+    generic = [f.resolve() for f in input_path.rglob("*") if f.is_file() and f.suffix in (".json", ".jsonl")]
+    return _dedupe_by_stem_prefer_jsonl(generic)
 
 
 def load_samples(input_path: str | Path, limit: int = 0) -> list[dict]:
@@ -294,6 +324,7 @@ def load_samples(input_path: str | Path, limit: int = 0) -> list[dict]:
         raise FileNotFoundError(f"No input files found for semantic clustering: {input_path}")
 
     samples = []
+    sample_seq = 0
     for f in files:
         if f.suffix == ".jsonl":
             iterator = _iter_jsonl(f)
@@ -303,9 +334,11 @@ def load_samples(input_path: str | Path, limit: int = 0) -> list[dict]:
         for item in iterator:
             if not isinstance(item, dict):
                 continue
+            sample_seq += 1
             item = dict(item)
             meta = dict(item.get("metadata") or {})
             meta.setdefault("source_file", str(f))
+            meta.setdefault("semantic_input_seq", sample_seq)
             item["metadata"] = meta
             samples.append(item)
             if limit and len(samples) >= limit:
@@ -326,38 +359,35 @@ def extract_pinned_prefix(conversations: Sequence[dict], max_turns: int = 3) -> 
         return [], 0
 
     n = len(conversations)
-    picked = []
     picked_idx = set()
 
     # 1) Keep leading system turns.
     i = 0
     while i < n and conversations[i].get("from") == "system":
-        if len(picked) < max_turns:
-            picked.append(conversations[i])
+        if len(picked_idx) < max_turns:
             picked_idx.add(i)
         i += 1
 
     # 2) Include first task-defining user turn.
     first_h = _first_index(conversations, "human", start=i)
-    if first_h is not None and len(picked) < max_turns:
-        picked.append(conversations[first_h])
+    if first_h is not None and len(picked_idx) < max_turns:
         picked_idx.add(first_h)
 
         # 3) Include first assistant reply after first user, when available.
         first_g = _first_index(conversations, "gpt", start=first_h + 1)
-        if first_g is not None and len(picked) < max_turns:
-            picked.append(conversations[first_g])
+        if first_g is not None and len(picked_idx) < max_turns:
             picked_idx.add(first_g)
 
-    if not picked:
+    if not picked_idx:
         # Fallback: deterministic head prefix.
-        for j in range(min(max_turns, n)):
-            picked.append(conversations[j])
-            picked_idx.add(j)
+        picked_idx.update(range(min(max_turns, n)))
 
-    body_start = (max(picked_idx) + 1) if picked_idx else 0
-    body_start = min(body_start, n)
-    return picked, body_start
+    # Keep prefix contiguous to avoid dropping intermediate turns
+    # (for example tool observations between first human/gpt).
+    max_idx = max(picked_idx)
+    prefix = list(conversations[:max_idx + 1])
+    body_start = min(max_idx + 1, n)
+    return prefix, body_start
 
 
 def _align_window_start(conversations: Sequence[dict], start: int, end: int) -> int:
@@ -392,7 +422,27 @@ def build_windows_from_sample(sample: dict, config: PipelineConfig) -> list[Traj
         return []
 
     meta = normalized.get("metadata") or {}
-    source_id = normalized.get("id") or meta.get("source_id") or f"sample_{hash(str(meta)) & 0xfffffff}"
+    source_id = meta.get("source_id") or normalized.get("id")
+    if not source_id:
+        stable_payload = {
+            "source_file": meta.get("source_file"),
+            "semantic_input_seq": meta.get("semantic_input_seq"),
+            "turn_count": len(conversations),
+            "head": [
+                {
+                    "from": t.get("from"),
+                    "value": (t.get("value") or "")[:96],
+                }
+                for t in conversations[:3]
+            ],
+        }
+        stable_json = json.dumps(
+            stable_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        source_id = f"sample_{hashlib.sha256(stable_json.encode('utf-8')).hexdigest()[:12]}"
     value_score = (normalized.get("value") or {}).get("value_score")
     source_file = meta.get("source_file")
 
@@ -556,34 +606,42 @@ def _embed_batch_local(provider: LocalHashEmbeddingProvider, texts: list[str], w
         return [f.result() for f in futures]
 
 
-def embed_windows(windows: Sequence[TrajectoryWindow], config: PipelineConfig) -> list[WindowEmbedding]:
+def embed_windows(
+    windows: Sequence[TrajectoryWindow],
+    config: PipelineConfig,
+    progress_cb: SemanticProgressCb | None = None,
+) -> list[WindowEmbedding]:
     provider = create_embedding_provider(config)
     batch_size = config.semantic_embedding_batch_size
     workers = config.semantic_embedding_max_workers
 
-    rendered = [render_window_for_embedding(w) for w in windows]
-    vectors = []
-    for batch in _chunked(rendered, batch_size):
-        if isinstance(provider, LocalHashEmbeddingProvider):
-            vectors.extend(_embed_batch_local(provider, list(batch), workers))
-        else:
-            vectors.extend(provider.embed_texts(batch))
-
-    if len(vectors) != len(windows):
-        raise ValueError("Embedding vector count mismatch")
-
     out = []
-    for w, vec in zip(windows, vectors):
-        out.append(
-            WindowEmbedding(
-                window_id=w.window_id,
-                source_id=w.source_id,
-                dim=len(vec),
-                provider=provider.name,
-                model=provider.model,
-                vector=vec,
+    total = len(windows)
+    processed = 0
+    for window_batch in _chunked(windows, batch_size):
+        rendered_batch = [render_window_for_embedding(w) for w in window_batch]
+        if isinstance(provider, LocalHashEmbeddingProvider):
+            vectors = _embed_batch_local(provider, rendered_batch, workers)
+        else:
+            vectors = provider.embed_texts(rendered_batch)
+        if len(vectors) != len(window_batch):
+            raise ValueError("Embedding vector count mismatch")
+        for w, vec in zip(window_batch, vectors):
+            out.append(
+                WindowEmbedding(
+                    window_id=w.window_id,
+                    source_id=w.source_id,
+                    dim=len(vec),
+                    provider=provider.name,
+                    model=provider.model,
+                    vector=vec,
+                )
             )
-        )
+        processed += len(window_batch)
+        if progress_cb:
+            progress_cb("embed", "Embedding windows", processed, total)
+    if len(out) != len(windows):
+        raise ValueError("Embedding output count mismatch")
     return out
 
 
@@ -666,6 +724,7 @@ def build_neighbor_graph(
     embeddings: Sequence[WindowEmbedding],
     semhash_records: Sequence[WindowSemHash],
     config: PipelineConfig,
+    progress_cb: SemanticProgressCb | None = None,
 ) -> tuple[dict, dict]:
     """Build ANN-refined neighbor graph.
 
@@ -684,6 +743,9 @@ def build_neighbor_graph(
     top_k = config.semantic_ann_top_k
     sim_threshold = config.semantic_ann_sim_threshold
 
+    total = len(semhash_records)
+    progress_step = max(total // 100, 1)
+
     for i, rec in enumerate(semhash_records):
         coarse = set()
         for band_i, val in enumerate(rec.band_values):
@@ -699,10 +761,12 @@ def build_neighbor_graph(
             sim = _dot(vectors[i], vectors[j])  # vectors are normalized
             if sim >= sim_threshold:
                 scored.append((sim, j))
-        scored.sort(reverse=True)
-        refined = [j for _, j in scored[:top_k]]
+        refined = [j for _, j in heapq.nlargest(top_k, scored)]
         neighbors[i] = refined
         total_refined_links += len(refined)
+        done = i + 1
+        if progress_cb and (done == total or done % progress_step == 0):
+            progress_cb("graph", "Refining ANN neighbor graph", done, total)
 
     metrics = {
         "coarse_pairs": total_coarse_pairs,
@@ -814,7 +878,11 @@ def compute_cluster_stats(
     bit_density = 0.0
     if bits:
         total_one = sum(b.bit_count() for b in bits)
-        bit_density = total_one / (len(bits) * max(len(bin(bits[0])) - 2, 1))
+        bit_width = len(semhash_records[0].bits_hex) * 4 if semhash_records[0].bits_hex else 0
+        if bit_width <= 0:
+            bit_width = max(max(b.bit_length() for b in bits), 1)
+        bit_density = total_one / (len(bits) * bit_width)
+        bit_density = min(max(bit_density, 0.0), 1.0)
 
     sizes_sorted = sorted(sizes)
     p50 = sizes_sorted[len(sizes_sorted) // 2] if sizes_sorted else 0
@@ -866,6 +934,7 @@ def _compatibility_key(config: PipelineConfig) -> str:
         "window_size": config.semantic_window_size,
         "window_stride": config.semantic_window_stride,
         "long_turn_threshold": config.semantic_long_turn_threshold,
+        "pinned_prefix_max_turns": config.semantic_pinned_prefix_max_turns,
     }
     s = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -927,6 +996,7 @@ def run_semantic_clustering(
     config: PipelineConfig | None = None,
     resume: bool = False,
     export_representatives: bool = True,
+    progress_cb: SemanticProgressCb | None = None,
 ):
     """Run full-batch semantic clustering pipeline."""
     t0 = time.time()
@@ -942,22 +1012,56 @@ def run_semantic_clustering(
     if resume:
         ensure_manifest_compatible(load_manifest(manifest_path), config)
 
+    stage_seconds: dict[str, float] = {}
+    if progress_cb:
+        progress_cb("start", "Semantic clustering started", None, None)
+
+    t_stage = time.time()
     samples = load_samples(in_path, limit=limit)
+    stage_seconds["load"] = round(time.time() - t_stage, 3)
+    if progress_cb:
+        progress_cb("load", f"Loaded samples from {in_path}", len(samples), len(samples))
     if not samples:
         raise ValueError("No valid samples found for semantic clustering")
 
+    t_stage = time.time()
     windows = build_windows(samples, config)
+    stage_seconds["window"] = round(time.time() - t_stage, 3)
+    if progress_cb:
+        progress_cb("window", "Built trajectory windows", len(windows), len(windows))
     if not windows:
         raise ValueError("No semantic windows produced from input samples")
 
-    embeddings = embed_windows(windows, config)
+    t_stage = time.time()
+    embeddings = embed_windows(windows, config, progress_cb=progress_cb)
+    stage_seconds["embed"] = round(time.time() - t_stage, 3)
+
+    t_stage = time.time()
     semhash_records = compute_semhash_records(embeddings, config)
-    neighbors, graph_metrics = build_neighbor_graph(embeddings, semhash_records, config)
+    stage_seconds["hash"] = round(time.time() - t_stage, 3)
+    if progress_cb:
+        progress_cb("hash", "Projected SemHash signatures", len(semhash_records), len(semhash_records))
+
+    t_stage = time.time()
+    neighbors, graph_metrics = build_neighbor_graph(
+        embeddings,
+        semhash_records,
+        config,
+        progress_cb=progress_cb,
+    )
+    stage_seconds["graph"] = round(time.time() - t_stage, 3)
+
+    t_stage = time.time()
     clusters = build_clusters(neighbors, windows)
     members = select_representatives(clusters, windows)
+    stage_seconds["cluster"] = round(time.time() - t_stage, 3)
+    if progress_cb:
+        progress_cb("cluster", "Built clusters and selected representatives", len(clusters), len(clusters))
+
     stats = compute_cluster_stats(windows, clusters, semhash_records, graph_metrics)
     stats["elapsed_seconds"] = round(time.time() - t0, 3)
     stats["total_samples"] = len(samples)
+    stats["stage_seconds"] = stage_seconds
 
     # Artifacts
     prefix = config.semantic_output_prefix
@@ -969,19 +1073,33 @@ def run_semantic_clustering(
     reps_file = out_dir / f"{prefix}_representatives.jsonl"
     stats_file = out_dir / "semantic_cluster_stats.json"
 
+    t_stage = time.time()
     _write_jsonl(windows_file, (asdict(w) for w in windows))
+    if progress_cb:
+        progress_cb("export", f"Wrote {windows_file.name}", 1, 5)
     _write_jsonl(emb_file, (asdict(e) for e in embeddings))
+    if progress_cb:
+        progress_cb("export", f"Wrote {emb_file.name}", 2, 5)
     _write_jsonl(hash_file, (asdict(h) for h in semhash_records))
+    if progress_cb:
+        progress_cb("export", f"Wrote {hash_file.name}", 3, 5)
     _write_jsonl(members_file, (asdict(m) for m in members))
-    _write_json(clusters_file, {
-        "clusters": {cid: [windows[i].window_id for i in idxs] for cid, idxs in clusters.items()}
-    })
-    _write_json(stats_file, stats)
+    if progress_cb:
+        progress_cb("export", f"Wrote {members_file.name}", 4, 5)
+    _write_json(
+        clusters_file,
+        {"clusters": {cid: [windows[i].window_id for i in idxs] for cid, idxs in clusters.items()}},
+    )
+    if progress_cb:
+        progress_cb("export", f"Wrote {clusters_file.name}", 5, 5)
 
     if export_representatives:
         rep_count = export_representative_windows(windows, members, reps_file)
+        if progress_cb:
+            progress_cb("export", f"Wrote {reps_file.name}", rep_count, rep_count)
     else:
         rep_count = 0
+    stage_seconds["export"] = round(time.time() - t_stage, 3)
 
     manifest = SemanticRunManifest(
         version=config.semantic_manifest_version,
@@ -1021,24 +1139,30 @@ def run_semantic_clustering(
     )
     save_manifest(manifest_path, manifest)
 
-    stats.update({
-        "artifacts": {
+    artifacts = {
             "windows": str(windows_file),
             "embeddings": str(emb_file),
             "semhash": str(hash_file),
             "cluster_membership": str(members_file),
             "clusters": str(clusters_file),
-            "representatives": str(reps_file),
             "manifest": str(manifest_path),
             "stats": str(stats_file),
-        },
+        }
+    if export_representatives:
+        artifacts["representatives"] = str(reps_file)
+
+    stats.update({
+        "artifacts": artifacts,
         "representative_count": rep_count,
     })
+    _write_json(stats_file, stats)
+    if progress_cb:
+        progress_cb("done", "Semantic clustering complete", None, None)
     return stats
 
 
 def format_semantic_summary(stats: dict) -> str:
-    return (
+    summary = (
         "Semantic clustering complete\n"
         f"Samples: {stats.get('total_samples', 0)}\n"
         f"Windows: {stats.get('total_windows', 0)}\n"
@@ -1046,3 +1170,10 @@ def format_semantic_summary(stats: dict) -> str:
         f"Representatives: {stats.get('representative_count', 0)}\n"
         f"Elapsed: {stats.get('elapsed_seconds', 0)}s"
     )
+    stage_seconds = stats.get("stage_seconds") or {}
+    if stage_seconds:
+        ordered = ["load", "window", "embed", "hash", "graph", "cluster", "export"]
+        parts = [f"{k}={stage_seconds[k]}s" for k in ordered if k in stage_seconds]
+        if parts:
+            summary += "\nStages: " + ", ".join(parts)
+    return summary

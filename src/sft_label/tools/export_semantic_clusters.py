@@ -21,6 +21,19 @@ def _discover_file(input_dir: Path, suffix: str) -> Path:
     return candidates[0]
 
 
+def _manifest_output_prefix(input_dir: Path) -> str | None:
+    manifest_path = input_dir / "semantic_cluster_manifest.json"
+    if not manifest_path.exists():
+        return None
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    params = manifest.get("parameters") or {}
+    prefix = params.get("output_prefix")
+    if isinstance(prefix, str) and prefix.strip():
+        return prefix.strip()
+    return None
+
+
 def run_export_semantic_clusters(
     input_dir: str | Path,
     output_path: str | Path,
@@ -31,8 +44,18 @@ def run_export_semantic_clusters(
     if not base.exists():
         raise FileNotFoundError(f"Input directory does not exist: {base}")
 
-    windows_file = _discover_file(base, "_windows.jsonl")
-    members_file = _discover_file(base, "_cluster_membership.jsonl")
+    prefix = _manifest_output_prefix(base)
+    if prefix:
+        windows_file = base / f"{prefix}_windows.jsonl"
+        members_file = base / f"{prefix}_cluster_membership.jsonl"
+        if not windows_file.exists() or not members_file.exists():
+            raise FileNotFoundError(
+                "Semantic manifest prefix is set but required artifacts are missing: "
+                f"{windows_file.name}, {members_file.name}"
+            )
+    else:
+        windows_file = _discover_file(base, "_windows.jsonl")
+        members_file = _discover_file(base, "_cluster_membership.jsonl")
 
     windows = {}
     for row in _load_jsonl(windows_file):
@@ -41,12 +64,14 @@ def run_export_semantic_clusters(
             windows[wid] = row
 
     out_rows = []
+    missing_window_refs = 0
     for member in _load_jsonl(members_file):
         if not include_non_representative and not member.get("representative"):
             continue
         wid = member.get("window_id")
         window = windows.get(wid)
         if not window:
+            missing_window_refs += 1
             continue
         out_rows.append({
             "cluster_id": member.get("cluster_id"),
@@ -57,6 +82,12 @@ def run_export_semantic_clusters(
             "value_score": member.get("value_score"),
             "window": window,
         })
+
+    if missing_window_refs:
+        raise ValueError(
+            "Cluster membership references missing windows: "
+            f"{missing_window_refs} row(s) missing from {windows_file.name}"
+        )
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
