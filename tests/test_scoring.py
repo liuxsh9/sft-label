@@ -1343,7 +1343,7 @@ class TestComputeSelectionScores:
         """15+ samples with diverse labels → selection_score in [1, 10]."""
         samples = []
         intents = ["build", "learn", "debug", "modify"]
-        diffs = ["beginner", "intermediate", "advanced", "expert"]
+        diffs = ["beginner", "intermediate", "upper-intermediate", "advanced", "expert"]
         for i in range(20):
             labels = {
                 "intent": intents[i % len(intents)],

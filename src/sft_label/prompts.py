@@ -139,17 +139,19 @@ Rules:
 
 ### Difficulty (single-select)
 What coding ability level is needed to produce a good response?
-- `beginner`: Basic syntax, simple API calls, standard library usage (e.g., Python list operations, HTML/CSS basics, simple file I/O)
-- `intermediate`: Framework usage, common design patterns, multi-component coordination (e.g., Flask CRUD API, React components with state, SQL joins)
-- `advanced`: Performance optimization, complex architecture, deep debugging, multi-system integration (e.g., distributed rate limiter with Redis sliding window, connection pool implementation, custom Webpack plugin)
-- `expert`: Deep internals knowledge, cutting-edge techniques, large-scale system design (e.g., Rust Pin/Unpin mechanism, Linux kernel scheduler, lock-free data structures, custom memory allocator, JIT compiler, multi-file repository-level debugging with deep codebase understanding)
+- `beginner`: Basic syntax/stdlib, simple API calls, one-step fixes (simple file I/O, list ops, HTML basics)
+- `intermediate`: Routine framework work with known patterns in local scope (Flask CRUD, React state form, straightforward SQL joins)
+- `upper-intermediate`: Non-trivial but standard engineering coordination (2-5 files/modules, async refactor with error-path preservation, cross-component debugging)
+- `advanced`: Hard system design/optimization with explicit tradeoffs (distributed rate limiting, concurrency correctness, failure semantics, high-performance tuning)
+- `expert`: Deep internals or correctness-critical specialist work (compiler/runtime/kernel internals, lock-free proofs, formal verification, custom allocator/JIT internals)
 Calibration anchors:
-- Flask CRUD = intermediate (standard framework usage)
-- Distributed rate limiter with sliding window + degradation = advanced (multi-system, algorithmic)
-- Custom malloc implementation = expert (deep system internals)
-- Multi-step repository-level debugging across 5+ files with root-cause analysis = expert (deep codebase understanding)
-- Designing a lock-free concurrent data structure with correctness guarantees = expert (correctness-critical systems)
-Note: expert should remain rare (top 5-10%). The bar is high: requires knowledge most senior developers do not routinely possess.
+- Flask CRUD = intermediate
+- Callback→async refactor with fallback/error-path parity = upper-intermediate
+- Distributed rate limiter with degradation + thread safety = advanced
+- Custom malloc / lock-free queue with correctness argument = expert
+Anti-collapse rule:
+- If torn between adjacent levels, prefer LOWER unless there is clear evidence of broader coordination depth or deeper internals.
+- `expert` should remain very rare (<3%).
 
 ## Output Format
 Return ONLY valid JSON (no markdown, no explanation):
@@ -278,17 +280,17 @@ Rules:
 - code-optimization requires EXPLICIT performance improvement intent
 
 ### Difficulty (single-select)
-- `beginner`: Basic syntax, simple API calls, standard library usage (list ops, HTML basics, simple file I/O)
-- `intermediate`: Framework usage, common patterns, multi-component (Flask CRUD, React state, SQL joins)
-- `advanced`: Performance optimization, complex architecture, deep debugging (distributed rate limiter, connection pool, custom plugin)
-- `expert`: Deep internals, cutting-edge, large-scale design (Rust Pin/Unpin, kernel scheduler, lock-free DS, JIT compiler, multi-file repo-level debugging with deep codebase understanding)
+- `beginner`: Basic syntax/stdlib and one-step fixes
+- `intermediate`: Routine framework work with known patterns in local scope (Flask CRUD, React state, SQL joins)
+- `upper-intermediate`: Non-trivial engineering coordination (2-5 files/modules, async refactor with fallback parity, cross-component debugging)
+- `advanced`: Hard system design/optimization with explicit tradeoffs (distributed limiter, concurrency correctness, performance tuning)
+- `expert`: Deep internals/specialist correctness work (compiler/runtime/kernel internals, lock-free proofs, formal verification, allocator/JIT internals)
 Calibration:
-- Flask CRUD = intermediate (standard framework usage)
-- Distributed rate limiter with sliding window = advanced (multi-system, algorithmic)
-- Custom malloc / lock-free concurrent DS = expert (deep system internals)
-Expert is rare (top 1-2%) — requires knowledge most senior developers do not routinely possess.
-CRITICAL boundary: Advanced = multi-system integration (distributed cache, connection pools, custom plugins). Expert = deep internals OR repo-scale mastery (5+ file debugging with cross-module root cause). When in doubt between adjacent levels, default to the LOWER level.
-Expert examples: Rust Pin/Unpin, kernel scheduler, lock-free concurrent data structures, JIT compiler internals, custom allocators, Byzantine fault tolerance, formal verification.
+- Flask CRUD = intermediate
+- Callback→async with fallback/error-path parity = upper-intermediate
+- Distributed rate limiter + degradation + thread safety = advanced
+- Custom malloc / lock-free queue with correctness argument = expert
+Boundary rule: if uncertain between adjacent levels, choose LOWER. `expert` is very rare (<3%).
 
 ## Output Format
 Return ONLY valid JSON (no markdown, no explanation):
@@ -414,7 +416,7 @@ total_turns: 2
     },
     {
         "role": "assistant",
-        "content": '{"intent":"modify","language":["javascript"],"domain":["web-backend"],"task":["code-refactoring"],"difficulty":"intermediate","confidence":{"intent":0.97,"language":0.99,"domain":0.88,"task":0.95,"difficulty":0.85},"unmapped":[]}'
+        "content": '{"intent":"modify","language":["javascript"],"domain":["web-backend"],"task":["code-refactoring"],"difficulty":"upper-intermediate","confidence":{"intent":0.97,"language":0.99,"domain":0.88,"task":0.95,"difficulty":0.85},"unmapped":[]}'
     },
     # Example 7: Review (code quality feedback, no implementation)
     {
@@ -970,8 +972,99 @@ total_turns: 6
 
 # ─── Compact few-shot subsets (for --prompt-mode compact) ──
 
-# Call 1: keep 3 of 7 — build(Flask CRUD), debug(Rust), modify(JS async)
-CALL1_FEWSHOT_COMPACT = CALL1_FEWSHOT[0:2] + CALL1_FEWSHOT[2:4] + CALL1_FEWSHOT[10:12]
+# Call 1: short anchors with balanced difficulty coverage to avoid intermediate collapse
+CALL1_FEWSHOT_COMPACT = [
+    # Beginner
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"解释一下 Python 列表推导式，并给个过滤偶数的例子"},{"from":"gpt","value":"列表推导式用于一行生成列表，例如 `[x for x in nums if x % 2 == 0]` 会筛出偶数。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["python"]
+has_tool_roles: false
+code_block_count: 1
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"learn","language":["python"],"domain":[],"task":["code-explanation"],"difficulty":"beginner","confidence":{"intent":0.96,"language":0.99,"domain":0.95,"task":0.95,"difficulty":0.92},"unmapped":[]}'
+    },
+    # Intermediate
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"用 Flask 写一个用户 CRUD API，用 SQLite 存储"},{"from":"gpt","value":"可以用 Flask + sqlite3 实现 `/users` 的 GET/POST/PUT/DELETE，并返回 JSON。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["python"]
+has_tool_roles: false
+code_block_count: 0
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"build","language":["python","sql"],"domain":["web-backend","api-development"],"task":["feature-implementation","api-design"],"difficulty":"intermediate","confidence":{"intent":0.98,"language":0.94,"domain":0.94,"task":0.90,"difficulty":0.88},"unmapped":[]}'
+    },
+    # Upper-intermediate
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"把这个 Node.js callback 路由改成 async/await，要求保留 redis 失败时回退 rows.length"},{"from":"gpt","value":"可以改为外层 try/catch + 内层 redis try/catch，保持原有降级逻辑不变。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["javascript"]
+has_tool_roles: false
+code_block_count: 0
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"modify","language":["javascript"],"domain":["web-backend"],"task":["code-refactoring","error-handling-task"],"difficulty":"upper-intermediate","confidence":{"intent":0.97,"language":0.99,"domain":0.88,"task":0.92,"difficulty":0.86},"unmapped":[]}'
+    },
+    # Advanced
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"实现分布式限流：Redis 滑动窗口，按用户/IP，Redis 故障时降级本地并保证线程安全"},{"from":"gpt","value":"可以用 Redis ZSET 维护窗口计数，并在连接异常时回退到加锁的本地计数器。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["python"]
+has_tool_roles: false
+code_block_count: 0
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"build","language":["python"],"domain":["web-backend"],"task":["feature-implementation"],"difficulty":"advanced","confidence":{"intent":0.98,"language":0.99,"domain":0.86,"task":0.94,"difficulty":0.90},"unmapped":[]}'
+    },
+    # Expert
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"用 Rust 设计一个无锁 MPMC 队列，解释 ABA 风险与内存序选择"},{"from":"gpt","value":"需要基于原子 CAS 设计队列节点推进策略，并结合 hazard pointers/epoch 回收处理 ABA 与内存可见性。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["rust"]
+has_tool_roles: false
+code_block_count: 0
+total_turns: 2
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"build","language":["rust"],"domain":["systems-programming"],"task":["feature-implementation"],"difficulty":"expert","confidence":{"intent":0.96,"language":0.99,"domain":0.90,"task":0.90,"difficulty":0.92},"unmapped":[]}'
+    },
+]
 
 # Call 2: keep 3 of 5 — custom bash/debug(no-planning anchor), Q&A knapsack(empty agentic), empty CRUD(anchor)
 # Balance: 1/3 agentic, 2/3 empty — prevents multi-step-reasoning over-tagging
@@ -1028,7 +1121,7 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result, 
 
 TAG_POOLS = {
     "intent": {"learn", "build", "modify", "debug", "review", "decide"},
-    "difficulty": {"beginner", "intermediate", "advanced", "expert"},
+    "difficulty": {"beginner", "intermediate", "upper-intermediate", "advanced", "expert"},
     "context": {"snippet", "single-function", "single-file", "multi-file", "module",
                 "repository", "monorepo", "greenfield", "legacy-code", "with-dependencies"},
     "language": {

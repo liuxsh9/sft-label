@@ -91,7 +91,7 @@ def compute_viz_data(samples, stats):
                 cross[tuple(parts)] = count
 
     intents = sorted({k[0] for k in cross})
-    diffs = ["beginner", "intermediate", "advanced", "expert"]
+    diffs = ["beginner", "intermediate", "upper-intermediate", "advanced", "expert"]
     cross_matrix = {
         "rows": intents,
         "cols": [d for d in diffs if any(cross.get((i, d), 0) for i in intents)],

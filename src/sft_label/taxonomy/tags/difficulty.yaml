@@ -36,6 +36,23 @@
   - "Set up a basic CI/CD pipeline with GitHub Actions"
   - "Write unit tests for this service class using mocking"
 
+- id: upper-intermediate
+  name: Upper Intermediate
+  category: Difficulty
+  description: >
+    Non-trivial engineering coordination across components/files,
+    behavior-preserving refactors, or cross-module debugging without deep
+    internals expertise.
+  aliases:
+  - intermediate-plus
+  - mid-high
+  examples:
+  - "Refactor callback-based Node.js route to async/await while preserving fallback behavior"
+  - "Fix cross-module auth bug across middleware, service, and handler layers"
+  - "Migrate synchronous job flow to async pipeline with retry and timeout handling"
+  - "Restructure monolithic endpoint into service/repository layers without behavior changes"
+  - "Implement robust API error mapping across multiple integration points"
+
 - id: advanced
   name: Advanced
   category: Difficulty
