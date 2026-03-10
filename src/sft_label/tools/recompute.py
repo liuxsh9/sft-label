@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sft_label.config import CONFIDENCE_THRESHOLD
 from sft_label.artifacts import (
@@ -156,6 +157,21 @@ def _recompute_progress_interval(total_files):
     return min(100, max(10, total_files // 20))
 
 
+def _resolve_worker_count(workers, total_items):
+    """Normalize worker count for optional parallel execution."""
+    if workers is None:
+        workers = 1
+    try:
+        workers = int(workers)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"workers must be a positive integer, got {workers!r}") from e
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    if total_items <= 0:
+        return 1
+    return min(workers, total_items)
+
+
 # ─── Pass 1: Recompute stats from labeled output ────────
 
 def _synthesize_monitor(sample):
@@ -265,13 +281,14 @@ def recompute_value_stats_from_scored(samples):
 
 # ─── Orchestration ───────────────────────────────────────
 
-def run_recompute(input_path, pass_num="both", output_dir=None):
+def run_recompute(input_path, pass_num="both", output_dir=None, workers=1):
     """Recompute stats from labeled/scored pipeline output.
 
     Args:
         input_path: Path to a single file or run directory.
         pass_num: "1" (Pass 1 only), "2" (Pass 2 only), or "both".
         output_dir: Where to write stats. Default: same directory as input.
+        workers: max number of files to process in parallel in directory mode.
 
     Returns:
         dict with paths of written files.
@@ -286,14 +303,14 @@ def run_recompute(input_path, pass_num="both", output_dir=None):
     elif input_path.is_dir():
         out_dir = Path(output_dir) if output_dir else input_path
         out_dir.mkdir(parents=True, exist_ok=True)
-        written.update(_recompute_directory(input_path, pass_num, out_dir))
+        written.update(_recompute_directory(input_path, pass_num, out_dir, workers=workers))
     else:
         raise FileNotFoundError(f"Input path not found: {input_path}")
 
     return written
 
 
-def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=None):
+def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=None, workers=1):
     """Refresh Pass 2 rarity/value fields offline from existing scored output.
 
     Recomputes per-sample:
@@ -307,6 +324,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
         tag_stats_path: optional external Pass 1 stats path for cross-dataset rarity.
         output_dir: output root (default: in-place).
         config: PipelineConfig override; only rarity/value settings are used.
+        workers: max number of files to process in parallel in directory mode.
 
     Returns:
         dict with written artifact paths/counts.
@@ -360,6 +378,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
     scored_files = [in_path] if in_path.is_file() else discover_scored_files(in_path)
     if not scored_files:
         return {}
+    worker_count = _resolve_worker_count(workers, len(scored_files))
 
     def _display_path(path):
         path = Path(path)
@@ -377,6 +396,10 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
         f"Starting rarity refresh: input={in_path} output={out_root} "
         f"mode={rarity_mode} files={len(scored_files)}"
     )
+    if in_path.is_dir() and worker_count > 1:
+        _log_refresh_rarity(
+            f"Parallel mode enabled: workers={worker_count}"
+        )
 
     distributions = None
     total_stats_samples = 0
@@ -530,12 +553,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
         _log_refresh_rarity(f"{phase}: refreshed {refreshed} scored sample(s)")
         return refreshed, stats
 
-    written = {}
-    all_file_stats = []
-    all_samples = []
-    refreshed_total = 0
-
-    for index, sf in enumerate(scored_files, start=1):
+    def _process_scored_file(index, sf):
         phase = _file_phase_label(sf, index, len(scored_files))
         size_hint = _format_file_size(sf)
         size_msg = f" ({size_hint})" if size_hint else ""
@@ -555,8 +573,6 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
                 f"{phase}: failed while refreshing rarity: {type(e).__name__}: {e}"
             )
             raise
-        refreshed_total += refreshed_count
-        all_samples.extend(samples)
 
         if in_path.is_file():
             target_dir = out_root
@@ -584,15 +600,60 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
         _log_refresh_rarity(
             f"{phase}: wrote {scored_json.name}, {scored_jsonl.name}, {stats_path.name}"
         )
+        return {
+            "index": index,
+            "file_path": sf,
+            "phase": phase,
+            "samples": samples,
+            "stats": stats,
+            "refreshed_count": refreshed_count,
+            "target_dir": target_dir,
+            "scored_json": scored_json,
+            "scored_jsonl": scored_jsonl,
+            "stats_path": stats_path,
+        }
+
+    written = {}
+    all_file_stats = []
+    all_samples = []
+    refreshed_total = 0
+
+    processed = []
+    if worker_count > 1 and len(scored_files) > 1:
+        done = 0
+        processed_by_index = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {
+                pool.submit(_process_scored_file, index, sf): index
+                for index, sf in enumerate(scored_files, start=1)
+            }
+            for fut in as_completed(future_map):
+                index = future_map[fut]
+                processed_by_index[index] = fut.result()
+                done += 1
+                _log_refresh_rarity(
+                    f"Parallel progress: {done}/{len(scored_files)} file(s) completed"
+                )
+        processed = [processed_by_index[i] for i in range(1, len(scored_files) + 1)]
+    else:
+        for index, sf in enumerate(scored_files, start=1):
+            processed.append(_process_scored_file(index, sf))
+
+    for result in processed:
+        refreshed_total += result["refreshed_count"]
+        all_samples.extend(result["samples"])
+        stats = result["stats"]
 
         if in_path.is_file():
-            written["scored_json"] = str(scored_json)
-            written["scored_jsonl"] = str(scored_jsonl)
-            written["stats_value"] = str(stats_path)
-            _log_refresh_rarity(f"{phase}: recomputing conversation aggregation")
-            written.update(_recompute_conversations(samples, target_dir))
+            written["scored_json"] = str(result["scored_json"])
+            written["scored_jsonl"] = str(result["scored_jsonl"])
+            written["stats_value"] = str(result["stats_path"])
+            _log_refresh_rarity(
+                f"{result['phase']}: recomputing conversation aggregation"
+            )
+            written.update(_recompute_conversations(result["samples"], result["target_dir"]))
         else:
-            stats["file"] = _relative_file_label(sf, in_path)
+            stats["file"] = _relative_file_label(result["file_path"], in_path)
             all_file_stats.append(stats)
 
     if in_path.is_dir() and all_file_stats:
@@ -675,7 +736,7 @@ def _recompute_conversations(samples, out_dir):
     return {}
 
 
-def _recompute_directory(input_dir, pass_num, out_dir):
+def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
     """Recompute stats for all files in a run directory."""
     from sft_label.pipeline import merge_stats
     from sft_label.scoring import merge_value_stats
@@ -689,36 +750,74 @@ def _recompute_directory(input_dir, pass_num, out_dir):
         labeled_files = discover_labeled_files(input_dir)
         if labeled_files:
             print(f"Found {len(labeled_files)} labeled file(s)")
+            p1_workers = _resolve_worker_count(workers, len(labeled_files))
             p1_interval = _recompute_progress_interval(len(labeled_files))
-            p1_compact = p1_interval > 1
-            if p1_compact:
+            p1_compact = p1_interval > 1 and p1_workers == 1
+            if p1_workers > 1 and len(labeled_files) > 1:
+                print(f"  Pass 1 parallel mode: workers={p1_workers}")
+            elif p1_compact:
                 print(f"  Pass 1 compact mode: log every {p1_interval} files")
-            for idx, lf in enumerate(labeled_files, start=1):
+
+            def _process_labeled_file(idx, lf):
                 rel_label = _relative_file_label(lf, input_dir)
-                if not p1_compact:
-                    print(f"\n  Processing: {rel_label}")
                 samples = load_samples(lf)
                 stats = recompute_stats_from_labeled(samples)
-                stats["file"] = _relative_file_label(lf, input_dir)
-
-                # Write per-file stats alongside the labeled file
+                stats["file"] = rel_label
                 file_out_dir = out_dir / lf.parent.relative_to(input_dir) \
                     if lf.parent != input_dir else out_dir
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS1_STATS_FILE
                 _write_json(stats_path, stats)
-                if not p1_compact:
-                    print(f"    → {stats_path} "
-                          f"({stats['success']}/{stats['total_samples']} success)")
-                elif idx == 1 or idx == len(labeled_files) or idx % p1_interval == 0:
-                    print(
-                        f"  Pass 1 progress {idx}/{len(labeled_files)} | "
-                        f"{rel_label} | {stats['success']}/{stats['total_samples']} success"
-                    )
-                all_pass1_stats.append(stats)
+                return {
+                    "idx": idx,
+                    "rel_label": rel_label,
+                    "stats_path": stats_path,
+                    "stats": stats,
+                }
+
+            ordered_results = []
+            if p1_workers > 1 and len(labeled_files) > 1:
+                done = 0
+                results_by_idx = {}
+                with ThreadPoolExecutor(max_workers=p1_workers) as pool:
+                    futures = {
+                        pool.submit(_process_labeled_file, idx, lf): idx
+                        for idx, lf in enumerate(labeled_files, start=1)
+                    }
+                    for fut in as_completed(futures):
+                        item = fut.result()
+                        results_by_idx[item["idx"]] = item
+                        done += 1
+                        if done == 1 or done == len(labeled_files) or done % p1_interval == 0:
+                            print(
+                                f"  Pass 1 progress {done}/{len(labeled_files)} | "
+                                f"{item['rel_label']} | "
+                                f"{item['stats']['success']}/{item['stats']['total_samples']} success"
+                            )
+                ordered_results = [results_by_idx[i] for i in range(1, len(labeled_files) + 1)]
+            else:
+                for idx, lf in enumerate(labeled_files, start=1):
+                    rel_label = _relative_file_label(lf, input_dir)
+                    if not p1_compact:
+                        print(f"\n  Processing: {rel_label}")
+                    item = _process_labeled_file(idx, lf)
+                    if not p1_compact:
+                        print(
+                            f"    → {item['stats_path']} "
+                            f"({item['stats']['success']}/{item['stats']['total_samples']} success)"
+                        )
+                    elif idx == 1 or idx == len(labeled_files) or idx % p1_interval == 0:
+                        print(
+                            f"  Pass 1 progress {idx}/{len(labeled_files)} | "
+                            f"{item['rel_label']} | "
+                            f"{item['stats']['success']}/{item['stats']['total_samples']} success"
+                        )
+                    ordered_results.append(item)
+
+            all_pass1_stats.extend(item["stats"] for item in ordered_results)
 
             # Merge into summary
-            if len(all_pass1_stats) > 0:
+            if all_pass1_stats:
                 summary = merge_stats(all_pass1_stats)
                 summary["recomputed"] = True
                 summary["recomputed_at"] = datetime.now().isoformat()
@@ -734,36 +833,75 @@ def _recompute_directory(input_dir, pass_num, out_dir):
         if scored_files:
             print(f"\nFound {len(scored_files)} scored file(s)")
             all_scored_samples = []
+            p2_workers = _resolve_worker_count(workers, len(scored_files))
             p2_interval = _recompute_progress_interval(len(scored_files))
-            p2_compact = p2_interval > 1
-            if p2_compact:
+            p2_compact = p2_interval > 1 and p2_workers == 1
+            if p2_workers > 1 and len(scored_files) > 1:
+                print(f"  Pass 2 parallel mode: workers={p2_workers}")
+            elif p2_compact:
                 print(f"  Pass 2 compact mode: log every {p2_interval} files")
-            for idx, sf in enumerate(scored_files, start=1):
-                rel_label = _relative_file_label(sf, input_dir)
-                if not p2_compact:
-                    print(f"\n  Processing: {rel_label}")
-                samples = load_samples(sf)
-                all_scored_samples.extend(samples)
-                stats = recompute_value_stats_from_scored(samples)
-                stats["file"] = _relative_file_label(sf, input_dir)
 
+            def _process_scored_file(idx, sf):
+                rel_label = _relative_file_label(sf, input_dir)
+                samples = load_samples(sf)
+                stats = recompute_value_stats_from_scored(samples)
+                stats["file"] = rel_label
                 file_out_dir = out_dir / sf.parent.relative_to(input_dir) \
                     if sf.parent != input_dir else out_dir
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS2_STATS_FILE
                 _write_json(stats_path, stats)
-                if not p2_compact:
-                    print(f"    → {stats_path} "
-                          f"({stats['total_scored']} scored)")
-                elif idx == 1 or idx == len(scored_files) or idx % p2_interval == 0:
-                    print(
-                        f"  Pass 2 progress {idx}/{len(scored_files)} | "
-                        f"{rel_label} | {stats['total_scored']} scored"
-                    )
-                all_pass2_stats.append(stats)
+                return {
+                    "idx": idx,
+                    "rel_label": rel_label,
+                    "samples": samples,
+                    "stats_path": stats_path,
+                    "stats": stats,
+                }
+
+            ordered_results = []
+            if p2_workers > 1 and len(scored_files) > 1:
+                done = 0
+                results_by_idx = {}
+                with ThreadPoolExecutor(max_workers=p2_workers) as pool:
+                    futures = {
+                        pool.submit(_process_scored_file, idx, sf): idx
+                        for idx, sf in enumerate(scored_files, start=1)
+                    }
+                    for fut in as_completed(futures):
+                        item = fut.result()
+                        results_by_idx[item["idx"]] = item
+                        done += 1
+                        if done == 1 or done == len(scored_files) or done % p2_interval == 0:
+                            print(
+                                f"  Pass 2 progress {done}/{len(scored_files)} | "
+                                f"{item['rel_label']} | {item['stats']['total_scored']} scored"
+                            )
+                ordered_results = [results_by_idx[i] for i in range(1, len(scored_files) + 1)]
+            else:
+                for idx, sf in enumerate(scored_files, start=1):
+                    rel_label = _relative_file_label(sf, input_dir)
+                    if not p2_compact:
+                        print(f"\n  Processing: {rel_label}")
+                    item = _process_scored_file(idx, sf)
+                    if not p2_compact:
+                        print(
+                            f"    → {item['stats_path']} "
+                            f"({item['stats']['total_scored']} scored)"
+                        )
+                    elif idx == 1 or idx == len(scored_files) or idx % p2_interval == 0:
+                        print(
+                            f"  Pass 2 progress {idx}/{len(scored_files)} | "
+                            f"{item['rel_label']} | {item['stats']['total_scored']} scored"
+                        )
+                    ordered_results.append(item)
+
+            for item in ordered_results:
+                all_pass2_stats.append(item["stats"])
+                all_scored_samples.extend(item["samples"])
 
             # Merge into summary
-            if len(all_pass2_stats) > 0:
+            if all_pass2_stats:
                 summary = merge_value_stats(all_pass2_stats)
                 summary["recomputed"] = True
                 summary["recomputed_at"] = datetime.now().isoformat()
@@ -783,13 +921,14 @@ def _recompute_directory(input_dir, pass_num, out_dir):
 
 # ─── Dashboard regeneration ──────────────────────────────
 
-def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False):
+def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False, workers=1):
     """Regenerate HTML dashboards from existing stats and data files.
 
     Args:
         input_path: Path to a run directory.
         pass_num: "1" (Pass 1 only), "2" (Pass 2 only), or "both".
         open_browser: Open generated dashboards in default browser.
+        workers: max number of directories to process in parallel.
 
     Returns:
         list of generated dashboard paths.
@@ -812,17 +951,50 @@ def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False):
     is_batch = len(subdirs) > 0
 
     if is_batch:
+        worker_count = _resolve_worker_count(workers, len(subdirs))
         _log_regenerate_dashboard(
             f"Detected batch mode with {len(subdirs)} output directorie(s)"
         )
-        # Per-subdir dashboards
-        for index, subdir in enumerate(subdirs, start=1):
+        if worker_count > 1 and len(subdirs) > 1:
             _log_regenerate_dashboard(
-                f"[dir {index}/{len(subdirs)}] Regenerating dashboards for {subdir}"
+                f"Parallel mode enabled: workers={worker_count}"
             )
-            generated.extend(
-                _regenerate_for_dir(subdir, pass_num, generate_dashboard,
-                                    generate_value_dashboard))
+        # Per-subdir dashboards
+        if worker_count > 1 and len(subdirs) > 1:
+            done = 0
+            generated_by_index = {}
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                futures = {
+                    pool.submit(
+                        _regenerate_for_dir,
+                        subdir,
+                        pass_num,
+                        generate_dashboard,
+                        generate_value_dashboard,
+                    ): index
+                    for index, subdir in enumerate(subdirs, start=1)
+                }
+                for fut in as_completed(futures):
+                    index = futures[fut]
+                    subdir = subdirs[index - 1]
+                    _log_regenerate_dashboard(
+                        f"[dir {index}/{len(subdirs)}] Regenerating dashboards for {subdir}"
+                    )
+                    generated_by_index[index] = fut.result()
+                    done += 1
+                    _log_regenerate_dashboard(
+                        f"Parallel progress: {done}/{len(subdirs)} directory(ies) completed"
+                    )
+            for index in range(1, len(subdirs) + 1):
+                generated.extend(generated_by_index.get(index, []))
+        else:
+            for index, subdir in enumerate(subdirs, start=1):
+                _log_regenerate_dashboard(
+                    f"[dir {index}/{len(subdirs)}] Regenerating dashboards for {subdir}"
+                )
+                generated.extend(
+                    _regenerate_for_dir(subdir, pass_num, generate_dashboard,
+                                        generate_value_dashboard))
 
         # Global dashboards at top level
         _log_regenerate_dashboard(

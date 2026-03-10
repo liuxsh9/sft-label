@@ -468,6 +468,7 @@ def cmd_recompute_stats(args):
             input_path=args.input,
             pass_num=args.pass_num,
             output_dir=args.output,
+            workers=getattr(args, "workers", 8),
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -495,6 +496,7 @@ def cmd_refresh_rarity(args):
             tag_stats_path=getattr(args, "tag_stats", None),
             output_dir=args.output,
             config=config,
+            workers=getattr(args, "workers", 8),
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -515,6 +517,7 @@ def cmd_regenerate_dashboard(args):
             input_path=args.input,
             pass_num=args.pass_num,
             open_browser=getattr(args, "open", False),
+            workers=getattr(args, "workers", 8),
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -849,6 +852,8 @@ def build_parser():
                                    help="Which pass stats to recompute (default: both)")
     recompute_parser.add_argument("--output", type=str, default=None,
                                    help="Output directory (default: same as input)")
+    recompute_parser.add_argument("--workers", type=int, default=8,
+                                   help="File-level parallel workers (default: 8)")
 
     # --- refresh-rarity ---
     refresh_parser = subparsers.add_parser(
@@ -867,6 +872,8 @@ def build_parser():
     refresh_parser.add_argument("--mode", type=str, default=None,
                                 choices=["absolute", "percentile"],
                                 help="Rarity score normalization mode override")
+    refresh_parser.add_argument("--workers", type=int, default=8,
+                                help="File-level parallel workers in directory mode (default: 8)")
 
     # --- regenerate-dashboard ---
     regen_parser = subparsers.add_parser(
@@ -883,6 +890,8 @@ def build_parser():
                                help="Which dashboards to regenerate (default: both)")
     regen_parser.add_argument("--open", action="store_true",
                                help="Open dashboards in browser after generation")
+    regen_parser.add_argument("--workers", type=int, default=8,
+                               help="Directory-level parallel workers in batch mode (default: 8)")
 
     # --- export-review ---
     review_parser = subparsers.add_parser(

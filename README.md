@@ -361,12 +361,24 @@ uv run sft-label recompute-stats --input run_dir/scored.json --pass 2
 # Entire run directory (recomputes per-file + summary stats)
 uv run sft-label recompute-stats --input run_dir/
 uv run sft-label recompute-stats --input run_dir/ --pass 1
+uv run sft-label recompute-stats --input run_dir/ --workers 8
 
 # Custom output directory
 uv run sft-label recompute-stats --input run_dir/ --output /path/to/output/
 ```
 
 Recomputed stats are marked with `"recomputed": true`. LLM token usage fields will be zero (not preserved in pipeline output).
+
+`--workers` controls directory-mode file-level parallelism (default: `8`).
+
+### Refresh Rarity (Offline)
+
+Recompute Pass 2 rarity/value fields without calling LLM:
+
+```bash
+uv run sft-label refresh-rarity --input run_dir/
+uv run sft-label refresh-rarity --input run_dir/ --tag-stats global_stats.json --workers 8
+```
 
 ### Regenerate Dashboards
 
@@ -381,6 +393,9 @@ uv run sft-label regenerate-dashboard --input run_dir/ --pass 1 --open
 
 # Pass 2 only
 uv run sft-label regenerate-dashboard --input run_dir/ --pass 2
+
+# Batch directory parallelism
+uv run sft-label regenerate-dashboard --input run_dir/ --workers 8
 ```
 
 Requires stats files to exist — run `recompute-stats` first if they are missing.

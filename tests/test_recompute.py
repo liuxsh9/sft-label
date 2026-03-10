@@ -375,6 +375,18 @@ class TestRunRecompute:
         assert "summary_stats_value" in written
         assert "conversation_scores" in written
 
+    def test_directory_scored_parallel_workers(self, tmp_path):
+        for i in range(4):
+            sub_path = tmp_path / "code" / f"part{i:02d}"
+            sub_path.mkdir(parents=True)
+            samples = [_make_scored_sample(f"s{i}-0"), _make_scored_sample(f"s{i}-1")]
+            (sub_path / "scored.json").write_text(json.dumps(samples))
+
+        written = run_recompute(str(tmp_path), pass_num="2", workers=4)
+        assert "summary_stats_value" in written
+        summary = json.loads(Path(written["summary_stats_value"]).read_text())
+        assert len(summary.get("per_file_summary", [])) == 4
+
     def test_directory_scored_compact_progress_output(self, tmp_path, capsys):
         for i in range(35):
             sub = tmp_path / "code" / f"part{i:02d}"
@@ -505,6 +517,26 @@ class TestRefreshRarity:
                 stats_ref = rarity.get("stats_ref") or {}
                 assert stats_ref.get("source") == str(stats_path)
 
+    def test_directory_refresh_parallel_workers(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        for sub in ("code/part1", "multi_turn/part1"):
+            sub_path = tmp_path / sub
+            sub_path.mkdir(parents=True)
+            samples = [
+                _make_scored_sample(f"{sub}-s1", intent="build", difficulty="beginner"),
+                _make_scored_sample(f"{sub}-s2", intent="debug", difficulty="expert"),
+            ]
+            (sub_path / "scored.json").write_text(json.dumps(samples))
+
+        written = run_refresh_rarity(
+            str(tmp_path),
+            config=PipelineConfig(rarity_score_mode="absolute"),
+            workers=4,
+        )
+        assert "summary_stats_value" in written
+        assert int(written.get("files_refreshed", "0")) == 2
+
     def test_external_stats_without_combo_disables_combo_rarity(self, tmp_path):
         from sft_label.config import PipelineConfig
 
@@ -593,6 +625,18 @@ class TestRegenerateDashboard:
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
         assert len(generated) >= 1
+
+    def test_batch_mode_parallel_workers(self, tmp_path):
+        for sub in ("code/file1", "code/file2"):
+            sub_path = tmp_path / sub
+            sub_path.mkdir(parents=True)
+            samples = [_make_labeled_sample(f"{sub}-s{i}") for i in range(3)]
+            stats = recompute_stats_from_labeled(samples)
+            (sub_path / PASS1_STATS_FILE).write_text(json.dumps(stats))
+            (sub_path / "labeled.json").write_text(json.dumps(samples))
+
+        generated = run_regenerate_dashboard(str(tmp_path), pass_num="1", workers=4)
+        assert len(generated) >= 2
 
     def test_regenerate_for_dir_logs_failure_context(self, tmp_path, capsys):
         self._setup_stats_dir(tmp_path)

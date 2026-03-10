@@ -31,6 +31,8 @@ SUPPORTED_LANGUAGES = {"zh", "en"}
 _LANG = DEFAULT_LANGUAGE
 SECTION_DIVIDER = "-" * 56
 INTERACTIVE_DEFAULT_PROMPT_MODE = "compact"
+DEFAULT_MAINTENANCE_WORKERS = 8
+MAINTENANCE_WORKER_CHOICES = (1, 4, 8, 16, 32)
 BACK_TOKENS = {
     "b", "back", "/b", ":b",
     "返回", "上一步", "上一级",
@@ -1346,6 +1348,11 @@ def _build_recompute_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     if output_dir:
         argv.extend(["--output", output_dir])
 
+    _section(output_fn, "并发配置 / Parallelism")
+    workers = _ask_maintenance_workers(input_fn, output_fn)
+    if workers != DEFAULT_MAINTENANCE_WORKERS:
+        argv.extend(["--workers", str(workers)])
+
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)
 
@@ -1372,6 +1379,11 @@ def _build_regenerate_dashboard_plan(input_fn: InputFn, output_fn: OutputFn) -> 
 
     if _ask_yes_no(input_fn, "生成后自动打开浏览器 / Open dashboards in browser", default=False):
         argv.append("--open")
+
+    _section(output_fn, "并发配置 / Parallelism")
+    workers = _ask_maintenance_workers(input_fn, output_fn)
+    if workers != DEFAULT_MAINTENANCE_WORKERS:
+        argv.extend(["--workers", str(workers)])
 
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)
@@ -1405,8 +1417,32 @@ def _build_refresh_rarity_plan(input_fn: InputFn, output_fn: OutputFn) -> Launch
     if output_dir:
         argv.extend(["--output", output_dir])
 
+    _section(output_fn, "并发配置 / Parallelism")
+    workers = _ask_maintenance_workers(input_fn, output_fn)
+    if workers != DEFAULT_MAINTENANCE_WORKERS:
+        argv.extend(["--workers", str(workers)])
+
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)
+
+
+def _ask_maintenance_workers(input_fn: InputFn, output_fn: OutputFn) -> int:
+    options = [
+        (
+            str(v),
+            f"{v}" + ("（默认） / 8 (default)" if v == DEFAULT_MAINTENANCE_WORKERS else ""),
+            f"最多并发 {v} 个文件/目录 / Up to {v} files/dirs in parallel",
+        )
+        for v in MAINTENANCE_WORKER_CHOICES
+    ]
+    picked = _ask_choice(
+        input_fn,
+        output_fn,
+        "并发 worker 数 / Parallel workers",
+        options,
+        default_index=3,
+    )
+    return int(picked)
 
 
 def _build_optimize_layout_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:

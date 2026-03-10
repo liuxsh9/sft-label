@@ -144,3 +144,22 @@ def test_parser_keeps_scoring_concurrency_legacy_alias():
         ]
     )
     assert score_args.scoring_concurrency == 620
+
+
+def test_parser_accepts_maintenance_workers():
+    parser = build_parser()
+
+    recompute_args = parser.parse_args(
+        ["recompute-stats", "--input", "run_dir", "--workers", "16"]
+    )
+    assert recompute_args.workers == 16
+
+    refresh_args = parser.parse_args(
+        ["refresh-rarity", "--input", "run_dir", "--workers", "32"]
+    )
+    assert refresh_args.workers == 32
+
+    regen_args = parser.parse_args(
+        ["regenerate-dashboard", "--input", "run_dir", "--workers", "4"]
+    )
+    assert regen_args.workers == 4

@@ -239,11 +239,11 @@ def test_all_workflows_generate_parseable_argv():
         # 6. filter
         6: ["scored.json", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
         # 7. recompute-stats
-        7: ["run_dir/", "", "", ""],
+        7: ["run_dir/", "", "", "", ""],
         # 8. refresh-rarity
-        8: ["run_dir/", "", "", "", ""],
+        8: ["run_dir/", "", "", "", "", ""],
         # 9. regenerate-dashboard
-        9: ["run_dir/", "", "", ""],
+        9: ["run_dir/", "", "", "", ""],
         # 10. validate
         10: [],
         # 11. optimize-layout
@@ -400,4 +400,26 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
         "labeled.json",
         "--rarity-mode",
         "percentile",
+    ]
+
+
+def test_build_recompute_plan_can_set_workers():
+    io = StubIO(
+        [
+            "7",        # workflow: recompute-stats
+            "run_dir",  # --input
+            "",         # pass selection -> both
+            "",         # --output
+            "2",        # workers -> 4
+            "",         # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "recompute-stats",
+        "--input",
+        "run_dir",
+        "--workers",
+        "4",
     ]
