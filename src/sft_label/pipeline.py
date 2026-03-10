@@ -64,6 +64,7 @@ from sft_label.artifacts import (
     find_first_existing,
     sync_legacy_aliases,
 )
+from sft_label.labels import is_partial_labels, is_usable_labels
 
 
 # ─────────────────────────────────────────────────────────
@@ -660,6 +661,44 @@ def _resolve_aliases(dim, values):
     return resolved
 
 
+def _sanitize_confidence(confidence, dims, issues):
+    """Keep only numeric per-dimension confidence scores in [0, 1]."""
+    if confidence is None:
+        return {}
+    if not isinstance(confidence, dict):
+        issues.append("confidence: expected object")
+        return {}
+
+    cleaned = {}
+    for dim in dims:
+        score = confidence.get(dim)
+        if score is None:
+            continue
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            issues.append(f"confidence.{dim}: invalid type")
+            continue
+        score = float(score)
+        if 0.0 <= score <= 1.0:
+            cleaned[dim] = round(score, 4)
+        else:
+            issues.append(f"confidence.{dim}: out of range")
+    return cleaned
+
+
+def _build_partial_labels(call1_cleaned, reason):
+    """Wrap Call 1 output so downstream stages can block partial labels."""
+    labels = {
+        d: call1_cleaned.get(d, [] if d in MULTI_SELECT else "")
+        for d in ["intent", "language", "domain", "task", "difficulty"]
+    }
+    labels["confidence"] = dict(call1_cleaned.get("confidence", {}))
+    labels["unmapped"] = list(call1_cleaned.get("unmapped", []))
+    labels["partial"] = True
+    labels["partial_stage"] = "call1"
+    labels["partial_reason"] = reason
+    return labels
+
+
 def validate_tags(result, call_name="call1"):
     issues = []
     unmapped = result.get("unmapped", [])
@@ -679,6 +718,14 @@ def validate_tags(result, call_name="call1"):
         pool = TAG_POOLS.get(dim, set())
         if dim in SINGLE_SELECT:
             raw_val = result[dim]
+            if raw_val is None:
+                raw_val = ""
+            elif isinstance(raw_val, (list, dict, set, tuple)):
+                issues.append(f"{dim}: invalid type {type(raw_val).__name__}")
+                raw_val = ""
+            elif not isinstance(raw_val, str):
+                issues.append(f"{dim}: invalid type {type(raw_val).__name__}")
+                raw_val = str(raw_val)
             val = raw_val if (not raw_val or raw_val in pool) else TAG_ALIASES.get(raw_val, raw_val)
             if val and val not in pool:
                 issues.append(f"{dim}: '{val}' not in pool")
@@ -709,6 +756,7 @@ def validate_tags(result, call_name="call1"):
         if len(item.get("value", "")) <= 60 and item.get("value", "").count(" ") <= 3
     ]
 
+    cleaned["confidence"] = _sanitize_confidence(result.get("confidence"), dims, issues)
     cleaned["unmapped"] = unmapped
     return cleaned, issues
 
@@ -738,7 +786,10 @@ def check_consistency(labels):
 
 def find_low_confidence_dims(labels, threshold=CONFIDENCE_THRESHOLD):
     low = []
-    for dim, score in labels.get("confidence", {}).items():
+    confidence = labels.get("confidence", {})
+    if not isinstance(confidence, dict):
+        return low
+    for dim, score in confidence.items():
         if isinstance(score, (int, float)) and score < threshold:
             low.append((dim, score))
     return low
@@ -848,18 +899,10 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     monitor["error"] = usage2.get("error", "unknown")
                     monitor["error_response"] = usage2.get("error_response") or (call2_raw[:500] if call2_raw else "")
                     if usage2.get("non_retryable"):
-                        # Return partial results from Call 1
-                        labels = {d: call1_cleaned.get(d) for d in ["intent", "language", "domain", "task", "difficulty"]}
-                        labels["confidence"] = call1_cleaned.get("confidence", {})
-                        labels["unmapped"] = call1_cleaned.get("unmapped", [])
-                        return sample_idx, labels, monitor
+                        return sample_idx, _build_partial_labels(call1_cleaned, "call2_non_retryable_failure"), monitor
                     if sample_attempt < _max_retries_sample:
                         continue
-                    # Final attempt: return partial results from Call 1
-                    labels = {d: call1_cleaned.get(d) for d in ["intent", "language", "domain", "task", "difficulty"]}
-                    labels["confidence"] = call1_cleaned.get("confidence", {})
-                    labels["unmapped"] = call1_cleaned.get("unmapped", [])
-                    return sample_idx, labels, monitor
+                    return sample_idx, _build_partial_labels(call1_cleaned, "call2_retry_exhausted"), monitor
 
                 call2_cleaned, call2_issues = validate_tags(call2_result, "call2")
                 monitor["validation_issues"].extend(call2_issues)
@@ -870,7 +913,10 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     labels[d] = call1_cleaned.get(d, [] if d in MULTI_SELECT else "")
                 for d in ["concept", "agentic", "constraint", "context"]:
                     labels[d] = call2_cleaned.get(d, [] if d in MULTI_SELECT else "")
-                labels["confidence"] = {**call1_cleaned.get("confidence", {}), **call2_cleaned.get("confidence", {})}
+                labels["confidence"] = {
+                    **(call1_cleaned.get("confidence", {}) if isinstance(call1_cleaned.get("confidence"), dict) else {}),
+                    **(call2_cleaned.get("confidence", {}) if isinstance(call2_cleaned.get("confidence"), dict) else {}),
+                }
                 labels["unmapped"] = call1_cleaned.get("unmapped", []) + call2_cleaned.get("unmapped", [])
 
                 # Consistency
@@ -951,7 +997,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
     for dim in ["intent", "language", "domain", "concept", "task", "agentic", "constraint", "context", "difficulty"]:
         dist = {}
         for idx, labels in enumerate(all_labels):
-            if labels is None or idx in inherited_indices:
+            if not is_usable_labels(labels) or idx in inherited_indices:
                 continue
             val = labels.get(dim, [])
             if isinstance(val, list):
@@ -963,7 +1009,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
 
     all_unmapped = {}
     for idx, labels in enumerate(all_labels):
-        if labels is None or idx in inherited_indices:
+        if not is_usable_labels(labels) or idx in inherited_indices:
             continue
         for item in labels.get("unmapped", []):
             key = f"{item.get('dimension', '?')}:{item.get('value', '?')}" if isinstance(item, dict) else str(item)
@@ -972,7 +1018,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
     conf_stats = {}
     for dim in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
         scores = [l["confidence"][dim] for idx, l in enumerate(all_labels)
-                  if l and idx not in inherited_indices
+                  if is_usable_labels(l) and idx not in inherited_indices
                   and "confidence" in l and isinstance(l["confidence"].get(dim), (int, float))]
         if scores:
             conf_stats[dim] = {
@@ -986,7 +1032,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
     # Intent × Difficulty cross matrix
     cross = {}
     for idx, labels in enumerate(all_labels):
-        if labels is None or idx in inherited_indices:
+        if not is_usable_labels(labels) or idx in inherited_indices:
             continue
         intent = labels.get("intent", "?")
         diff = labels.get("difficulty", "?")
@@ -1297,7 +1343,10 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     # Write failed samples (original, without labels) for easy retry
     # Inherited samples have no monitor — they are not failures
     inherited_indices = set(collector.inherit_map.keys())
-    failed_indices = [i for i, l in enumerate(all_labels) if l is None and i not in inherited_indices]
+    failed_indices = [
+        i for i, l in enumerate(all_labels)
+        if (l is None or is_partial_labels(l)) and i not in inherited_indices
+    ]
     if failed_indices:
         with open(output_dir / failed_samples_file, "w", encoding="utf-8") as f:
             for i in failed_indices:
@@ -1334,7 +1383,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
         stats["sparse_inherited"] = sparse_inherited
         # Adjust totals: inherited samples count as success
         stats["total_samples"] = total
-        inherited_ok = sum(1 for i in inherited_indices if all_labels[i] is not None)
+        inherited_ok = sum(1 for i in inherited_indices if is_usable_labels(all_labels[i]))
         stats["success"] += inherited_ok
         stats["failed"] = stats["total_samples"] - stats["success"]
         stats["success_rate"] = round(stats["success"] / max(total, 1), 4)
@@ -1477,7 +1526,7 @@ class StatsAccumulator:
                 self.low_conf_freq[d] = self.low_conf_freq.get(d, 0) + 1
 
         for idx, labels in enumerate(all_labels):
-            if labels is None or idx in inherited_indices:
+            if not is_usable_labels(labels) or idx in inherited_indices:
                 continue
             for dim in self.DIMS:
                 val = labels.get(dim, [])
@@ -1514,7 +1563,10 @@ class StatsAccumulator:
         # Count inherited samples toward total (they have labels but no monitor)
         if inherit_map:
             inherited_indices = set(inherit_map.keys())
-            inherited_ok = sum(1 for i in inherited_indices if i < len(all_labels) and all_labels[i] is not None)
+            inherited_ok = sum(
+                1 for i in inherited_indices
+                if i < len(all_labels) and is_usable_labels(all_labels[i])
+            )
             self.sparse_inherited += len(inherit_map)
             self.total += len(inherit_map)
             self.success += inherited_ok
@@ -1631,7 +1683,7 @@ def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
     # Write failed samples
     inherited_indices = set(chunk.inherit_map.keys())
     for i, l in enumerate(all_labels):
-        if l is None and i not in inherited_indices:
+        if (l is None or is_partial_labels(l)) and i not in inherited_indices:
             s = dict(samples[i])
             s.pop("labels", None)
             s.pop("labeling_monitor", None)
@@ -2026,7 +2078,10 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     # Write failed samples (original, without labels) for easy retry
     # Inherited samples have no monitor — they are not failures
     inherited_indices = set(inherit_map.keys())
-    failed_indices = [i for i, l in enumerate(all_labels) if l is None and i not in inherited_indices]
+    failed_indices = [
+        i for i, l in enumerate(all_labels)
+        if (l is None or is_partial_labels(l)) and i not in inherited_indices
+    ]
     if failed_indices:
         with open(output_dir / failed_samples_file, "w", encoding="utf-8") as f:
             for i in failed_indices:
@@ -2060,7 +2115,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         stats["sparse_inherited"] = sparse_inherited
         # Adjust totals: inherited samples count as success
         stats["total_samples"] = total
-        inherited_ok = sum(1 for i in inherited_indices if all_labels[i] is not None)
+        inherited_ok = sum(1 for i in inherited_indices if is_usable_labels(all_labels[i]))
         stats["success"] += inherited_ok
         stats["failed"] = stats["total_samples"] - stats["success"]
         stats["success_rate"] = round(stats["success"] / max(total, 1), 4)

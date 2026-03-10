@@ -139,6 +139,41 @@ class TestAliasResolution:
         assert cleaned["concept"].count("algorithms") == 1
         assert len(issues) == 0
 
+    def test_single_select_invalid_container_type(self):
+        result = {
+            "intent": ["build"],
+            "language": ["python"],
+            "domain": [],
+            "task": ["feature-implementation"],
+            "difficulty": {"level": "intermediate"},
+            "confidence": {},
+            "unmapped": [],
+        }
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["intent"] == ""
+        assert cleaned["difficulty"] == ""
+        assert any("intent: invalid type" in issue for issue in issues)
+        assert any("difficulty: invalid type" in issue for issue in issues)
+
+    def test_confidence_invalid_shape_and_values(self):
+        result = {
+            "concept": ["algorithms"],
+            "agentic": [],
+            "constraint": [],
+            "context": "snippet",
+            "confidence": {
+                "concept": "0.9",
+                "agentic": 1.2,
+                "context": 0.8,
+                "extra": 0.5,
+            },
+            "unmapped": [],
+        }
+        cleaned, issues = validate_tags(result, "call2")
+        assert cleaned["confidence"] == {"context": 0.8}
+        assert any("confidence.concept: invalid type" in issue for issue in issues)
+        assert any("confidence.agentic: out of range" in issue for issue in issues)
+
 
 class TestCrossCategoryCorrection:
     """Verify misplaced tags are silently dropped from wrong dimensions."""

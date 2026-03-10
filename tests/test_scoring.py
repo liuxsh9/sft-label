@@ -955,6 +955,71 @@ import pytest
 class TestResumeScoringFile:
     """Test resume support for _run_scoring_file."""
 
+    def test_partial_labels_are_skipped_from_scoring(self):
+        from sft_label.scoring import score_one
+
+        sample = {
+            "id": "partial-1",
+            "conversations": [
+                {"from": "human", "value": "Question"},
+                {"from": "gpt", "value": "Answer"},
+            ],
+            "labels": {
+                "intent": "build",
+                "difficulty": "intermediate",
+                "partial": True,
+                "partial_stage": "call1",
+                "partial_reason": "call2_retry_exhausted",
+            },
+        }
+
+        value, monitor = asyncio.run(
+            score_one(
+                None,
+                sample,
+                "mock-model",
+                {"score": 0.0},
+                0,
+                1,
+                asyncio.Semaphore(1),
+            )
+        )
+
+        assert value is None
+        assert monitor["status"] == "skipped_partial_labels"
+        assert monitor["llm_calls"] == 0
+
+    def test_directory_jsonl_uses_chunked_pipeline(self, tmp_path):
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        labeled_path = tmp_path / "batch" / "labeled.jsonl"
+        labeled_path.parent.mkdir()
+        labeled_path.write_text(json.dumps({
+            "id": "sample-1",
+            "conversations": [
+                {"from": "human", "value": "Q"},
+                {"from": "gpt", "value": "A"},
+            ],
+            "labels": {"intent": "build", "difficulty": "intermediate"},
+        }) + "\n")
+
+        with patch("sft_label.scoring._run_scoring_file_chunked", return_value={
+            "total_scored": 1,
+            "total_failed": 0,
+            "total_llm_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "score_distributions": {},
+            "thinking_mode_breakdown": {},
+            "tag_insights": {},
+            "selection_thresholds": {},
+        }) as mock_chunked:
+            result = asyncio.run(run_scoring(str(tmp_path), config=PipelineConfig()))
+
+        assert mock_chunked.call_count == 1
+        assert result["files_processed"] == 1
+
     def test_resume_skips_prescored(self, tmp_path):
         """Partially scored.jsonl should let resume skip those samples."""
         from sft_label.scoring import _run_scoring_file
@@ -1133,6 +1198,8 @@ class TestResumeScoringFile:
 # ─────────────────────────────────────────────────────────
 
 from sft_label.scoring import compute_selection_scores
+from sft_label.scoring import compute_selection_scores_from_summaries
+from sft_label.config import PipelineConfig
 
 
 class TestComputeSelectionScores:
@@ -1246,6 +1313,122 @@ class TestComputeSelectionScores:
                                       value_score=6.0)]
         compute_selection_scores(samples, min_group_size=1)
         assert samples[0]["value"].get("selection_score") is not None
+
+    def test_tied_samples_get_same_intra_class_rank(self):
+        samples = [
+            self._make_sample(0, {"intent": "build", "language": ["python"]},
+                              complexity=5, quality=7, reasoning=6, value_score=6.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"]},
+                              complexity=5, quality=7, reasoning=6, value_score=6.1),
+            self._make_sample(2, {"intent": "build", "language": ["python"]},
+                              complexity=8, quality=9, reasoning=8, value_score=8.0),
+        ]
+
+        compute_selection_scores(samples, min_group_size=1)
+
+        assert samples[0]["value"]["intra_class_rank"] == samples[1]["value"]["intra_class_rank"]
+
+    def test_selection_uses_configured_value_weights(self):
+        samples = [
+            self._make_sample(0, {"intent": "build", "language": ["python"]},
+                              complexity=9, quality=5, reasoning=1, value_score=6.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"]},
+                              complexity=1, quality=5, reasoning=9, value_score=6.0),
+        ]
+
+        complexity_heavy = PipelineConfig(
+            value_weights={"complexity": 0.8, "quality": 0.1, "reasoning": 0.1, "rarity": 0.0},
+            selection_min_group_size=1,
+        )
+        reasoning_heavy = PipelineConfig(
+            value_weights={"complexity": 0.1, "quality": 0.1, "reasoning": 0.8, "rarity": 0.0},
+            selection_min_group_size=1,
+        )
+
+        compute_selection_scores(samples, config=complexity_heavy)
+        complexity_scores = {s["id"]: s["value"]["selection_score"] for s in samples}
+
+        samples = [
+            self._make_sample(0, {"intent": "build", "language": ["python"]},
+                              complexity=9, quality=5, reasoning=1, value_score=6.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"]},
+                              complexity=1, quality=5, reasoning=9, value_score=6.0),
+        ]
+        compute_selection_scores(samples, config=reasoning_heavy)
+        reasoning_scores = {s["id"]: s["value"]["selection_score"] for s in samples}
+
+        assert complexity_scores["sample-0"] > complexity_scores["sample-1"]
+        assert reasoning_scores["sample-1"] > reasoning_scores["sample-0"]
+
+    def test_selection_respects_configured_smoothing_prior(self):
+        samples = [
+            self._make_sample(0, {"intent": "build", "language": ["python"]},
+                              quality=2, value_score=4.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"]},
+                              quality=3, value_score=5.0),
+            self._make_sample(2, {"intent": "learn", "language": ["go"]},
+                              quality=10, value_score=9.0),
+        ]
+
+        low_prior = PipelineConfig(selection_min_group_size=2, selection_smoothing_prior=1)
+        high_prior = PipelineConfig(selection_min_group_size=2, selection_smoothing_prior=1000)
+
+        compute_selection_scores(samples, config=low_prior)
+        low_rank = samples[1]["value"]["intra_class_rank"]
+
+        samples = [
+            self._make_sample(0, {"intent": "build", "language": ["python"]},
+                              quality=2, value_score=4.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"]},
+                              quality=3, value_score=5.0),
+            self._make_sample(2, {"intent": "learn", "language": ["go"]},
+                              quality=10, value_score=9.0),
+        ]
+        compute_selection_scores(samples, config=high_prior)
+        high_rank = samples[1]["value"]["intra_class_rank"]
+
+        assert low_rank > high_rank
+
+
+class TestComputeSelectionScoresFromSummaries:
+    def test_summary_path_respects_smoothing_prior(self):
+        summaries = [
+            {
+                "labels": {"intent": "build", "language": ["python"]},
+                "complexity_overall": 5,
+                "quality_overall": 2,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 4.0,
+            },
+            {
+                "labels": {"intent": "build", "language": ["python"]},
+                "complexity_overall": 5,
+                "quality_overall": 3,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 5.0,
+            },
+            {
+                "labels": {"intent": "learn", "language": ["go"]},
+                "complexity_overall": 5,
+                "quality_overall": 10,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 9.0,
+            },
+        ]
+
+        low_prior = compute_selection_scores_from_summaries(
+            summaries,
+            config=PipelineConfig(selection_min_group_size=2, selection_smoothing_prior=1),
+        )
+        high_prior = compute_selection_scores_from_summaries(
+            summaries,
+            config=PipelineConfig(selection_min_group_size=2, selection_smoothing_prior=1000),
+        )
+
+        assert low_prior[1]["intra_class_rank"] > high_prior[1]["intra_class_rank"]
 
 
 # ─────────────────────────────────────────────────────────

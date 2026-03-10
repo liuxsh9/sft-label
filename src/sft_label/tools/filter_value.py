@@ -16,6 +16,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sft_label.labels import LABEL_META_KEYS, is_partial_labels
+from sft_label.conversation import sample_conversation_key
+
 
 @dataclass
 class FilterConfig:
@@ -66,7 +69,7 @@ def _sample_has_tag(labels, dim, tag):
         return val == tag
     # No dimension specified — search all dimensions
     for key, val in labels.items():
-        if key in ("confidence", "inherited", "inherited_from"):
+        if key in LABEL_META_KEYS:
             continue
         if isinstance(val, list) and tag in val:
             return True
@@ -88,6 +91,9 @@ def matches_filter(sample, config):
 
     # Check inherited
     if config.exclude_inherited and labels.get("inherited"):
+        return False
+
+    if is_partial_labels(labels):
         return False
 
     # Check source verification
@@ -170,10 +176,18 @@ def matches_filter(sample, config):
 def _load_conversation_scores(input_path):
     """Load conversation_scores.json from input path or its subdirectories.
 
-    Returns dict {conversation_id: record}.
+    Returns lookup dict keyed by conversation_key and unique legacy conversation_id.
+    Metadata is stored under "__meta__".
     """
     input_path = Path(input_path)
     lookup = {}
+    meta = {
+        "files_loaded": 0,
+        "files_failed": 0,
+        "records_loaded": 0,
+        "ambiguous_legacy_ids": [],
+    }
+    legacy_records = {}
 
     paths_to_try = []
     if input_path.is_file():
@@ -187,14 +201,47 @@ def _load_conversation_scores(input_path):
         try:
             with open(p, encoding="utf-8") as f:
                 records = json.load(f)
+            meta["files_loaded"] += 1
             for rec in records:
+                meta["records_loaded"] += 1
+                conv_key = rec.get("conversation_key")
+                if conv_key:
+                    lookup[conv_key] = rec
                 cid = rec.get("conversation_id")
                 if cid:
-                    lookup[cid] = rec
+                    legacy_records.setdefault(cid, []).append(rec)
         except (json.JSONDecodeError, OSError):
+            meta["files_failed"] += 1
             continue
 
+    for cid, records in legacy_records.items():
+        if len(records) == 1:
+            lookup[cid] = records[0]
+        else:
+            meta["ambiguous_legacy_ids"].append(cid)
+
+    lookup["__meta__"] = meta
     return lookup
+
+
+def _conversation_lookup_meta(conv_lookup):
+    """Return metadata stored on the conversation lookup."""
+    if isinstance(conv_lookup, dict):
+        return conv_lookup.get("__meta__", {})
+    return {}
+
+
+def _lookup_conversation_record(sample, conv_lookup):
+    """Find the matching conversation record for a sample."""
+    if not conv_lookup:
+        return None
+    conv_key = sample_conversation_key(sample)
+    if conv_key and conv_key in conv_lookup:
+        return conv_lookup[conv_key]
+    source_id = (sample.get("metadata") or {}).get("source_id")
+    if source_id:
+        return conv_lookup.get(source_id)
+    return None
 
 
 def _matches_conv_criteria(conv_record, config):
@@ -249,12 +296,12 @@ def _passes_turn_criteria(sample, config):
     value = sample.get("value") or {}
     if config.turn_value_min is not None:
         vs = value.get("value_score")
-        if vs is not None and vs < config.turn_value_min:
+        if vs is None or vs < config.turn_value_min:
             return False
     if config.turn_quality_min is not None:
         quality = value.get("quality") or value.get("scores", {}).get("quality") or {}
         qo = quality.get("overall") if isinstance(quality, dict) else None
-        if qo is not None and qo < config.turn_quality_min:
+        if qo is None or qo < config.turn_quality_min:
             return False
     return True
 
@@ -304,7 +351,7 @@ def _find_scored_files(input_path: Path):
     raise FileNotFoundError(f"Input path not found: {input_path}")
 
 
-def _iter_samples_streaming(path: Path):
+def _iter_samples_streaming(path: Path, stats=None):
     """Yield samples line-by-line from a JSONL file (memory-efficient)."""
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -313,6 +360,8 @@ def _iter_samples_streaming(path: Path):
                 try:
                     yield json.loads(line)
                 except json.JSONDecodeError:
+                    if stats is not None:
+                        stats["parse_errors"] += 1
                     continue
 
 
@@ -450,15 +499,17 @@ def _load_samples(path: Path):
     return list(_iter_json_array_streaming(path))
 
 
-def _iter_samples_from_files(paths):
+def _iter_samples_from_files(paths, stats=None):
     """Iterate samples from multiple files, auto-detecting format."""
     for path in paths:
         if path.suffix == ".jsonl":
-            yield from _iter_samples_streaming(path)
+            yield from _iter_samples_streaming(path, stats=stats)
         else:
             try:
                 yield from _iter_json_array_streaming(path)
             except (ValueError, OSError):
+                if stats is not None:
+                    stats["parse_errors"] += 1
                 continue
 
 
@@ -570,12 +621,13 @@ def _build_filter_desc(config):
     return " AND ".join(criteria) if criteria else "none"
 
 
-def _passes_with_conv(sample, config, use_conv, conv_lookup):
+def _passes_with_conv(sample, config, use_conv, conv_lookup, stats=None):
     """Apply conversation-level gate (if enabled) + full sample-level filter."""
     if use_conv and _is_multi_turn(sample):
-        source_id = (sample.get("metadata") or {}).get("source_id")
-        conv_rec = conv_lookup.get(source_id) if source_id else None
+        conv_rec = _lookup_conversation_record(sample, conv_lookup)
         if conv_rec is None or not _matches_conv_criteria(conv_rec, config):
+            if conv_rec is None and stats is not None:
+                stats["conversation_records_missing"] += 1
             return False
     return matches_filter(sample, config)
 
@@ -643,6 +695,8 @@ def _init_stream_stats():
         "inherited_retained": 0,
         "verify_matched": 0,
         "verify_no_meta": 0,
+        "parse_errors": 0,
+        "conversation_records_missing": 0,
     }
 
 
@@ -666,22 +720,22 @@ def _accumulate_retained_stats(sample, config, stats):
 
 def _iter_filtered_samples(scored_files, config, use_conv, conv_lookup, stats):
     """Stream filtered samples and update stats in-place."""
-    for sample in _iter_samples_from_files(scored_files):
+    for sample in _iter_samples_from_files(scored_files, stats=stats):
         stats["total"] += 1
-        if not _passes_with_conv(sample, config, use_conv, conv_lookup):
+        if not _passes_with_conv(sample, config, use_conv, conv_lookup, stats=stats):
             continue
         stats["retained"] += 1
         _accumulate_retained_stats(sample, config, stats)
         yield sample
 
 
-def _collect_filtered_samples(scored_files, config, use_conv, conv_lookup):
+def _collect_filtered_samples(scored_files, config, use_conv, conv_lookup, stats=None):
     """Collect filtered samples (needed for turn-level pruning path)."""
     retained = []
     total = 0
-    for sample in _iter_samples_from_files(scored_files):
+    for sample in _iter_samples_from_files(scored_files, stats=stats):
         total += 1
-        if _passes_with_conv(sample, config, use_conv, conv_lookup):
+        if _passes_with_conv(sample, config, use_conv, conv_lookup, stats=stats):
             retained.append(sample)
     retained, n_turn_pruned = _prune_turns(retained, config)
     return total, retained, n_turn_pruned
@@ -777,6 +831,8 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
     files_written = 0
     verify_matched = 0
     verify_no_meta = 0
+    parse_errors = 0
+    conversation_records_missing = 0
     output_files = []
 
     for scored_file in scored_files:
@@ -784,8 +840,9 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
         out_file.parent.mkdir(parents=True, exist_ok=True)
 
         if _has_turn_criteria(config):
+            file_scan_stats = _init_stream_stats()
             file_total, file_retained, file_turn_pruned = _collect_filtered_samples(
-                [scored_file], config, use_conv, conv_lookup
+                [scored_file], config, use_conv, conv_lookup, stats=file_scan_stats
             )
             turn_pruned += file_turn_pruned
             total += file_total
@@ -799,6 +856,8 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
             inherited_retained += file_stats["inherited_retained"]
             verify_matched += file_stats["verify_matched"]
             verify_no_meta += file_stats["verify_no_meta"]
+            parse_errors += file_scan_stats["parse_errors"]
+            conversation_records_missing += file_scan_stats["conversation_records_missing"]
 
             if config.output_format == "training" or out_file.suffix == ".jsonl":
                 _write_jsonl(file_retained, out_file, convert_training=(config.output_format == "training"))
@@ -818,6 +877,8 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
             inherited_retained += file_stats["inherited_retained"]
             verify_matched += file_stats["verify_matched"]
             verify_no_meta += file_stats["verify_no_meta"]
+            parse_errors += file_stats["parse_errors"]
+            conversation_records_missing += file_stats["conversation_records_missing"]
 
         files_written += 1
         output_files.append(str(out_file))
@@ -838,6 +899,9 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
         "output_root": str(output_root),
         "output_files": output_files,
         "files_written": files_written,
+        "parse_errors": parse_errors,
+        "conversation_records_missing": conversation_records_missing,
+        "conversation_scores": _conversation_lookup_meta(conv_lookup) if use_conv else None,
     }
     if config.verify_source:
         summary["verify_source"] = {"matched": verify_matched, "no_metadata": verify_no_meta}
@@ -898,8 +962,9 @@ def run_filter(input_path, threshold=None, output_path=None,
     output_path = Path(output_path)
 
     if _has_turn_criteria(config):
+        stream_stats = _init_stream_stats()
         total, retained, n_turn_pruned = _collect_filtered_samples(
-            scored_files, config, use_conv, conv_lookup
+            scored_files, config, use_conv, conv_lookup, stats=stream_stats
         )
         n_retained = len(retained)
         retained_stats = _init_stream_stats()
@@ -913,6 +978,8 @@ def run_filter(input_path, threshold=None, output_path=None,
         inherited_count = retained_stats["inherited_retained"]
         verify_matched = retained_stats["verify_matched"]
         verify_no_meta = retained_stats["verify_no_meta"]
+        parse_errors = stream_stats["parse_errors"]
+        conversation_records_missing = stream_stats["conversation_records_missing"]
         json_path, jsonl_path = _write_outputs(retained, output_path, config)
     else:
         stream_stats = _init_stream_stats()
@@ -928,6 +995,8 @@ def run_filter(input_path, threshold=None, output_path=None,
         inherited_count = stream_stats["inherited_retained"]
         verify_matched = stream_stats["verify_matched"]
         verify_no_meta = stream_stats["verify_no_meta"]
+        parse_errors = stream_stats["parse_errors"]
+        conversation_records_missing = stream_stats["conversation_records_missing"]
 
     summary = {
         "total": total,
@@ -942,6 +1011,9 @@ def run_filter(input_path, threshold=None, output_path=None,
         "output_format": config.output_format,
         "output_json": str(json_path) if json_path else None,
         "output_jsonl": str(jsonl_path) if jsonl_path else None,
+        "parse_errors": parse_errors,
+        "conversation_records_missing": conversation_records_missing,
+        "conversation_scores": _conversation_lookup_meta(conv_lookup) if use_conv else None,
     }
     if config.verify_source:
         summary["verify_source"] = {"matched": verify_matched, "no_metadata": verify_no_meta}
@@ -964,6 +1036,21 @@ def _print_summary(summary):
         print(f"  {'Inherited (retained):':<24} {summary['inherited_retained']}")
     if summary.get("turn_pruned"):
         print(f"  {'Turn-pruned:':<24} {summary['turn_pruned']}")
+    if summary.get("parse_errors"):
+        print(f"  {'Parse errors:':<24} {summary['parse_errors']}")
+    if summary.get("conversation_records_missing"):
+        print(f"  {'Conv scores missing:':<24} {summary['conversation_records_missing']}")
+    conv_meta = summary.get("conversation_scores") or {}
+    if conv_meta:
+        print(
+            f"  {'Conv score files:':<24} "
+            f"{conv_meta.get('files_loaded', 0)} loaded, {conv_meta.get('files_failed', 0)} failed"
+        )
+        if conv_meta.get("ambiguous_legacy_ids"):
+            print(
+                f"  {'Ambiguous conv ids:':<24} "
+                f"{len(conv_meta['ambiguous_legacy_ids'])}"
+            )
     if summary.get("verify_source"):
         verify = summary["verify_source"]
         print(f"  {'Source verified:':<24} {verify['matched']} matched, {verify['no_metadata']} no metadata")

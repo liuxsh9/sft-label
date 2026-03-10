@@ -27,6 +27,46 @@ from sft_label.config import (
     SELECTION_SMOOTHING_PRIOR,
     KNOWN_FLAGS_NEGATIVE,
 )
+from sft_label.labels import LABEL_META_KEYS
+
+
+def build_conversation_key(source_id, source_file=None):
+    """Build a stable conversation key across files."""
+    if not source_id:
+        return None
+    if source_file:
+        return f"{source_file}::{source_id}"
+    return source_id
+
+
+def sample_conversation_key(sample):
+    """Build the conversation key for a scored sample."""
+    meta = sample.get("metadata") or {}
+    return build_conversation_key(meta.get("source_id"), meta.get("source_file"))
+
+
+def _compute_percentiles(indexed_values):
+    """Assign tie-aware percentiles to (idx, value) pairs."""
+    if not indexed_values:
+        return {}
+
+    ordered = sorted(indexed_values, key=lambda item: (item[1], item[0]))
+    n = len(ordered)
+    scale = max(n - 1, 1)
+    percentiles = {}
+
+    pos = 0
+    while pos < n:
+        end = pos
+        value = ordered[pos][1]
+        while end + 1 < n and ordered[end + 1][1] == value:
+            end += 1
+        percentile = ((pos + end) / 2) / scale
+        for member_pos in range(pos, end + 1):
+            percentiles[ordered[member_pos][0]] = percentile
+        pos = end + 1
+
+    return percentiles
 
 
 # ─── Grouping ────────────────────────────────────────────
@@ -34,7 +74,7 @@ from sft_label.config import (
 def group_by_conversation(samples):
     """Group samples by conversation, filter to multi-turn only.
 
-    Returns dict {source_id: [slices sorted by turn_index]}.
+    Returns dict {conversation_key: [slices sorted by turn_index]}.
     Only includes conversations where total_turns > 1.
     """
     groups = defaultdict(list)
@@ -42,12 +82,13 @@ def group_by_conversation(samples):
         meta = s.get("metadata") or {}
         source_id = meta.get("source_id")
         total_turns = meta.get("total_turns", 1)
-        if source_id and total_turns > 1:
-            groups[source_id].append(s)
+        conv_key = build_conversation_key(source_id, meta.get("source_file"))
+        if conv_key and total_turns > 1:
+            groups[conv_key].append(s)
 
     # Sort each group by turn_index
-    for source_id in groups:
-        groups[source_id].sort(
+    for conv_key in groups:
+        groups[conv_key].sort(
             key=lambda s: (s.get("metadata") or {}).get("turn_index", 0)
         )
 
@@ -156,7 +197,7 @@ def _compute_penalty(slices):
 
 _SINGLE_SELECT_DIMS = {"intent", "difficulty", "context"}
 _MULTI_SELECT_DIMS = {"language", "domain", "task", "concept", "agentic", "constraint"}
-_LABEL_META_KEYS = {"confidence", "inherited", "inherited_from"}
+_LABEL_META_KEYS = LABEL_META_KEYS
 
 
 def _merge_labels(slices):
@@ -232,13 +273,17 @@ def _compute_pure_quality_from_slice(s):
 
 # ─── Per-conversation aggregation ────────────────────────
 
-def aggregate_conversation(source_id, slices):
+def aggregate_conversation(conversation_key, slices):
     """Aggregate scores for a single conversation.
 
     Returns a record dict, or None if insufficient data (e.g. single slice).
     """
     if len(slices) < 2:
         return None
+
+    first_meta = (slices[0].get("metadata") or {}) if slices else {}
+    source_id = first_meta.get("source_id") or conversation_key
+    source_file = first_meta.get("source_file")
 
     weights = _effective_weights(slices)
 
@@ -319,6 +364,8 @@ def aggregate_conversation(source_id, slices):
 
     return {
         "conversation_id": source_id,
+        "conversation_key": build_conversation_key(source_id, source_file),
+        "source_file": source_file,
         "turn_count": turn_count,
         "conv_value": round(conv_value, 2),
         "conv_selection": None,  # filled by compute_conv_selection_scores
@@ -365,12 +412,7 @@ def compute_conv_selection_scores(records):
         if pq is not None:
             valid_pq.append((i, pq))
 
-    global_percentiles = {}
-    if valid_pq:
-        sorted_global = sorted(valid_pq, key=lambda x: x[1])
-        n_global = len(sorted_global)
-        for rank, (idx, _pq) in enumerate(sorted_global):
-            global_percentiles[idx] = rank / max(n_global - 1, 1)
+    global_percentiles = _compute_percentiles(valid_pq)
 
     # Per-record percentiles across dimensions
     dim_percentiles = [{} for _ in records]
@@ -394,11 +436,11 @@ def compute_conv_selection_scores(records):
         for tag, members in tag_groups.items():
             if len(members) < min_group_size:
                 continue
-            sorted_members = sorted(members, key=lambda x: x[1])
-            n = len(sorted_members)
+            n = len(members)
             shrinkage = n / (n + smoothing_prior)
-            for rank, (idx, _pq) in enumerate(sorted_members):
-                tag_pct = rank / max(n - 1, 1)
+            tag_percentiles = _compute_percentiles(members)
+            for idx, _pq in members:
+                tag_pct = tag_percentiles[idx]
                 g_pct = global_percentiles.get(idx, 0.5)
                 percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
                 if dim in dim_percentiles[idx]:
@@ -413,20 +455,22 @@ def compute_conv_selection_scores(records):
 
     for i, rec in enumerate(records):
         percs = dim_percentiles[i]
-        if not percs:
-            continue
-
-        total_w = 0.0
-        total_v = 0.0
-        for dim, (pct_sum, pct_cnt) in percs.items():
-            w = rarity_weights.get(dim, 1.0)
-            total_w += w
-            total_v += w * (pct_sum / pct_cnt)  # arithmetic mean percentile
-        if total_w <= 0:
-            continue
-
-        intra_rank = total_v / total_w
-        intra_rank_scaled = 1.0 + 9.0 * intra_rank  # scale to 1-10
+        if percs:
+            total_w = 0.0
+            total_v = 0.0
+            for dim, (pct_sum, pct_cnt) in percs.items():
+                w = rarity_weights.get(dim, 1.0)
+                total_w += w
+                total_v += w * (pct_sum / pct_cnt)  # arithmetic mean percentile
+            if total_w <= 0:
+                continue
+            intra_rank = total_v / total_w
+            intra_rank_scaled = 1.0 + 9.0 * intra_rank  # scale to 1-10
+        else:
+            global_pct = global_percentiles.get(i)
+            if global_pct is None:
+                continue
+            intra_rank_scaled = 1.0 + 9.0 * global_pct
 
         # Absolute quality component
         pq = (rec.get("detail") or {}).get("pure_quality")

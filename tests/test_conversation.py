@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 from sft_label.conversation import (
+    build_conversation_key,
     group_by_conversation,
     _position_weight,
     _effective_weights,
@@ -25,7 +26,8 @@ from sft_label.conversation import (
 
 def _slice(source_id, turn_index, total_turns, value_score=6.0,
            complexity=5, quality=6, reasoning=5, rarity=4.0,
-           inherited=False, flags=None, labels=None, thinking_mode=None):
+           inherited=False, flags=None, labels=None, thinking_mode=None,
+           source_file=None):
     """Build a minimal multi-turn slice sample."""
     s = {
         "id": f"{source_id}_t{turn_index}",
@@ -51,6 +53,8 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
         s["labels"]["inherited"] = True
     if thinking_mode:
         s["value"]["thinking_mode"] = thinking_mode
+    if source_file:
+        s["metadata"]["source_file"] = source_file
     return s
 
 
@@ -94,6 +98,19 @@ class TestGroupByConversation:
     def test_no_source_id(self):
         sample = {"id": "x", "metadata": {"total_turns": 3}, "value": {}}
         assert group_by_conversation([sample]) == {}
+
+    def test_source_file_separates_duplicate_source_ids(self):
+        samples = [
+            _slice("dup", 1, 2, source_file="/tmp/a/scored.json"),
+            _slice("dup", 2, 2, source_file="/tmp/a/scored.json"),
+            _slice("dup", 1, 2, source_file="/tmp/b/scored.json"),
+            _slice("dup", 2, 2, source_file="/tmp/b/scored.json"),
+        ]
+        groups = group_by_conversation(samples)
+        assert set(groups) == {
+            build_conversation_key("dup", "/tmp/a/scored.json"),
+            build_conversation_key("dup", "/tmp/b/scored.json"),
+        }
 
 
 # ── TestPositionWeight ──
@@ -235,6 +252,15 @@ class TestAggregateConversation:
         assert rec["peak_complexity"] == 9
         assert len(rec["slices"]) == 3
 
+    def test_record_includes_conversation_key(self):
+        slices = [
+            _slice("c1", 1, 2, source_file="/tmp/a/scored.json"),
+            _slice("c1", 2, 2, source_file="/tmp/a/scored.json"),
+        ]
+        rec = aggregate_conversation(build_conversation_key("c1", "/tmp/a/scored.json"), slices)
+        assert rec["conversation_key"] == build_conversation_key("c1", "/tmp/a/scored.json")
+        assert rec["source_file"] == "/tmp/a/scored.json"
+
     def test_single_slice_returns_none(self):
         slices = [_slice("c1", 1, 1)]
         assert aggregate_conversation("c1", slices) is None
@@ -308,6 +334,21 @@ class TestAggregateConversations:
         assert len(records) == 2
         ids = {r["conversation_id"] for r in records}
         assert ids == {"c1", "c2"}
+
+    def test_duplicate_source_ids_across_files_stay_separate(self):
+        samples = [
+            _slice("dup", 1, 2, source_file="/tmp/a/scored.json"),
+            _slice("dup", 2, 2, source_file="/tmp/a/scored.json"),
+            _slice("dup", 1, 2, source_file="/tmp/b/scored.json"),
+            _slice("dup", 2, 2, source_file="/tmp/b/scored.json"),
+        ]
+        records = aggregate_conversations(samples)
+        assert len(records) == 2
+        keys = {r["conversation_key"] for r in records}
+        assert keys == {
+            build_conversation_key("dup", "/tmp/a/scored.json"),
+            build_conversation_key("dup", "/tmp/b/scored.json"),
+        }
 
     def test_single_turn_only_returns_empty(self):
         samples = [_single_turn_sample(), _single_turn_sample()]

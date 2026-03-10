@@ -65,6 +65,7 @@ from sft_label.artifacts import (
     find_first_existing,
     sync_legacy_aliases,
 )
+from sft_label.labels import is_partial_labels, is_usable_labels
 
 
 # ─────────────────────────────────────────────────────────
@@ -185,6 +186,8 @@ def build_combo_counts(samples):
     counts = {}
     for s in samples:
         labels = s.get("labels") or {}
+        if not is_usable_labels(labels):
+            continue
         intent = labels.get("intent", "")
         difficulty = labels.get("difficulty", "")
         concepts = labels.get("concept", [])
@@ -201,6 +204,8 @@ def build_tag_distributions(samples, rarity_weights=None):
 
     for s in samples:
         labels = s.get("labels") or {}
+        if not is_usable_labels(labels):
+            continue
         total += 1
         for dim in dims:
             tags = labels.get(dim)
@@ -224,6 +229,8 @@ def build_tag_distributions(samples, rarity_weights=None):
 
 def _update_distributions_from_labels(distributions, labels, dims):
     """In-place update for streaming distribution construction."""
+    if not is_usable_labels(labels):
+        return
     for dim in dims:
         tags = labels.get(dim)
         if tags is None:
@@ -544,6 +551,36 @@ def _extract_pure_quality(value_dict, quality_weights=None):
     return pq
 
 
+def _selection_quality_weights(config=None):
+    """Resolve quality-only weights from config.value_weights."""
+    base_weights = config.value_weights if config and config.value_weights else VALUE_WEIGHTS
+    return {k: v for k, v in base_weights.items() if k != "rarity"}
+
+
+def _compute_percentiles(indexed_values):
+    """Assign tie-aware percentiles to (idx, value) pairs."""
+    if not indexed_values:
+        return {}
+
+    ordered = sorted(indexed_values, key=lambda item: (item[1], item[0]))
+    n = len(ordered)
+    scale = max(n - 1, 1)
+    percentiles = {}
+
+    pos = 0
+    while pos < n:
+        end = pos
+        value = ordered[pos][1]
+        while end + 1 < n and ordered[end + 1][1] == value:
+            end += 1
+        percentile = ((pos + end) / 2) / scale
+        for member_pos in range(pos, end + 1):
+            percentiles[ordered[member_pos][0]] = percentile
+        pos = end + 1
+
+    return percentiles
+
+
 def compute_selection_scores(samples, rarity_weights=None,
                               intra_weight=None, min_group_size=None,
                               config=None):
@@ -573,7 +610,7 @@ def compute_selection_scores(samples, rarity_weights=None,
         min_group_size = (config.selection_min_group_size if config
                           else SELECTION_MIN_GROUP_SIZE)
 
-    quality_weights = {k: v for k, v in VALUE_WEIGHTS.items() if k != "rarity"}
+    quality_weights = _selection_quality_weights(config)
 
     # Step 1: Compute pure_quality for each sample
     pure_qualities = []
@@ -586,15 +623,11 @@ def compute_selection_scores(samples, rarity_weights=None,
 
     # Step 2: Global percentile (needed for Bayesian shrinkage)
     valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
-    global_percentiles = {}
-    if valid_pq:
-        sorted_global = sorted(valid_pq, key=lambda x: x[1])
-        n_global = len(sorted_global)
-        for rank, (idx, _pq) in enumerate(sorted_global):
-            global_percentiles[idx] = rank / max(n_global - 1, 1)
+    global_percentiles = _compute_percentiles(valid_pq)
 
     # Step 3: Per-dimension, per-tag quality percentile with Bayesian shrinkage
-    smoothing_prior = SELECTION_SMOOTHING_PRIOR
+    smoothing_prior = (config.selection_smoothing_prior if config
+                       else SELECTION_SMOOTHING_PRIOR)
     dim_percentiles = [{} for _ in samples]  # [{dim: (percentile_sum, count)}, ...]
 
     for dim in _SELECTION_DIMS:
@@ -604,6 +637,8 @@ def compute_selection_scores(samples, rarity_weights=None,
             if pure_qualities[i] is None:
                 continue
             labels = s.get("labels") or {}
+            if not is_usable_labels(labels):
+                continue
             tags = labels.get(dim)
             if tags is None:
                 continue
@@ -617,12 +652,12 @@ def compute_selection_scores(samples, rarity_weights=None,
             if len(members) < min_group_size:
                 continue
 
-            sorted_members = sorted(members, key=lambda x: x[1])
-            n = len(sorted_members)
+            n = len(members)
             # Bayesian shrinkage: blend tag-group percentile toward global
             shrinkage = n / (n + smoothing_prior)
-            for rank, (idx, _pq) in enumerate(sorted_members):
-                tag_pct = rank / max(n - 1, 1)
+            tag_percentiles = _compute_percentiles(members)
+            for idx, _pq in members:
+                tag_pct = tag_percentiles[idx]
                 g_pct = global_percentiles.get(idx, 0.5)
                 percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
                 # Multi-select: average across tags in this dimension
@@ -710,8 +745,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         min_group_size = (config.selection_min_group_size if config
                           else SELECTION_MIN_GROUP_SIZE)
 
-    quality_weights = {k: v for k, v in VALUE_WEIGHTS.items() if k != "rarity"}
-    total_qw = sum(quality_weights.values())
+    quality_weights = _selection_quality_weights(config)
 
     # Step 1: pure_quality from summary fields
     pure_qualities = []
@@ -735,15 +769,11 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
 
     # Step 2: Global percentile (needed for Bayesian shrinkage)
     valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
-    global_percentiles = {}
-    if valid_pq:
-        sorted_global = sorted(valid_pq, key=lambda x: x[1])
-        n_global = len(sorted_global)
-        for rank, (idx, _pq) in enumerate(sorted_global):
-            global_percentiles[idx] = rank / max(n_global - 1, 1)
+    global_percentiles = _compute_percentiles(valid_pq)
 
     # Step 3: Per-tag percentile with Bayesian shrinkage
-    smoothing_prior = SELECTION_SMOOTHING_PRIOR
+    smoothing_prior = (config.selection_smoothing_prior if config
+                       else SELECTION_SMOOTHING_PRIOR)
     dim_percentiles = [{} for _ in summaries]
 
     for dim in _SELECTION_DIMS:
@@ -752,6 +782,8 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
             if pure_qualities[i] is None:
                 continue
             labels = s.get("labels") or {}
+            if not is_usable_labels(labels):
+                continue
             tags = labels.get(dim)
             if tags is None:
                 continue
@@ -764,11 +796,11 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         for tag, members in tag_groups.items():
             if len(members) < min_group_size:
                 continue
-            sorted_members = sorted(members, key=lambda x: x[1])
-            n = len(sorted_members)
+            n = len(members)
             shrinkage = n / (n + smoothing_prior)
-            for rank, (idx, _pq) in enumerate(sorted_members):
-                tag_pct = rank / max(n - 1, 1)
+            tag_percentiles = _compute_percentiles(members)
+            for idx, _pq in members:
+                tag_pct = tag_percentiles[idx]
                 g_pct = global_percentiles.get(idx, 0.5)
                 percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
                 # Multi-select: average across tags in this dimension
@@ -863,6 +895,11 @@ async def score_one(http_client, sample, model, rarity_result,
         "prompt_tokens": 0,
         "completion_tokens": 0,
     }
+
+    if is_partial_labels(labels):
+        monitor["status"] = "skipped_partial_labels"
+        monitor["error"] = labels.get("partial_reason", "partial labels")
+        return None, monitor
 
     # Detect thinking mode: prefer metadata (Pangu COT stripped during Pass 1),
     # fallback to scanning conversations (ShareGPT retains COT markers)
@@ -2506,6 +2543,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         distributions = {d: c for d, c in distributions.items() if c}
         return distributions, total
 
+    local_distributions = None
+
     if tag_stats_path:
         distributions, global_total_stats_samples, ts = load_tag_stats(tag_stats_path)
         if distributions:
@@ -2532,6 +2571,21 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             print(f"  Using local rarity baseline ({local_total} samples)")
         else:
             print("  Warning: rarity unavailable (no valid tag distributions)")
+
+    shared_tag_stats_path = str(tag_stats_path) if tag_stats_path else None
+    temp_tag_stats_path = None
+    if shared_tag_stats_path is None and local_distributions and global_total_stats_samples > 0:
+        temp_tag_stats_path = output_dir / ".directory_rarity_stats.json"
+        with open(temp_tag_stats_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "tag_distributions": local_distributions,
+                "total_samples": global_total_stats_samples,
+                "timestamp": datetime.now().isoformat(),
+            }, f, ensure_ascii=False, indent=2)
+        shared_tag_stats_path = str(temp_tag_stats_path)
+
+    streaming_files = [p for p in labeled_files if p.suffix == ".jsonl"]
+    resident_files = [p for p in labeled_files if p.suffix != ".jsonl"]
 
     concurrency = config.scoring_concurrency
     watermark = int(concurrency * config.dir_pipeline_watermark)
@@ -2612,10 +2666,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     # --- Try to load more files if below watermark ---
     def maybe_load_more(pending_futures, collectors, next_to_load, client):
         active_count = sum(1 for c in collectors.values() if not c.completed)
-        while (next_to_load < len(labeled_files)
+        while (next_to_load < len(resident_files)
                and len(pending_futures) < watermark
                and active_count < max_active):
-            labeled_path = labeled_files[next_to_load]
+            labeled_path = resident_files[next_to_load]
             c = load_and_submit(next_to_load, labeled_path, client, pending_futures)
             collectors[c.file_idx] = c
             next_to_load += 1
@@ -2633,89 +2687,107 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         initial_estimated_calls=workload_estimate.initial_estimated_llm_calls,
     )
 
-    async with httpx.AsyncClient(
-        proxy=None,
-        timeout=config.request_timeout,
-        limits=httpx.Limits(
-            max_connections=concurrency + 10,
-            max_keepalive_connections=concurrency,
-        ),
-    ) as client:
-        with _create_progress() as progress:
-            file_task = progress.add_task("Files", total=len(labeled_files), info="")
-            sample_task = progress.add_task(
-                "Scoring",
-                total=workload_estimate.total_samples,
-                visible=workload_estimate.total_samples > 0,
-                info="starting...",
+    try:
+        for labeled_path in streaming_files:
+            print(f"  Streaming JSONL scoring for {labeled_path.relative_to(input_dir)}")
+            stats = await _run_scoring_file_chunked(
+                labeled_path,
+                labeled_path.parent,
+                shared_tag_stats_path,
+                limit,
+                config,
+                llm_progress_cb=llm_progress_cb,
             )
-            llm_task = progress.add_task(
-                "LLM calls",
-                total=max(workload_estimate.initial_estimated_llm_calls, 1),
-                visible=workload_estimate.total_samples > 0,
-                info=eta_tracker.info_line(),
-            )
-            pprint = progress.console.print
+            stats["file"] = labeled_path.name
+            all_file_stats.append(stats)
 
-            # Initial load
-            next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
-
-            while pending_futures:
-                done, pending_futures = await asyncio.wait(
-                    pending_futures, return_when=asyncio.FIRST_COMPLETED)
-
-                for fut in done:
-                    file_idx, sample_idx, value, monitor = fut.result()
-                    c = collectors[file_idx]
-
-                    if 0 <= sample_idx < c.total:
-                        c.values[sample_idx] = value
-                        c.monitors[sample_idx] = monitor
-
-                    c.done += 1
-                    if value:
-                        c.ok += 1
-                    else:
-                        c.fail += 1
-                        if not first_error_logged and monitor:
-                            err = monitor.get("error", "unknown")
-                            err_resp = monitor.get("error_response", "")
-                            pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
-                            if err_resp and err_resp != err:
-                                pprint(f"      response={err_resp[:200]}")
-                            first_error_logged = True
-
-                    total_ok = sum(cc.ok for cc in collectors.values())
-                    total_fail = sum(cc.fail for cc in collectors.values())
-                    _info = f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]"
-                    if rate_limiter:
-                        _info += f" | {rate_limiter.stats.summary_line()}"
-                    if llm_progress_cb and monitor:
-                        ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                        if ginfo:
-                            _info += f" | {ginfo}"
-                    progress.update(sample_task, advance=1, info=_info)
-                    eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
-                    progress.update(
-                        llm_task,
-                        total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-                        completed=eta_tracker.calls_done,
+        if resident_files:
+            async with httpx.AsyncClient(
+                proxy=None,
+                timeout=config.request_timeout,
+                limits=httpx.Limits(
+                    max_connections=concurrency + 10,
+                    max_keepalive_connections=concurrency,
+                ),
+            ) as client:
+                with _create_progress() as progress:
+                    file_task = progress.add_task("Files", total=len(resident_files), info="")
+                    sample_task = progress.add_task(
+                        "Scoring",
+                        total=sum(_count_scoring_samples_in_file(p, limit=limit) for p in resident_files),
+                        visible=bool(resident_files),
+                        info="starting...",
+                    )
+                    llm_task = progress.add_task(
+                        "LLM calls",
+                        total=max(eta_tracker.estimated_total_calls, 1),
+                        visible=bool(resident_files),
                         info=eta_tracker.info_line(),
                     )
+                    pprint = progress.console.print
 
-                    # Check if file is fully done
-                    if c.done >= c.total and not c.completed:
-                        stats = _flush_scoring_file(c, config, pprint=pprint)
-                        stats["file"] = c.labeled_path.name
-                        all_file_stats.append(stats)
-                        progress.update(file_task, advance=1)
+                    # Initial load
+                    next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
 
-                # After processing batch, check if we should load more files
-                next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
+                    while pending_futures:
+                        done, pending_futures = await asyncio.wait(
+                            pending_futures, return_when=asyncio.FIRST_COMPLETED)
 
-                active_names = [c.labeled_path.name for c in collectors.values()
-                                if not c.completed]
-                progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
+                        for fut in done:
+                            file_idx, sample_idx, value, monitor = fut.result()
+                            c = collectors[file_idx]
+
+                            if 0 <= sample_idx < c.total:
+                                c.values[sample_idx] = value
+                                c.monitors[sample_idx] = monitor
+
+                            c.done += 1
+                            if value:
+                                c.ok += 1
+                            else:
+                                c.fail += 1
+                                if not first_error_logged and monitor:
+                                    err = monitor.get("error", "unknown")
+                                    err_resp = monitor.get("error_response", "")
+                                    pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
+                                    if err_resp and err_resp != err:
+                                        pprint(f"      response={err_resp[:200]}")
+                                    first_error_logged = True
+
+                            total_ok = sum(cc.ok for cc in collectors.values())
+                            total_fail = sum(cc.fail for cc in collectors.values())
+                            _info = f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]"
+                            if rate_limiter:
+                                _info += f" | {rate_limiter.stats.summary_line()}"
+                            if llm_progress_cb and monitor:
+                                ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                                if ginfo:
+                                    _info += f" | {ginfo}"
+                            progress.update(sample_task, advance=1, info=_info)
+                            eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                            progress.update(
+                                llm_task,
+                                total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                                completed=eta_tracker.calls_done,
+                                info=eta_tracker.info_line(),
+                            )
+
+                            # Check if file is fully done
+                            if c.done >= c.total and not c.completed:
+                                stats = _flush_scoring_file(c, config, pprint=pprint)
+                                stats["file"] = c.labeled_path.name
+                                all_file_stats.append(stats)
+                                progress.update(file_task, advance=1)
+
+                        # After processing batch, check if we should load more files
+                        next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
+
+                        active_names = [c.labeled_path.name for c in collectors.values()
+                                        if not c.completed]
+                        progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
+    finally:
+        if temp_tag_stats_path and temp_tag_stats_path.exists():
+            temp_tag_stats_path.unlink()
 
     elapsed = time.time() - batch_start
 

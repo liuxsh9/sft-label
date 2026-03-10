@@ -151,6 +151,19 @@ class TestMatchesFilter:
         assert matches_filter(sample_inherited, config) is False
         assert matches_filter(sample_normal, config) is True
 
+    def test_partial_labels_are_excluded_by_default(self):
+        config = FilterConfig()
+        sample_partial = _full_sample(
+            7.0,
+            labels={
+                "intent": "build",
+                "difficulty": "intermediate",
+                "partial": True,
+                "partial_stage": "call1",
+            },
+        )
+        assert matches_filter(sample_partial, config) is False
+
     def test_combined_criteria(self):
         """AND logic between different criteria."""
         config = FilterConfig(
@@ -417,6 +430,22 @@ class TestDirectoryModeComplex:
         lookup = _load_conversation_scores(str(tmp_path))
         assert "deep-c1" in lookup
         assert lookup["deep-c1"]["conv_value"] == 9.0
+
+    def test_conversation_scores_ambiguous_legacy_ids_are_not_reused(self, tmp_path):
+        sub_a = tmp_path / "a"
+        sub_b = tmp_path / "b"
+        sub_a.mkdir()
+        sub_b.mkdir()
+        (sub_a / "conversation_scores.json").write_text(json.dumps([
+            {"conversation_id": "dup", "conversation_key": "/tmp/a::dup", "conv_value": 9.0},
+        ]))
+        (sub_b / "conversation_scores.json").write_text(json.dumps([
+            {"conversation_id": "dup", "conversation_key": "/tmp/b::dup", "conv_value": 1.0},
+        ]))
+
+        lookup = _load_conversation_scores(str(tmp_path))
+        assert "dup" not in lookup
+        assert lookup["__meta__"]["ambiguous_legacy_ids"] == ["dup"]
 
     def test_directory_empty_files(self, tmp_path):
         """Directory with empty scored files."""
@@ -733,6 +762,47 @@ class TestConversationFilter:
         config = FilterConfig(conv_value_min=5.0)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 0
+        assert summary["conversation_records_missing"] == 2
+        assert summary["conversation_scores"]["files_loaded"] == 0
+
+    def test_cross_file_conversation_ids_do_not_collide(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        file_a = dir_a / "scored.json"
+        file_b = dir_b / "scored.json"
+
+        sample_a = _mt_sample("dup", 1, 2, score=8.0)
+        sample_a["metadata"]["source_file"] = str(file_a)
+        sample_b = _mt_sample("dup", 1, 2, score=8.0)
+        sample_b["metadata"]["source_file"] = str(file_b)
+
+        file_a.write_text(json.dumps([sample_a]))
+        file_b.write_text(json.dumps([sample_b]))
+
+        (dir_a / "conversation_scores.json").write_text(json.dumps([
+            {
+                "conversation_id": "dup",
+                "conversation_key": f"{file_a}::dup",
+                "conv_value": 9.0,
+                "conv_selection": 9.0,
+                "peak_complexity": 8,
+            },
+        ]))
+        (dir_b / "conversation_scores.json").write_text(json.dumps([
+            {
+                "conversation_id": "dup",
+                "conversation_key": f"{file_b}::dup",
+                "conv_value": 2.0,
+                "conv_selection": 2.0,
+                "peak_complexity": 2,
+            },
+        ]))
+
+        summary = run_filter(str(tmp_path), config=FilterConfig(conv_value_min=5.0))
+        assert summary["retained"] == 1
 
     def test_turn_count_min_filters_short_conversations(self, tmp_path):
         """turn_count_min should filter out conversations with fewer turns."""
@@ -916,6 +986,31 @@ class TestTurnLevelPruning:
         config = FilterConfig(turn_value_min=5.0, keep_first_last=True)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 1
+
+    def test_turn_value_min_requires_score_presence(self, tmp_path):
+        samples = [
+            _mt_sample_scored("c1", 1, 3, score=8.0),
+            _mt_sample_scored("c1", 2, 3, score=8.0),
+            _mt_sample_scored("c1", 3, 3, score=8.0),
+        ]
+        samples[1]["value"].pop("value_score")
+        input_file = self._setup(tmp_path, samples)
+        summary = run_filter(str(input_file), config=FilterConfig(turn_value_min=5.0))
+        assert summary["retained"] == 2
+        assert summary["turn_pruned"] == 1
+
+
+class TestMalformedInput:
+    def test_jsonl_parse_errors_are_reported(self, tmp_path):
+        scored_path = tmp_path / "scored.jsonl"
+        good = _full_sample(8.0)
+        with open(scored_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(good) + "\n")
+            f.write("{bad json}\n")
+
+        summary = run_filter(str(scored_path), config=FilterConfig(value_min=5.0))
+        assert summary["retained"] == 1
+        assert summary["parse_errors"] == 1
 
 
 class TestPreserveStructure:
