@@ -46,8 +46,8 @@ from sft_label.preprocessing import (
 from sft_label.pipeline import (
     async_llm_call,
     AsyncRateLimiter,
-    RequestStats,
     RuntimeEtaEstimator,
+    format_progress_info,
 )
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
@@ -1569,7 +1569,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 chunk_data["monitors"] = None
 
             with _create_progress() as progress:
-                task = progress.add_task("Scoring", total=total, info="")
+                task = progress.add_task("Pass 2", total=total, info="")
 
                 # Initial load
                 maybe_load_more_scoring()
@@ -1596,13 +1596,15 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                 print(f"      response={err_resp[:200]}")
                             first_error_logged = True
 
-                        _info = f"ok={scored_count + (1 if value else 0)} fail={failed_count + (0 if value else 1)}"
-                        if rate_limiter:
-                            _info += f" | {rate_limiter.stats.summary_line()}"
+                        _info = format_progress_info(
+                            ok_count=scored_count + (1 if value else 0),
+                            fail_count=failed_count + (0 if value else 1),
+                            request_stats=rate_limiter.stats if rate_limiter else None,
+                        )
                         if llm_progress_cb and monitor:
-                            ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                            if ginfo:
-                                _info += f" | {ginfo}"
+                            run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                            if run_info:
+                                _info = f"{_info} • {run_info}"
                         progress.update(task, advance=1, info=_info)
 
                         # Check if chunk is done
@@ -2119,19 +2121,21 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             return idx
 
         with _create_progress() as progress:
-            task = progress.add_task("Scoring", total=len(to_score), info="")
+            task = progress.add_task("Pass 2", total=len(to_score), info="")
 
             tasks = [asyncio.create_task(score_task(i)) for i in to_score]
             for coro in asyncio.as_completed(tasks):
                 idx = await coro
-                _info = f"ok={scored_count} fail={failed_count}"
-                if rate_limiter:
-                    _info += f" | {rate_limiter.stats.summary_line()}"
+                _info = format_progress_info(
+                    ok_count=scored_count,
+                    fail_count=failed_count,
+                    request_stats=rate_limiter.stats if rate_limiter else None,
+                )
                 monitor = all_monitors[idx]
                 if llm_progress_cb and monitor:
-                    ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                    if ginfo:
-                        _info += f" | {ginfo}"
+                    run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                    if run_info:
+                        _info = f"{_info} • {run_info}"
                 progress.update(task, advance=1, info=_info)
 
     elapsed = time.time() - start_time
@@ -2471,18 +2475,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     rarity_mode = resolve_rarity_mode(config)
 
     print(f"Found {len(labeled_files)} labeled files in {input_dir}")
-    print("  planning scoring workload estimate...")
     workload_estimate = estimate_scoring_directory_workload(
         labeled_files,
         limit=limit,
         config=config,
     )
     print(
-        "  plan: "
+        "  Plan | "
         f"{workload_estimate.files_planned} files, "
         f"{workload_estimate.total_samples} samples, "
-        f"LLM calls ~{workload_estimate.initial_estimated_llm_calls} "
-        f"(baseline {workload_estimate.baseline_total_llm_calls}), "
+        f"llm~{workload_estimate.initial_estimated_llm_calls}, "
         f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
     )
 
@@ -2711,15 +2713,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 ),
             ) as client:
                 with _create_progress() as progress:
+                    global_llm_info = None
                     file_task = progress.add_task("Files", total=len(resident_files), info="")
                     sample_task = progress.add_task(
-                        "Scoring",
+                        "Pass 2",
                         total=sum(_count_scoring_samples_in_file(p, limit=limit) for p in resident_files),
                         visible=bool(resident_files),
                         info="starting...",
                     )
                     llm_task = progress.add_task(
-                        "LLM calls",
+                        "LLM",
                         total=max(eta_tracker.estimated_total_calls, 1),
                         visible=bool(resident_files),
                         info=eta_tracker.info_line(),
@@ -2756,20 +2759,24 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
                             total_ok = sum(cc.ok for cc in collectors.values())
                             total_fail = sum(cc.fail for cc in collectors.values())
-                            _info = f"ok={total_ok} fail={total_fail} [{c.labeled_path.name}]"
-                            if rate_limiter:
-                                _info += f" | {rate_limiter.stats.summary_line()}"
+                            _info = format_progress_info(
+                                ok_count=total_ok,
+                                fail_count=total_fail,
+                                label=c.labeled_path.name,
+                                request_stats=rate_limiter.stats if rate_limiter else None,
+                            )
                             if llm_progress_cb and monitor:
-                                ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                                if ginfo:
-                                    _info += f" | {ginfo}"
+                                global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
                             progress.update(sample_task, advance=1, info=_info)
                             eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                            llm_info = eta_tracker.info_line()
+                            if global_llm_info:
+                                llm_info = f"{llm_info} • {global_llm_info}"
                             progress.update(
                                 llm_task,
                                 total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
                                 completed=eta_tracker.calls_done,
-                                info=eta_tracker.info_line(),
+                                info=llm_info,
                             )
 
                             # Check if file is fully done

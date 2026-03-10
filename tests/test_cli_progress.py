@@ -47,6 +47,7 @@ def test_estimate_end_to_end_llm_calls_single_file(tmp_path):
 def test_combined_llm_progress_tracker_updates():
     tracker = _CombinedLLMProgressTracker(100)
     info = tracker.update(12, "pass1")
-    assert "global=12/100" in info
-    assert "p1=12" in info
-    assert "p2=0" in info
+    assert "run 12/100" in info
+    summary = tracker.summary_line()
+    assert "p1=12" in summary
+    assert "p2=0" in summary

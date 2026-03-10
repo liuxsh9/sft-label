@@ -86,6 +86,20 @@ def create_progress():
     )
 
 
+def format_progress_info(ok_count, fail_count=0, label=None, request_stats=None):
+    """Build a compact progress info string for live terminal updates."""
+    parts = [f"ok={ok_count}"]
+    if fail_count:
+        parts.append(f"fail={fail_count}")
+    if label:
+        parts.append(label)
+    if request_stats is not None:
+        http = request_stats.summary_line()
+        if http:
+            parts.append(http)
+    return " • ".join(parts)
+
+
 # ─────────────────────────────────────────────────────────
 # Directory discovery & checkpoint
 # ─────────────────────────────────────────────────────────
@@ -1209,10 +1223,10 @@ class RuntimeEtaEstimator:
         return remaining / self.calls_per_sec
 
     def info_line(self):
-        rate = f"{self.calls_per_sec:.1f} calls/s" if self.calls_per_sec > 0 else "warming"
+        rate = f"{self.calls_per_sec:.1f}/s" if self.calls_per_sec > 0 else "warming"
         eta = self._fmt_duration(self.eta_seconds())
-        avg = f"{self.avg_calls_per_sample:.2f} calls/sample" if self.samples_done > 0 else "n/a"
-        return f"{rate} | eta {eta} | avg {avg}"
+        avg = f"{self.avg_calls_per_sample:.2f}/sample" if self.samples_done > 0 else "n/a"
+        return f"eta {eta} • rate {rate} • avg {avg}"
 
 
 def estimate_directory_workload(
@@ -1856,13 +1870,16 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                     c.fail += 1
 
                 if progress and sample_task is not None:
-                    info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [chunk {c.chunk_idx + 1}]"
-                    if rate_limiter:
-                        info += f" | {rate_limiter.stats.summary_line()}"
+                    info = format_progress_info(
+                        c.ok,
+                        c.fail,
+                        label=f"chunk {c.chunk_idx + 1}",
+                        request_stats=rate_limiter.stats if rate_limiter else None,
+                    )
                     if llm_progress_cb and monitor:
-                        ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
-                        if ginfo:
-                            info += f" | {ginfo}"
+                        run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                        if run_info:
+                            info = f"{info} • {run_info}"
                     progress.update(sample_task, advance=1, info=info)
 
                 # Check if chunk is fully done
@@ -2000,13 +2017,16 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             fail_count += 1
 
         if progress and sample_task is not None:
-            info = f"✓{ok_count}" + (f" ✗{fail_count}" if fail_count else "") + sparse_info
-            if rate_limiter:
-                info += f" | {rate_limiter.stats.summary_line()}"
+            info = format_progress_info(
+                ok_count,
+                fail_count,
+                label=sparse_info.strip() if sparse_info else None,
+                request_stats=rate_limiter.stats if rate_limiter else None,
+            )
             if llm_progress_cb and monitor:
-                ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
-                if ginfo:
-                    info += f" | {ginfo}"
+                run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                if run_info:
+                    info = f"{info} • {run_info}"
             progress.update(sample_task, advance=1, info=info)
         else:
             # Fallback: per-sample print (no progress bar)
@@ -2298,6 +2318,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             total_labeled_samples=workload_estimate.total_labeled_samples,
             initial_estimated_calls=workload_estimate.initial_estimated_llm_calls,
         )
+    global_llm_info = None
 
     if progress and sample_task is not None:
         initial_sample_total = (
@@ -2344,22 +2365,29 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
 
             # Update samples progress bar
             if progress and sample_task is not None:
-                info = f"✓{c.ok}" + (f" ✗{c.fail}" if c.fail else "") + f" [{c.rel_path.name}]" + c.sparse_info
-                if rate_limiter:
-                    info += f" | {rate_limiter.stats.summary_line()}"
+                label = c.rel_path.name
+                if c.sparse_info:
+                    label += c.sparse_info
+                info = format_progress_info(
+                    c.ok,
+                    c.fail,
+                    label=label,
+                    request_stats=rate_limiter.stats if rate_limiter else None,
+                )
                 if llm_progress_cb and monitor:
-                    ginfo = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
-                    if ginfo:
-                        info += f" | {ginfo}"
+                    global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
                 progress.update(sample_task, advance=1, info=info)
             if eta_tracker:
                 eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
                 if progress and llm_task is not None:
+                    llm_info = eta_tracker.info_line()
+                    if global_llm_info:
+                        llm_info = f"{llm_info} • {global_llm_info}"
                     progress.update(
                         llm_task,
                         total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
                         completed=eta_tracker.calls_done,
-                        info=eta_tracker.info_line(),
+                        info=llm_info,
                     )
 
             # Check if this file is fully done (compare against label_count, not total)
@@ -2568,7 +2596,6 @@ async def run(
         _concurrency = config.concurrency
 
         print(f"Pipeline RESUME | {run_dir} | model={_model} concurrency={_concurrency} | {len(completed)}/{len(dir_files)} files done")
-        print("  planning workload estimate...")
         workload_estimate = estimate_directory_workload(
             dir_files,
             limit=limit,
@@ -2578,12 +2605,11 @@ async def run(
             enable_arbitration=enable_arbitration,
         )
         print(
-            "  plan: "
+            "  Plan | "
             f"{workload_estimate.files_planned} pending files, "
             f"{workload_estimate.total_samples} samples "
             f"({workload_estimate.total_labeled_samples} labeled, {workload_estimate.total_inherited_samples} inherited), "
-            f"LLM calls ~{workload_estimate.initial_estimated_llm_calls} "
-            f"(baseline {workload_estimate.baseline_total_llm_calls}), "
+            f"llm~{workload_estimate.initial_estimated_llm_calls}, "
             f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
         )
 
@@ -2602,13 +2628,13 @@ async def run(
             with create_progress() as progress:
                 file_task = progress.add_task("Files", total=n, info="")
                 sample_task = progress.add_task(
-                    "Samples",
+                    "Pass 1",
                     total=workload_estimate.total_labeled_samples,
                     visible=workload_estimate.total_labeled_samples > 0,
                     info="starting...",
                 )
                 llm_task = progress.add_task(
-                    "LLM calls",
+                    "LLM",
                     total=max(workload_estimate.initial_estimated_llm_calls, 1),
                     visible=workload_estimate.total_labeled_samples > 0,
                     info="starting...",
@@ -2657,7 +2683,6 @@ async def run(
 
         checkpoint_path = run_dir / "checkpoint.json"
         create_checkpoint(checkpoint_path, dir_files)
-        print("  planning workload estimate...")
         workload_estimate = estimate_directory_workload(
             dir_files,
             limit=limit,
@@ -2667,12 +2692,11 @@ async def run(
             enable_arbitration=enable_arbitration,
         )
         print(
-            "  plan: "
+            "  Plan | "
             f"{workload_estimate.files_planned} files, "
             f"{workload_estimate.total_samples} samples "
             f"({workload_estimate.total_labeled_samples} labeled, {workload_estimate.total_inherited_samples} inherited), "
-            f"LLM calls ~{workload_estimate.initial_estimated_llm_calls} "
-            f"(baseline {workload_estimate.baseline_total_llm_calls}), "
+            f"llm~{workload_estimate.initial_estimated_llm_calls}, "
             f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
         )
         batch_start = time.time()
@@ -2690,13 +2714,13 @@ async def run(
             with create_progress() as progress:
                 file_task = progress.add_task("Files", total=n, info="")
                 sample_task = progress.add_task(
-                    "Samples",
+                    "Pass 1",
                     total=workload_estimate.total_labeled_samples,
                     visible=workload_estimate.total_labeled_samples > 0,
                     info="starting...",
                 )
                 llm_task = progress.add_task(
-                    "LLM calls",
+                    "LLM",
                     total=max(workload_estimate.initial_estimated_llm_calls, 1),
                     visible=workload_estimate.total_labeled_samples > 0,
                     info="starting...",
@@ -2732,7 +2756,7 @@ async def run(
         ) as http_client:
             sem = asyncio.Semaphore(_concurrency)
             with create_progress() as progress:
-                sample_task = progress.add_task("Labeling", total=None, info="starting...")
+                sample_task = progress.add_task("Pass 1", total=None, info="starting...")
                 stats = await run_one_file(
                     _input_path, run_dir, http_client, sem, config.labeling_model,
                     enable_arbitration=enable_arbitration,

@@ -112,7 +112,7 @@ class _CombinedLLMProgressTracker:
         else:
             self._smoothed_cps = 0.2 * instant_cps + 0.8 * self._smoothed_cps
 
-        return self.summary_line()
+        return self.progress_line()
 
     def eta_seconds(self):
         if self._smoothed_cps <= 0:
@@ -121,13 +121,16 @@ class _CombinedLLMProgressTracker:
         return remaining / self._smoothed_cps
 
     def summary_line(self) -> str:
-        pct = min(self.calls_done / max(self.planned_total_calls, 1) * 100, 100.0)
         cps = f"{self._smoothed_cps:.1f}/s" if self._smoothed_cps > 0 else "warming"
         eta = _format_eta(self.eta_seconds())
         return (
-            f"global={self.calls_done}/{self.planned_total_calls} ({pct:.1f}%) "
-            f"eta {eta} rate {cps} p1={self.pass1_calls} p2={self.pass2_calls}"
+            f"{self.progress_line()} eta {eta} rate {cps} "
+            f"p1={self.pass1_calls} p2={self.pass2_calls}"
         )
+
+    def progress_line(self) -> str:
+        pct = min(self.calls_done / max(self.planned_total_calls, 1) * 100, 100.0)
+        return f"run {self.calls_done}/{self.planned_total_calls} ({pct:.1f}%)"
 
 
 def _estimate_pass2_calls(total_samples: int, sample_max_retries: int) -> int:
@@ -225,14 +228,12 @@ def cmd_run(args):
         if plan:
             global_tracker = _CombinedLLMProgressTracker(plan["total_est_calls"])
             print(
-                "Global LLM plan | "
-                f"pass1~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled) + "
-                f"pass2~{plan['pass2_est_calls']} ({plan['pass2_samples']} samples) = "
-                f"{plan['total_est_calls']} calls"
+                "Run plan | "
+                f"llm~{plan['total_est_calls']} = "
+                f"p1~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled) + "
+                f"p2~{plan['pass2_est_calls']} ({plan['pass2_samples']} samples)"
             )
             llm_progress_cb = global_tracker.update
-        else:
-            print("Global LLM plan skipped (unable to estimate from current arguments)")
     try:
         stats = asyncio.run(run(
             input_path=args.input,
@@ -261,8 +262,6 @@ def cmd_run(args):
                 config=config,
                 llm_progress_cb=llm_progress_cb,
             ))
-            if global_tracker:
-                print(f"\nGlobal LLM progress: {global_tracker.summary_line()}")
 
     # Optional semantic clustering pass (trajectory-level)
     if getattr(args, "semantic_cluster", False) and stats:
