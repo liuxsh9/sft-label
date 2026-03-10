@@ -490,6 +490,44 @@ class TestRefreshRarity:
                 stats_ref = rarity.get("stats_ref") or {}
                 assert stats_ref.get("source") == str(stats_path)
 
+    def test_external_stats_without_combo_disables_combo_rarity(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        samples = [
+            _make_scored_sample("s1", intent="build", difficulty="beginner"),
+            _make_scored_sample("s2", intent="debug", difficulty="expert"),
+        ]
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps(samples), encoding="utf-8")
+
+        stats = {
+            "total_samples": 1000,
+            "distribution_total_samples": 800,
+            "tag_distributions": {
+                "intent": {"build": 600, "debug": 50},
+                "difficulty": {"beginner": 700, "expert": 30},
+                "concept": {"api-design": 300},
+            },
+            # combo_distributions intentionally omitted
+        }
+        stats_path = tmp_path / "global_stats.json"
+        stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+        written = run_refresh_rarity(
+            str(path),
+            tag_stats_path=str(stats_path),
+            config=PipelineConfig(rarity_score_mode="absolute"),
+        )
+        assert "stats_value" in written
+
+        refreshed = json.loads((tmp_path / "scored.json").read_text(encoding="utf-8"))
+        for sample in refreshed:
+            rarity = (sample.get("value") or {}).get("rarity") or {}
+            assert rarity.get("combo_rarity") == 0.0
+
+        stats_out = json.loads(Path(written["stats_value"]).read_text(encoding="utf-8"))
+        assert stats_out["rarity_config"]["combo_mode"] == "disabled"
+
 
 # ─── Test run_regenerate_dashboard ───────────────────────
 

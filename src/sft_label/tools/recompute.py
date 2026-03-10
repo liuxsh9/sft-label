@@ -315,7 +315,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
     """
     from sft_label.config import PipelineConfig, VALUE_WEIGHTS, RARITY_WEIGHTS
     from sft_label.scoring import (
-        load_tag_stats, compute_tag_idf, compute_sample_rarity,
+        load_tag_stats_context, compute_tag_idf, compute_sample_rarity,
         build_combo_counts, normalize_rarity_scores, resolve_rarity_mode,
         build_tag_distributions, compute_value_score, compute_selection_scores,
         merge_value_stats,
@@ -336,6 +336,10 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             dim_base = base.setdefault(dim, {})
             for tag, count in counts.items():
                 dim_base[tag] = dim_base.get(tag, 0) + count
+
+    def _merge_combo_counts(base, incoming):
+        for combo_key, count in incoming.items():
+            base[combo_key] = base.get(combo_key, 0) + count
 
     def _resolve_stats_source():
         if tag_stats_path:
@@ -380,15 +384,25 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
     total_stats_samples = 0
     stats_timestamp = None
     stats_source_str = None
+    baseline_combo_counts = None
+    combo_mode = "disabled"
 
     if stats_source_path:
         _log_refresh_rarity(f"Loading rarity baseline stats from {stats_source_path}")
-        dists, total, ts = load_tag_stats(stats_source_path)
+        dists, total, ts, meta = load_tag_stats_context(stats_source_path)
         if dists:
             distributions = dists
             total_stats_samples = total
             stats_timestamp = ts
             stats_source_str = str(stats_source_path)
+            baseline_combo_counts = meta.get("combo_counts")
+            if baseline_combo_counts:
+                combo_mode = "external"
+            else:
+                _log_refresh_rarity(
+                    "External stats has no combo_distributions; "
+                    "combo rarity disabled for cross-dataset comparability"
+                )
             _log_refresh_rarity(
                 f"Using external rarity baseline: {stats_source_path} "
                 f"({total_stats_samples} samples)"
@@ -403,6 +417,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
     if not distributions:
         agg_distributions = {}
         agg_total = 0
+        agg_combo_counts = {}
         rw = config.rarity_weights or RARITY_WEIGHTS
         _log_refresh_rarity(
             f"Building local rarity baseline from {len(scored_files)} scored file(s)"
@@ -427,11 +442,14 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             if local_dist:
                 _merge_distributions(agg_distributions, local_dist)
             agg_total += local_total
+            _merge_combo_counts(agg_combo_counts, build_combo_counts(samples))
         if agg_distributions and agg_total > 0:
             distributions = agg_distributions
             total_stats_samples = agg_total
             stats_timestamp = datetime.now().isoformat()
             stats_source_str = f"{in_path}#local"
+            baseline_combo_counts = agg_combo_counts
+            combo_mode = "local"
             _log_refresh_rarity(f"Using local rarity baseline ({agg_total} samples)")
         else:
             raise ValueError("No valid labels found to build rarity baseline")
@@ -454,7 +472,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
 
     def _refresh_one(samples, phase):
         rarity_results = []
-        combo_counts = build_combo_counts(samples) if idf_map else None
+        combo_counts = baseline_combo_counts if idf_map else None
         rw = config.rarity_weights or RARITY_WEIGHTS
         total_samples_in_file = len(samples)
         progress_interval = _refresh_progress_interval(total_samples_in_file)
@@ -508,6 +526,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             "total_samples_in_distribution": total_stats_samples,
             "dimension_weights": rw,
             "combo_alpha": config.rarity_combo_alpha,
+            "combo_mode": combo_mode,
             "score_mode": rarity_mode,
         }
         _log_refresh_rarity(f"{phase}: refreshed {refreshed} scored sample(s)")
@@ -591,6 +610,7 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
             "total_samples_in_distribution": total_stats_samples,
             "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
             "combo_alpha": config.rarity_combo_alpha,
+            "combo_mode": combo_mode,
             "score_mode": rarity_mode,
         }
         summary_path = out_root / PASS2_SUMMARY_STATS_FILE

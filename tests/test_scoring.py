@@ -34,6 +34,7 @@ from sft_label.scoring import (
     compute_value_score,
     compute_value_stats,
     load_tag_stats,
+    load_tag_stats_context,
 )
 
 
@@ -381,6 +382,18 @@ class TestComputeSampleRarity:
         # r2 only uses intent, r1 uses both
         assert r1["score"] != r2["score"]
 
+    def test_missing_dimension_is_skipped_not_maxed(self):
+        """When baseline lacks a dimension, that dim should be ignored."""
+        labels = {"intent": "build", "context": "snippet"}
+        rarity = compute_sample_rarity(
+            labels,
+            idf_map={"intent": {"build": 1.0}},
+            total_samples=1000,
+            rarity_weights={"intent": 1.0, "context": 10.0},
+            combo_counts=None,
+        )
+        assert rarity["tag_rarity"] == 1.0
+
 
 class TestNormalizeRarityScores:
     def test_normalize_to_1_10(self):
@@ -471,8 +484,41 @@ class TestBuildComboCounts:
         ]
         counts = build_combo_counts(samples)
         assert counts["build|advanced|algorithms"] == 1
-        # null/missing labels produce a fallback combo key
-        assert counts["||"] == 2
+        # null/missing labels should be ignored
+        assert "||" not in counts
+
+
+class TestLoadTagStats:
+    def test_prefers_distribution_total_samples(self, tmp_path):
+        stats = {
+            "total_samples": 1000,
+            "distribution_total_samples": 200,
+            "tag_distributions": {"intent": {"build": 100}},
+            "timestamp": "2026-01-01T00:00:00",
+        }
+        path = tmp_path / "stats.json"
+        path.write_text(json.dumps(stats), encoding="utf-8")
+
+        dists, total, ts = load_tag_stats(path)
+        assert dists == stats["tag_distributions"]
+        assert total == 200
+        assert ts == "2026-01-01T00:00:00"
+
+    def test_loads_combo_distributions_from_context(self, tmp_path):
+        stats = {
+            "total_samples": 1000,
+            "tag_distributions": {"intent": {"build": 100}},
+            "combo_distributions": {
+                "build|beginner|algorithms": 12,
+                "bad|entry": -1,
+                "": 10,
+            },
+        }
+        path = tmp_path / "stats.json"
+        path.write_text(json.dumps(stats), encoding="utf-8")
+
+        _d, _t, _ts, meta = load_tag_stats_context(path)
+        assert meta["combo_counts"] == {"build|beginner|algorithms": 12}
 
 
 # ─────────────────────────────────────────────────────────
@@ -1192,6 +1238,82 @@ class TestResumeScoringFile:
         assert rarity_by_id["common-2"] is not None
         assert rarity_by_id["rare-1"] is not None
         assert rarity_by_id["rare-1"] > rarity_by_id["common-1"]
+
+    def test_external_stats_without_combo_disables_combo_rarity(self, tmp_path):
+        from sft_label.scoring import _run_scoring_file
+        from sft_label.config import PipelineConfig
+        from unittest.mock import patch
+
+        samples = [
+            {
+                "id": "s1",
+                "conversations": [
+                    {"from": "human", "value": "Q1"},
+                    {"from": "gpt", "value": "A1"},
+                ],
+                "labels": {
+                    "intent": "build",
+                    "difficulty": "beginner",
+                    "language": ["python"],
+                    "domain": ["web-backend"],
+                    "task": ["feature-implementation"],
+                    "concept": ["data-types"],
+                    "context": "snippet",
+                },
+            }
+        ]
+        labeled_path = tmp_path / "labeled.json"
+        labeled_path.write_text(json.dumps(samples), encoding="utf-8")
+
+        stats_path = tmp_path / "stats.json"
+        stats_path.write_text(json.dumps({
+            "total_samples": 1000,
+            "distribution_total_samples": 800,
+            "tag_distributions": {
+                "intent": {"build": 500},
+                "difficulty": {"beginner": 600},
+                "language": {"python": 700},
+                "domain": {"web-backend": 600},
+                "task": {"feature-implementation": 650},
+                "concept": {"data-types": 500},
+                "context": {"snippet": 700},
+            },
+        }), encoding="utf-8")
+
+        captured_rarity = {}
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                  sample_idx, total, sem, config=None, rate_limiter=None):
+            captured_rarity[sample["id"]] = rarity_result
+            value = {
+                "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }
+            monitor = {"sample_id": sample.get("id"), "status": "success",
+                        "llm_calls": 1, "prompt_tokens": 100, "completion_tokens": 50,
+                        "attempts": 1, "validation_issues": []}
+            return value, monitor
+
+        config = PipelineConfig(
+            scoring_concurrency=1,
+            sample_max_retries=1,
+            rarity_score_mode="absolute",
+        )
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            stats = asyncio.run(_run_scoring_file(
+                labeled_path, tmp_path, str(stats_path), 0, config, resume=False,
+            ))
+
+        rarity = captured_rarity["s1"]
+        assert rarity is not None
+        assert rarity["combo_rarity"] == 0.0
+        assert stats["rarity_config"]["combo_mode"] == "disabled"
 
 
 # ─────────────────────────────────────────────────────────

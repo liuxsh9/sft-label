@@ -169,6 +169,7 @@ def merge_stats(all_file_stats):
     """Merge per-file stats into a global summary."""
     merged = {
         "total_samples": 0, "success": 0, "failed": 0,
+        "distribution_total_samples": 0,
         "total_llm_calls": 0, "total_prompt_tokens": 0,
         "total_completion_tokens": 0, "total_tokens": 0,
         "arbitrated_count": 0,
@@ -186,7 +187,8 @@ def merge_stats(all_file_stats):
         for k in ("total_samples", "success", "failed", "total_llm_calls",
                    "total_prompt_tokens", "total_completion_tokens", "total_tokens",
                    "arbitrated_count", "validation_issue_count", "consistency_warning_count",
-                   "sparse_labeled", "sparse_inherited"):
+                   "sparse_labeled", "sparse_inherited",
+                   "distribution_total_samples"):
             merged[k] += st.get(k, 0)
         merged["total_elapsed_seconds"] += st.get("total_elapsed_seconds", 0)
         # Merge tag distributions
@@ -1006,6 +1008,10 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
     arbitrated = sum(1 for m in all_monitors if m["arbitrated"])
 
     inherited_indices = set(inherit_map.keys()) if inherit_map else set()
+    distribution_total = sum(
+        1 for idx, labels in enumerate(all_labels)
+        if is_usable_labels(labels) and idx not in inherited_indices
+    )
 
     distributions = {}
     for dim in ["intent", "language", "domain", "concept", "task", "agentic", "constraint", "context", "difficulty"]:
@@ -1055,6 +1061,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
 
     return {
         "total_samples": total,
+        "distribution_total_samples": distribution_total,
         "success": success,
         "failed": total - success,
         "success_rate": round(success / max(total, 1), 4),
@@ -1489,6 +1496,7 @@ class StatsAccumulator:
 
     def __init__(self):
         self.total = 0
+        self.distribution_total = 0
         self.success = 0
         self.total_calls = 0
         self.total_pt = 0
@@ -1542,6 +1550,7 @@ class StatsAccumulator:
         for idx, labels in enumerate(all_labels):
             if not is_usable_labels(labels) or idx in inherited_indices:
                 continue
+            self.distribution_total += 1
             for dim in self.DIMS:
                 val = labels.get(dim, [])
                 if isinstance(val, list):
@@ -1611,6 +1620,7 @@ class StatsAccumulator:
         total = self.total
         result = {
             "total_samples": total,
+            "distribution_total_samples": self.distribution_total,
             "success": self.success,
             "failed": total - self.success,
             "success_rate": round(self.success / max(total, 1), 4),
@@ -2479,7 +2489,8 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     """Write global summary stats + dashboard for a batch run."""
     batch_elapsed = time.time() - batch_start
     summary = merge_stats(all_file_stats) if all_file_stats else {
-        "total_samples": 0, "success": 0, "failed": 0, "success_rate": 0,
+        "total_samples": 0, "distribution_total_samples": 0,
+        "success": 0, "failed": 0, "success_rate": 0,
         "total_llm_calls": 0, "total_tokens": 0, "arbitrated_count": 0,
         "unmapped_unique_count": 0, "tag_distributions": {}, "unmapped_tags": {},
         "files_processed": 0,
