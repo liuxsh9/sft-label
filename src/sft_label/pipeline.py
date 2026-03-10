@@ -52,17 +52,10 @@ from sft_label.config import (
 )
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
-    PASS1_STATS_FILE_LEGACY,
     PASS1_SUMMARY_STATS_FILE,
-    PASS1_SUMMARY_STATS_FILE_LEGACY,
     pass1_stats_filename,
-    pass1_stats_legacy_filename,
     pass1_dashboard_filename,
-    pass1_dashboard_legacy_filename,
     pass1_global_dashboard_filename,
-    pass1_global_dashboard_legacy_filename,
-    find_first_existing,
-    sync_legacy_aliases,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
 
@@ -1344,9 +1337,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     labeled_jsonl = f"labeled{suffix}.jsonl"
     monitor_file = f"monitor{suffix}.jsonl"
     stats_file = pass1_stats_filename(suffix)
-    stats_file_legacy = pass1_stats_legacy_filename(suffix)
     dashboard_file = pass1_dashboard_filename(suffix)
-    dashboard_file_legacy = pass1_dashboard_legacy_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
 
     with open(output_dir / labeled_json, "w", encoding="utf-8") as f:
@@ -1412,14 +1403,12 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     stats_path = output_dir / stats_file
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
-    sync_legacy_aliases(stats_path, [stats_file_legacy])
 
     # Per-file dashboard
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=labeled_json,
                            stats_file=stats_file, output_file=dashboard_file)
-        sync_legacy_aliases(output_dir / dashboard_file, [dashboard_file_legacy])
     except Exception:
         pass
 
@@ -1930,17 +1919,12 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     stats_path = output_dir / PASS1_STATS_FILE
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
-    sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
 
     # Dashboard (stats-only mode — no labeled.json)
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=None,
                            stats_file=PASS1_STATS_FILE, output_file=pass1_dashboard_filename())
-        sync_legacy_aliases(
-            output_dir / pass1_dashboard_filename(),
-            [pass1_dashboard_legacy_filename()],
-        )
     except Exception:
         pass
 
@@ -2088,9 +2072,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     labeled_jsonl = f"labeled{suffix}.jsonl"
     monitor_file = f"monitor{suffix}.jsonl"
     stats_file = pass1_stats_filename(suffix)
-    stats_file_legacy = pass1_stats_legacy_filename(suffix)
     dashboard_file = pass1_dashboard_filename(suffix)
-    dashboard_file_legacy = pass1_dashboard_legacy_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
 
     with open(output_dir / labeled_json, "w", encoding="utf-8") as f:
@@ -2153,14 +2135,12 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     stats_path = output_dir / stats_file
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
-    sync_legacy_aliases(stats_path, [stats_file_legacy])
 
     # Per-file dashboard
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=labeled_json,
                            stats_file=stats_file, output_file=dashboard_file)
-        sync_legacy_aliases(output_dir / dashboard_file, [dashboard_file_legacy])
     except Exception:
         pass
 
@@ -2516,7 +2496,6 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    sync_legacy_aliases(summary_path, [PASS1_SUMMARY_STATS_FILE_LEGACY])
 
     input_name = input_path.name
     global_dashboard = pass1_global_dashboard_filename(input_name)
@@ -2525,10 +2504,6 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
         generate_dashboard(run_dir, labeled_file=None,
                            stats_file=PASS1_SUMMARY_STATS_FILE,
                            output_file=global_dashboard)
-        sync_legacy_aliases(
-            run_dir / global_dashboard,
-            [pass1_global_dashboard_legacy_filename(input_name)],
-        )
         print(f"\nGlobal dashboard generated: {run_dir / global_dashboard}")
     except Exception as e:
         print(f"\nGlobal dashboard generation skipped: {e}")
@@ -2585,16 +2560,19 @@ async def run(
             return {"status": "already_done", "run_dir": str(run_dir)}
 
         # Recover settings from summary_stats or checkpoint
-        summary_path = find_first_existing(
-            run_dir,
-            [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY],
-        )
-        if summary_path:
+        summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+        if summary_path.exists():
             with open(summary_path, "r", encoding="utf-8") as f:
                 prev_summary = json.load(f)
             _input_path = Path(prev_summary.get("input_path", str(input_path)))
             _model = prev_summary.get("model", config.labeling_model)
         else:
+            if input_path is None:
+                raise FileNotFoundError(
+                    f"missing {PASS1_SUMMARY_STATS_FILE} in {run_dir}; "
+                    "please run 'sft-label optimize-layout --input <run_dir> --apply' "
+                    "for legacy runs or provide --input explicitly when resuming"
+                )
             _input_path = Path(input_path)
             _model = config.labeling_model
 
@@ -2788,7 +2766,6 @@ async def run(
         stats_path = run_dir / PASS1_STATS_FILE
         with open(stats_path, "w", encoding="utf-8") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
-        sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
 
         print_summary(stats, run_dir)
         print(f"Output:  {run_dir / 'labeled.json'}")

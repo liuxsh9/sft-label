@@ -7,7 +7,7 @@ Evaluates SFT training data value through:
   3. Weighted aggregation — composite value_score
 
 Runs after Pass 1 (tag labeling) and produces scored.json, stats_scoring.json,
-dashboard_scoring.html per file (with legacy aliases kept).
+dashboard_scoring.html per file.
 """
 
 from __future__ import annotations
@@ -51,19 +51,11 @@ from sft_label.pipeline import (
 )
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
-    PASS1_STATS_FILE_LEGACY,
     PASS1_SUMMARY_STATS_FILE,
-    PASS1_SUMMARY_STATS_FILE_LEGACY,
     PASS2_STATS_FILE,
-    PASS2_STATS_FILE_LEGACY,
     PASS2_SUMMARY_STATS_FILE,
-    PASS2_SUMMARY_STATS_FILE_LEGACY,
     PASS2_DASHBOARD_FILE,
-    PASS2_DASHBOARD_FILE_LEGACY,
     pass2_global_dashboard_filename,
-    pass2_global_dashboard_legacy_filename,
-    find_first_existing,
-    sync_legacy_aliases,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
 
@@ -1459,11 +1451,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     combo_mode = "disabled"
 
     if tag_stats_path is None:
-        candidate = find_first_existing(
-            input_path.parent,
-            [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY],
-        )
-        if candidate:
+        candidate = input_path.parent / PASS1_STATS_FILE
+        if candidate.exists():
             tag_stats_path = str(candidate)
 
     stats_source = tag_stats_path
@@ -1822,7 +1811,6 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     with open(tmp_stats, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
     os.replace(tmp_stats, stats_path)
-    sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
 
     # Conversation-level aggregation (re-read scored.jsonl for chunked mode)
     try:
@@ -1848,7 +1836,6 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         generate_value_dashboard(output_dir, scored_file="scored.jsonl",
                                  stats_file=PASS2_STATS_FILE,
                                  output_file=PASS2_DASHBOARD_FILE)
-        sync_legacy_aliases(output_dir / PASS2_DASHBOARD_FILE, [PASS2_DASHBOARD_FILE_LEGACY])
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
@@ -2143,11 +2130,8 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         stats_source = tag_stats_path
     else:
         # Auto-discover Pass 1 stats in same directory
-        candidate = find_first_existing(
-            input_path.parent,
-            [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY],
-        )
-        stats_source = str(candidate) if candidate else None
+        candidate = input_path.parent / PASS1_STATS_FILE
+        stats_source = str(candidate) if candidate.exists() else None
 
     if stats_source:
         distributions, total_stats_samples, ts, meta = load_tag_stats_context(stats_source)
@@ -2370,7 +2354,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     with open(tmp_stats, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
     os.replace(tmp_stats, stats_path)
-    sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
 
     # Conversation-level aggregation
     try:
@@ -2387,7 +2370,6 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         generate_value_dashboard(output_dir, scored_file="scored.json",
                                  stats_file=PASS2_STATS_FILE,
                                  output_file=PASS2_DASHBOARD_FILE)
-        sync_legacy_aliases(output_dir / PASS2_DASHBOARD_FILE, [PASS2_DASHBOARD_FILE_LEGACY])
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
@@ -2565,7 +2547,6 @@ def _flush_scoring_file(collector, config, pprint=print):
     with open(tmp_stats, "w", encoding="utf-8") as f:
         json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
     os.replace(tmp_stats, stats_path)
-    sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
 
     # Conversation-level aggregation
     try:
@@ -2582,7 +2563,6 @@ def _flush_scoring_file(collector, config, pprint=print):
                                  stats_file=PASS2_STATS_FILE,
                                  output_file=PASS2_DASHBOARD_FILE,
                                  quiet=True)
-        sync_legacy_aliases(output_dir / PASS2_DASHBOARD_FILE, [PASS2_DASHBOARD_FILE_LEGACY])
     except Exception:
         pass
 
@@ -2648,23 +2628,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
     # Use Pass 1 summary stats for rarity if no explicit stats provided
     if tag_stats_path is None:
-        candidate = find_first_existing(
-            input_dir,
-            [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY],
-        )
-        if candidate:
+        candidate = input_dir / PASS1_SUMMARY_STATS_FILE
+        if candidate.exists():
             tag_stats_path = str(candidate)
         else:
             # Try per-file stats (flat, one-level, or recursive)
-            stats_files = sorted(input_dir.glob("stats*.json"))
+            stats_files = sorted(input_dir.glob("stats_labeling*.json"))
             if not stats_files:
-                stats_files = sorted(input_dir.glob("*/stats*.json"))
+                stats_files = sorted(input_dir.glob("*/stats_labeling*.json"))
             if not stats_files:
-                stats_files = sorted(input_dir.glob("**/stats*.json"))
-            stats_files = [
-                f for f in stats_files
-                if "summary" not in f.name and "value" not in f.name and "scoring" not in f.name
-            ]
+                stats_files = sorted(input_dir.glob("**/stats_labeling*.json"))
             if stats_files:
                 tag_stats_path = str(stats_files[0])
 
@@ -3006,7 +2979,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         summary_path = output_dir / PASS2_SUMMARY_STATS_FILE
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
-        sync_legacy_aliases(summary_path, [PASS2_SUMMARY_STATS_FILE_LEGACY])
 
         # Global conversation-level aggregation across all files
         try:
@@ -3045,10 +3017,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                                      stats_file=PASS2_SUMMARY_STATS_FILE,
                                      output_file=pass2_global_dashboard_filename(dir_name),
                                      quiet=True)
-            sync_legacy_aliases(
-                output_dir / pass2_global_dashboard_filename(dir_name),
-                [pass2_global_dashboard_legacy_filename(dir_name)],
-            )
         except Exception as e:
             print(f"  Warning: global dashboard generation failed: {e}")
 

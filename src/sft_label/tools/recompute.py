@@ -19,23 +19,13 @@ from datetime import datetime
 from sft_label.config import CONFIDENCE_THRESHOLD
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
-    PASS1_STATS_FILE_LEGACY,
     PASS1_SUMMARY_STATS_FILE,
-    PASS1_SUMMARY_STATS_FILE_LEGACY,
     PASS1_DASHBOARD_FILE,
-    PASS1_DASHBOARD_FILE_LEGACY,
     PASS2_STATS_FILE,
-    PASS2_STATS_FILE_LEGACY,
     PASS2_SUMMARY_STATS_FILE,
-    PASS2_SUMMARY_STATS_FILE_LEGACY,
     PASS2_DASHBOARD_FILE,
-    PASS2_DASHBOARD_FILE_LEGACY,
     pass1_global_dashboard_filename,
-    pass1_global_dashboard_legacy_filename,
     pass2_global_dashboard_filename,
-    pass2_global_dashboard_legacy_filename,
-    find_first_existing,
-    sync_legacy_aliases,
 )
 
 
@@ -356,13 +346,13 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
                 raise FileNotFoundError(f"tag stats not found: {p}")
             return p
         if in_path.is_file():
-            return find_first_existing(in_path.parent, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY])
-        summary = find_first_existing(
-            in_path, [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY]
-        )
-        if summary:
+            stats_path = in_path.parent / PASS1_STATS_FILE
+            return stats_path if stats_path.exists() else None
+        summary = in_path / PASS1_SUMMARY_STATS_FILE
+        if summary.exists():
             return summary
-        return find_first_existing(in_path, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY])
+        stats_path = in_path / PASS1_STATS_FILE
+        return stats_path if stats_path.exists() else None
 
     stats_source_path = _resolve_stats_source()
     rarity_mode = resolve_rarity_mode(config)
@@ -591,7 +581,6 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
                 f"{phase}: failed while writing stats: {type(e).__name__}: {e}"
             )
             raise
-        sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
         _log_refresh_rarity(
             f"{phase}: wrote {scored_json.name}, {scored_jsonl.name}, {stats_path.name}"
         )
@@ -623,7 +612,6 @@ def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=
         }
         summary_path = out_root / PASS2_SUMMARY_STATS_FILE
         _write_json(summary_path, summary)
-        sync_legacy_aliases(summary_path, [PASS2_SUMMARY_STATS_FILE_LEGACY])
         written["summary_stats_value"] = str(summary_path)
         written["files_refreshed"] = str(len(all_file_stats))
         _log_refresh_rarity(f"Wrote summary stats: {summary_path}")
@@ -652,7 +640,6 @@ def _recompute_single_file(file_path, pass_num, out_dir):
             stats = recompute_stats_from_labeled(samples)
             stats_path = out_dir / PASS1_STATS_FILE
             _write_json(stats_path, stats)
-            sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
             written["stats"] = str(stats_path)
             print(f"  Pass 1 stats: {stats_path} "
                   f"({stats['success']}/{stats['total_samples']} success)")
@@ -664,7 +651,6 @@ def _recompute_single_file(file_path, pass_num, out_dir):
             stats = recompute_value_stats_from_scored(samples)
             stats_path = out_dir / PASS2_STATS_FILE
             _write_json(stats_path, stats)
-            sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
             written["stats_value"] = str(stats_path)
             print(f"  Pass 2 stats: {stats_path} "
                   f"({stats['total_scored']} scored)")
@@ -721,7 +707,6 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS1_STATS_FILE
                 _write_json(stats_path, stats)
-                sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
                 if not p1_compact:
                     print(f"    → {stats_path} "
                           f"({stats['success']}/{stats['total_samples']} success)")
@@ -739,7 +724,6 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 summary["recomputed_at"] = datetime.now().isoformat()
                 summary_path = out_dir / PASS1_SUMMARY_STATS_FILE
                 _write_json(summary_path, summary)
-                sync_legacy_aliases(summary_path, [PASS1_SUMMARY_STATS_FILE_LEGACY])
                 written["summary_stats"] = str(summary_path)
                 print(f"\n  Summary: {summary_path} "
                       f"({summary.get('success', 0)} total success)")
@@ -768,7 +752,6 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS2_STATS_FILE
                 _write_json(stats_path, stats)
-                sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
                 if not p2_compact:
                     print(f"    → {stats_path} "
                           f"({stats['total_scored']} scored)")
@@ -786,7 +769,6 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 summary["recomputed_at"] = datetime.now().isoformat()
                 summary_path = out_dir / PASS2_SUMMARY_STATS_FILE
                 _write_json(summary_path, summary)
-                sync_legacy_aliases(summary_path, [PASS2_SUMMARY_STATS_FILE_LEGACY])
                 written["summary_stats_value"] = str(summary_path)
                 print(f"\n  Summary: {summary_path} "
                       f"({summary.get('total_scored', 0)} total scored)")
@@ -872,8 +854,8 @@ def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False):
 
 def _find_output_subdirs(run_dir):
     """Find subdirectories containing labeled/scored/stats files."""
-    pass1_stats_names = (PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY)
-    pass2_stats_names = (PASS2_STATS_FILE, PASS2_STATS_FILE_LEGACY)
+    pass1_stats_names = (PASS1_STATS_FILE,)
+    pass2_stats_names = (PASS2_STATS_FILE,)
     subdirs = []
     for child in sorted(run_dir.iterdir()):
         if not child.is_dir():
@@ -905,9 +887,9 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
     generated = []
 
     if pass_num in ("1", "both"):
-        pass1_stats_path = find_first_existing(
-            dir_path, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY]
-        )
+        pass1_stats_path = dir_path / PASS1_STATS_FILE
+        if not pass1_stats_path.exists():
+            pass1_stats_path = None
         if pass1_stats_path:
             try:
                 _log_regenerate_dashboard(
@@ -918,7 +900,6 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
                     stats_file=pass1_stats_path.name,
                     output_file=PASS1_DASHBOARD_FILE,
                 )
-                sync_legacy_aliases(Path(out), [PASS1_DASHBOARD_FILE_LEGACY])
                 generated.append(out)
                 _log_regenerate_dashboard(f"{dir_path}: wrote Pass 1 dashboard {out}")
             except Exception as e:
@@ -927,12 +908,19 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
                     f"{type(e).__name__}: {e}"
                 )
         else:
-            _log_regenerate_dashboard(f"{dir_path}: skipped Pass 1 dashboard (no stats file)")
+            legacy = dir_path / "stats.json"
+            if legacy.exists():
+                _log_regenerate_dashboard(
+                    f"{dir_path}: found legacy stats.json; run "
+                    f"'sft-label optimize-layout --input {dir_path} --apply' first"
+                )
+            else:
+                _log_regenerate_dashboard(f"{dir_path}: skipped Pass 1 dashboard (no stats file)")
 
     if pass_num in ("2", "both"):
-        pass2_stats_path = find_first_existing(
-            dir_path, [PASS2_STATS_FILE, PASS2_STATS_FILE_LEGACY]
-        )
+        pass2_stats_path = dir_path / PASS2_STATS_FILE
+        if not pass2_stats_path.exists():
+            pass2_stats_path = None
         if pass2_stats_path:
             try:
                 _log_regenerate_dashboard(
@@ -945,7 +933,6 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
                     quiet=True,
                 )
                 if out_path:
-                    sync_legacy_aliases(Path(out_path), [PASS2_DASHBOARD_FILE_LEGACY])
                     generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
                     _log_regenerate_dashboard(f"{dir_path}: wrote Pass 2 dashboard {out_path}")
                 else:
@@ -958,7 +945,14 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
                     f"{type(e).__name__}: {e}"
                 )
         else:
-            _log_regenerate_dashboard(f"{dir_path}: skipped Pass 2 dashboard (no stats file)")
+            legacy = dir_path / "stats_value.json"
+            if legacy.exists():
+                _log_regenerate_dashboard(
+                    f"{dir_path}: found legacy stats_value.json; run "
+                    f"'sft-label optimize-layout --input {dir_path} --apply' first"
+                )
+            else:
+                _log_regenerate_dashboard(f"{dir_path}: skipped Pass 2 dashboard (no stats file)")
 
     return generated
 
@@ -968,9 +962,9 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
     generated = []
 
     if pass_num in ("1", "both"):
-        pass1_summary_path = find_first_existing(
-            run_dir, [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY]
-        )
+        pass1_summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+        if not pass1_summary_path.exists():
+            pass1_summary_path = None
         if pass1_summary_path:
             try:
                 _log_regenerate_dashboard(
@@ -979,7 +973,6 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                 out = gen_p1(run_dir, labeled_file=None,
                              stats_file=pass1_summary_path.name,
                              output_file=pass1_global_dashboard_filename(run_dir.name))
-                sync_legacy_aliases(Path(out), [pass1_global_dashboard_legacy_filename(run_dir.name)])
                 generated.append(out)
                 _log_regenerate_dashboard(f"{run_dir}: wrote global Pass 1 dashboard {out}")
             except Exception as e:
@@ -988,12 +981,21 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                     f"{type(e).__name__}: {e}"
                 )
         else:
-            _log_regenerate_dashboard(f"{run_dir}: skipped global Pass 1 dashboard (no summary stats)")
+            legacy = run_dir / "summary_stats.json"
+            if legacy.exists():
+                _log_regenerate_dashboard(
+                    f"{run_dir}: found legacy summary_stats.json; run "
+                    f"'sft-label optimize-layout --input {run_dir} --apply' first"
+                )
+            else:
+                _log_regenerate_dashboard(
+                    f"{run_dir}: skipped global Pass 1 dashboard (no summary stats)"
+                )
 
     if pass_num in ("2", "both"):
-        pass2_summary_path = find_first_existing(
-            run_dir, [PASS2_SUMMARY_STATS_FILE, PASS2_SUMMARY_STATS_FILE_LEGACY]
-        )
+        pass2_summary_path = run_dir / PASS2_SUMMARY_STATS_FILE
+        if not pass2_summary_path.exists():
+            pass2_summary_path = None
         if pass2_summary_path:
             try:
                 _log_regenerate_dashboard(
@@ -1004,7 +1006,6 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                                   output_file=pass2_global_dashboard_filename(run_dir.name),
                                   quiet=True)
                 if out_path:
-                    sync_legacy_aliases(Path(out_path), [pass2_global_dashboard_legacy_filename(run_dir.name)])
                     generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
                     _log_regenerate_dashboard(f"{run_dir}: wrote global Pass 2 dashboard {out_path}")
                 else:
@@ -1017,7 +1018,16 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                     f"{type(e).__name__}: {e}"
                 )
         else:
-            _log_regenerate_dashboard(f"{run_dir}: skipped global Pass 2 dashboard (no summary stats)")
+            legacy = run_dir / "summary_stats_value.json"
+            if legacy.exists():
+                _log_regenerate_dashboard(
+                    f"{run_dir}: found legacy summary_stats_value.json; run "
+                    f"'sft-label optimize-layout --input {run_dir} --apply' first"
+                )
+            else:
+                _log_regenerate_dashboard(
+                    f"{run_dir}: skipped global Pass 2 dashboard (no summary stats)"
+                )
 
     return generated
 

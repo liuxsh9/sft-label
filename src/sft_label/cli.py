@@ -8,6 +8,7 @@ Subcommands:
   sft-label refresh-rarity       — Refresh Pass 2 rarity/value fields (no LLM)
   sft-label semantic-cluster     — Run trajectory SemHash + ANN clustering
   sft-label export-semantic      — Export representative windows from clustering artifacts
+  sft-label optimize-layout      — One-time optimize historical output layout
   sft-label filter               — Filter scored data by value threshold
   sft-label validate             — Validate taxonomy definitions
   sft-label export-review        — Export labeled data to review CSV
@@ -541,6 +542,29 @@ def cmd_export_semantic(args):
     print(f"Exported {count} semantic window rows to {args.output}")
 
 
+def cmd_optimize_layout(args):
+    """One-time optimize historical output file layout."""
+    from sft_label.tools.optimize_layout import (
+        run_optimize_layout,
+        format_optimize_layout_summary,
+    )
+
+    try:
+        summary = run_optimize_layout(
+            input_path=args.input,
+            apply=getattr(args, "apply", False),
+            prune_legacy=getattr(args, "prune_legacy", False),
+            manifest_path=getattr(args, "manifest", None),
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print(format_optimize_layout_summary(summary))
+    if not getattr(args, "apply", False):
+        print("\nDry-run only. Re-run with --apply to execute changes.")
+
+
 def cmd_start(args, parser):
     """Interactive launcher for grouped workflows."""
     from sft_label.launcher import (
@@ -786,6 +810,23 @@ def build_parser():
     export_sem_parser.add_argument("--include-all", action="store_true",
                                    help="Include non-representative rows (default: representatives only)")
 
+    # --- optimize-layout ---
+    optimize_parser = subparsers.add_parser(
+        "optimize-layout",
+        help="One-time optimize historical output layout",
+        description="Normalize legacy output naming/layout in an existing run "
+                    "directory. Default is dry-run; use --apply to execute.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    optimize_parser.add_argument("--input", type=str, required=True,
+                                 help="Run directory root to optimize")
+    optimize_parser.add_argument("--apply", action="store_true",
+                                 help="Apply planned operations (default: dry-run)")
+    optimize_parser.add_argument("--prune-legacy", action="store_true",
+                                 help="Delete legacy alias files when canonical equivalents exist")
+    optimize_parser.add_argument("--manifest", type=str, default=None,
+                                 help="Manifest output path (default: <input>/layout_optimization_manifest.json)")
+
     # --- recompute-stats ---
     recompute_parser = subparsers.add_parser(
         "recompute-stats",
@@ -926,6 +967,8 @@ def dispatch_command(args, parser):
         cmd_semantic_cluster(args)
     elif args.command == "export-semantic":
         cmd_export_semantic(args)
+    elif args.command == "optimize-layout":
+        cmd_optimize_layout(args)
     elif args.command == "filter":
         cmd_filter(args)
     elif args.command == "export-review":

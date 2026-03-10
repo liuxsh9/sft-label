@@ -244,10 +244,12 @@ def test_all_workflows_generate_parseable_argv():
         9: ["run_dir/", "", "", ""],
         # 10. validate
         10: [],
-        # 11. export-semantic
-        11: ["run_dir/", "out.jsonl", "", ""],
-        # 12. export-review
-        12: ["labeled.json", "review.csv", "", "", ""],
+        # 11. optimize-layout
+        11: ["run_dir/", "", "", "", ""],
+        # 12. export-semantic
+        12: ["run_dir/", "out.jsonl", "", ""],
+        # 13. export-review
+        13: ["labeled.json", "review.csv", "", "", ""],
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -323,7 +325,7 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
     io = StubIO(["0"])
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
     assert plan is None
-    assert any("请选择任务编号 [0-12, 默认 1]：" in str(item) for item in io.outputs)
+    assert any("请选择任务编号 [0-13, 默认 1]：" in str(item) for item in io.outputs)
     assert not any("Select workflow number" in str(item) for item in io.outputs)
 
 
@@ -345,3 +347,27 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
     assert plan is not None
     assert any("覆盖本次 LITELLM_BASE/LITELLM_KEY [y/N]：" in str(item) for item in io.outputs)
     assert not any("覆盖本次 LITELLM_BASE / LITELLM_KEY" in str(item) for item in io.outputs)
+
+
+def test_build_optimize_layout_plan():
+    io = StubIO(
+        [
+            "11",          # workflow: optimize-layout
+            "run_dir",     # --input
+            "y",           # --apply
+            "y",           # --prune-legacy
+            "plan.json",   # --manifest
+            "",            # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "optimize-layout",
+        "--input",
+        "run_dir",
+        "--apply",
+        "--prune-legacy",
+        "--manifest",
+        "plan.json",
+    ]

@@ -178,6 +178,12 @@ WORKFLOWS = [
         description="校验 taxonomy 文件与一致性 / Validate taxonomy files and consistency",
         group="维护 / Maintenance",
     ),
+    Workflow(
+        key="optimize-layout",
+        label="优化历史文件布局 / Optimize legacy layout",
+        description="统一旧版命名并可选清理 legacy 别名 / Normalize old naming and optionally prune legacy aliases",
+        group="维护 / Maintenance",
+    ),
 ]
 
 
@@ -556,6 +562,8 @@ def build_launch_plan(
                 return _build_export_review_plan(input_fn, output_fn)
             if wf.key == "validate":
                 return LaunchPlan(argv=["validate"])
+            if wf.key == "optimize-layout":
+                return _build_optimize_layout_plan(input_fn, output_fn)
             raise ValueError(f"Unknown workflow key: {wf.key}")
         except BackRequested:
             if input_fn is interactive_input:
@@ -1343,6 +1351,26 @@ def _build_refresh_rarity_plan(input_fn: InputFn, output_fn: OutputFn) -> Launch
     output_dir = _ask_optional_text(input_fn, "输出目录覆盖（可选） / Output directory override (optional)")
     if output_dir:
         argv.extend(["--output", output_dir])
+
+    argv.extend(_ask_extra_flags(input_fn))
+    return LaunchPlan(argv=argv)
+
+
+def _build_optimize_layout_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+    argv = ["optimize-layout"]
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(input_fn, "运行目录或结果目录 / Run dir or output dir")])
+
+    _section(output_fn, "执行模式 / Execution mode")
+    if _ask_yes_no(input_fn, "直接应用变更（否则仅 dry-run） / Apply changes now (otherwise dry-run only)", default=False):
+        argv.append("--apply")
+
+    if _ask_yes_no(input_fn, "清理 legacy 别名文件 / Prune legacy alias files", default=False):
+        argv.append("--prune-legacy")
+
+    manifest = _ask_optional_text(input_fn, "manifest 路径（可选） / Manifest path (optional)")
+    if manifest:
+        argv.extend(["--manifest", manifest])
 
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)

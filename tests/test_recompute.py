@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from sft_label.artifacts import PASS1_STATS_FILE
 from sft_label.tools.recompute import (
     load_samples,
     discover_labeled_files,
@@ -550,7 +551,7 @@ class TestRegenerateDashboard:
         """Create a directory with stats files for dashboard generation."""
         samples = [_make_labeled_sample(f"s{i}") for i in range(5)]
         stats = recompute_stats_from_labeled(samples)
-        (tmp_path / "stats.json").write_text(json.dumps(stats))
+        (tmp_path / PASS1_STATS_FILE).write_text(json.dumps(stats))
         (tmp_path / "labeled.json").write_text(json.dumps(samples))
         return tmp_path
 
@@ -567,7 +568,7 @@ class TestRegenerateDashboard:
         assert len(generated) >= 1
         assert "Starting dashboard regeneration" in out
         assert "Detected single-directory mode" in out
-        assert "generating Pass 1 dashboard from stats.json" in out
+        assert f"generating Pass 1 dashboard from {PASS1_STATS_FILE}" in out
         assert "wrote Pass 1 dashboard" in out
         assert "Completed dashboard regeneration" in out
 
@@ -587,7 +588,7 @@ class TestRegenerateDashboard:
         sub.mkdir(parents=True)
         samples = [_make_labeled_sample(f"s{i}") for i in range(3)]
         stats = recompute_stats_from_labeled(samples)
-        (sub / "stats.json").write_text(json.dumps(stats))
+        (sub / PASS1_STATS_FILE).write_text(json.dumps(stats))
         (sub / "labeled.json").write_text(json.dumps(samples))
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")

@@ -17,11 +17,8 @@ import pytest
 
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
-    PASS1_STATS_FILE_LEGACY,
     PASS2_STATS_FILE,
-    PASS2_STATS_FILE_LEGACY,
     PASS2_DASHBOARD_FILE,
-    PASS2_DASHBOARD_FILE_LEGACY,
 )
 from sft_label.config import PipelineConfig
 
@@ -249,7 +246,6 @@ class TestE2ESingleFile:
         assert (run_dir / "labeled.json").exists()
         assert (run_dir / "labeled.jsonl").exists()
         assert (run_dir / PASS1_STATS_FILE).exists()
-        assert (run_dir / PASS1_STATS_FILE_LEGACY).exists()
         assert (run_dir / "monitor.jsonl").exists()
 
         # ── Verify labeled data ──
@@ -392,11 +388,9 @@ class TestE2EScoring:
 
         # ── Verify stats ──
         assert (tmp_path / PASS2_STATS_FILE).exists()
-        assert (tmp_path / PASS2_STATS_FILE_LEGACY).exists()
 
         # ── Verify dashboard ──
         assert (tmp_path / PASS2_DASHBOARD_FILE).exists()
-        assert (tmp_path / PASS2_DASHBOARD_FILE_LEGACY).exists()
 
         # ── Verify terminal output ──
         captured = capsys.readouterr()

@@ -14,12 +14,8 @@ from pathlib import Path
 
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
-    PASS1_STATS_FILE_LEGACY,
     PASS1_SUMMARY_STATS_FILE,
-    PASS1_SUMMARY_STATS_FILE_LEGACY,
     PASS2_STATS_FILE,
-    PASS2_STATS_FILE_LEGACY,
-    find_first_existing,
 )
 
 
@@ -83,9 +79,6 @@ def load_value_run(run_dir, scored_file="scored.json", stats_file=PASS2_STATS_FI
 
     stats = {}
     stats_path = run_dir / stats_file
-    if not stats_path.exists() and stats_file == PASS2_STATS_FILE:
-        legacy = run_dir / PASS2_STATS_FILE_LEGACY
-        stats_path = legacy if legacy.exists() else stats_path
     if stats_path.exists():
         with open(stats_path, encoding="utf-8") as f:
             stats = json.load(f)
@@ -258,17 +251,13 @@ def _load_pass1_data(run_dir, is_global):
         from sft_label.tools.visualize_labels import load_run, compute_viz_data
 
         if is_global:
-            p1_stats_path = find_first_existing(
-                run_dir, [PASS1_SUMMARY_STATS_FILE, PASS1_SUMMARY_STATS_FILE_LEGACY]
-            )
+            p1_stats_path = run_dir / PASS1_SUMMARY_STATS_FILE
             p1_labeled_file = None
         else:
-            p1_stats_path = find_first_existing(
-                run_dir, [PASS1_STATS_FILE, PASS1_STATS_FILE_LEGACY]
-            )
+            p1_stats_path = run_dir / PASS1_STATS_FILE
             p1_labeled_file = "labeled.json"
 
-        if p1_stats_path is None:
+        if not p1_stats_path.exists():
             return None
 
         p1_samples, p1_stats = load_run(

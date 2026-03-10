@@ -15,9 +15,7 @@ from pathlib import Path
 
 from sft_label.artifacts import (
     PASS2_STATS_FILE,
-    PASS2_STATS_FILE_LEGACY,
     PASS2_DASHBOARD_FILE,
-    PASS2_DASHBOARD_FILE_LEGACY,
 )
 from sft_label.preprocessing import (
     detect_thinking_mode,
@@ -1697,10 +1695,8 @@ class TestIntegrationScoring:
         assert (tmp_path / "scored.json").exists()
         assert (tmp_path / "scored.jsonl").exists()
         assert (tmp_path / PASS2_STATS_FILE).exists()
-        assert (tmp_path / PASS2_STATS_FILE_LEGACY).exists()
         assert (tmp_path / "monitor_value.jsonl").exists()
         assert (tmp_path / PASS2_DASHBOARD_FILE).exists()
-        assert (tmp_path / PASS2_DASHBOARD_FILE_LEGACY).exists()
 
         # Verify scored.json structure
         with open(tmp_path / "scored.json", encoding="utf-8") as f:
