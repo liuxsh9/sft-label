@@ -93,6 +93,24 @@ def format_progress_info(ok_count, fail_count=0, label=None, request_stats=None)
     return " • ".join(parts)
 
 
+def parse_run_progress(info):
+    """Parse 'run <done>/<total> ...' and return (done, total) if available."""
+    if not info or not info.startswith("run "):
+        return None
+    token = info.split(" ", 2)[1] if " " in info else ""
+    if "/" not in token:
+        return None
+    done_s, total_s = token.split("/", 1)
+    try:
+        done = max(int(done_s), 0)
+        total = max(int(total_s), 0)
+    except ValueError:
+        return None
+    if total <= 0:
+        return None
+    return done, total
+
+
 # ─────────────────────────────────────────────────────────
 # Directory discovery & checkpoint
 # ─────────────────────────────────────────────────────────
@@ -2370,15 +2388,22 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             if eta_tracker:
                 eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
                 if progress and llm_task is not None:
-                    llm_info = eta_tracker.info_line()
-                    if global_llm_info:
-                        llm_info = f"{llm_info} • {global_llm_info}"
-                    progress.update(
-                        llm_task,
-                        total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-                        completed=eta_tracker.calls_done,
-                        info=llm_info,
-                    )
+                    global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
+                    if global_counts:
+                        g_done, g_total = global_counts
+                        progress.update(
+                            llm_task,
+                            total=max(g_total, 1),
+                            completed=min(g_done, g_total),
+                            info=global_llm_info,
+                        )
+                    else:
+                        progress.update(
+                            llm_task,
+                            total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                            completed=eta_tracker.calls_done,
+                            info=eta_tracker.info_line(),
+                        )
 
             # Check if this file is fully done (compare against label_count, not total)
             if c.done >= c.label_count and not c.completed:

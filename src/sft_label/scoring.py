@@ -48,6 +48,7 @@ from sft_label.pipeline import (
     AsyncRateLimiter,
     RuntimeEtaEstimator,
     format_progress_info,
+    parse_run_progress,
 )
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
@@ -2924,15 +2925,22 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                                 global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
                             progress.update(sample_task, advance=1, info=_info)
                             eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
-                            llm_info = eta_tracker.info_line()
-                            if global_llm_info:
-                                llm_info = f"{llm_info} • {global_llm_info}"
-                            progress.update(
-                                llm_task,
-                                total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-                                completed=eta_tracker.calls_done,
-                                info=llm_info,
-                            )
+                            global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
+                            if global_counts:
+                                g_done, g_total = global_counts
+                                progress.update(
+                                    llm_task,
+                                    total=max(g_total, 1),
+                                    completed=min(g_done, g_total),
+                                    info=global_llm_info,
+                                )
+                            else:
+                                progress.update(
+                                    llm_task,
+                                    total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                                    completed=eta_tracker.calls_done,
+                                    info=eta_tracker.info_line(),
+                                )
 
                             # Check if file is fully done
                             if c.done >= c.total and not c.completed:

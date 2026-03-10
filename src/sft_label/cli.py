@@ -114,7 +114,7 @@ class _CombinedLLMProgressTracker:
         else:
             self._smoothed_cps = 0.2 * instant_cps + 0.8 * self._smoothed_cps
 
-        return self.progress_line()
+        return self.eta_line()
 
     def eta_seconds(self):
         if self._smoothed_cps <= 0:
@@ -122,13 +122,13 @@ class _CombinedLLMProgressTracker:
         remaining = max(self.planned_total_calls - self.calls_done, 0)
         return remaining / self._smoothed_cps
 
-    def summary_line(self) -> str:
+    def eta_line(self) -> str:
         cps = f"{self._smoothed_cps:.1f}/s" if self._smoothed_cps > 0 else "warming"
         eta = _format_eta(self.eta_seconds())
-        return (
-            f"{self.progress_line()} eta {eta} rate {cps} "
-            f"p1={self.pass1_calls} p2={self.pass2_calls}"
-        )
+        return f"{self.progress_line()} eta {eta} rate {cps}"
+
+    def summary_line(self) -> str:
+        return f"{self.eta_line()} p1={self.pass1_calls} p2={self.pass2_calls}"
 
     def progress_line(self) -> str:
         pct = min(self.calls_done / max(self.planned_total_calls, 1) * 100, 100.0)
