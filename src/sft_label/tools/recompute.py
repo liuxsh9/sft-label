@@ -158,6 +158,14 @@ def _relative_file_label(path, root):
         return path.name
 
 
+def _recompute_progress_interval(total_files):
+    """Choose logging cadence for recompute-stats in large directories."""
+    if total_files <= 20:
+        return 1
+    # Keep output roughly within ~20 progress lines per pass.
+    return min(100, max(10, total_files // 20))
+
+
 # ─── Pass 1: Recompute stats from labeled output ────────
 
 def _synthesize_monitor(sample):
@@ -695,8 +703,14 @@ def _recompute_directory(input_dir, pass_num, out_dir):
         labeled_files = discover_labeled_files(input_dir)
         if labeled_files:
             print(f"Found {len(labeled_files)} labeled file(s)")
-            for lf in labeled_files:
-                print(f"\n  Processing: {lf.name}")
+            p1_interval = _recompute_progress_interval(len(labeled_files))
+            p1_compact = p1_interval > 1
+            if p1_compact:
+                print(f"  Pass 1 compact mode: log every {p1_interval} files")
+            for idx, lf in enumerate(labeled_files, start=1):
+                rel_label = _relative_file_label(lf, input_dir)
+                if not p1_compact:
+                    print(f"\n  Processing: {rel_label}")
                 samples = load_samples(lf)
                 stats = recompute_stats_from_labeled(samples)
                 stats["file"] = _relative_file_label(lf, input_dir)
@@ -708,8 +722,14 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 stats_path = file_out_dir / PASS1_STATS_FILE
                 _write_json(stats_path, stats)
                 sync_legacy_aliases(stats_path, [PASS1_STATS_FILE_LEGACY])
-                print(f"    → {stats_path} "
-                      f"({stats['success']}/{stats['total_samples']} success)")
+                if not p1_compact:
+                    print(f"    → {stats_path} "
+                          f"({stats['success']}/{stats['total_samples']} success)")
+                elif idx == 1 or idx == len(labeled_files) or idx % p1_interval == 0:
+                    print(
+                        f"  Pass 1 progress {idx}/{len(labeled_files)} | "
+                        f"{rel_label} | {stats['success']}/{stats['total_samples']} success"
+                    )
                 all_pass1_stats.append(stats)
 
             # Merge into summary
@@ -730,8 +750,14 @@ def _recompute_directory(input_dir, pass_num, out_dir):
         if scored_files:
             print(f"\nFound {len(scored_files)} scored file(s)")
             all_scored_samples = []
-            for sf in scored_files:
-                print(f"\n  Processing: {sf.name}")
+            p2_interval = _recompute_progress_interval(len(scored_files))
+            p2_compact = p2_interval > 1
+            if p2_compact:
+                print(f"  Pass 2 compact mode: log every {p2_interval} files")
+            for idx, sf in enumerate(scored_files, start=1):
+                rel_label = _relative_file_label(sf, input_dir)
+                if not p2_compact:
+                    print(f"\n  Processing: {rel_label}")
                 samples = load_samples(sf)
                 all_scored_samples.extend(samples)
                 stats = recompute_value_stats_from_scored(samples)
@@ -743,8 +769,14 @@ def _recompute_directory(input_dir, pass_num, out_dir):
                 stats_path = file_out_dir / PASS2_STATS_FILE
                 _write_json(stats_path, stats)
                 sync_legacy_aliases(stats_path, [PASS2_STATS_FILE_LEGACY])
-                print(f"    → {stats_path} "
-                      f"({stats['total_scored']} scored)")
+                if not p2_compact:
+                    print(f"    → {stats_path} "
+                          f"({stats['total_scored']} scored)")
+                elif idx == 1 or idx == len(scored_files) or idx % p2_interval == 0:
+                    print(
+                        f"  Pass 2 progress {idx}/{len(scored_files)} | "
+                        f"{rel_label} | {stats['total_scored']} scored"
+                    )
                 all_pass2_stats.append(stats)
 
             # Merge into summary

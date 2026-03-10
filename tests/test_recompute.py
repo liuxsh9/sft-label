@@ -374,6 +374,20 @@ class TestRunRecompute:
         assert "summary_stats_value" in written
         assert "conversation_scores" in written
 
+    def test_directory_scored_compact_progress_output(self, tmp_path, capsys):
+        for i in range(35):
+            sub = tmp_path / "code" / f"part{i:02d}"
+            sub.mkdir(parents=True)
+            samples = [_make_scored_sample(f"s{i}-0"), _make_scored_sample(f"s{i}-1")]
+            (sub / "scored.json").write_text(json.dumps(samples))
+
+        run_recompute(str(tmp_path), pass_num="2")
+        out = capsys.readouterr().out
+        assert "Pass 2 compact mode: log every" in out
+        assert "Pass 2 progress" in out
+        # Compact mode should avoid per-file verbose lines.
+        assert "  Processing:" not in out
+
     def test_custom_output_dir(self, tmp_path):
         samples = [_make_labeled_sample("s0")]
         input_path = tmp_path / "labeled.json"
