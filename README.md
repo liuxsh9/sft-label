@@ -336,6 +336,7 @@ Multi-condition sample selection with AND logic between criteria, OR within tag 
 | Exclude inherited | `--exclude-inherited` | Drops sparse-sampled inherited labels |
 | Source verification | `--verify-source` | `--verify-source original.json` |
 | Output format | `--format` | `scored` (default) or `training` (stripped) |
+| Preserve structure | `--preserve-structure` | Directory mode: mirror folder structure + per-file format (skip empty files) |
 
 Conversation-level criteria (multi-turn):
 

@@ -997,7 +997,7 @@ def build_parser():
     filter_parser.add_argument("--no-keep-first-last", action="store_true",
                                 help="Allow pruning first/last turns in conversations")
     filter_parser.add_argument("--preserve-structure", action="store_true",
-                                help="Directory input only: mirror input folder structure and file count")
+                                help="Directory input only: mirror input folder structure and per-file format (skip empty output files)")
 
     return parser
 

@@ -327,13 +327,28 @@ def filter_samples(samples, threshold=None, include_unscored=False, config=None)
 
 # ── File discovery and loading ──
 
-def _find_scored_files(input_path: Path):
+def _is_under_path(path: Path, root: Path) -> bool:
+    """Return True when path is root or inside root."""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _find_scored_files(input_path: Path, exclude_paths=None):
     """Find scored JSON/JSONL files from a file or directory path."""
+    exclude_paths = [Path(p) for p in (exclude_paths or [])]
+
     if input_path.is_file():
+        if any(_is_under_path(input_path, p) for p in exclude_paths):
+            return []
         return [input_path]
 
     if input_path.is_dir():
         files = sorted(set(input_path.rglob("scored*.json")) | set(input_path.rglob("scored*.jsonl")))
+        if exclude_paths:
+            files = [f for f in files if not any(_is_under_path(f, p) for p in exclude_paths)]
         # Deduplicate: when both .json and .jsonl exist for the same stem
         # in the same directory, prefer .jsonl for streaming scalability.
         seen_stems = {}
@@ -742,7 +757,8 @@ def _collect_filtered_samples(scored_files, config, use_conv, conv_lookup, stats
 
 
 def _write_json_array(samples, json_path):
-    """Write samples as JSON array."""
+    """Write samples as JSON array and return the number of written records."""
+    n = 0
     with open(json_path, "w", encoding="utf-8") as f:
         f.write("[\n")
         first = True
@@ -751,15 +767,20 @@ def _write_json_array(samples, json_path):
                 f.write(",\n")
             f.write(json.dumps(s, ensure_ascii=False))
             first = False
+            n += 1
         f.write("\n]\n")
+    return n
 
 
 def _write_jsonl(samples, jsonl_path, convert_training=False):
-    """Write samples as JSONL."""
+    """Write samples as JSONL and return the number of written records."""
+    n = 0
     with open(jsonl_path, "w", encoding="utf-8") as f:
         for s in samples:
             item = _convert_to_training_format(s) if convert_training else s
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            n += 1
+    return n
 
 
 def _write_outputs(retained_samples, output_path, config):
@@ -814,7 +835,7 @@ def _mirror_output_path(root_output, input_root, scored_file, config):
 
 
 def _run_filter_preserve_structure(input_path, scored_files, output_path, config, use_conv, conv_lookup):
-    """Directory mode: mirror input folder structure and file count."""
+    """Directory mode: mirror input folder structure and per-file format."""
     suffix = _build_suffix(config)
     if output_path is None:
         output_root = input_path / f"filtered-{suffix}"
@@ -859,17 +880,28 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
             parse_errors += file_scan_stats["parse_errors"]
             conversation_records_missing += file_scan_stats["conversation_records_missing"]
 
+            if not file_retained:
+                continue
+
             if config.output_format == "training" or out_file.suffix == ".jsonl":
-                _write_jsonl(file_retained, out_file, convert_training=(config.output_format == "training"))
+                _write_jsonl(
+                    file_retained,
+                    out_file,
+                    convert_training=(config.output_format == "training"),
+                )
             else:
                 _write_json_array(file_retained, out_file)
         else:
             file_stats = _init_stream_stats()
             stream = _iter_filtered_samples([scored_file], config, use_conv, conv_lookup, file_stats)
             if config.output_format == "training" or out_file.suffix == ".jsonl":
-                _write_jsonl(stream, out_file, convert_training=(config.output_format == "training"))
+                n_written = _write_jsonl(
+                    stream,
+                    out_file,
+                    convert_training=(config.output_format == "training"),
+                )
             else:
-                _write_json_array(stream, out_file)
+                n_written = _write_json_array(stream, out_file)
             total += file_stats["total"]
             retained += file_stats["retained"]
             value_sum += file_stats["value_sum"]
@@ -879,6 +911,9 @@ def _run_filter_preserve_structure(input_path, scored_files, output_path, config
             verify_no_meta += file_stats["verify_no_meta"]
             parse_errors += file_stats["parse_errors"]
             conversation_records_missing += file_stats["conversation_records_missing"]
+            if n_written == 0:
+                out_file.unlink(missing_ok=True)
+                continue
 
         files_written += 1
         output_files.append(str(out_file))
@@ -933,7 +968,15 @@ def run_filter(input_path, threshold=None, output_path=None,
             include_unscored=include_unscored,
         )
 
-    scored_files = _find_scored_files(input_path)
+    output_path_obj = Path(output_path) if output_path is not None else None
+    if output_path_obj is None and config.preserve_structure and input_path.is_dir():
+        output_path_obj = input_path / f"filtered-{_build_suffix(config)}"
+
+    exclude_paths = []
+    if input_path.is_dir() and output_path_obj is not None:
+        exclude_paths.append(output_path_obj)
+
+    scored_files = _find_scored_files(input_path, exclude_paths=exclude_paths)
 
     if not scored_files:
         raise FileNotFoundError(f"No scored files found in {input_path}")
@@ -957,9 +1000,9 @@ def run_filter(input_path, threshold=None, output_path=None,
         return summary
 
     # Compute output path
-    if output_path is None:
-        output_path = _generate_output_name(config, input_path)
-    output_path = Path(output_path)
+    if output_path_obj is None:
+        output_path_obj = _generate_output_name(config, input_path)
+    output_path = Path(output_path_obj)
 
     if _has_turn_criteria(config):
         stream_stats = _init_stream_stats()

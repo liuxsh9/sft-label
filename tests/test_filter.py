@@ -539,6 +539,16 @@ class TestFindScoredFiles:
         files = _find_scored_files(tmp_path)
         assert files == [target]
 
+    def test_excludes_paths(self, tmp_path):
+        keep = tmp_path / "scored.json"
+        keep.touch()
+        excluded_root = tmp_path / "filtered-v6"
+        excluded_root.mkdir()
+        (excluded_root / "scored.json").touch()
+
+        files = _find_scored_files(tmp_path, exclude_paths=[excluded_root])
+        assert files == [keep]
+
 
 # ── Source verification ──
 
@@ -1070,6 +1080,36 @@ class TestPreserveStructure:
         assert "id" in record
         assert "conversations" in record
         assert "labels" not in record
+
+    def test_preserve_structure_skips_empty_output_files(self, tmp_path):
+        (tmp_path / "scored.json").write_text(json.dumps([_full_sample(8.0)]))
+        sub = tmp_path / "nested"
+        sub.mkdir(parents=True)
+        (sub / "scored_low.json").write_text(json.dumps([_full_sample(3.0)]))
+
+        out_root = tmp_path / "filtered_struct"
+        config = FilterConfig(value_min=6.0, preserve_structure=True, output_format="scored")
+        summary = run_filter(str(tmp_path), output_path=str(out_root), config=config)
+
+        assert summary["files_written"] == 1
+        assert len(summary["output_files"]) == 1
+        assert (out_root / "scored.json").exists()
+        assert not (out_root / "nested" / "scored_low.json").exists()
+
+    def test_preserve_structure_rerun_does_not_reingest_output_root(self, tmp_path):
+        (tmp_path / "scored.json").write_text(json.dumps([_full_sample(8.0), _full_sample(3.0)]))
+        config = FilterConfig(value_min=6.0, preserve_structure=True, output_format="scored")
+
+        summary_first = run_filter(str(tmp_path), config=config)
+        summary_second = run_filter(str(tmp_path), config=config)
+
+        assert summary_first["total"] == 2
+        assert summary_second["total"] == 2
+        assert summary_second["files_written"] == 1
+
+        out_root = Path(summary_first["output_root"])
+        assert (out_root / "scored.json").exists()
+        assert not (out_root / out_root.name / "scored.json").exists()
 
 
 def _load_retained(tmp_path):
