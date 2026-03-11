@@ -4,6 +4,8 @@ import json
 import pytest
 from pathlib import Path
 
+from sft_label.inline_pass1 import merge_pass1_results
+from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
 from sft_label.tools.filter_value import (
     filter_samples, run_filter, matches_filter, FilterConfig,
     _find_scored_files,
@@ -38,6 +40,89 @@ def _full_sample(score, labels=None, metadata=None, value_extra=None):
 def _unscored():
     """Create a sample without value data."""
     return {"id": "unscored-1", "messages": []}
+
+
+def _inline_full_labels(intent="build"):
+    return {
+        "intent": intent,
+        "language": ["python"],
+        "domain": ["web-backend"],
+        "task": ["feature-implementation"],
+        "difficulty": "intermediate",
+        "concept": ["algorithms"],
+        "agentic": [],
+        "constraint": [],
+        "context": "snippet",
+        "confidence": {"intent": 0.9, "language": 0.9, "difficulty": 0.9},
+        "unmapped": [],
+    }
+
+
+def _inline_monitor():
+    return {
+        "sample_id": "sample-1",
+        "status": "success",
+        "llm_calls": 2,
+        "total_prompt_tokens": 12,
+        "total_completion_tokens": 8,
+        "validation_issues": [],
+        "consistency_warnings": [],
+        "low_confidence_dims": [],
+        "arbitrated": False,
+        "sample_attempt": 0,
+        "elapsed_seconds": 0.5,
+    }
+
+
+def _inline_value(score):
+    return {
+        "value_score": score,
+        "selection_score": score + 0.5,
+        "intra_class_rank": score,
+        "complexity": {"overall": 6},
+        "quality": {"overall": 7, "correctness": 7},
+        "reasoning": {"overall": 6},
+        "rarity": {"score": 5.0},
+        "thinking_mode": "fast",
+        "flags": [],
+        "confidence": 0.85,
+    }
+
+
+def _inline_rows_for_file(source_file: Path, rows, labels_per_row, values_per_row=None, conversations=None):
+    merged_rows = []
+    for row_number, (row, row_labels) in enumerate(zip(rows, labels_per_row), start=1):
+        bundle = build_row_sample_bundle(row, source_file, row_number)
+        samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+        monitors = [_inline_monitor() if labels else None for labels in row_labels]
+        merged = merge_pass1_results(
+            [bundle],
+            samples,
+            row_labels,
+            monitors,
+            sample_to_bundle,
+            source_file=source_file,
+        )
+        merged_rows.extend(merged.rows)
+
+    if values_per_row:
+        for row, row_values in zip(merged_rows, values_per_row):
+            turns = row["extra_info"]["unique_info"]["data_label"]["turns"]
+            for turn, value in zip(turns, row_values):
+                turn["value"] = value
+
+    if conversations:
+        for row, conversation in zip(merged_rows, conversations):
+            row["extra_info"]["unique_info"]["data_label"]["conversation"] = conversation
+
+    return merged_rows
+
+
+def _write_jsonl(path: Path, rows) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 # ── filter_samples (backward compat) ──
@@ -308,6 +393,158 @@ class TestRunFilter:
         summary = run_filter(str(input_file), threshold=5.0)
         assert summary["total"] == 0
         assert summary["retained"] == 0
+
+    def test_inline_file_input(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "train.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-inline",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[_inline_value(5.0), _inline_value(8.0)]],
+        )
+        _write_jsonl(source_file, rows)
+
+        summary = run_filter(str(source_file), threshold=6.0)
+        assert summary["total"] == 2
+        assert summary["retained"] == 1
+
+        output = Path(summary["output_json"])
+        assert output.exists()
+        retained = json.loads(output.read_text())
+        assert len(retained) == 1
+        assert retained[0]["value"]["value_score"] == 8.0
+
+    def test_inline_file_uses_embedded_conversation_scores(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "multi.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-inline",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[_inline_value(6.0), _inline_value(7.0)]],
+            conversations=[{
+                "conversation_id": "conv-inline",
+                "conversation_key": f"{source_file}::conv-inline",
+                "turn_count": 2,
+                "conv_value": 8.5,
+                "conv_selection": 8.0,
+                "peak_complexity": 7.0,
+            }],
+        )
+        _write_jsonl(source_file, rows)
+
+        summary = run_filter(
+            str(source_file),
+            config=FilterConfig(conv_value_min=8.0),
+        )
+        assert summary["retained"] == 2
+        assert summary["conversation_scores"]["records_loaded"] == 1
+
+    def test_inline_directory_preserve_structure(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        file_a = run_root / "dataset" / "code" / "a.jsonl"
+        file_b = run_root / "dataset" / "multi" / "b.jsonl"
+
+        rows_a = _inline_rows_for_file(
+            file_a,
+            [{
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": "qa"},
+                    {"role": "assistant", "content": "aa"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value(8.0)]],
+        )
+        rows_b = _inline_rows_for_file(
+            file_b,
+            [{
+                "id": "conv-b",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("debug"), _inline_full_labels("modify")]],
+            [[_inline_value(4.0), _inline_value(9.0)]],
+        )
+        _write_jsonl(file_a, rows_a)
+        _write_jsonl(file_b, rows_b)
+
+        summary = run_filter(
+            str(run_root),
+            config=FilterConfig(value_min=6.0, preserve_structure=True),
+        )
+
+        assert summary["retained"] == 2
+        output_root = Path(summary["output_root"])
+        assert (output_root / "dataset" / "code" / "a.jsonl").exists()
+        assert (output_root / "dataset" / "multi" / "b.jsonl").exists()
+
+    def test_inline_preserve_structure_turn_pruning_removes_stale_output_files(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "code" / "a.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": "qa"},
+                    {"role": "assistant", "content": "aa"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value(8.0)]],
+        )
+        _write_jsonl(source_file, rows)
+
+        out_root = tmp_path / "filtered_inline"
+        summary_first = run_filter(
+            str(run_root),
+            output_path=str(out_root),
+            config=FilterConfig(
+                value_min=1.0,
+                turn_value_min=4.0,
+                preserve_structure=True,
+                output_format="scored",
+            ),
+        )
+        out_file = out_root / "dataset" / "code" / "a.jsonl"
+        assert summary_first["files_written"] == 1
+        assert out_file.exists()
+
+        summary_second = run_filter(
+            str(run_root),
+            output_path=str(out_root),
+            config=FilterConfig(
+                value_min=1.0,
+                turn_value_min=10.0,
+                preserve_structure=True,
+                output_format="scored",
+            ),
+        )
+        assert summary_second["files_written"] == 0
+        assert not out_file.exists()
 
 
 # ── Directory mode (complex scenarios) ──
@@ -1110,6 +1347,36 @@ class TestPreserveStructure:
         out_root = Path(summary_first["output_root"])
         assert (out_root / "scored.json").exists()
         assert not (out_root / out_root.name / "scored.json").exists()
+
+    def test_preserve_structure_turn_pruning_removes_stale_output_files(self, tmp_path):
+        (tmp_path / "scored.json").write_text(json.dumps([_full_sample(8.0)]))
+        out_root = tmp_path / "filtered_struct"
+
+        summary_first = run_filter(
+            str(tmp_path),
+            output_path=str(out_root),
+            config=FilterConfig(
+                value_min=1.0,
+                turn_value_min=4.0,
+                preserve_structure=True,
+                output_format="scored",
+            ),
+        )
+        assert summary_first["files_written"] == 1
+        assert (out_root / "scored.json").exists()
+
+        summary_second = run_filter(
+            str(tmp_path),
+            output_path=str(out_root),
+            config=FilterConfig(
+                value_min=1.0,
+                turn_value_min=10.0,
+                preserve_structure=True,
+                output_format="scored",
+            ),
+        )
+        assert summary_second["files_written"] == 0
+        assert not (out_root / "scored.json").exists()
 
 
 def _load_retained(tmp_path):

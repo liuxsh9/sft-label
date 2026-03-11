@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from sft_label.artifacts import PASS1_STATS_FILE
+from sft_label.inline_pass1 import merge_pass1_results
+from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
 from sft_label.tools.recompute import (
     load_samples,
     discover_labeled_files,
@@ -105,6 +107,90 @@ def _make_multiturn_scored_samples(source_id, n_turns=3):
         }
         samples.append(s)
     return samples
+
+
+def _inline_full_labels(intent: str = "build") -> dict:
+    return {
+        "intent": intent,
+        "language": ["python"],
+        "domain": ["web-backend"],
+        "task": ["feature-implementation"],
+        "difficulty": "intermediate",
+        "concept": ["algorithms"],
+        "agentic": [],
+        "constraint": [],
+        "context": "snippet",
+        "confidence": {"intent": 0.9, "language": 0.9, "difficulty": 0.9},
+        "unmapped": [],
+    }
+
+
+def _inline_monitor() -> dict:
+    return {
+        "sample_id": "sample-1",
+        "status": "success",
+        "llm_calls": 2,
+        "total_prompt_tokens": 12,
+        "total_completion_tokens": 8,
+        "validation_issues": [],
+        "consistency_warnings": [],
+        "low_confidence_dims": [],
+        "arbitrated": False,
+        "sample_attempt": 0,
+        "elapsed_seconds": 0.5,
+    }
+
+
+def _inline_value(sample_id: str, rarity_score: float = 5.0) -> dict:
+    return {
+        "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+        "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+        "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+        "rarity": {"score": rarity_score},
+        "flags": [],
+        "thinking_mode": "fast",
+        "value_score": 6.5 if sample_id.endswith("2") else 6.0,
+        "selection_score": 6.2 if sample_id.endswith("2") else 5.8,
+        "intra_class_rank": 6.0,
+        "confidence": 0.85,
+    }
+
+
+def _inline_rows_for_file(
+    source_file: Path,
+    rows: list[dict],
+    labels_per_row: list[list[dict]],
+    values_per_row: list[list[dict]] | None = None,
+) -> list[dict]:
+    merged_rows = []
+    for row_number, (row, row_labels) in enumerate(zip(rows, labels_per_row), start=1):
+        bundle = build_row_sample_bundle(row, source_file, row_number)
+        samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+        monitors = [_inline_monitor() if labels else None for labels in row_labels]
+        merged = merge_pass1_results(
+            [bundle],
+            samples,
+            row_labels,
+            monitors,
+            sample_to_bundle,
+            source_file=source_file,
+        )
+        merged_rows.extend(merged.rows)
+
+    if values_per_row:
+        for row, row_values in zip(merged_rows, values_per_row):
+            turns = row["extra_info"]["unique_info"]["data_label"]["turns"]
+            for turn, value in zip(turns, row_values):
+                turn["value"] = value
+
+    return merged_rows
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 # ─── Test load_samples ───────────────────────────────────
@@ -416,6 +502,114 @@ class TestRunRecompute:
         with pytest.raises(FileNotFoundError):
             run_recompute("/nonexistent/path")
 
+    def test_inline_single_file_writes_meta_artifacts(self, tmp_path):
+        run_root = tmp_path / "train_labeled_20260311_120000"
+        source_file = run_root / "train" / "train.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-inline",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-inline_t1"), _inline_value("conv-inline_t2")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        written = run_recompute(str(source_file), pass_num="both")
+        artifact_dir = run_root / "meta_label_data" / "files" / "train"
+
+        assert Path(written["stats"]).is_file()
+        assert Path(written["stats_value"]).is_file()
+        assert (artifact_dir / "conversation_scores.json").exists()
+        assert json.loads(Path(written["stats_value"]).read_text())["total_scored"] == 2
+
+    def test_inline_directory_summary_uses_mirrored_file_paths(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        file_a = run_root / "dataset" / "code" / "a.jsonl"
+        file_b = run_root / "dataset" / "multi" / "b.jsonl"
+
+        rows_a = _inline_rows_for_file(
+            file_a,
+            [{
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": "qa"},
+                    {"role": "assistant", "content": "aa"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value("row-a_t1")]],
+        )
+        rows_b = _inline_rows_for_file(
+            file_b,
+            [{
+                "id": "conv-b",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("debug"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-b_t1"), _inline_value("conv-b_t2")]],
+        )
+        _write_jsonl(file_a, rows_a)
+        _write_jsonl(file_b, rows_b)
+
+        written = run_recompute(str(run_root), pass_num="2")
+        summary = json.loads(Path(written["summary_stats_value"]).read_text())
+        files = {row["file"] for row in summary.get("per_file_summary", [])}
+        assert files == {"code/a.jsonl", "multi/b.jsonl"}
+
+    def test_inline_directory_summary_preserves_multi_suffix_filenames(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "code" / "a.b.c.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": "qa"},
+                    {"role": "assistant", "content": "aa"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value("row-a_t1")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        written = run_recompute(str(run_root), pass_num="2")
+        summary = json.loads(Path(written["summary_stats_value"]).read_text())
+        files = {row["file"] for row in summary.get("per_file_summary", [])}
+        assert files == {"code/a.b.c.jsonl"}
+
+    def test_inline_recompute_rejects_custom_output_dir(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "code" / "a.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": "qa"},
+                    {"role": "assistant", "content": "aa"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value("row-a_t1")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        with pytest.raises(ValueError, match="Inline recompute writes in-place"):
+            run_recompute(str(run_root), pass_num="2", output_dir=str(tmp_path / "elsewhere"))
+
 
 class TestRefreshRarity:
     def test_refresh_logs_progress_for_large_file(self, tmp_path, capsys):
@@ -575,6 +769,65 @@ class TestRefreshRarity:
         stats_out = json.loads(Path(written["stats_value"]).read_text(encoding="utf-8"))
         assert stats_out["rarity_config"]["combo_mode"] == "disabled"
 
+    def test_inline_directory_refresh_syncs_back_to_rows(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "multi" / "b.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-b",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("debug")]],
+            [[_inline_value("conv-b_t1", rarity_score=1.0), _inline_value("conv-b_t2", rarity_score=1.0)]],
+        )
+        _write_jsonl(source_file, rows)
+
+        written = run_refresh_rarity(
+            str(run_root),
+            config=PipelineConfig(rarity_score_mode="absolute"),
+        )
+
+        assert "summary_stats_value" in written
+        updated_rows = [json.loads(line) for line in source_file.read_text(encoding="utf-8").splitlines()]
+        turns = updated_rows[0]["extra_info"]["unique_info"]["data_label"]["turns"]
+        assert turns[0]["value"]["rarity"]["stats_ref"]["source"]
+        assert turns[1]["value"]["selection_score"] is not None
+        assert (run_root / "meta_label_data" / "summary_stats_scoring.json").exists()
+
+    def test_inline_refresh_rejects_custom_output_dir(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "code" / "a.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": "qa"},
+                    {"role": "assistant", "content": "aa"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value("row-a_t1")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        with pytest.raises(ValueError, match="Inline rarity refresh writes in-place"):
+            run_refresh_rarity(
+                str(run_root),
+                output_dir=str(tmp_path / "elsewhere"),
+                config=PipelineConfig(rarity_score_mode="absolute"),
+            )
+
 
 # ─── Test run_regenerate_dashboard ───────────────────────
 
@@ -650,3 +903,29 @@ class TestRegenerateDashboard:
         assert "Warning: Pass 1 dashboard failed" in out
         assert "RuntimeError: boom" in out
         assert str(tmp_path) in out
+
+    def test_inline_run_root_dashboards_land_at_run_root(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "multi" / "b.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-b",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-b_t1"), _inline_value("conv-b_t2")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        run_recompute(str(run_root), pass_num="both")
+        generated = run_regenerate_dashboard(str(run_root), pass_num="both")
+
+        assert len(generated) >= 2
+        assert any(Path(path).parent == run_root for path in map(Path, generated))
+        assert len(list(run_root.glob("dashboard_scoring*.html"))) >= 1

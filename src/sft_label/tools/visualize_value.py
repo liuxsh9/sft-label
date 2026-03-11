@@ -45,15 +45,16 @@ def load_value_run(run_dir, scored_file="scored.json", stats_file=PASS2_STATS_FI
     else:
         # Global mode: collect from subdirectory scored files
         # Try .json first, fall back to .jsonl for dirs without .json
+        # and recurse so inline meta_label_data/files/** layouts are covered.
         json_paths = {}  # parent_dir -> path
-        for pattern in ("*/scored*.json", "scored*.json"):
+        for pattern in ("**/scored*.json", "scored*.json"):
             for p in sorted(run_dir.glob(pattern)):
                 if "summary" in p.name or "stats" in p.name or p.suffix == ".jsonl":
                     continue
                 json_paths[p.parent] = p
 
         jsonl_paths = {}
-        for pattern in ("*/scored*.jsonl", "scored*.jsonl"):
+        for pattern in ("**/scored*.jsonl", "scored*.jsonl"):
             for p in sorted(run_dir.glob(pattern)):
                 if p.parent not in json_paths:
                     jsonl_paths[p.parent] = p

@@ -24,6 +24,9 @@ uv sync
 export LITELLM_BASE="http://localhost:4000/v1"
 export LITELLM_KEY="your-key"
 
+# If your env vars live in ~/.zshrc, use an interactive zsh shell for one-off runs
+zsh -ic 'cd /path/to/sft-label && uv run sft-label start'
+
 # Recommended: interactive launcher (grouped by workflow)
 sft-label start
 
@@ -65,6 +68,12 @@ The interactive launcher groups commands by workflow:
 - Maintenance: stats recompute, dashboard regeneration, taxonomy validation
 - Export: semantic rows, review CSV/TSV
 
+For `run`, the launcher now also exposes inline JSONL modes directly:
+- `refresh`: recompute and replace the whole embedded `data_label`
+- `incremental`: skip rows whose embedded labels already satisfy the active version
+- `migrate`: copy `data_label` from another inline-labeled run by `data_id`, then fill unmatched/incomplete rows
+- `recompute`: rebuild stats, rarity, conversation aggregates, and dashboards without LLM calls
+
 It also supports advanced tuning via optional raw flags input, so all existing CLI flags remain available.
 
 ```bash
@@ -73,6 +82,15 @@ sft-label run --input data.json
 
 # Run on a directory
 sft-label run --input data_dir/ --output results/
+
+# Inline JSONL: incremental fill-in on an already labeled mirrored run
+sft-label run --input previous_run/ --mode incremental
+
+# Inline JSONL: migrate labels from another run, then fill gaps
+sft-label run --input data_dir/ --mode migrate --migrate-from old_run/
+
+# Inline JSONL: offline recompute from embedded data_label only
+sft-label run --input previous_run/ --mode recompute
 
 # Resume interrupted run
 sft-label run --input data_dir/ --resume data_dir-labeled-20250101_120000/
@@ -137,6 +155,77 @@ sft-label validate
 # Export to review CSV
 sft-label export-review --input labeled.json --output review.csv
 ```
+
+### Inline JSONL Workflow
+
+For Pangu-style JSONL input, the primary output is now a mirrored dataset tree instead of `labeled.json[l]` as the source of truth.
+
+Each output row keeps the original line order and row count, and writes annotations under:
+
+```json
+{
+  "extra_info": {
+    "unique_info": {
+      "data_id": "sha256:v1:...",
+      "data_label": {
+        "meta": {
+          "schema_version": "1",
+          "label_version": "inline-v1",
+          "mode": "refresh"
+        },
+        "turns": [
+          {
+            "turn_index": 1,
+            "labels": {...},
+            "value": {...}
+          }
+        ],
+        "conversation": {...}
+      }
+    }
+  }
+}
+```
+
+Typical mirrored run layout:
+
+```text
+<run_root>/
+  <input_name>/...              # mirrored dataset tree
+  meta_label_data/
+    checkpoint.json
+    summary_stats_labeling.json
+    summary_stats_scoring.json
+    conversation_scores.json
+    files/...                   # per-file caches, logs, stats
+  dashboard_*.html
+```
+
+Recommended commands:
+
+```bash
+# Full refresh labeling on raw JSONL input
+uv run sft-label run --input tests/fixtures/e2e_folder_test/
+
+# Incremental fill-in from an existing mirrored run
+uv run sft-label run --input previous_run/ --mode incremental
+
+# Migrate labels by data_id from another run, then fill missing rows
+uv run sft-label run --input new_dataset/ --mode migrate --migrate-from old_run/
+
+# Rebuild stats / rarity / dashboards from embedded data_label only
+uv run sft-label run --input previous_run/ --mode recompute
+```
+
+Mode semantics:
+- `refresh`: refreshes the whole `data_label` for the targeted Pass 1 stage and drops stale Pass 2 fields when labels changed
+- `incremental`: preserves existing compatible labels and only calls LLM for missing/incomplete turns
+- `migrate`: seeds rows from a source run matched by `data_id`, records migration provenance, then behaves like incremental fill-in
+- `recompute`: no LLM calls; rebuilds derived artifacts under `meta_label_data/`
+
+Notes:
+- Full runs preserve the mirrored JSONL tree's original row count and row order. Each row is updated in place with `extra_info.unique_info.data_id` and `data_label`.
+- `--limit` is a smoke/sampling mode. When enabled, the mirrored output contains only the sampled subset, so line-count parity applies to the sampled subset rather than the full source file.
 
 ### Library
 
@@ -355,6 +444,11 @@ Conversation-level criteria (multi-turn):
 After manually editing labels, merging runs, or changing datasets, recompute stats without re-running the LLM pipeline:
 
 ```bash
+# Inline mirrored run root (recommended)
+uv run sft-label recompute-stats --input run_root/
+uv run sft-label refresh-rarity --input run_root/
+uv run sft-label regenerate-dashboard --input run_root/
+
 # Single file
 uv run sft-label recompute-stats --input run_dir/labeled.json
 uv run sft-label recompute-stats --input run_dir/scored.json --pass 2
@@ -417,6 +511,8 @@ uv run sft-label run --input data.json --score --tag-stats /path/to/reference_st
 
 | Mode | Pass 1 | Pass 2 |
 |------|--------|--------|
+| Inline mirrored run | `<run_root>/meta_label_data/summary_stats_labeling.json` | `<run_root>/meta_label_data/summary_stats_scoring.json` |
+| Inline per-file | `<run_root>/meta_label_data/files/<relpath>/stats_labeling.json` | `<run_root>/meta_label_data/files/<relpath>/stats_scoring.json` |
 | Single file | `<run_dir>/stats.json` | `<run_dir>/stats_value.json` |
 | Directory | `<run_dir>/<subdir>/stats.json` | `<run_dir>/<subdir>/stats_value.json` |
 | Directory summary | `<run_dir>/summary_stats.json` | `<run_dir>/summary_stats_value.json` |

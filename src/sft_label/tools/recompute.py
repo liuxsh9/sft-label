@@ -28,6 +28,12 @@ from sft_label.artifacts import (
     pass1_global_dashboard_filename,
     pass2_global_dashboard_filename,
 )
+from sft_label.inline_scoring import (
+    discover_inline_jsonl_files,
+    infer_inline_scoring_target,
+    write_inline_pass1_cache,
+    write_inline_scored_cache,
+)
 
 
 # ─── Sample loading ──────────────────────────────────────
@@ -68,9 +74,7 @@ def discover_labeled_files(input_dir):
     """Find labeled*.json/jsonl files in a run directory tree."""
     input_dir = Path(input_dir)
     files = []
-    for pattern in ("labeled*.json", "labeled*.jsonl",
-                     "*/labeled*.json", "*/labeled*.jsonl",
-                     "*/*/labeled*.json", "*/*/labeled*.jsonl"):
+    for pattern in ("**/labeled*.json", "**/labeled*.jsonl"):
         files.extend(input_dir.glob(pattern))
     return _dedup_json_jsonl(files)
 
@@ -79,9 +83,7 @@ def discover_scored_files(input_dir):
     """Find scored*.json/jsonl files in a run directory tree."""
     input_dir = Path(input_dir)
     files = []
-    for pattern in ("scored*.json", "scored*.jsonl",
-                     "*/scored*.json", "*/scored*.jsonl",
-                     "*/*/scored*.json", "*/*/scored*.jsonl"):
+    for pattern in ("**/scored*.json", "**/scored*.jsonl"):
         files.extend(input_dir.glob(pattern))
     return _dedup_json_jsonl(files)
 
@@ -279,9 +281,103 @@ def recompute_value_stats_from_scored(samples):
     return stats
 
 
+# ─── Inline mirrored dataset helpers ────────────────────
+
+def _inline_file_dashboard_name(prefix: str, target, source_file: Path) -> str:
+    rel = target.layout.relative_source_path(source_file).with_suffix("")
+    stem = "__".join(rel.parts) if rel.parts else source_file.stem
+    return f"{prefix}_{stem}.html"
+
+
+def _rewrite_inline_per_file_summary(summary_path):
+    """Rewrite artifact-relative per-file rows to mirrored dataset file paths."""
+    summary_path = Path(summary_path)
+    if not summary_path.exists():
+        return
+    with open(summary_path, encoding="utf-8") as f:
+        summary = json.load(f)
+
+    updated = False
+    for row in summary.get("per_file_summary", []):
+        file_label = row.get("file")
+        if not isinstance(file_label, str) or not file_label:
+            continue
+        file_path = Path(file_label)
+        parts = list(file_path.parts)
+        if parts and parts[0] == "files":
+            file_path = Path(*parts[1:])
+        if file_path.name in {"scored.json", "scored.jsonl", "labeled.json", "labeled.jsonl"}:
+            if file_path.parent != Path("."):
+                row["file"] = f"{file_path.parent}.jsonl"
+                updated = True
+
+    if updated:
+        _write_json(summary_path, summary)
+
+
+def _materialize_inline_recompute_artifacts(target, pass_num):
+    """Rebuild transient labeled/scored caches from inline rows."""
+    source_files = discover_inline_jsonl_files(target)
+    selected = source_files if not target.target_path.is_file() else [target.target_path.resolve()]
+    for source_file in selected:
+        artifact_dir = target.layout.file_artifact_dir(source_file)
+        if pass_num in ("1", "both"):
+            write_inline_pass1_cache(source_file, artifact_dir)
+        if pass_num in ("2", "both"):
+            write_inline_scored_cache(source_file, artifact_dir)
+    return selected
+
+
+def _run_recompute_inline(target, pass_num="both", workers=1):
+    """Run recompute over an inline mirrored dataset via rebuildable caches."""
+    selected = _materialize_inline_recompute_artifacts(target, pass_num)
+
+    if target.target_path.is_file():
+        artifact_input = target.layout.file_artifact_dir(target.target_path)
+    else:
+        artifact_input = target.layout.meta_root
+
+    written = _run_recompute_legacy(
+        artifact_input,
+        pass_num=pass_num,
+        output_dir=artifact_input,
+        workers=workers,
+    )
+
+    if target.target_path.is_file():
+        if pass_num in ("1", "both"):
+            pass1_stats = artifact_input / PASS1_STATS_FILE
+            if pass1_stats.exists():
+                written.setdefault("stats", str(pass1_stats))
+        if pass_num in ("2", "both"):
+            pass2_stats = artifact_input / PASS2_STATS_FILE
+            if pass2_stats.exists():
+                written.setdefault("stats_value", str(pass2_stats))
+    if "summary_stats_value" in written:
+        _rewrite_inline_per_file_summary(written["summary_stats_value"])
+    return written
+
+
 # ─── Orchestration ───────────────────────────────────────
 
 def run_recompute(input_path, pass_num="both", output_dir=None, workers=1):
+    inline_target = infer_inline_scoring_target(input_path)
+    if inline_target is not None:
+        expected_output = (
+            inline_target.layout.file_artifact_dir(inline_target.target_path)
+            if inline_target.target_path.is_file()
+            else inline_target.layout.meta_root
+        )
+        if output_dir is not None and Path(output_dir).resolve() != expected_output.resolve():
+            raise ValueError(
+                "Inline recompute writes in-place under meta_label_data; "
+                f"use --output {expected_output} or omit --output"
+            )
+        return _run_recompute_inline(inline_target, pass_num=pass_num, workers=workers)
+    return _run_recompute_legacy(input_path, pass_num=pass_num, output_dir=output_dir, workers=workers)
+
+
+def _run_recompute_legacy(input_path, pass_num="both", output_dir=None, workers=1):
     """Recompute stats from labeled/scored pipeline output.
 
     Args:
@@ -310,7 +406,51 @@ def run_recompute(input_path, pass_num="both", output_dir=None, workers=1):
     return written
 
 
+def _sync_inline_scored_artifacts(target, source_files):
+    """Persist refreshed scored caches back into inline mirrored rows."""
+    from sft_label.scoring import _sync_inline_scored_cache_to_dataset
+
+    for source_file in source_files:
+        _sync_inline_scored_cache_to_dataset(
+            source_file,
+            target.layout.file_artifact_dir(source_file),
+        )
+
+
 def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=None, workers=1):
+    inline_target = infer_inline_scoring_target(input_path)
+    if inline_target is not None:
+        selected = _materialize_inline_recompute_artifacts(inline_target, pass_num="2")
+        if inline_target.target_path.is_file():
+            refresh_input = inline_target.layout.file_artifact_dir(inline_target.target_path)
+        else:
+            refresh_input = inline_target.layout.meta_root
+        if output_dir is not None and Path(output_dir).resolve() != refresh_input.resolve():
+            raise ValueError(
+                "Inline rarity refresh writes in-place under meta_label_data; "
+                f"use --output {refresh_input} or omit --output"
+            )
+        written = _run_refresh_rarity_legacy(
+            refresh_input,
+            tag_stats_path=tag_stats_path,
+            output_dir=refresh_input,
+            config=config,
+            workers=workers,
+        )
+        _sync_inline_scored_artifacts(inline_target, selected)
+        if "summary_stats_value" in written:
+            _rewrite_inline_per_file_summary(written["summary_stats_value"])
+        return written
+    return _run_refresh_rarity_legacy(
+        input_path,
+        tag_stats_path=tag_stats_path,
+        output_dir=output_dir,
+        config=config,
+        workers=workers,
+    )
+
+
+def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None, config=None, workers=1):
     """Refresh Pass 2 rarity/value fields offline from existing scored output.
 
     Recomputes per-sample:
@@ -921,7 +1061,118 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
 
 # ─── Dashboard regeneration ──────────────────────────────
 
+def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False):
+    import webbrowser
+    from sft_label.tools.visualize_labels import generate_dashboard
+    from sft_label.tools.visualize_value import generate_value_dashboard
+
+    generated = []
+    selected = discover_inline_jsonl_files(target)
+    if target.target_path.is_file():
+        selected = [target.target_path.resolve()]
+
+    _log_regenerate_dashboard(
+        f"Starting inline dashboard regeneration: input={target.target_path} pass={pass_num}"
+    )
+
+    for source_file in selected:
+        artifact_dir = target.layout.file_artifact_dir(source_file)
+        rel_label = target.layout.relative_source_path(source_file)
+
+        if pass_num in ("1", "both"):
+            pass1_stats_path = artifact_dir / PASS1_STATS_FILE
+            if pass1_stats_path.exists():
+                write_inline_pass1_cache(source_file, artifact_dir)
+                _log_regenerate_dashboard(
+                    f"{rel_label}: generating inline Pass 1 dashboard from {pass1_stats_path.name}"
+                )
+                out = generate_dashboard(
+                    artifact_dir,
+                    labeled_file="labeled.json",
+                    stats_file=PASS1_STATS_FILE,
+                    output_file=str(target.layout.dashboard_path(
+                        _inline_file_dashboard_name("dashboard_labeling", target, source_file)
+                    )),
+                )
+                generated.append(Path(out) if not isinstance(out, Path) else out)
+
+        if pass_num in ("2", "both"):
+            pass2_stats_path = artifact_dir / PASS2_STATS_FILE
+            if pass2_stats_path.exists():
+                write_inline_scored_cache(source_file, artifact_dir)
+                _log_regenerate_dashboard(
+                    f"{rel_label}: generating inline Pass 2 dashboard from {pass2_stats_path.name}"
+                )
+                out = generate_value_dashboard(
+                    artifact_dir,
+                    scored_file="scored.json",
+                    stats_file=PASS2_STATS_FILE,
+                    output_file=str(target.layout.dashboard_path(
+                        _inline_file_dashboard_name("dashboard_scoring", target, source_file)
+                    )),
+                    quiet=True,
+                )
+                if out:
+                    generated.append(Path(out) if not isinstance(out, Path) else out)
+
+    if not target.target_path.is_file():
+        if pass_num in ("1", "both"):
+            pass1_summary_path = target.layout.meta_root / PASS1_SUMMARY_STATS_FILE
+            if pass1_summary_path.exists():
+                out = generate_dashboard(
+                    target.layout.meta_root,
+                    labeled_file=None,
+                    stats_file=PASS1_SUMMARY_STATS_FILE,
+                    output_file=str(target.layout.dashboard_path(
+                        pass1_global_dashboard_filename(target.layout.dataset_root_name)
+                    )),
+                )
+                generated.append(Path(out) if not isinstance(out, Path) else out)
+
+        if pass_num in ("2", "both"):
+            pass2_summary_path = target.layout.meta_root / PASS2_SUMMARY_STATS_FILE
+            if pass2_summary_path.exists():
+                out = generate_value_dashboard(
+                    target.layout.meta_root,
+                    scored_file=None,
+                    stats_file=PASS2_SUMMARY_STATS_FILE,
+                    output_file=str(target.layout.dashboard_path(
+                        pass2_global_dashboard_filename(target.layout.dataset_root_name)
+                    )),
+                    quiet=True,
+                )
+                if out:
+                    generated.append(Path(out) if not isinstance(out, Path) else out)
+
+    if open_browser:
+        for path in generated:
+            resolved = Path(path).resolve()
+            _log_regenerate_dashboard(f"Opening dashboard in browser: {resolved}")
+            webbrowser.open(f"file://{resolved}")
+
+    _log_regenerate_dashboard(
+        f"Completed inline dashboard regeneration: generated {len(generated)} dashboard(s)"
+    )
+    return generated
+
+
 def run_regenerate_dashboard(input_path, pass_num="both", open_browser=False, workers=1):
+    inline_target = infer_inline_scoring_target(input_path)
+    if inline_target is not None:
+        return _run_regenerate_dashboard_inline(
+            inline_target,
+            pass_num=pass_num,
+            open_browser=open_browser,
+        )
+    return _run_regenerate_dashboard_legacy(
+        input_path,
+        pass_num=pass_num,
+        open_browser=open_browser,
+        workers=workers,
+    )
+
+
+def _run_regenerate_dashboard_legacy(input_path, pass_num="both", open_browser=False, workers=1):
     """Regenerate HTML dashboards from existing stats and data files.
 
     Args:
