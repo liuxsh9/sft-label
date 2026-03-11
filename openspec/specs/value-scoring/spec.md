@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: Rarity computation from tag distributions
-The system SHALL compute a rarity score (1-10) for each sample using tag IDF values from a tag distribution stats file. The rarity score SHALL combine weighted per-dimension tag IDF (α=0.7) with cross-dimension combo IDF (1-α=0.3). Each dimension SHALL have a configurable weight (defaults: concept=2.0, domain=1.5, agentic=1.5, language/task/constraint=1.0, intent/difficulty/context=0.3-0.5). Raw rarity values SHALL be normalized to 1-10 scale via percentile mapping across all scored samples.
+The system SHALL compute a rarity score (1-10) for each scored turn using tag IDF values from a Pass 1 tag distribution stats file. The rarity score SHALL combine weighted per-dimension tag IDF with cross-dimension combo rarity and SHALL normalize raw rarity values to a 1-10 scale according to the configured mode. In inline dataset mode, the auto-discovered baseline SHALL come from the run’s embedded-label process artifacts rather than from standalone `labeled.json` outputs.
 
-#### Scenario: Rarity from auto-discovered stats
-- **WHEN** scoring `labeled.json` and `stats.json` exists in the same directory
-- **THEN** the system SHALL read `tag_distributions` from `stats.json` and compute rarity for each sample
+#### Scenario: Rarity from auto-discovered inline stats
+- **WHEN** scoring an inline-labeled dataset and the run contains Pass 1 stats under `meta_label_data/`
+- **THEN** the system SHALL read `tag_distributions` from that stats file and compute rarity for each scored turn
 
 #### Scenario: Rarity from explicit stats file
 - **WHEN** `--tag-stats global_stats.json` is provided
@@ -13,11 +13,11 @@ The system SHALL compute a rarity score (1-10) for each sample using tag IDF val
 
 #### Scenario: No stats available
 - **WHEN** no stats file is found or specified
-- **THEN** the system SHALL set `rarity.score` to `null` for all samples and emit a warning
+- **THEN** the system SHALL fall back to the configured local-baseline behavior and SHALL emit a warning when rarity cannot be computed from an external distribution
 
 #### Scenario: Stats reference metadata
-- **WHEN** rarity is computed for a sample
-- **THEN** `value.rarity.stats_ref` SHALL contain `source` (file path), `total_samples` (N), and `timestamp` (ISO format)
+- **WHEN** rarity is computed for a scored turn
+- **THEN** the embedded rarity record SHALL contain `stats_ref.source`, `stats_ref.total_samples`, and `stats_ref.timestamp`
 
 ### Requirement: COT-preserving smart truncation
 The system SHALL provide a truncation mode that preserves chain-of-thought content for quality evaluation. The total budget (default 20K chars) SHALL be allocated as: instruction 15%, COT 45%, response 35%, meta 5%. For COT content exceeding its budget, the system SHALL keep head (30% of COT budget) + 2-3 evenly-spaced middle fragments (10% each) + tail (30% of COT budget), with position markers between gaps.
@@ -68,33 +68,33 @@ The system SHALL compute a composite `value_score` per sample as a weighted sum 
 - **THEN** `value_score` SHALL be computed from the three LLM-scored dimensions only, with weights renormalized
 
 ### Requirement: Standalone score CLI subcommand
-The system SHALL provide `sft-label score` subcommand that runs Pass 2 on pre-labeled data. It SHALL accept `--input` (required, path to labeled.json or directory), `--tag-stats` (optional), `--model`, `--concurrency`, and `--limit`.
+The system SHALL provide `sft-label score` for Pass 2 scoring on inline-labeled datasets. It SHALL accept a labeled JSONL file or mirrored labeled dataset directory as input, read Pass 1 labels from embedded `data_label` turn records, and write Pass 2 results back into the same embedded `data_label` structure.
 
-#### Scenario: Score single file
-- **WHEN** `sft-label score --input run_dir/labeled.json`
-- **THEN** the system SHALL read labeled samples, compute rarity, run LLM scoring, and output scored.json + stats_value.json + dashboard_value.html in the same directory
+#### Scenario: Score single mirrored file
+- **WHEN** `sft-label score --input <mirrored-file-or-run-dir>` is invoked on an inline-labeled dataset
+- **THEN** the system SHALL read embedded turn labels, compute Pass 2 values, rewrite the mirrored JSONL output with updated embedded `data_label` values, and write Pass 2 process artifacts under `meta_label_data/`
 
 #### Scenario: Score with external stats
-- **WHEN** `sft-label score --input labeled.json --tag-stats global_stats.json`
+- **WHEN** `--tag-stats` is provided while scoring an inline-labeled dataset
 - **THEN** the system SHALL use `global_stats.json` for rarity computation instead of auto-discovery
 
 ### Requirement: Continuous Pass 1 + Pass 2 execution
-The system SHALL support `sft-label run --input data.json --score` to run tag labeling followed by value scoring in a single invocation. Pass 2 SHALL automatically use Pass 1's `stats.json` for rarity computation.
+The system SHALL support `sft-label run --score` for inline-labeled datasets. Pass 1 SHALL produce mirrored JSONL outputs with embedded Pass 1 annotations, and Pass 2 SHALL then read those embedded annotations and update the same mirrored JSONL outputs with Pass 2 values.
 
-#### Scenario: Continuous mode
-- **WHEN** `--score` flag is provided with `sft-label run`
-- **THEN** after Pass 1 completes, the system SHALL automatically invoke Pass 2 on the Pass 1 output using the just-produced stats.json
+#### Scenario: Continuous inline mode
+- **WHEN** `sft-label run --input <dataset> --score` is executed
+- **THEN** the system SHALL run Pass 1 labeling first, then run Pass 2 scoring against the mirrored inline-labeled dataset produced by Pass 1, using the run’s Pass 1 stats as the default rarity baseline
 
 ### Requirement: Output file structure
-Pass 2 SHALL write output files alongside Pass 1 outputs. Per-file outputs: `scored[_prefix].json`, `scored[_prefix].jsonl`, `stats_value[_prefix].json`, `monitor_value[_prefix].jsonl`, `dashboard_value[_prefix].html`, `failed_value[_prefix].jsonl`. Global outputs: `summary_stats_value.json`, `dashboard_value_<name>.html`.
+Pass 2 SHALL persist results inside each row’s embedded `data_label` rather than emitting standalone `scored.json` as the primary output. Per-run process artifacts such as Pass 2 stats, monitors, failure logs, and flattened caches SHALL live under `meta_label_data/`. Dashboard HTML files SHALL live at the run root.
 
-#### Scenario: Per-sample output structure
-- **WHEN** a sample is scored
-- **THEN** the output SHALL contain the original `labels` field (unchanged) plus a new `value` field with complexity, quality, reasoning, rarity (with stats_ref), flags, thinking_mode, value_score, and confidence
+#### Scenario: Per-row output structure
+- **WHEN** a row is successfully scored
+- **THEN** the output row SHALL retain its embedded Pass 1 labels and SHALL add Pass 2 values under the matching `data_label.turns[*]` entries plus any derived conversation aggregate updates under `data_label.conversation`
 
 #### Scenario: Directory mode output
-- **WHEN** scoring a directory of labeled files
-- **THEN** each file SHALL produce prefixed output files, plus global summary_stats_value.json and dashboard_value_<name>.html
+- **WHEN** scoring a mirrored dataset directory
+- **THEN** each mirrored JSONL file SHALL be rewritten in place within the run output tree, while run-level Pass 2 stats and process artifacts SHALL be written under `meta_label_data/` and dashboards SHALL be regenerated at the run root
 
 ### Requirement: Scoring configuration
 PipelineConfig SHALL be extended with scoring-specific fields: value scoring weights (complexity/quality/reasoning/rarity), rarity dimension weights, rarity combo alpha, value truncation budget and ratios. Module-level defaults SHALL be defined in config.py.
