@@ -358,6 +358,96 @@ Input (ShareGPT JSON / Pangu JSONL)
 | Agentic    | 23   | multi  |
 | Constraint | 20   | multi  |
 
+## Tag Atlas (All 225 Tags)
+
+A compact, searchable view of every taxonomy tag id grouped by dimension.
+
+<details>
+<summary><strong>Intent</strong> (6)</summary>
+
+`learn` `build` `debug` `review` `decide` `modify`
+
+</details>
+
+<details>
+<summary><strong>Difficulty</strong> (5)</summary>
+
+`beginner` `intermediate` `upper-intermediate` `advanced` `expert`
+
+</details>
+
+<details>
+<summary><strong>Context</strong> (10)</summary>
+
+`greenfield` `legacy-code` `module` `monorepo` `multi-file` `repository` `single-file` `single-function`
+`snippet` `with-dependencies`
+
+</details>
+
+<details>
+<summary><strong>Language</strong> (75)</summary>
+
+`ada` `apl` `arkts` `ascendc` `assembly` `bazel` `c` `clojure`
+`cmake` `cobol` `cpp` `crystal` `csharp` `css` `dart` `dockerfile`
+`dotenv` `ejs` `elixir` `erb` `erlang` `fortran` `fsharp` `go`
+`gradle` `groovy` `handlebars` `haskell` `hcl` `html` `ini` `java`
+`javascript` `jinja` `json` `julia` `kotlin` `latex` `liquid` `lisp`
+`lua` `makefile` `markdown` `matlab` `maven` `nginx-config` `nim` `objective-c`
+`ocaml` `perl` `php` `powershell` `prolog` `properties` `python` `r`
+`racket` `restructuredtext` `ruby` `rust` `scala` `scheme` `shell` `smalltalk`
+`solidity` `sql` `swift` `toml` `typescript` `verilog` `vhdl` `vyper`
+`xml` `yaml` `zig`
+
+</details>
+
+<details>
+<summary><strong>Domain</strong> (38)</summary>
+
+`api-development` `automation` `bioinformatics` `blockchain` `cli-tool` `cloud-computing` `compiler-development` `compliance`
+`computer-vision` `cybersecurity` `data-engineering` `data-science` `database-administration` `desktop-application` `devops` `e-commerce`
+`embedded-systems` `financial-technology` `game-development` `geospatial` `graphics-and-xr` `healthcare-technology` `accessibility` `internationalization`
+`iot` `machine-learning` `media-processing` `mobile-development` `natural-language-processing` `network-programming` `operating-systems` `real-time-systems`
+`robotics` `scientific-computing` `search-engineering` `systems-programming` `web-backend` `web-frontend`
+
+</details>
+
+<details>
+<summary><strong>Task</strong> (22)</summary>
+
+`api-design` `bug-fixing` `code-completion` `code-exploration` `code-explanation` `code-optimization` `code-refactoring` `code-review-task`
+`code-translation` `configuration` `dependency-management` `deployment` `documentation` `error-handling-task` `feature-implementation` `logging`
+`migration` `monitoring` `performance-analysis` `schema-design` `security-audit` `testing-task`
+
+</details>
+
+<details>
+<summary><strong>Concept</strong> (26)</summary>
+
+`control-flow` `data-types` `functions` `data-structures` `object-oriented-programming` `functional-programming` `recursion` `concurrency`
+`memory-management` `ownership` `type-system` `error-handling` `metaprogramming` `algorithms` `iterators` `design-patterns`
+`architecture` `testing` `security` `database-concepts` `api-protocols` `caching` `version-control` `ci-cd`
+`profiling` `debugging`
+
+</details>
+
+<details>
+<summary><strong>Agentic</strong> (23)</summary>
+
+`api-calling` `bash-execution` `build-execution` `code-execution` `database-query` `dependency-installation` `file-operations` `git-operations`
+`static-analysis` `test-running` `ui-automation` `web-search` `context-management` `error-recovery` `iterative-refinement` `multi-file-coordination`
+`multi-step-reasoning` `parallel-execution` `planning` `subagent-management` `tool-selection` `user-interaction` `visual-understanding`
+
+</details>
+
+<details>
+<summary><strong>Constraint</strong> (20)</summary>
+
+`accessible` `backward-compatible` `deterministic` `fault-tolerant` `gdpr-compliant` `hipaa-compliant` `idempotent` `internationalized`
+`lock-free` `no-dynamic-allocation` `no-external-dependencies` `no-recursion` `observable` `pci-dss-compliant` `performance-optimized` `portable`
+`scalable` `stateless` `thread-safe` `type-safe`
+
+</details>
+
 ## Value Scoring (Pass 2)
 
 Each sample receives multi-dimensional scores (1-10):
