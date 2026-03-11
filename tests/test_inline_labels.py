@@ -186,7 +186,7 @@ class TestInlineRunLayout:
             layout.run_root / "meta_label_data" / "cache" / "flattened" / "sample.jsonl"
         )
         assert layout.dashboard_path("dashboard_labeling.html") == (
-            layout.run_root / "dashboard_labeling.html"
+            layout.run_root / "meta_label_data" / "dashboards" / "dashboard_labeling.html"
         )
 
     def test_single_file_layout_paths(self, tmp_path):
