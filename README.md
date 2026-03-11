@@ -386,6 +386,10 @@ Additional outputs per sample:
 | `monitor_value.jsonl` | Per-sample LLM call metadata |
 | `failed_value.jsonl` | Samples that failed scoring |
 
+Example scoring dashboard from a real e2e run:
+
+![Scoring dashboard screenshot](docs/assets/dashboard-scoring-e2e.png)
+
 ## Trajectory Semantic Clustering (Pass 4)
 
 ### What It Does
