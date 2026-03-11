@@ -1,0 +1,53 @@
+<svg width="1280" height="780" viewBox="0 0 1280 780" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="780" rx="28" fill="#F6F8FC"/>
+  <rect x="28" y="28" width="1224" height="724" rx="24" fill="#FCFDFE" stroke="#D9E1EE"/>
+
+  <text x="72" y="96" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="34" font-weight="700">
+    Three ways the project behaves in practice
+  </text>
+  <text x="72" y="132" fill="#4D627D" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18">
+    Same CLI, different persistence models.
+  </text>
+
+  <rect x="72" y="190" width="352" height="504" rx="24" fill="#EFF4FF" stroke="#C8D9FF"/>
+  <text x="100" y="234" fill="#315AA8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">MODE 1</text>
+  <text x="100" y="270" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Legacy Single File</text>
+  <text x="100" y="304" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Artifacts for one JSON file.</text>
+  <text x="100" y="356" fill="#10233F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18">input/</text>
+  <text x="100" y="384" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  data.json</text>
+  <text x="100" y="430" fill="#10233F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18">run_dir/</text>
+  <text x="100" y="458" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  labeled.json</text>
+  <text x="100" y="486" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  scored.json</text>
+  <text x="100" y="514" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  stats_*.json</text>
+  <text x="100" y="542" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  dashboard_*.html</text>
+  <text x="100" y="594" fill="#315AA8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">Best for ad hoc JSON runs</text>
+
+  <rect x="464" y="190" width="352" height="504" rx="24" fill="#F4F7FB" stroke="#D6DFEC"/>
+  <text x="492" y="234" fill="#5F6F88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">MODE 2</text>
+  <text x="492" y="270" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Legacy JSON Directory</text>
+  <text x="492" y="304" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Per-file dirs plus run summary.</text>
+  <text x="492" y="356" fill="#10233F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18">dataset/</text>
+  <text x="492" y="384" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  a.json</text>
+  <text x="492" y="412" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  nested/b.json</text>
+  <text x="492" y="458" fill="#10233F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18">results/</text>
+  <text x="492" y="486" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  a/ stats_*.json</text>
+  <text x="492" y="514" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  nested/b/ stats_*.json</text>
+  <text x="492" y="542" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  summary_stats_*.json</text>
+  <text x="492" y="570" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  dashboard_*.html</text>
+  <text x="492" y="622" fill="#5F6F88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">Best for legacy JSON trees</text>
+
+  <rect x="856" y="190" width="352" height="504" rx="24" fill="#EEF9F4" stroke="#BFE6D4"/>
+  <text x="884" y="234" fill="#0E7A54" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">MODE 3</text>
+  <text x="884" y="270" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Mirrored Inline JSONL</text>
+  <text x="884" y="304" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">For JSONL files or trees.</text>
+  <text x="884" y="356" fill="#10233F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18">&lt;run_root&gt;/</text>
+  <text x="884" y="384" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  dataset/...</text>
+  <text x="884" y="412" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">    embedded data_label</text>
+  <text x="884" y="458" fill="#10233F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="18">  meta_label_data/</text>
+  <text x="884" y="486" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">    checkpoint.json</text>
+  <text x="884" y="514" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">    summary_stats_*.json</text>
+  <text x="884" y="542" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">    conversation_scores.json</text>
+  <text x="884" y="570" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">    files/.../stats_*.json</text>
+  <text x="884" y="598" fill="#42556F" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="17">  dashboard_*.html</text>
+  <text x="884" y="644" fill="#0E7A54" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">Best for iterative curation</text>
+</svg>

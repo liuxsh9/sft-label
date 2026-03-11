@@ -10,7 +10,7 @@ It is designed for real dataset operations:
 - recompute downstream stats, rarity, and dashboards offline after manual edits or migration
 - treat multi-turn conversations and long tool-using trajectories as first-class data shapes
 
-![Pipeline overview](docs/assets/pipeline-overview.svg)
+![Pipeline overview](docs/assets/pipeline-overview-v2.svg)
 
 ## What You Give It And What You Get Back
 
@@ -31,7 +31,7 @@ It is designed for real dataset operations:
 | Pass 3: Filtering | Produce subsets for review or training | sample-level, conversation-level, and turn-level criteria |
 | Pass 4: Semantic Clustering | Deduplicate long trajectories by behavior | pinned-prefix windowing, SemHash, ANN refinement, SNR representative pick |
 
-![Operating modes and outputs](docs/assets/operating-modes.svg)
+![Operating modes and outputs](docs/assets/operating-modes-v2.svg)
 
 ## Operating Modes
 
