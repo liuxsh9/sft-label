@@ -154,6 +154,75 @@ def load_tag_stats(stats_path):
     return distributions, total_samples, timestamp
 
 
+_RARITY_DEFAULT_CONFIDENCE = 0.75
+_RARITY_INHERITED_CONFIDENCE_PENALTY = 0.65
+_RARITY_MULTI_TAG_MAX_BLEND = 0.60
+_SELECTION_CONFIDENCE_FLOOR = 0.25
+
+
+def _coerce_unit_float(value, default):
+    """Clamp a possibly-invalid float-like value into [0, 1]."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    return default
+
+
+def _dimension_label_confidence(labels, dim, default=_RARITY_DEFAULT_CONFIDENCE):
+    """Return the effective confidence for one label dimension."""
+    if not isinstance(labels, dict):
+        return default
+    confidence = default
+    confidence_map = labels.get("confidence")
+    if isinstance(confidence_map, dict):
+        confidence = _coerce_unit_float(confidence_map.get(dim), default)
+    if labels.get("inherited"):
+        confidence *= _RARITY_INHERITED_CONFIDENCE_PENALTY
+    return max(0.0, min(1.0, confidence))
+
+
+def _sample_label_confidence(labels, dims=None, default=_RARITY_DEFAULT_CONFIDENCE):
+    """Return the mean confidence across populated label dimensions."""
+    if not isinstance(labels, dict):
+        return default
+    if dims is None:
+        dims = [dim for dim in RARITY_WEIGHTS.keys() if labels.get(dim) is not None]
+    confidences = []
+    for dim in dims:
+        tags = labels.get(dim)
+        if tags is None:
+            continue
+        if isinstance(tags, list) and not tags:
+            continue
+        if isinstance(tags, str) and not tags:
+            continue
+        confidences.append(_dimension_label_confidence(labels, dim, default=default))
+    if not confidences:
+        return default * (_RARITY_INHERITED_CONFIDENCE_PENALTY if labels.get("inherited") else 1.0)
+    return sum(confidences) / len(confidences)
+
+
+def _dimension_rarity_prior(dim_idfs):
+    """Use the dimension mean as a conservative prior for missing/uncertain tags."""
+    if not dim_idfs:
+        return 0.0
+    values = [v for v in dim_idfs.values() if isinstance(v, (int, float))]
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _aggregate_multi_tag_rarity(values):
+    """Blend max and mean to reduce single-tag max-IDF amplification."""
+    if not values:
+        return 0.0
+    max_value = max(values)
+    mean_value = sum(values) / len(values)
+    return (_RARITY_MULTI_TAG_MAX_BLEND * max_value
+            + (1.0 - _RARITY_MULTI_TAG_MAX_BLEND) * mean_value)
+
+
 def compute_tag_idf(distributions, total_samples):
     """Compute IDF for every tag across all dimensions.
 
@@ -214,14 +283,25 @@ def compute_sample_rarity(sample_labels, idf_map, total_samples,
         if not dim_idfs:
             continue
 
+        dim_prior = _dimension_rarity_prior(dim_idfs)
+        dim_confidence = _dimension_label_confidence(sample_labels, dim)
+
         if isinstance(tags, list):
             if not tags:
                 continue
-            tag_idf_values = [dim_idfs.get(t, math.log2(total_samples)) for t in tags]
-            dim_rarity = max(tag_idf_values)
+            tag_idf_values = [
+                dim_idfs.get(t, dim_prior)
+                for t in tags
+                if isinstance(t, str) and t
+            ]
+            if not tag_idf_values:
+                continue
+            observed_rarity = _aggregate_multi_tag_rarity(tag_idf_values)
         else:
             # Single-select dimension
-            dim_rarity = dim_idfs.get(tags, math.log2(total_samples))
+            observed_rarity = dim_idfs.get(tags, dim_prior)
+
+        dim_rarity = dim_confidence * observed_rarity + (1 - dim_confidence) * dim_prior
 
         weighted_sum += weight * dim_rarity
         weight_total += weight
@@ -234,7 +314,12 @@ def compute_sample_rarity(sample_labels, idf_map, total_samples,
         combo_key = _combo_key_from_labels(sample_labels)
         if combo_key:
             combo_count = combo_counts.get(combo_key, 0)
-            combo_rarity = math.log2(total_samples / (combo_count + 1))
+            raw_combo_rarity = math.log2(total_samples / (combo_count + 1))
+            combo_confidence = _sample_label_confidence(sample_labels, dims=list(rarity_weights.keys()))
+            combo_rarity = (
+                combo_confidence * raw_combo_rarity
+                + (1 - combo_confidence) * tag_rarity
+            )
 
     raw_score = combo_alpha * tag_rarity + (1 - combo_alpha) * combo_rarity
 
@@ -242,6 +327,8 @@ def compute_sample_rarity(sample_labels, idf_map, total_samples,
         "score": raw_score,
         "tag_rarity": round(tag_rarity, 3),
         "combo_rarity": round(combo_rarity, 3),
+        "effective_confidence": round(_sample_label_confidence(sample_labels), 3),
+        "uncertainty": round(1.0 - _sample_label_confidence(sample_labels), 3),
         "stats_ref": stats_ref_info,
     }
 
@@ -285,6 +372,8 @@ def _combo_key_from_labels(labels):
 
 def _update_combo_counts_from_labels(combo_counts, labels):
     """In-place combo count update; returns True when one combo is counted."""
+    if isinstance(labels, dict) and labels.get("inherited"):
+        return False
     if not _labels_have_rarity_signal(labels):
         return False
     combo_key = _combo_key_from_labels(labels)
@@ -311,6 +400,8 @@ def build_tag_distributions(samples, rarity_weights=None):
 
     for s in samples:
         labels = s.get("labels") or {}
+        if labels.get("inherited"):
+            continue
         if not _labels_have_rarity_signal(labels, dims=dims):
             continue
         total += 1
@@ -341,6 +432,8 @@ def _update_distributions_from_labels(distributions, labels, dims):
         bool: True when at least one tag is counted into distributions.
     """
     if not is_usable_labels(labels):
+        return False
+    if labels.get("inherited"):
         return False
     touched = False
     for dim in dims:
@@ -672,6 +765,24 @@ def _selection_quality_weights(config=None):
     return {k: v for k, v in base_weights.items() if k != "rarity"}
 
 
+def _selection_dim_confidence(labels, dim):
+    """Confidence used for selection shrinkage and fusion."""
+    return max(_SELECTION_CONFIDENCE_FLOOR, _dimension_label_confidence(labels, dim))
+
+
+def _selection_summary_from_sample(sample):
+    """Extract the lightweight fields needed for global selection ranking."""
+    value = sample.get("value") or {}
+    return {
+        "labels": sample.get("labels") or {},
+        "complexity_overall": (value.get("complexity") or {}).get("overall"),
+        "quality_overall": (value.get("quality") or {}).get("overall"),
+        "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
+        "rarity_score": (value.get("rarity") or {}).get("score"),
+        "value_score": value.get("value_score"),
+    }
+
+
 def _compute_percentiles(indexed_values):
     """Assign tie-aware percentiles to (idx, value) pairs."""
     if not indexed_values:
@@ -726,6 +837,10 @@ def compute_selection_scores(samples, rarity_weights=None,
                           else SELECTION_MIN_GROUP_SIZE)
 
     quality_weights = _selection_quality_weights(config)
+    label_confidences = [
+        {dim: _selection_dim_confidence(s.get("labels") or {}, dim) for dim in _SELECTION_DIMS}
+        for s in samples
+    ]
 
     # Step 1: Compute pure_quality for each sample
     pure_qualities = []
@@ -767,14 +882,19 @@ def compute_selection_scores(samples, rarity_weights=None,
             if len(members) < min_group_size:
                 continue
 
-            n = len(members)
+            effective_n = sum(label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
+                              for idx, _pq in members)
             # Bayesian shrinkage: blend tag-group percentile toward global
-            shrinkage = n / (n + smoothing_prior)
+            shrinkage = effective_n / (effective_n + smoothing_prior)
             tag_percentiles = _compute_percentiles(members)
             for idx, _pq in members:
                 tag_pct = tag_percentiles[idx]
                 g_pct = global_percentiles.get(idx, 0.5)
-                percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
+                sample_conf = label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
+                percentile = (
+                    sample_conf * (shrinkage * tag_pct + (1 - shrinkage) * g_pct)
+                    + (1 - sample_conf) * g_pct
+                )
                 # Multi-select: average across tags in this dimension
                 if dim in dim_percentiles[idx]:
                     prev, cnt = dim_percentiles[idx][dim]
@@ -798,7 +918,7 @@ def compute_selection_scores(samples, rarity_weights=None,
             weighted_sum = 0.0
             weight_total = 0.0
             for dim, (pct_sum, pct_cnt) in percs.items():
-                w = rarity_weights.get(dim, 1.0)
+                w = rarity_weights.get(dim, 1.0) * label_confidences[i].get(dim, _SELECTION_CONFIDENCE_FLOOR)
                 weighted_sum += w * (pct_sum / pct_cnt)  # mean percentile
                 weight_total += w
             if weight_total > 0:
@@ -861,6 +981,10 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                           else SELECTION_MIN_GROUP_SIZE)
 
     quality_weights = _selection_quality_weights(config)
+    label_confidences = [
+        {dim: _selection_dim_confidence(s.get("labels") or {}, dim) for dim in _SELECTION_DIMS}
+        for s in summaries
+    ]
 
     # Step 1: pure_quality from summary fields
     pure_qualities = []
@@ -911,13 +1035,18 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         for tag, members in tag_groups.items():
             if len(members) < min_group_size:
                 continue
-            n = len(members)
-            shrinkage = n / (n + smoothing_prior)
+            effective_n = sum(label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
+                              for idx, _pq in members)
+            shrinkage = effective_n / (effective_n + smoothing_prior)
             tag_percentiles = _compute_percentiles(members)
             for idx, _pq in members:
                 tag_pct = tag_percentiles[idx]
                 g_pct = global_percentiles.get(idx, 0.5)
-                percentile = shrinkage * tag_pct + (1 - shrinkage) * g_pct
+                sample_conf = label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
+                percentile = (
+                    sample_conf * (shrinkage * tag_pct + (1 - shrinkage) * g_pct)
+                    + (1 - sample_conf) * g_pct
+                )
                 # Multi-select: average across tags in this dimension
                 if dim in dim_percentiles[idx]:
                     prev, cnt = dim_percentiles[idx][dim]
@@ -938,7 +1067,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
             weighted_sum = 0.0
             weight_total = 0.0
             for dim, (pct_sum, pct_cnt) in percs.items():
-                w = rarity_weights.get(dim, 1.0)
+                w = rarity_weights.get(dim, 1.0) * label_confidences[i].get(dim, _SELECTION_CONFIDENCE_FLOOR)
                 weighted_sum += w * (pct_sum / pct_cnt)  # mean percentile
                 weight_total += w
             if weight_total > 0:
@@ -2464,6 +2593,171 @@ def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
     )
 
 
+def _discover_scored_output_files(root_dir):
+    """Find logical scored outputs in a run tree, preferring JSON over JSONL."""
+    root_dir = Path(root_dir)
+    candidates = []
+    for pattern in ("scored*.json", "scored*.jsonl", "**/scored*.json", "**/scored*.jsonl"):
+        candidates.extend(root_dir.glob(pattern))
+
+    preferred = {}
+    for path in sorted(set(candidates)):
+        key = (path.parent, path.stem)
+        existing = preferred.get(key)
+        if existing is None:
+            preferred[key] = path
+            continue
+        if existing.suffix == ".jsonl" and path.suffix == ".json":
+            preferred[key] = path
+
+    return sorted(preferred.values())
+
+
+def _load_scored_samples(path):
+    """Load scored samples from .json or .jsonl."""
+    path = Path(path)
+    if path.suffix == ".jsonl":
+        samples = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    samples.append(json.loads(line))
+        return samples
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
+
+
+def _write_scored_samples(primary_path, samples):
+    """Write scored outputs back to disk, keeping JSON/JSONL siblings in sync."""
+    primary_path = Path(primary_path)
+    dir_path = primary_path.parent
+    json_path = dir_path / "scored.json"
+    jsonl_path = dir_path / "scored.jsonl"
+
+    if json_path.exists() or primary_path.suffix == ".json":
+        tmp_json = json_path.with_suffix(".tmp.json")
+        with open(tmp_json, "w", encoding="utf-8") as f:
+            json.dump(samples, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_json, json_path)
+
+    if jsonl_path.exists() or primary_path.suffix == ".jsonl":
+        tmp_jsonl = jsonl_path.with_suffix(".tmp.jsonl")
+        with open(tmp_jsonl, "w", encoding="utf-8") as f:
+            for sample in samples:
+                f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        os.replace(tmp_jsonl, jsonl_path)
+
+
+def _load_monitor_records(dir_path):
+    """Load scoring monitors for per-file stats recomputation."""
+    monitor_path = Path(dir_path) / "monitor_value.jsonl"
+    if not monitor_path.exists():
+        return []
+
+    monitors = []
+    with open(monitor_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                monitors.append(json.loads(line))
+    return monitors
+
+
+def _load_existing_pass2_stats(dir_path):
+    """Load existing per-file Pass 2 stats if present."""
+    stats_path = Path(dir_path) / PASS2_STATS_FILE
+    if not stats_path.exists():
+        return {}
+    with open(stats_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=print):
+    """Recompute selection globally across directory outputs and rewrite files."""
+    scored_files = _discover_scored_output_files(output_dir)
+    if not scored_files:
+        return []
+
+    pprint(f"  Recomputing global selection across {len(scored_files)} scored file(s)")
+
+    summaries = []
+    file_entries = []
+    for scored_path in scored_files:
+        samples = _load_scored_samples(scored_path)
+        scored_count = 0
+        for sample in samples:
+            if sample.get("value"):
+                summaries.append(_selection_summary_from_sample(sample))
+                scored_count += 1
+        file_entries.append({
+            "path": scored_path,
+            "scored_count": scored_count,
+        })
+
+    selection_results = compute_selection_scores_from_summaries(summaries, config=config)
+
+    updated_stats = []
+    cursor = 0
+    for entry in file_entries:
+        scored_path = entry["path"]
+        samples = _load_scored_samples(scored_path)
+        for sample in samples:
+            value = sample.get("value")
+            if not value:
+                continue
+            if cursor >= len(selection_results):
+                break
+            selection = selection_results[cursor]
+            value["selection_score"] = selection["selection_score"]
+            value["intra_class_rank"] = selection["intra_class_rank"]
+            cursor += 1
+
+        _write_scored_samples(scored_path, samples)
+
+        monitors = _load_monitor_records(scored_path.parent)
+        stats = compute_value_stats(samples, monitors)
+        existing_stats = _load_existing_pass2_stats(scored_path.parent)
+        for key in (
+            "elapsed_seconds",
+            "model",
+            "input_file",
+            "http_request_stats",
+            "weights_used",
+            "rarity_config",
+            "chunked",
+        ):
+            if key in existing_stats:
+                stats[key] = existing_stats[key]
+
+        stats_path = scored_path.parent / PASS2_STATS_FILE
+        tmp_stats = stats_path.with_suffix(".tmp.json")
+        with open(tmp_stats, "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in stats.items() if k != "_raw_scores"},
+                      f, ensure_ascii=False, indent=2)
+        os.replace(tmp_stats, stats_path)
+
+        try:
+            from sft_label.tools.visualize_value import generate_value_dashboard
+            generate_value_dashboard(
+                scored_path.parent,
+                scored_file="scored.json" if (scored_path.parent / "scored.json").exists() else "scored.jsonl",
+                stats_file=PASS2_STATS_FILE,
+                output_file=PASS2_DASHBOARD_FILE,
+            )
+        except Exception:
+            pass
+
+        input_file = existing_stats.get("input_file")
+        file_label_source = Path(input_file) if input_file else scored_path
+        stats["file"] = _relative_file_label(file_label_source, input_dir)
+        updated_stats.append(stats)
+
+    return updated_stats
+
+
 def _flush_scoring_file(collector, config, pprint=print):
     """Write all scoring outputs for a completed file and release memory.
 
@@ -2960,6 +3254,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             temp_tag_stats_path.unlink()
 
     elapsed = time.time() - batch_start
+
+    if all_file_stats:
+        rewritten_file_stats = _rewrite_directory_global_selection(
+            output_dir=output_dir,
+            input_dir=input_dir,
+            config=config,
+            pprint=pprint,
+        )
+        if rewritten_file_stats:
+            all_file_stats = rewritten_file_stats
 
     # Write global summary
     if all_file_stats:

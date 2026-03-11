@@ -260,16 +260,64 @@ class TestTruncateForScoring:
         assert result["original_response_chars"] == len("goodbye world")
         assert result["original_cot_chars"] == 0
 
-    def test_multi_turn_uses_first_human_last_gpt(self):
+    def test_multi_turn_centers_latest_user_and_final_answer(self):
         convs = [
             {"from": "human", "value": "first question"},
             {"from": "gpt", "value": "first answer"},
             {"from": "human", "value": "second question"},
+            {"from": "gpt", "value": "second answer"},
+            {"from": "human", "value": "current request"},
             {"from": "gpt", "value": "final answer"},
         ]
         result = truncate_for_scoring(convs, "fast", budget=10000)
-        assert result["instruction"] == "first question"
+        assert result["instruction"] == "current request"
+        assert result["current_request"] == "current request"
         assert result["response"] == "final answer"
+
+    def test_includes_current_turn_tool_trajectory(self):
+        convs = [
+            {"from": "human", "value": "old request"},
+            {"from": "gpt", "value": "old answer"},
+            {"from": "human", "value": "fix the failing test"},
+            {"from": "gpt", "value": "I'll inspect the logs first."},
+            {"from": "tool", "value": "pytest output: assertion failed on line 42"},
+            {"from": "gpt", "value": "final fix with updated code"},
+        ]
+        result = truncate_for_scoring(convs, "fast", budget=10000)
+        assert result["instruction"] == "fix the failing test"
+        assert "[Assistant Step] I'll inspect the logs first." in result["trajectory"]
+        assert "[Tool Result] pytest output: assertion failed on line 42" in result["trajectory"]
+        assert result["trajectory_tool_turns"] == 1
+
+    def test_excludes_old_turn_trajectory(self):
+        convs = [
+            {"from": "human", "value": "old request"},
+            {"from": "gpt", "value": "I'll run the old command"},
+            {"from": "tool", "value": "old tool result"},
+            {"from": "gpt", "value": "old answer"},
+            {"from": "human", "value": "new request"},
+            {"from": "gpt", "value": "let me inspect the new failure"},
+            {"from": "tool", "value": "new tool result"},
+            {"from": "gpt", "value": "new final answer"},
+        ]
+        result = truncate_for_scoring(convs, "fast", budget=10000)
+        assert result["instruction"] == "new request"
+        assert "new tool result" in result["trajectory"]
+        assert "old tool result" not in result["trajectory"]
+
+    def test_budget_preserves_final_answer_alongside_large_tool_output(self):
+        huge_tool = "tool-output-" * 1500
+        final_answer = "final answer with the actual fix"
+        convs = [
+            {"from": "human", "value": "repair the repo"},
+            {"from": "gpt", "value": "running diagnostics"},
+            {"from": "tool", "value": huge_tool},
+            {"from": "gpt", "value": final_answer},
+        ]
+        result = truncate_for_scoring(convs, "fast", budget=1800)
+        assert result["was_truncated"] is True
+        assert "final answer with the actual fix" in result["response"]
+        assert result["response"]
 
 
 # ─────────────────────────────────────────────────────────
@@ -354,20 +402,40 @@ class TestComputeSampleRarity:
         )
         assert result["combo_rarity"] > 0
 
-    def test_unknown_tag_gets_max_idf(self):
-        """Tags not in distributions should get max IDF (log2(N))."""
+    def test_unknown_tag_uses_conservative_prior_not_max_idf(self):
+        """Unknown tags should shrink toward the dimension prior, not max rarity."""
         labels = {"intent": "never-seen-before"}
         result = compute_sample_rarity(labels, self.idf_map, 1000)
-        expected_max = math.log2(1000)
-        assert result["tag_rarity"] == round(expected_max, 3)
+        expected_prior = sum(self.idf_map["intent"].values()) / len(self.idf_map["intent"])
+        assert result["tag_rarity"] == round(expected_prior, 3)
 
-    def test_multi_select_uses_max(self):
+    def test_multi_select_blends_max_with_mean(self):
         labels = {"concept": ["algorithms", "data-types"]}
         result = compute_sample_rarity(labels, self.idf_map, 1000)
-        # Should use max IDF of the two tags (algorithms is rarer → higher IDF)
         algo_idf = self.idf_map["concept"]["algorithms"]
         data_types_idf = self.idf_map["concept"]["data-types"]
-        assert result["tag_rarity"] == round(max(algo_idf, data_types_idf), 3)
+        assert result["tag_rarity"] < round(max(algo_idf, data_types_idf), 3)
+        assert result["tag_rarity"] > round((algo_idf + data_types_idf) / 2, 3)
+
+    def test_low_confidence_shrinks_toward_dimension_prior(self):
+        labels = {
+            "intent": "debug",
+            "confidence": {"intent": 0.1},
+        }
+        result = compute_sample_rarity(labels, self.idf_map, 1000)
+        prior = sum(self.idf_map["intent"].values()) / len(self.idf_map["intent"])
+        debug_idf = self.idf_map["intent"]["debug"]
+        assert abs(result["tag_rarity"] - prior) < abs(debug_idf - prior)
+
+    def test_inherited_labels_report_higher_uncertainty(self):
+        direct = compute_sample_rarity({"intent": "debug"}, self.idf_map, 1000)
+        inherited = compute_sample_rarity(
+            {"intent": "debug", "inherited": True},
+            self.idf_map,
+            1000,
+        )
+        assert inherited["effective_confidence"] < direct["effective_confidence"]
+        assert inherited["uncertainty"] > direct["uncertainty"]
 
     def test_custom_weights(self):
         labels = {"intent": "build", "concept": ["algorithms"]}
@@ -1033,6 +1101,64 @@ class TestResumeScoringFile:
         assert monitor["status"] == "skipped_partial_labels"
         assert monitor["llm_calls"] == 0
 
+    def test_score_one_uses_current_turn_centered_evidence_window(self):
+        from sft_label.scoring import score_one
+        from unittest.mock import patch
+
+        sample = {
+            "id": "trajectory-1",
+            "conversations": [
+                {"from": "human", "value": "initial request"},
+                {"from": "gpt", "value": "initial answer"},
+                {"from": "human", "value": "please run the tests and fix the failure"},
+                {"from": "gpt", "value": "I'll inspect the failure first."},
+                {"from": "tool", "value": "pytest output: AssertionError in test_bug"},
+                {"from": "gpt", "value": "Here is the final fix"},
+            ],
+            "labels": {
+                "intent": "debug",
+                "agentic": ["tool-calling"],
+                "difficulty": "advanced",
+                "confidence": {"intent": 0.95, "agentic": 0.95, "difficulty": 0.95},
+            },
+            "metadata": {"turn_index": 2, "total_turns": 3},
+        }
+
+        captured = {}
+
+        async def fake_async_llm_call(http_client, messages, model, **kwargs):
+            captured["messages"] = messages
+            payload = {
+                "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 6, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "flags": [],
+                "confidence": 0.8,
+            }
+            return payload, json.dumps(payload), {"prompt_tokens": 10, "completion_tokens": 5}
+
+        with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+            value, monitor = asyncio.run(
+                score_one(
+                    None,
+                    sample,
+                    "mock-model",
+                    {"score": 5.0},
+                    0,
+                    1,
+                    asyncio.Semaphore(1),
+                    config=PipelineConfig(sample_max_retries=1),
+                )
+            )
+
+        assert value is not None
+        assert monitor["status"] == "success"
+        user_msg = captured["messages"][-1]["content"]
+        assert "please run the tests and fix the failure" in user_msg
+        assert "[Tool Result] pytest output: AssertionError in test_bug" in user_msg
+        assert "[Final Assistant] Here is the final fix" in user_msg
+        assert "<prior_context>" in user_msg
+
     def test_directory_jsonl_uses_chunked_pipeline(self, tmp_path):
         from sft_label.scoring import run_scoring
         from unittest.mock import patch
@@ -1064,6 +1190,74 @@ class TestResumeScoringFile:
         assert mock_chunked.call_count == 1
         assert result["files_processed"] == 1
         assert result["per_file_summary"][0]["file"] == "batch/labeled.jsonl"
+
+    def test_directory_selection_is_global_not_per_file(self, tmp_path):
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        quality_by_id = {
+            "a-low": 2,
+            "a-high": 4,
+            "b-low": 7,
+            "b-high": 9,
+        }
+
+        for subdir, sample_ids in {
+            "file_a": ["a-low", "a-high"],
+            "file_b": ["b-low", "b-high"],
+        }.items():
+            path = tmp_path / subdir
+            path.mkdir()
+            samples = []
+            for sample_id in sample_ids:
+                samples.append({
+                    "id": sample_id,
+                    "conversations": [
+                        {"from": "human", "value": f"Request {sample_id}"},
+                        {"from": "gpt", "value": f"Answer {sample_id}"},
+                    ],
+                    "labels": {
+                        "intent": "build",
+                        "language": ["python"],
+                        "difficulty": "intermediate",
+                        "confidence": {"intent": 0.95, "language": 0.95, "difficulty": 0.95},
+                    },
+                })
+            (path / "labeled.json").write_text(json.dumps(samples), encoding="utf-8")
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                  sample_idx, total, sem, config=None, rate_limiter=None):
+            q = quality_by_id[sample["id"]]
+            value = {
+                "complexity": {"instruction": q, "analytical_depth": q, "implementation": q, "overall": q},
+                "quality": {"correctness": q, "code_quality": q, "explanation": q, "completeness": q, "overall": q},
+                "reasoning": {"clarity": q, "consistency": q, "self_correction": False, "overall": q},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": float(q),
+                "confidence": 0.9,
+            }
+            monitor = {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+            return value, monitor
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            asyncio.run(run_scoring(str(tmp_path), config=PipelineConfig(scoring_concurrency=1, sample_max_retries=1)))
+
+        scored_a = json.loads((tmp_path / "file_a" / "scored.json").read_text(encoding="utf-8"))
+        scored_b = json.loads((tmp_path / "file_b" / "scored.json").read_text(encoding="utf-8"))
+        by_id = {sample["id"]: sample["value"]["selection_score"] for sample in scored_a + scored_b}
+
+        assert by_id["b-high"] > by_id["a-high"]
+        assert by_id["b-low"] > by_id["a-high"]
 
     def test_resume_skips_prescored(self, tmp_path):
         """Partially scored.jsonl should let resume skip those samples."""
@@ -1510,6 +1704,33 @@ class TestComputeSelectionScores:
 
         assert low_rank > high_rank
 
+    def test_low_confidence_labels_get_more_globalized_selection(self):
+        confident = [
+            self._make_sample(0, {"intent": "build", "language": ["python"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=5, value_score=5.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=6, value_score=6.0),
+            self._make_sample(2, {"intent": "learn", "language": ["go"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=1, value_score=1.0),
+            self._make_sample(3, {"intent": "review", "language": ["rust"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=9, value_score=9.0),
+        ]
+        uncertain = [
+            self._make_sample(0, {"intent": "build", "language": ["python"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=5, value_score=5.0),
+            self._make_sample(1, {"intent": "build", "language": ["python"], "confidence": {"intent": 0.10, "language": 0.10}},
+                              quality=6, value_score=6.0),
+            self._make_sample(2, {"intent": "learn", "language": ["go"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=1, value_score=1.0),
+            self._make_sample(3, {"intent": "review", "language": ["rust"], "confidence": {"intent": 0.95, "language": 0.95}},
+                              quality=9, value_score=9.0),
+        ]
+
+        compute_selection_scores(confident, min_group_size=2)
+        compute_selection_scores(uncertain, min_group_size=2)
+
+        assert uncertain[1]["value"]["intra_class_rank"] < confident[1]["value"]["intra_class_rank"]
+
 
 class TestComputeSelectionScoresFromSummaries:
     def test_summary_path_respects_smoothing_prior(self):
@@ -1550,6 +1771,60 @@ class TestComputeSelectionScoresFromSummaries:
         )
 
         assert low_prior[1]["intra_class_rank"] > high_prior[1]["intra_class_rank"]
+
+    def test_summary_path_respects_label_uncertainty(self):
+        confident = [
+            {
+                "labels": {"intent": "build", "language": ["python"], "confidence": {"intent": 0.95, "language": 0.95}},
+                "complexity_overall": 5,
+                "quality_overall": 5,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 5.0,
+            },
+            {
+                "labels": {"intent": "build", "language": ["python"], "confidence": {"intent": 0.95, "language": 0.95}},
+                "complexity_overall": 5,
+                "quality_overall": 6,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 6.0,
+            },
+            {
+                "labels": {"intent": "learn", "language": ["go"], "confidence": {"intent": 0.95, "language": 0.95}},
+                "complexity_overall": 5,
+                "quality_overall": 1,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 1.0,
+            },
+            {
+                "labels": {"intent": "review", "language": ["rust"], "confidence": {"intent": 0.95, "language": 0.95}},
+                "complexity_overall": 5,
+                "quality_overall": 9,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 9.0,
+            },
+        ]
+        uncertain = [
+            confident[0],
+            {
+                "labels": {"intent": "build", "language": ["python"], "confidence": {"intent": 0.10, "language": 0.10}},
+                "complexity_overall": 5,
+                "quality_overall": 6,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 6.0,
+            },
+            confident[2],
+            confident[3],
+        ]
+
+        confident_scores = compute_selection_scores_from_summaries(confident, min_group_size=2)
+        uncertain_scores = compute_selection_scores_from_summaries(uncertain, min_group_size=2)
+
+        assert uncertain_scores[1]["intra_class_rank"] < confident_scores[1]["intra_class_rank"]
 
 
 # ─────────────────────────────────────────────────────────
@@ -1884,10 +2159,16 @@ class TestBuildScoringMessagesMultiTurn:
     def test_turn_position_added_for_multiturn(self):
         from sft_label.prompts_value import build_scoring_messages
         truncated = {
+            "current_request": "Fix the bug",
             "instruction": "Fix the bug",
+            "trajectory": "[Assistant Step] I will inspect the logs\n[Tool Result] pytest failed",
             "response": "Here is the fix",
+            "original_prior_context_chars": 0,
             "original_cot_chars": 0,
+            "original_trajectory_chars": 42,
             "original_response_chars": 100,
+            "trajectory_turn_count": 2,
+            "trajectory_tool_turns": 1,
         }
         messages = build_scoring_messages(
             truncated=truncated, thinking_mode="fast",
@@ -1897,14 +2178,23 @@ class TestBuildScoringMessagesMultiTurn:
         )
         user_msg = messages[-1]["content"]
         assert "turn_position: 3/5 (multi-turn slice)" in user_msg
+        assert "<current_turn_request>" in user_msg
+        assert "<trajectory>" in user_msg
+        assert "<final_response>" in user_msg
+        assert user_msg.index("<current_turn_request>") < user_msg.index("<trajectory>") < user_msg.index("<final_response>")
 
     def test_no_turn_position_for_single_turn(self):
         from sft_label.prompts_value import build_scoring_messages
         truncated = {
+            "current_request": "Write code",
             "instruction": "Write code",
             "response": "Here is code",
+            "original_prior_context_chars": 0,
             "original_cot_chars": 0,
+            "original_trajectory_chars": 0,
             "original_response_chars": 100,
+            "trajectory_turn_count": 0,
+            "trajectory_tool_turns": 0,
         }
         messages = build_scoring_messages(
             truncated=truncated, thinking_mode="fast",
@@ -1914,6 +2204,31 @@ class TestBuildScoringMessagesMultiTurn:
         )
         user_msg = messages[-1]["content"]
         assert "turn_position" not in user_msg
+
+    def test_tool_turns_are_labeled_distinctly(self):
+        from sft_label.prompts_value import build_scoring_messages
+        truncated = {
+            "current_request": "Run the failing command",
+            "instruction": "Run the failing command",
+            "trajectory": "[Assistant Step] Executing tests\n[Tool Result] FAIL test_example.py::test_bug",
+            "response": "I fixed the bug",
+            "original_prior_context_chars": 0,
+            "original_cot_chars": 0,
+            "original_trajectory_chars": 80,
+            "original_response_chars": 20,
+            "trajectory_turn_count": 2,
+            "trajectory_tool_turns": 1,
+        }
+        messages = build_scoring_messages(
+            truncated=truncated,
+            thinking_mode="fast",
+            labels={"intent": "debug", "agentic": ["tool-calling"]},
+            total_turns=4,
+            code_block_count=1,
+        )
+        user_msg = messages[-1]["content"]
+        assert "[Tool Result] FAIL test_example.py::test_bug" in user_msg
+        assert "[Final Assistant] I fixed the bug" in user_msg
 
 
 # ─────────────────────────────────────────────────────────

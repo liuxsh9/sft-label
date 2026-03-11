@@ -118,6 +118,11 @@ Flag criteria (be selective — most samples should have 0-1 flags):
 ## Important Notes
 
 - The <meta> block provides context: Pass 1 tags, original lengths (before truncation), thinking mode.
+- The <conversation> block is CURRENT-TURN CENTERED. Use:
+  - `<prior_context>` only as background.
+  - `<current_turn_request>` as the request being answered.
+  - `<trajectory>` as the assistant/tool trace tied to that request. `[Tool Result]` lines are execution evidence.
+  - `<final_response>` as the answer to score for quality/completeness.
 - original_*_chars provides context about truncation extent, but longer does NOT necessarily mean higher complexity or quality. A concise, correct 200-char response can be higher quality than a rambling 5000-char one.
 - For truncated content: assume the truncated portion continues at the same quality level as visible content, unless there are specific signs of degradation. Do not penalize completeness heavily for truncation.
 - When you cannot verify correctness with certainty (complex algorithms, concurrency, external dependencies), set confidence lower (0.6-0.7) rather than guessing a high correctness score.
@@ -215,6 +220,7 @@ Flag criteria (err on the side of NOT flagging):
 ## Notes
 
 - <meta> provides context (tags, original lengths, thinking mode). Longer does NOT mean higher quality.
+- <conversation> is current-turn centered: `<current_turn_request>` is the request, `<trajectory>` is the related assistant/tool trace, and `<final_response>` is the answer being scored.
 - For truncated content, assume same quality continues. Don't penalize completeness heavily.
 - When correctness is uncertain (complex algorithms, concurrency), set confidence lower (0.6-0.7).
 - Avoid middle-clustering: use the full 1-10 range. A trivial "hello world" IS 1-2, not 5.
@@ -604,9 +610,14 @@ def build_scoring_messages(truncated, thinking_mode, labels,
     # Build meta block
     meta_parts = [
         f"thinking_mode: {thinking_mode}",
+        f"current_turn_centered: true",
+        f"original_prior_context_chars: {truncated.get('original_prior_context_chars', 0)}",
         f"original_cot_chars: {truncated.get('original_cot_chars', 0)}",
+        f"original_trajectory_chars: {truncated.get('original_trajectory_chars', 0)}",
         f"original_response_chars: {truncated.get('original_response_chars', 0)}",
         f"total_turns: {total_turns}",
+        f"trajectory_turn_count: {truncated.get('trajectory_turn_count', 0)}",
+        f"trajectory_tool_turns: {truncated.get('trajectory_tool_turns', 0)}",
         f"code_block_count: {code_block_count}",
         f"tags: {json.dumps(labels, ensure_ascii=False)}",
     ]
@@ -616,14 +627,19 @@ def build_scoring_messages(truncated, thinking_mode, labels,
 
     # Build conversation block
     conv_parts = []
-    if truncated.get("instruction"):
-        conv_parts.append(f"[Human] {truncated['instruction']}")
+    if truncated.get("prior_context"):
+        conv_parts.append(f"<prior_context>\n{truncated['prior_context']}\n</prior_context>")
+    current_request = truncated.get("current_request") or truncated.get("instruction")
+    if current_request:
+        conv_parts.append(f"<current_turn_request>\n[Human] {current_request}\n</current_turn_request>")
+    if truncated.get("trajectory"):
+        conv_parts.append(f"<trajectory>\n{truncated['trajectory']}\n</trajectory>")
     if thinking_mode == "slow" and truncated.get("cot"):
         conv_parts.append(f"«cot»\n{truncated['cot']}\n«/cot»")
     if truncated.get("response"):
-        conv_parts.append(f"[GPT] {truncated['response']}")
+        conv_parts.append(f"<final_response>\n[Final Assistant] {truncated['response']}\n</final_response>")
 
-    conversation = "\n".join(conv_parts)
+    conversation = "\n\n".join(conv_parts)
 
     user_content = f"<meta>\n{meta}\n</meta>\n\n<conversation>\n{conversation}\n</conversation>"
 

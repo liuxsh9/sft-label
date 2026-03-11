@@ -614,6 +614,30 @@ class TestShouldForceLabel:
         ]}
         assert not _should_force_label(source, target)
 
+    def test_keyword_focus_change_forces(self):
+        from sft_label.preprocessing import _should_force_label
+        source = {"conversations": [
+            {"from": "human", "value": "Build a Flask API endpoint for this service"},
+            {"from": "gpt", "value": "Here is the Flask handler"},
+        ]}
+        target = {"conversations": [
+            {"from": "human", "value": "Optimize the SQL query performance"},
+            {"from": "gpt", "value": "Here is the optimized query"},
+        ]}
+        assert _should_force_label(source, target)
+
+    def test_file_scope_change_forces(self):
+        from sft_label.preprocessing import _should_force_label
+        source = {"conversations": [
+            {"from": "human", "value": "Update the README"},
+            {"from": "gpt", "value": "Done."},
+        ]}
+        target = {"conversations": [
+            {"from": "human", "value": "Update src/app.py and tests/test_app.py"},
+            {"from": "gpt", "value": "Done."},
+        ]}
+        assert _should_force_label(source, target)
+
 
 class TestSparseSamplingSignalDetection:
     def test_language_change_forces_labeling(self):
@@ -639,4 +663,3 @@ class TestSparseSamplingSignalDetection:
         inherited_after_change = [i for i in range(10, 15) if i in inherit_map]
         # The force-labeling should increase labeled count vs pure schedule
         assert len(labeled_after_change) > 0
-

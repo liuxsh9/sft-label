@@ -614,6 +614,82 @@ def truncate_with_fragments(text, budget, n_fragments=3, head_ratio=0.3, tail_ra
     return "".join(parts)
 
 
+def _find_last_assistant_idx(conversations):
+    """Return the last assistant turn index, or the last turn as fallback."""
+    for idx in range(len(conversations) - 1, -1, -1):
+        if conversations[idx].get("from") == "gpt":
+            return idx
+    return len(conversations) - 1 if conversations else -1
+
+
+def _find_current_request_idx(conversations, last_assistant_idx):
+    """Return the human turn that the final assistant response is answering."""
+    if last_assistant_idx <= 0:
+        return 0 if conversations else -1
+    for idx in range(last_assistant_idx - 1, -1, -1):
+        if conversations[idx].get("from") == "human":
+            return idx
+    for idx, turn in enumerate(conversations):
+        if turn.get("from") == "human":
+            return idx
+    return max(0, last_assistant_idx - 1)
+
+
+def _format_scoring_turn(turn, final=False):
+    """Render one conversation turn for the Pass 2 evidence window."""
+    role = turn.get("from")
+    if role == "human":
+        label = "Human"
+    elif role == "tool":
+        label = "Tool Result"
+    elif role == "gpt":
+        label = "Final Assistant" if final else "Assistant Step"
+    else:
+        label = (role or "Turn").replace("-", " ").title()
+
+    text = sanitize_training_markers(turn.get("value", ""))
+    return f"[{label}] {text}" if text else f"[{label}]"
+
+
+def _extract_scoring_segments(conversations):
+    """Split a sample into prior context, current request, trajectory, and final answer."""
+    if not conversations:
+        return {
+            "prior_context": "",
+            "current_request": "",
+            "trajectory": "",
+            "response": "",
+            "trajectory_turn_count": 0,
+            "trajectory_tool_turns": 0,
+        }
+
+    last_assistant_idx = _find_last_assistant_idx(conversations)
+    if last_assistant_idx < 0:
+        return {
+            "prior_context": "",
+            "current_request": "",
+            "trajectory": "",
+            "response": "",
+            "trajectory_turn_count": 0,
+            "trajectory_tool_turns": 0,
+        }
+
+    request_idx = _find_current_request_idx(conversations, last_assistant_idx)
+    prior_turns = conversations[:request_idx]
+    request_turn = conversations[request_idx] if 0 <= request_idx < len(conversations) else {}
+    trajectory_turns = conversations[request_idx + 1:last_assistant_idx]
+    response_turn = conversations[last_assistant_idx]
+
+    return {
+        "prior_context": "\n".join(_format_scoring_turn(turn) for turn in prior_turns),
+        "current_request": sanitize_training_markers(request_turn.get("value", "")),
+        "trajectory": "\n".join(_format_scoring_turn(turn) for turn in trajectory_turns),
+        "response": sanitize_training_markers(response_turn.get("value", "")),
+        "trajectory_turn_count": len(trajectory_turns),
+        "trajectory_tool_turns": sum(1 for turn in trajectory_turns if turn.get("from") == "tool"),
+    }
+
+
 def truncate_for_scoring(conversations, thinking_mode, cot_text="",
                          budget=None, instruction_ratio=None,
                          cot_ratio=None, response_ratio=None,
@@ -621,16 +697,16 @@ def truncate_for_scoring(conversations, thinking_mode, cot_text="",
     """Orchestrate COT-preserving truncation for value scoring.
 
     Budget allocation:
-      - Instruction (first human turn): 15%
+      - Current user request: 15%
       - COT (slow thinking only): 45%
-      - Response (last GPT turn, COT stripped): 35%
+      - Remaining evidence pool: prior context + current-turn trajectory + final answer
       - Meta is handled externally: 5%
 
-    For fast thinking (no COT), COT budget merges into response → 80% total.
+    For fast thinking (no COT), the COT budget merges into the evidence pool.
 
     Returns:
-        dict with keys: instruction, cot (or None), response, was_truncated,
-              original_instruction_chars, original_cot_chars, original_response_chars
+        dict with keys: instruction/current_request, prior_context, trajectory,
+              cot (or None), response, was_truncated, original_*_chars
     """
     if budget is None:
         budget = VALUE_TRUNCATION_BUDGET
@@ -646,14 +722,14 @@ def truncate_for_scoring(conversations, thinking_mode, cot_text="",
     # Content budget (exclude ~5% meta overhead)
     content_budget = int(budget * 0.95)
 
-    # Extract instruction (first human turn) and response (last GPT turn)
-    instruction = ""
-    response = ""
-    for turn in conversations:
-        if turn.get("from") == "human" and not instruction:
-            instruction = turn.get("value", "")
-        if turn.get("from") == "gpt":
-            response = turn.get("value", "")  # keep updating to get last one
+    # Extract a current-turn-centered evidence window.
+    segments = _extract_scoring_segments(conversations)
+    prior_context = segments["prior_context"]
+    instruction = segments["current_request"]
+    trajectory = segments["trajectory"]
+    response = segments["response"]
+    trajectory_turn_count = segments["trajectory_turn_count"]
+    trajectory_tool_turns = segments["trajectory_tool_turns"]
 
     # For fast thinking, strip COT from response if any
     if thinking_mode == "fast":
@@ -664,62 +740,133 @@ def truncate_for_scoring(conversations, thinking_mode, cot_text="",
         cot_text_final = cot_text
 
     # Sanitize training-specific XML tags
+    prior_context = sanitize_training_markers(prior_context)
     instruction = sanitize_training_markers(instruction)
+    trajectory = sanitize_training_markers(trajectory)
     response_clean = sanitize_training_markers(response_clean)
     if cot_text_final:
         cot_text_final = sanitize_training_markers(cot_text_final)
 
+    original_prior_context_chars = len(prior_context)
     original_instruction_chars = len(instruction)
+    original_trajectory_chars = len(trajectory)
     original_cot_chars = len(cot_text_final)
     original_response_chars = len(response_clean)
 
-    total_original = original_instruction_chars + original_cot_chars + original_response_chars
+    total_original = (
+        original_prior_context_chars
+        + original_instruction_chars
+        + original_trajectory_chars
+        + original_cot_chars
+        + original_response_chars
+    )
     was_truncated = total_original > content_budget
 
     if not was_truncated:
         return {
+            "prior_context": prior_context,
+            "current_request": instruction,
             "instruction": instruction,
+            "trajectory": trajectory,
             "cot": cot_text_final if thinking_mode == "slow" else None,
             "response": response_clean,
             "was_truncated": False,
+            "original_prior_context_chars": original_prior_context_chars,
             "original_instruction_chars": original_instruction_chars,
+            "original_trajectory_chars": original_trajectory_chars,
             "original_cot_chars": original_cot_chars,
             "original_response_chars": original_response_chars,
+            "trajectory_turn_count": trajectory_turn_count,
+            "trajectory_tool_turns": trajectory_tool_turns,
         }
 
     # Allocate budgets
     if thinking_mode == "slow" and cot_text_final:
         instr_budget = int(content_budget * instruction_ratio)
         cot_budget = int(content_budget * cot_ratio)
-        resp_budget = content_budget - instr_budget - cot_budget
+        evidence_budget = content_budget - instr_budget - cot_budget
     else:
-        # Fast thinking: no COT, merge COT budget into response
+        # Fast thinking: no COT, merge COT budget into current-turn evidence
         instr_budget = int(content_budget * instruction_ratio)
         cot_budget = 0
-        resp_budget = content_budget - instr_budget
+        evidence_budget = content_budget - instr_budget
+
+    evidence_weights = []
+    if prior_context:
+        evidence_weights.append(("prior_context", 0.20))
+    if trajectory:
+        evidence_weights.append(("trajectory", 0.45))
+    if response_clean:
+        evidence_weights.append(("response", 0.35))
+
+    evidence_budgets = {
+        "prior_context": 0,
+        "trajectory": 0,
+        "response": 0,
+    }
+    if evidence_weights and evidence_budget > 0:
+        total_weight = sum(weight for _, weight in evidence_weights)
+        allocated = 0
+        for name, weight in evidence_weights[:-1]:
+            share = int(evidence_budget * (weight / total_weight))
+            evidence_budgets[name] = share
+            allocated += share
+        last_name = evidence_weights[-1][0]
+        evidence_budgets[last_name] = max(0, evidence_budget - allocated)
 
     # Truncate each section
     trunc_instruction = _truncate_text(instruction, instr_budget) if len(instruction) > instr_budget else instruction
+    prior_budget = evidence_budgets["prior_context"]
+    if prior_context and prior_budget > 0:
+        trunc_prior_context = (
+            _truncate_text(prior_context, prior_budget, keep_head_ratio=0.15)
+            if len(prior_context) > prior_budget else prior_context
+        )
+    else:
+        trunc_prior_context = prior_context if prior_budget != 0 else ""
 
     if thinking_mode == "slow" and cot_text_final and cot_budget > 0:
         trunc_cot = truncate_with_fragments(cot_text_final, cot_budget, n_fragments=n_fragments)
     else:
         trunc_cot = None
 
-    if thinking_mode == "fast":
-        # For fast thinking, use fragment-based truncation on response too
-        trunc_response = truncate_with_fragments(response_clean, resp_budget, n_fragments=n_fragments)
+    trajectory_budget = evidence_budgets["trajectory"]
+    if trajectory and trajectory_budget > 0:
+        trunc_trajectory = truncate_with_fragments(
+            trajectory, trajectory_budget,
+            n_fragments=n_fragments,
+            head_ratio=0.25,
+            tail_ratio=0.35,
+        )
     else:
-        trunc_response = _truncate_text(response_clean, resp_budget) if len(response_clean) > resp_budget else response_clean
+        trunc_trajectory = trajectory if trajectory_budget != 0 else ""
+
+    response_budget = evidence_budgets["response"]
+    if thinking_mode == "fast" and response_budget > 0:
+        trunc_response = truncate_with_fragments(
+            response_clean, response_budget, n_fragments=n_fragments,
+            head_ratio=0.45, tail_ratio=0.25,
+        )
+    elif response_budget > 0:
+        trunc_response = _truncate_text(response_clean, response_budget) if len(response_clean) > response_budget else response_clean
+    else:
+        trunc_response = response_clean if response_budget != 0 else ""
 
     return {
+        "prior_context": trunc_prior_context,
+        "current_request": trunc_instruction,
         "instruction": trunc_instruction,
+        "trajectory": trunc_trajectory,
         "cot": trunc_cot,
         "response": trunc_response,
         "was_truncated": True,
+        "original_prior_context_chars": original_prior_context_chars,
         "original_instruction_chars": original_instruction_chars,
+        "original_trajectory_chars": original_trajectory_chars,
         "original_cot_chars": original_cot_chars,
         "original_response_chars": original_response_chars,
+        "trajectory_turn_count": trajectory_turn_count,
+        "trajectory_tool_turns": trajectory_tool_turns,
     }
 
 
@@ -1049,28 +1196,80 @@ def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=
     return schedule
 
 
+_FILE_SCOPE_RE = re.compile(r'(?:[\w./-]+\.[A-Za-z0-9]{1,8}|[\w./-]+/[\w./-]+)')
+
+
+def _current_turn_signature(sample):
+    """Build lightweight structural signals for inheritance decisions."""
+    convs = sample.get("conversations", [])
+    segments = _extract_scoring_segments(convs)
+
+    request = segments["current_request"]
+    trajectory = segments["trajectory"]
+    response = segments["response"]
+    window_text = "\n".join(part for part in (request, trajectory, response) if part)
+
+    keyword_groups = {group for group, _matches in detect_keywords(request)}
+    fence_langs = set(detect_code_fence_languages(response))
+    if not fence_langs and window_text:
+        fence_langs = set(detect_code_fence_languages(window_text))
+
+    role_pattern = []
+    last_assistant_idx = _find_last_assistant_idx(convs)
+    request_idx = _find_current_request_idx(convs, last_assistant_idx) if last_assistant_idx >= 0 else -1
+    if request_idx >= 0 and last_assistant_idx >= request_idx:
+        role_pattern = [turn.get("from", "") for turn in convs[request_idx:last_assistant_idx + 1]]
+
+    return {
+        "keyword_groups": keyword_groups,
+        "fence_langs": fence_langs,
+        "trajectory_tool_turns": segments["trajectory_tool_turns"],
+        "trajectory_turn_count": segments["trajectory_turn_count"],
+        "code_block_count": count_code_blocks(window_text),
+        "has_file_scope": bool(_FILE_SCOPE_RE.search(window_text)),
+        "role_pattern": tuple(role_pattern),
+    }
+
+
 def _should_force_label(source_sample, target_sample):
     """Check if target's signals differ enough from source to warrant fresh labeling.
 
     Prevents label inheritance when the adjacent slice has materially different
     characteristics (language change, tool role presence change).
     """
-    s_convs = source_sample.get("conversations", [])
-    t_convs = target_sample.get("conversations", [])
+    source_sig = _current_turn_signature(source_sample)
+    target_sig = _current_turn_signature(target_sample)
 
-    # Compare last assistant response languages
-    s_last = next((t["value"] for t in reversed(s_convs) if t.get("from") == "gpt"), "")
-    t_last = next((t["value"] for t in reversed(t_convs) if t.get("from") == "gpt"), "")
-
-    s_langs = set(detect_code_fence_languages(s_last))
-    t_langs = set(detect_code_fence_languages(t_last))
+    # Compare last-turn code languages
+    s_langs = source_sig["fence_langs"]
+    t_langs = target_sig["fence_langs"]
     if s_langs and t_langs and s_langs != t_langs:
         return True
 
-    # Tool role presence changed (agentic → non-agentic or vice versa)
-    s_has_tool = any(t.get("from") == "tool" for t in s_convs[-3:])
-    t_has_tool = any(t.get("from") == "tool" for t in t_convs[-3:])
-    if s_has_tool != t_has_tool:
+    # Tool execution pattern changed materially.
+    if source_sig["trajectory_tool_turns"] != target_sig["trajectory_tool_turns"]:
+        return True
+    if source_sig["role_pattern"] != target_sig["role_pattern"] and (
+        source_sig["trajectory_turn_count"] or target_sig["trajectory_turn_count"]
+    ):
+        return True
+
+    # Current-turn evidence moved between plain text and code-heavy.
+    s_code_blocks = source_sig["code_block_count"]
+    t_code_blocks = target_sig["code_block_count"]
+    if (s_code_blocks == 0) != (t_code_blocks == 0):
+        return True
+    if abs(s_code_blocks - t_code_blocks) >= 2:
+        return True
+
+    # File-scope changes usually indicate a different coordination burden.
+    if source_sig["has_file_scope"] != target_sig["has_file_scope"]:
+        return True
+
+    # Query focus changed between materially different keyword groups.
+    s_keywords = source_sig["keyword_groups"]
+    t_keywords = target_sig["keyword_groups"]
+    if s_keywords and t_keywords and s_keywords != t_keywords:
         return True
 
     return False
