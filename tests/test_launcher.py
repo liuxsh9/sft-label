@@ -36,6 +36,7 @@ def test_build_run_pass1_pass2_semantic_plan():
             "1",          # run mode: new
             "data.json",  # --input
             "",           # --output
+            "",           # inline mode (refresh)
             "",           # --limit (default 0)
             "",           # shuffle (default no)
             "",           # arbitration (default yes)
@@ -227,11 +228,11 @@ def test_all_workflows_generate_parseable_argv():
     parser = build_parser()
     workflow_answers = {
         # 1. run-pass1
-        1: ["1", "data.json", "", "", "", "", "", "", "n", ""],
+        1: ["1", "data.json", "", "", "", "", "", "", "", "n", ""],
         # 2. run-pass1-pass2
-        2: ["1", "data.json", "", "", "", "", "", "", "stats.json", "", "n", ""],
+        2: ["1", "data.json", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
         # 3. run-pass1-pass2-semantic
-        3: ["1", "data.json", "", "", "", "", "", "", "", "", "n", ""],
+        3: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
         # 4. score
         4: ["labeled.json", "", "", "", "", "", "", "n", ""],
         # 5. semantic
@@ -296,6 +297,7 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
             "\x1b[A",     # arrow key input on required --input field
             "data.json",  # actual --input
             "",           # --output
+            "",           # inline mode
             "",           # --limit
             "",           # --shuffle
             "",           # --arbitration
@@ -311,6 +313,86 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
     assert plan is not None
     assert plan.argv[:3] == ["run", "--input", "data.json"]
     assert "检测到方向键/控制字符输入，已忽略" in captured.out
+
+
+def test_build_run_plan_can_set_migrate_mode():
+    io = StubIO(
+        [
+            "1",             # workflow: run-pass1
+            "1",             # run mode: new
+            "dataset",       # --input
+            "",              # --output
+            "3",             # inline mode: migrate
+            "old-run",       # --migrate-from
+            "",              # --limit
+            "",              # --shuffle
+            "",              # --arbitration
+            "",              # --prompt mode
+            "",              # --model
+            "n",             # env override
+            "",              # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv[:7] == [
+        "run",
+        "--input",
+        "dataset",
+        "--mode",
+        "migrate",
+        "--migrate-from",
+        "old-run",
+    ]
+
+
+def test_build_run_plan_can_set_recompute_mode():
+    io = StubIO(
+        [
+            "1",        # workflow: run-pass1
+            "1",        # run mode: new
+            "dataset",  # --input
+            "",         # --output
+            "4",        # inline mode: recompute
+            "",         # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "run",
+        "--input",
+        "dataset",
+        "--mode",
+        "recompute",
+    ]
+
+
+def test_build_run_resume_plan_skips_output_prompt():
+    io = StubIO(
+        [
+            "1",        # workflow: run-pass1
+            "2",        # run mode: resume
+            "run-dir",  # --resume
+            "",         # also set --input? no
+            "",         # --limit
+            "",         # --shuffle
+            "",         # --arbitration
+            "",         # --prompt mode
+            "",         # --model
+            "n",        # env override
+            "",         # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "run",
+        "--resume",
+        "run-dir",
+    ]
+    assert "--output" not in plan.argv
+    assert not any("输出目录（可选）" in str(item) for item in io.outputs)
 
 
 def test_build_launch_plan_can_render_english():

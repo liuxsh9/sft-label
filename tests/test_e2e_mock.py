@@ -303,15 +303,19 @@ class TestE2EDirectory:
         # ── Verify output structure ──
         run_dir = Path(stats["run_dir"]) if "run_dir" in stats else output_dir
         assert run_dir.exists()
-
-        # Should have per-file subdirs
-        subdirs = [d for d in run_dir.iterdir() if d.is_dir()]
-        assert len(subdirs) >= 2, f"Expected >=2 subdirs, got {len(subdirs)}: {subdirs}"
-
-        # Each subdir should have labeled.json
-        for sub in subdirs:
-            labeled_files = list(sub.glob("labeled*.json"))
-            assert len(labeled_files) >= 1, f"No labeled files in {sub}"
+        dataset_root = run_dir / dir_input.name
+        if dataset_root.is_dir():
+            assert (run_dir / "meta_label_data").is_dir()
+            mirrored_files = sorted(dataset_root.rglob("*.jsonl"))
+            assert len(mirrored_files) >= 2, f"Expected mirrored jsonl files under {dataset_root}"
+            for mirrored in mirrored_files:
+                assert mirrored.read_text(encoding="utf-8").strip(), f"Mirrored file is empty: {mirrored}"
+        else:
+            subdirs = [d for d in run_dir.iterdir() if d.is_dir() and d.name != "meta_label_data"]
+            assert len(subdirs) >= 2, f"Expected >=2 subdirs, got {len(subdirs)}: {subdirs}"
+            for sub in subdirs:
+                labeled_files = list(sub.glob("labeled*.json"))
+                assert len(labeled_files) >= 1, f"No labeled files in {sub}"
 
         # ── Verify terminal output is clean ──
         captured = capsys.readouterr()

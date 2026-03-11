@@ -12,6 +12,7 @@ dashboard_scoring.html per file.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -58,6 +59,16 @@ from sft_label.artifacts import (
     PASS2_DASHBOARD_FILE,
     pass2_global_dashboard_filename,
 )
+from sft_label.inline_scoring import (
+    InlineScoringTarget,
+    discover_inline_jsonl_files,
+    infer_inline_scoring_target,
+    load_inline_scoring_file,
+    scoreable_samples_from_bundle,
+    stream_inline_rows_with_scoring,
+    update_inline_row_with_scored_samples,
+    write_inline_labeled_cache,
+)
 from sft_label.labels import is_partial_labels, is_usable_labels
 
 
@@ -85,6 +96,27 @@ def _coerce_positive_int(value):
         iv = int(value)
         return iv if iv > 0 else 0
     return 0
+
+
+def _write_json_atomic(path, payload):
+    """Write JSON via a temp file and atomic replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _write_jsonl_atomic(path, records):
+    """Write JSONL via a temp file and atomic replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, path)
 
 
 def _normalize_combo_counts(raw_counts):
@@ -1507,6 +1539,271 @@ def compute_value_stats(scored_samples, all_monitors):
 # Pipeline entry points
 # ─────────────────────────────────────────────────────────
 
+def _inline_dashboard_filename(layout: InlineScoringTarget, source_file: Path) -> str:
+    rel = layout.layout.relative_source_path(source_file).with_suffix("")
+    stem = "__".join(rel.parts) if rel.parts else source_file.stem
+    return f"dashboard_scoring_{stem}.html"
+
+
+def _load_scored_artifact_samples(artifact_dir: Path):
+    """Load scored samples from a per-file artifact directory."""
+    artifact_dir = Path(artifact_dir)
+    json_path = artifact_dir / "scored.json"
+    jsonl_path = artifact_dir / "scored.jsonl"
+    if json_path.exists():
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    samples = []
+    if jsonl_path.exists():
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    samples.append(json.loads(line))
+    return samples
+
+
+def _load_monitor_lookup(path: Path) -> dict[str, dict]:
+    lookup = {}
+    path = Path(path)
+    if not path.exists():
+        return lookup
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            monitor = json.loads(line)
+            sample_id = monitor.get("sample_id")
+            if sample_id:
+                lookup[sample_id] = monitor
+    return lookup
+
+
+def _load_resumed_value_cache(output_dir: Path) -> dict[str, dict]:
+    """Load existing scored values keyed by sample id from scored.jsonl."""
+    resumed_values: dict[str, dict] = {}
+    scored_jsonl_path = Path(output_dir) / "scored.jsonl"
+    if not scored_jsonl_path.exists():
+        return resumed_values
+
+    with open(scored_jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            scored_sample = json.loads(line)
+            sample_id = scored_sample.get("id", "")
+            value = scored_sample.get("value")
+            if sample_id and isinstance(value, dict):
+                resumed_values[sample_id] = value
+    return resumed_values
+
+
+def _existing_resume_value(sample: dict, resumed_values: dict[str, dict]) -> dict | None:
+    """Return an existing score from inline payload or an on-disk scored cache."""
+    embedded_value = sample.get("value")
+    if isinstance(embedded_value, dict):
+        return copy.deepcopy(embedded_value)
+
+    sample_id = sample.get("id", "")
+    cached_value = resumed_values.get(sample_id)
+    if isinstance(cached_value, dict):
+        return copy.deepcopy(cached_value)
+
+    legacy_sample_id = (sample.get("metadata") or {}).get("legacy_sample_id", "")
+    if legacy_sample_id and legacy_sample_id != sample_id:
+        cached_value = resumed_values.get(legacy_sample_id)
+        if isinstance(cached_value, dict):
+            return copy.deepcopy(cached_value)
+    return None
+
+
+def _resumed_monitor(sample_id: str) -> dict:
+    """Synthetic scoring monitor for resume-skipped samples."""
+    return {
+        "sample_id": sample_id,
+        "status": "resumed",
+        "llm_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "attempts": 0,
+    }
+
+
+def _sync_inline_scored_cache_to_dataset(source_file: Path, artifact_dir: Path, limit: int = 0):
+    """Copy scored cache results back into the mirrored inline dataset rows."""
+    source_file = Path(source_file)
+    artifact_dir = Path(artifact_dir)
+    scored_samples = _load_scored_artifact_samples(artifact_dir)
+    bundles, _samples, sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
+    if len(scored_samples) != len(sample_to_bundle):
+        raise ValueError(
+            f"Scored cache/sample mismatch for {source_file}: "
+            f"{len(scored_samples)} scored vs {len(sample_to_bundle)} scoreable turns"
+        )
+
+    samples_by_bundle = [[] for _ in bundles]
+    for sample, bundle_idx in zip(scored_samples, sample_to_bundle):
+        samples_by_bundle[bundle_idx].append(sample)
+
+    monitor_lookup = _load_monitor_lookup(artifact_dir / "monitor_value.jsonl")
+    updated_rows = {}
+    conversation_records = []
+    for bundle_idx, bundle in enumerate(bundles):
+        updated_row, conversation = update_inline_row_with_scored_samples(
+            bundle.raw_row,
+            samples_by_bundle[bundle_idx],
+            monitor_lookup=monitor_lookup,
+        )
+        updated_rows[bundle.row_number] = updated_row
+        if conversation and len(samples_by_bundle[bundle_idx]) >= 2:
+            conversation_records.append(conversation)
+
+    tmp_path = source_file.with_name(f".{source_file.name}.tmp")
+    with open(source_file, "r", encoding="utf-8") as src, open(tmp_path, "w", encoding="utf-8") as dst:
+        for row_number, line in enumerate(src, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = updated_rows.get(row_number)
+            if payload is None:
+                payload = json.loads(stripped)
+            dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, source_file)
+
+    if conversation_records:
+        _write_json_atomic(artifact_dir / "conversation_scores.json", conversation_records)
+    else:
+        conv_path = artifact_dir / "conversation_scores.json"
+        if conv_path.exists():
+            conv_path.unlink()
+
+    return scored_samples, conversation_records
+
+
+def _generate_inline_file_dashboard(target: InlineScoringTarget, source_file: Path):
+    artifact_dir = target.layout.file_artifact_dir(source_file)
+    try:
+        from sft_label.tools.visualize_value import generate_value_dashboard
+        scored_name = "scored.json" if (artifact_dir / "scored.json").exists() else "scored.jsonl"
+        generate_value_dashboard(
+            artifact_dir,
+            scored_file=scored_name,
+            stats_file=PASS2_STATS_FILE,
+            output_file=str(target.layout.dashboard_path(_inline_dashboard_filename(target, source_file))),
+            quiet=True,
+        )
+    except Exception:
+        pass
+
+
+async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Path,
+                                   tag_stats_path, limit, config, resume=False,
+                                   llm_progress_cb=None):
+    """Score one mirrored inline JSONL file via rebuildable meta caches."""
+    artifact_dir = target.layout.file_artifact_dir(source_file)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    _bundles, cached_samples = write_inline_labeled_cache(source_file, artifact_dir, limit=limit)
+
+    effective_tag_stats = tag_stats_path
+    if effective_tag_stats is None:
+        candidate = artifact_dir / PASS1_STATS_FILE
+        if candidate.exists():
+            effective_tag_stats = str(candidate)
+        else:
+            summary_candidate = target.layout.meta_root / PASS1_SUMMARY_STATS_FILE
+            if summary_candidate.exists():
+                effective_tag_stats = str(summary_candidate)
+
+    stats = await _run_scoring_file(
+        artifact_dir / "labeled.jsonl",
+        artifact_dir,
+        effective_tag_stats,
+        limit,
+        config,
+        resume=resume,
+        llm_progress_cb=llm_progress_cb,
+    )
+
+    scored_samples, conversation_records = _sync_inline_scored_cache_to_dataset(
+        source_file,
+        artifact_dir,
+        limit=limit,
+    )
+    _generate_inline_file_dashboard(target, source_file)
+
+    stats["input_file"] = str(source_file)
+    stats["mirrored_file"] = str(source_file)
+    stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
+    if conversation_records:
+        stats["conversation_records"] = len(conversation_records)
+    _write_json_atomic(artifact_dir / PASS2_STATS_FILE, {k: v for k, v in stats.items() if k != "_raw_scores"})
+    return stats
+
+
+async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_path,
+                                        limit, config, resume=False,
+                                        llm_progress_cb=None):
+    """Score a mirrored inline dataset tree using meta caches under meta_label_data."""
+    source_files = discover_inline_jsonl_files(target)
+    for source_file in source_files:
+        write_inline_labeled_cache(
+            source_file,
+            target.layout.file_artifact_dir(source_file),
+            limit=limit,
+        )
+
+    effective_tag_stats = tag_stats_path
+    if effective_tag_stats is None:
+        summary_candidate = target.layout.meta_root / PASS1_SUMMARY_STATS_FILE
+        if summary_candidate.exists():
+            effective_tag_stats = str(summary_candidate)
+
+    summary = await _run_scoring_directory(
+        target.layout.file_meta_root,
+        target.layout.meta_root,
+        effective_tag_stats,
+        limit,
+        config,
+        resume=resume,
+        llm_progress_cb=llm_progress_cb,
+    )
+
+    all_conv_records = []
+    for source_file in source_files:
+        artifact_dir = target.layout.file_artifact_dir(source_file)
+        _scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
+            source_file,
+            artifact_dir,
+            limit=limit,
+        )
+        if conv_records:
+            all_conv_records.extend(conv_records)
+        _generate_inline_file_dashboard(target, source_file)
+
+    if all_conv_records:
+        _write_json_atomic(target.layout.meta_root / "conversation_scores.json", all_conv_records)
+
+    try:
+        from sft_label.tools.visualize_value import generate_value_dashboard
+        generate_value_dashboard(
+            target.layout.meta_root,
+            scored_file=None,
+            stats_file=PASS2_SUMMARY_STATS_FILE,
+            output_file=str(target.layout.dashboard_path(
+                pass2_global_dashboard_filename(target.layout.dataset_root_name)
+            )),
+            quiet=True,
+        )
+    except Exception:
+        pass
+
+    summary["run_dir"] = str(target.layout.run_root)
+    summary["input_path"] = str(target.target_path)
+    return summary
+
 def _create_progress():
     """Create a Rich progress bar for scoring."""
     return Progress(
@@ -1538,11 +1835,33 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
         config = PipelineConfig()
 
     input_path = Path(input_path)
+    inline_target = infer_inline_scoring_target(input_path)
+
+    if inline_target is not None:
+        if input_path.is_file():
+            return await _run_inline_scoring_file(
+                inline_target,
+                input_path.resolve(),
+                tag_stats_path,
+                limit,
+                config,
+                resume=resume,
+                llm_progress_cb=llm_progress_cb,
+            )
+        return await _run_inline_scoring_directory(
+            inline_target,
+            tag_stats_path,
+            limit,
+            config,
+            resume=resume,
+            llm_progress_cb=llm_progress_cb,
+        )
 
     # Determine if directory or single file
     if input_path.is_dir():
         return await _run_scoring_directory(
             input_path, output_dir, tag_stats_path, limit, config,
+            resume=resume,
             llm_progress_cb=llm_progress_cb,
         )
     else:
@@ -1553,7 +1872,8 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
 
 
 async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
-                                     limit, config, llm_progress_cb=None):
+                                     limit, config, resume=False,
+                                     llm_progress_cb=None):
     """Score a JSONL labeled file in chunks to bound memory.
 
     Two-pass approach:
@@ -1568,6 +1888,9 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         output_dir = input_path.parent
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    resumed_values = _load_resumed_value_cache(output_dir) if resume else {}
+    if resumed_values:
+        print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
 
     chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
@@ -1724,6 +2047,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             chunk_gen = iter_chunks_from_jsonl(input_path, chunk_size, limit=limit)
             chunks_loaded = 0
             gen_exhausted = False
+            next_chunk_to_flush = 0
+            skipped_count = 0
 
             async def _tagged_score(idx, chunk_idx, sample, rarity_result):
                 nonlocal scored_count, failed_count, first_error_logged
@@ -1734,12 +2059,12 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 return chunk_idx, idx, value, monitor, sample
 
             def load_next_scoring_chunk():
-                nonlocal chunks_loaded, global_offset, gen_exhausted
+                nonlocal chunks_loaded, global_offset, gen_exhausted, skipped_count
                 try:
                     raw_records = next(chunk_gen)
                 except StopIteration:
                     gen_exhausted = True
-                    return None
+                    return None, 0
 
                 # These are already-labeled samples from the JSONL
                 samples = []
@@ -1758,28 +2083,44 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     "done": 0,
                     "values": [None] * len(samples),
                     "monitors": [None] * len(samples),
+                    "flushed": False,
                 }
 
                 # Submit scoring tasks
+                resumed_in_chunk = 0
                 for i, sample in enumerate(samples):
                     abs_idx = offset + i
+                    resumed_value = _existing_resume_value(sample, resumed_values)
+                    if resumed_value is not None:
+                        active_chunks[chunk_idx]["values"][i] = resumed_value
+                        active_chunks[chunk_idx]["monitors"][i] = _resumed_monitor(
+                            sample.get("id", f"sample-{abs_idx}")
+                        )
+                        active_chunks[chunk_idx]["done"] += 1
+                        resumed_in_chunk += 1
+                        skipped_count += 1
+                        continue
                     rarity_result = raw_rarities[abs_idx] if abs_idx < len(raw_rarities) else {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
                     fut = asyncio.ensure_future(
                         _tagged_score(abs_idx, chunk_idx, sample, rarity_result)
                     )
                     pending_futures.add(fut)
 
-                return chunk_idx
+                return chunk_idx, resumed_in_chunk
 
             def maybe_load_more_scoring():
+                resumed_loaded = 0
                 active_count = sum(1 for c in active_chunks.values()
                                    if c["done"] < c["total"])
                 while (not gen_exhausted
                        and len(pending_futures) < int(config.scoring_concurrency * config.dir_pipeline_watermark)
                        and active_count < max_active):
-                    if load_next_scoring_chunk() is None:
+                    chunk_idx, resumed_in_chunk = load_next_scoring_chunk()
+                    if chunk_idx is None:
                         break
+                    resumed_loaded += resumed_in_chunk
                     active_count += 1
+                return resumed_loaded
 
             def flush_scoring_chunk(chunk_idx):
                 nonlocal scored_count, failed_count
@@ -1825,12 +2166,27 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 chunk_data["samples"] = None
                 chunk_data["values"] = None
                 chunk_data["monitors"] = None
+                chunk_data["flushed"] = True
+
+            def flush_ready_scoring_chunks():
+                nonlocal next_chunk_to_flush
+                while True:
+                    chunk_data = active_chunks.get(next_chunk_to_flush)
+                    if chunk_data is None or chunk_data.get("flushed"):
+                        break
+                    if chunk_data["done"] < chunk_data["total"]:
+                        break
+                    flush_scoring_chunk(next_chunk_to_flush)
+                    next_chunk_to_flush += 1
 
             with _create_progress() as progress:
                 task = progress.add_task("Pass 2", total=total, info="")
 
                 # Initial load
-                maybe_load_more_scoring()
+                resumed_loaded = maybe_load_more_scoring()
+                if resumed_loaded:
+                    progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
+                flush_ready_scoring_chunks()
 
                 while pending_futures:
                     done, pending_futures = await asyncio.wait(
@@ -1864,12 +2220,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             if run_info:
                                 _info = f"{_info} • {run_info}"
                         progress.update(task, advance=1, info=_info)
+                    flush_ready_scoring_chunks()
+                    resumed_loaded = maybe_load_more_scoring()
+                    if resumed_loaded:
+                        progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
+                    flush_ready_scoring_chunks()
 
-                        # Check if chunk is done
-                        if chunk_data["done"] >= chunk_data["total"]:
-                            flush_scoring_chunk(chunk_idx)
-
-                    maybe_load_more_scoring()
+                flush_ready_scoring_chunks()
 
     finally:
         out_scored.close()
@@ -2213,6 +2570,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     if input_path.suffix == ".jsonl":
         return await _run_scoring_file_chunked(
             input_path, output_dir, tag_stats_path, limit, config,
+            resume=resume,
             llm_progress_cb=llm_progress_cb,
         )
 
@@ -2231,22 +2589,9 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     total = len(samples)
 
     # Resume: load previously scored samples from scored.jsonl
-    resumed_values = {}
-    if resume:
-        scored_jsonl_path = output_dir / "scored.jsonl"
-        if scored_jsonl_path.exists():
-            with open(scored_jsonl_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    scored_sample = json.loads(line)
-                    sid = scored_sample.get("id", "")
-                    v = scored_sample.get("value")
-                    if sid and v:
-                        resumed_values[sid] = v
-            if resumed_values:
-                print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
+    resumed_values = _load_resumed_value_cache(output_dir) if resume else {}
+    if resumed_values:
+        print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
 
     # Load tag stats for rarity
     rarity_mode = resolve_rarity_mode(config)
@@ -2339,14 +2684,13 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     # Pre-fill resumed values
     skipped_count = 0
-    if resumed_values:
+    if resume:
         for idx, s in enumerate(samples):
             sid = s.get("id", "")
-            if sid in resumed_values:
-                all_values[idx] = resumed_values[sid]
-                all_monitors[idx] = {"sample_id": sid, "status": "resumed",
-                                     "llm_calls": 0, "prompt_tokens": 0,
-                                     "completion_tokens": 0, "attempts": 0}
+            resumed_value = _existing_resume_value(s, resumed_values)
+            if resumed_value is not None:
+                all_values[idx] = resumed_value
+                all_monitors[idx] = _resumed_monitor(sid)
                 skipped_count += 1
 
     scored_count = skipped_count
@@ -2872,7 +3216,7 @@ def _flush_scoring_file(collector, config, pprint=print):
 
 
 async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, config,
-                                 llm_progress_cb=None):
+                                 resume=False, llm_progress_cb=None):
     """Score all labeled files in a directory with cross-file parallelism.
 
     Uses watermark-based file loading (same pattern as Pass 1's
@@ -3104,29 +3448,46 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             stats_ref_info=global_stats_ref_info,
             combo_mode=global_combo_mode,
         )
+        resumed_values = _load_resumed_value_cache(file_output_dir) if resume else {}
+        if resumed_values:
+            pprint(
+                f"  Resume: loaded {len(resumed_values)} pre-scored samples for "
+                f"{labeled_path.relative_to(input_dir)}"
+            )
 
+        resumed_loaded = 0
         # Submit scoring tasks
         for i in range(total):
+            resumed_value = _existing_resume_value(samples[i], resumed_values)
+            if resumed_value is not None:
+                collector.values[i] = resumed_value
+                collector.monitors[i] = _resumed_monitor(samples[i].get("id", f"sample-{i}"))
+                collector.done += 1
+                collector.ok += 1
+                resumed_loaded += 1
+                continue
             fut = asyncio.ensure_future(
                 _tagged_score(client, samples[i], rarity_results[i],
                               file_idx, i, total)
             )
             pending_futures.add(fut)
 
-        return collector
+        return collector, resumed_loaded
 
     # --- Try to load more files if below watermark ---
     def maybe_load_more(pending_futures, collectors, next_to_load, client):
         active_count = sum(1 for c in collectors.values() if not c.completed)
+        resumed_loaded = 0
         while (next_to_load < len(resident_files)
                and len(pending_futures) < watermark
                and active_count < max_active):
             labeled_path = resident_files[next_to_load]
-            c = load_and_submit(next_to_load, labeled_path, client, pending_futures)
+            c, file_resumed = load_and_submit(next_to_load, labeled_path, client, pending_futures)
             collectors[c.file_idx] = c
             next_to_load += 1
             active_count += 1
-        return next_to_load
+            resumed_loaded += file_resumed
+        return next_to_load, resumed_loaded
 
     # --- Main watermark-driven loop ---
     collectors = {}
@@ -3148,6 +3509,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 shared_tag_stats_path,
                 limit,
                 config,
+                resume=resume,
                 llm_progress_cb=llm_progress_cb,
             )
             stats["file"] = _relative_file_label(labeled_path, input_dir)
@@ -3179,8 +3541,25 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     )
                     pprint = progress.console.print
 
+                    def flush_completed_collectors():
+                        flushed = 0
+                        for collector in collectors.values():
+                            if collector.done < collector.total or collector.completed:
+                                continue
+                            stats = _flush_scoring_file(collector, config, pprint=pprint)
+                            stats["file"] = _relative_file_label(collector.labeled_path, input_dir)
+                            all_file_stats.append(stats)
+                            progress.update(file_task, advance=1)
+                            flushed += 1
+                        return flushed
+
                     # Initial load
-                    next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
+                    next_to_load, resumed_loaded = maybe_load_more(
+                        pending_futures, collectors, next_to_load, client
+                    )
+                    if resumed_loaded:
+                        progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
+                    flush_completed_collectors()
 
                     while pending_futures:
                         done, pending_futures = await asyncio.wait(
@@ -3236,19 +3615,18 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                                     info=eta_tracker.info_line(),
                                 )
 
-                            # Check if file is fully done
-                            if c.done >= c.total and not c.completed:
-                                stats = _flush_scoring_file(c, config, pprint=pprint)
-                                stats["file"] = _relative_file_label(c.labeled_path, input_dir)
-                                all_file_stats.append(stats)
-                                progress.update(file_task, advance=1)
-
                         # After processing batch, check if we should load more files
-                        next_to_load = maybe_load_more(pending_futures, collectors, next_to_load, client)
+                        next_to_load, resumed_loaded = maybe_load_more(
+                            pending_futures, collectors, next_to_load, client
+                        )
+                        if resumed_loaded:
+                            progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
+                        flush_completed_collectors()
 
                         active_names = [c.labeled_path.name for c in collectors.values()
                                         if not c.completed]
                         progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
+                    flush_completed_collectors()
     finally:
         if temp_tag_stats_path and temp_tag_stats_path.exists():
             temp_tag_stats_path.unlink()

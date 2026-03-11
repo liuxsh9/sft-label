@@ -611,9 +611,40 @@ def _build_run_plan(
         if _ask_yes_no(input_fn, "是否同时设置 --input 路径 / Also set --input path", default=False):
             argv.extend(["--input", _ask_required_text(input_fn, "输入文件或目录路径 / Input file/dir path")])
 
-    output_path = _ask_optional_text(input_fn, "输出目录（可选） / Output directory (optional)")
-    if output_path:
-        argv.extend(["--output", output_path])
+    if mode == "new":
+        output_path = _ask_optional_text(input_fn, "输出目录（可选） / Output directory (optional)")
+        if output_path:
+            argv.extend(["--output", output_path])
+
+    inline_mode = "refresh"
+    if mode == "new":
+        inline_mode = _ask_choice(
+            input_fn,
+            output_fn,
+            "标注模式 / Inline mode",
+            [
+                ("refresh", "refresh（默认） / refresh (default)",
+                 "重算并替换整条 data_label / Recompute and replace the whole data_label"),
+                ("incremental", "incremental",
+                 "跳过已完成样本，仅补缺失部分 / Skip completed rows and fill missing turns"),
+                ("migrate", "migrate",
+                 "先按 data_id 复制旧标注，再增量补齐 / Copy labels by data_id, then fill gaps"),
+                ("recompute", "recompute",
+                 "不调用 LLM，只重算统计/稀有度/看板 / Rebuild stats, rarity, and dashboards without LLM"),
+            ],
+            default_index=1,
+        )
+        if inline_mode != "refresh":
+            argv.extend(["--mode", inline_mode])
+        if inline_mode == "migrate":
+            argv.extend(["--migrate-from", _ask_required_text(
+                input_fn,
+                "迁移来源（旧 run / 数据集） / Migration source (previous run or dataset)",
+            )])
+
+    if inline_mode == "recompute":
+        argv.extend(_ask_extra_flags(input_fn))
+        return LaunchPlan(argv=argv, env_overrides=env_overrides)
 
     if chain_score:
         argv.append("--score")
@@ -1025,9 +1056,40 @@ def _build_run_plan_legacy(
         if _ask_yes_no(input_fn, "是否同时设置 --input 路径 / Also set --input path", default=False):
             argv.extend(["--input", _ask_required_text(input_fn, "输入文件或目录路径 / Input file/dir path")])
 
-    output_path = _ask_optional_text(input_fn, "输出目录（可选） / Output directory (optional)")
-    if output_path:
-        argv.extend(["--output", output_path])
+    if mode == "new":
+        output_path = _ask_optional_text(input_fn, "输出目录（可选） / Output directory (optional)")
+        if output_path:
+            argv.extend(["--output", output_path])
+
+    inline_mode = "refresh"
+    if mode == "new":
+        inline_mode = _ask_choice(
+            input_fn,
+            output_fn,
+            "标注模式 / Inline mode",
+            [
+                ("refresh", "refresh（默认） / refresh (default)",
+                 "重算并替换整条 data_label / Recompute and replace the whole data_label"),
+                ("incremental", "incremental",
+                 "跳过已完成样本，仅补缺失部分 / Skip completed rows and fill missing turns"),
+                ("migrate", "migrate",
+                 "先按 data_id 复制旧标注，再增量补齐 / Copy labels by data_id, then fill gaps"),
+                ("recompute", "recompute",
+                 "不调用 LLM，只重算统计/稀有度/看板 / Rebuild stats, rarity, and dashboards without LLM"),
+            ],
+            default_index=1,
+        )
+        if inline_mode != "refresh":
+            argv.extend(["--mode", inline_mode])
+        if inline_mode == "migrate":
+            argv.extend(["--migrate-from", _ask_required_text(
+                input_fn,
+                "迁移来源（旧 run / 数据集） / Migration source (previous run or dataset)",
+            )])
+
+    if inline_mode == "recompute":
+        argv.extend(_ask_extra_flags(input_fn))
+        return LaunchPlan(argv=argv, env_overrides=env_overrides)
 
     limit = _ask_int(input_fn, "每个文件采样上限（0=全部） / Sample limit per file (0 = all)", default=0)
     if limit:
@@ -1192,7 +1254,7 @@ def _build_filter_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     criteria_count = 0
 
     _section(output_fn, "输出设置 / Output settings")
-    argv.extend(["--input", _ask_required_text(input_fn, "输入评分文件或目录 / Input scored file/dir")])
+    argv.extend(["--input", _ask_required_text(input_fn, "输入评分文件、镜像 JSONL 或目录 / Input scored file, mirrored JSONL, or dir")])
     output_path = _ask_optional_text(input_fn, "输出文件路径（可选） / Output file path (optional)")
     if output_path:
         argv.extend(["--output", output_path])
@@ -1479,7 +1541,7 @@ def _build_export_semantic_plan(input_fn: InputFn, output_fn: OutputFn) -> Launc
 def _build_export_review_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     argv = ["export-review"]
     _section(output_fn, "基础输入 / Basic input")
-    argv.extend(["--input", _ask_required_text(input_fn, "输入已标注 JSON 路径 / Input labeled JSON path")])
+    argv.extend(["--input", _ask_required_text(input_fn, "输入已标注 JSON/镜像 JSONL/目录 / Input labeled JSON, mirrored JSONL, or directory")])
     argv.extend(["--output", _ask_required_text(input_fn, "输出 CSV/TSV 路径 / Output CSV/TSV path")])
 
     _section(output_fn, "导出选项 / Export options")

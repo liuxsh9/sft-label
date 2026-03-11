@@ -41,6 +41,22 @@ from sft_label.prompts import (
     TAG_POOLS, SINGLE_SELECT, MULTI_SELECT
 )
 from sft_label.preprocessing import preprocess, format_signals_for_prompt, normalize_and_slice, truncate_conversations_for_labeling, apply_sparse_sampling
+from sft_label.inline_pass1 import (
+    append_rows_jsonl,
+    apply_inherited_labels,
+    build_sample_artifacts,
+    merge_pass1_results,
+    prepare_inline_pass1_batch,
+)
+from sft_label.inline_migration import load_inline_migration_index
+from sft_label.inline_labels import DEFAULT_LABEL_VERSION
+from sft_label.inline_rows import (
+    flatten_row_sample_bundles,
+    iter_row_sample_bundle_chunks_from_jsonl,
+    iter_row_sample_bundles_from_jsonl,
+)
+from sft_label.inline_scoring import infer_inline_scoring_target
+from sft_label.run_layout import InlineRunLayout, resolve_run_root
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
     DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
@@ -58,6 +74,9 @@ from sft_label.artifacts import (
     pass1_global_dashboard_filename,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
+
+
+INLINE_RUN_MODES = {"incremental", "refresh", "migrate", "recompute"}
 
 
 # ─────────────────────────────────────────────────────────
@@ -143,7 +162,7 @@ def load_checkpoint(checkpoint_path):
     return None
 
 
-def create_checkpoint(checkpoint_path, files):
+def create_checkpoint(checkpoint_path, files, *, metadata=None):
     """Create a fresh checkpoint for a batch run."""
     ckpt = {
         "status": "in_progress",
@@ -151,6 +170,8 @@ def create_checkpoint(checkpoint_path, files):
         "failed": {},
         "total_files": len(files),
     }
+    if metadata:
+        ckpt["metadata"] = dict(metadata)
     _write_checkpoint(checkpoint_path, ckpt)
     return ckpt
 
@@ -172,6 +193,8 @@ def update_checkpoint(checkpoint_path, rel_path_str, success=True, error_msg=Non
 
 
 def _write_checkpoint(checkpoint_path, ckpt):
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     with open(checkpoint_path, "w", encoding="utf-8") as f:
         json.dump(ckpt, f, ensure_ascii=False, indent=2)
 
@@ -188,6 +211,9 @@ def merge_stats(all_file_stats):
         "unmapped_unique_count": 0,
         "total_elapsed_seconds": 0,
         "sparse_labeled": 0, "sparse_inherited": 0,
+        "rows_total": 0, "rows_skipped": 0, "rows_changed": 0,
+        "rows_migrated": 0, "rows_pass2_invalidated": 0,
+        "preserved_samples": 0,
         "tag_distributions": {},
         "confidence_stats": {},
         "cross_matrix": {},
@@ -199,7 +225,10 @@ def merge_stats(all_file_stats):
                    "total_prompt_tokens", "total_completion_tokens", "total_tokens",
                    "arbitrated_count", "validation_issue_count", "consistency_warning_count",
                    "sparse_labeled", "sparse_inherited",
-                   "distribution_total_samples"):
+                   "distribution_total_samples",
+                   "rows_total", "rows_skipped", "rows_changed",
+                   "rows_migrated", "rows_pass2_invalidated",
+                   "preserved_samples"):
             merged[k] += st.get(k, 0)
         merged["total_elapsed_seconds"] += st.get("total_elapsed_seconds", 0)
         # Merge tag distributions
@@ -254,25 +283,70 @@ def merge_stats(all_file_stats):
     return merged
 
 
-def resolve_run_dir(output, input_path):
-    """Determine the run output directory based on output setting.
+def resolve_run_dir(output, input_path, *, base_dir=None):
+    """Backward-compatible wrapper around the inline run-layout helper."""
+    return resolve_run_root(input_path, output=output, base_dir=base_dir)
 
-    Two modes:
-      - None (default):
-        - Directory input: <parent>/<dir_name>-labeled-<timestamp>/
-        - Single file input: <parent>/<stem>-labeled-<timestamp>/
-      - explicit path: use as-is (absolute or relative to cwd)
-    """
-    if output is not None:
-        return Path(output).resolve()
 
-    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    parent = input_path.parent
-    if input_path.is_dir():
-        name = input_path.resolve().name
-    else:
-        name = input_path.stem
-    return parent / f"{name}-labeled-{run_ts}"
+def _checkpoint_path_for_run(run_dir, layout: InlineRunLayout | None = None) -> Path:
+    run_dir = Path(run_dir)
+    if layout is not None:
+        return layout.meta_root / "checkpoint.json"
+    candidate = run_dir / "meta_label_data" / "checkpoint.json"
+    if candidate.exists():
+        return candidate
+    return run_dir / "checkpoint.json"
+
+
+def _summary_path_for_run(run_dir, layout: InlineRunLayout | None = None) -> Path:
+    run_dir = Path(run_dir)
+    if layout is not None:
+        return layout.meta_root / PASS1_SUMMARY_STATS_FILE
+    candidate = run_dir / "meta_label_data" / PASS1_SUMMARY_STATS_FILE
+    if candidate.exists():
+        return candidate
+    return run_dir / PASS1_SUMMARY_STATS_FILE
+
+
+def _normalize_run_input(input_path) -> tuple[Path, object | None]:
+    """Normalize inline run roots to their mirrored dataset path."""
+    if input_path is None:
+        return None, None
+    resolved = Path(input_path).resolve()
+    inline_target = infer_inline_scoring_target(resolved)
+    if inline_target is None:
+        return resolved, None
+    if inline_target.target_path == inline_target.layout.run_root:
+        return inline_target.layout.dataset_root, inline_target
+    return inline_target.target_path, inline_target
+
+
+def _resolve_mode(mode: str) -> str:
+    resolved = str(mode or "refresh").strip().lower()
+    if resolved not in INLINE_RUN_MODES:
+        raise ValueError(f"unsupported run mode: {mode}")
+    return resolved
+
+
+def _write_json_atomic(path, payload):
+    """Write JSON via a temp file and atomic replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    tmp_path.replace(path)
+
+
+def _write_jsonl_atomic(path, records):
+    """Write JSONL via a temp file and atomic replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    tmp_path.replace(path)
 
 
 # ─────────────────────────────────────────────────────────
@@ -1011,8 +1085,8 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
       (to avoid inflating tag counts from duplicated labels)
     - Reported separately as sparse_labeled / sparse_inherited
     """
-    total = len(all_monitors)
-    success = sum(1 for m in all_monitors if m["status"] == "success")
+    total = len(all_labels)
+    success = sum(1 for labels in all_labels if is_usable_labels(labels))
     total_calls = sum(m["llm_calls"] for m in all_monitors)
     total_pt = sum(m["total_prompt_tokens"] for m in all_monitors)
     total_ct = sum(m["total_completion_tokens"] for m in all_monitors)
@@ -1101,28 +1175,44 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
 # Streaming I/O + cross-file helpers
 # ─────────────────────────────────────────────────────────
 
-def iter_samples_from_file(input_path, limit=0, shuffle=False):
+def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundles=False):
     """Load and normalize samples from a file with minimal memory overhead.
 
     JSONL: line-by-line read + normalize_and_slice (memory = 1 raw line at a time).
     JSON:  json.load then del raw (can't avoid full load, but releases raw ASAP).
 
-    Returns: (samples_list, n_raw)
+    Returns:
+      - default: (samples_list, n_raw)
+      - with return_row_bundles=True: (samples_list, n_raw, row_bundles, sample_to_bundle)
     """
     input_path = Path(input_path)
     samples = []
     n_raw = 0
 
     if str(input_path).endswith(".jsonl"):
-        with open(input_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                n_raw += 1
-                raw = json.loads(line)
-                samples.extend(normalize_and_slice(raw))
-                del raw
+        if return_row_bundles:
+            row_bundles = []
+            sample_budget = 0
+            for bundle in iter_row_sample_bundles_from_jsonl(input_path, limit=0):
+                projected = sample_budget + len(bundle.samples)
+                if limit > 0 and row_bundles and projected > limit:
+                    break
+                row_bundles.append(bundle)
+                sample_budget = projected
+                if limit > 0 and sample_budget >= limit:
+                    break
+            n_raw = len(row_bundles)
+            samples, sample_to_bundle = flatten_row_sample_bundles(row_bundles)
+        else:
+            with open(input_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    n_raw += 1
+                    raw = json.loads(line)
+                    samples.extend(normalize_and_slice(raw))
+                    del raw
     else:
         with open(input_path, "r", encoding="utf-8") as f:
             raw_samples = json.load(f)
@@ -1139,8 +1229,11 @@ def iter_samples_from_file(input_path, limit=0, shuffle=False):
 
     if shuffle:
         random.shuffle(samples)
-    if limit > 0:
+    if limit > 0 and not (return_row_bundles and str(input_path).endswith(".jsonl")):
         samples = samples[:limit]
+
+    if return_row_bundles and str(input_path).endswith(".jsonl"):
+        return samples, n_raw, row_bundles, sample_to_bundle
 
     return samples, n_raw
 
@@ -1155,8 +1248,17 @@ class FileCollector:
     prefix: str             # file stem for output naming
     total: int
     samples: list
+    row_bundles: list | None = None
+    sample_to_bundle: list | None = None
+    dataset_output_path: Path | None = None
+    run_failure_log_path: Path | None = None
+    inline_output: bool = False
     label_count: int = 0    # actual LLM labels (sparse)
     inherit_map: dict = field(default_factory=dict)
+    updated_sample_indices: set[int] = field(default_factory=set)
+    bundle_plans: list | None = None
+    plan_stats: dict = field(default_factory=dict)
+    run_mode: str = "refresh"
     sparse_info: str = ""   # progress bar context string
     done: int = 0
     ok: int = 0
@@ -1255,6 +1357,9 @@ def estimate_directory_workload(
     config=None,
     completed_set=None,
     enable_arbitration=True,
+    mode: str = "refresh",
+    migration_index: dict | None = None,
+    label_version: str = DEFAULT_LABEL_VERSION,
 ):
     """Estimate global workload before directory-mode execution."""
     completed_set = completed_set or set()
@@ -1284,8 +1389,22 @@ def estimate_directory_workload(
                 continue
             files_planned += 1
 
-            samples, n_raw = iter_samples_from_file(abs_path, limit=limit, shuffle=shuffle)
-            label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
+            if str(abs_path).endswith(".jsonl"):
+                row_bundles = list(iter_row_sample_bundles_from_jsonl(abs_path, limit=limit))
+                prepared = prepare_inline_pass1_batch(
+                    row_bundles,
+                    mode=mode,
+                    label_version=label_version,
+                    sparse_kwargs=_sparse_kw,
+                    migration_index=migration_index,
+                )
+                samples = prepared.samples
+                n_raw = len(prepared.bundles)
+                label_indices = prepared.label_indices
+                inherit_map = prepared.inherit_map
+            else:
+                samples, n_raw = iter_samples_from_file(abs_path, limit=limit, shuffle=shuffle)
+                label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
 
             total_raw += n_raw
             total_samples += len(samples)
@@ -1327,29 +1446,11 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     prefix = collector.prefix
     total = collector.total
 
-    # Inherit labels for sparse-sampled slices
-    for unlabeled_idx, source_idx in collector.inherit_map.items():
-        if all_labels[source_idx] is not None:
-            inherited = dict(all_labels[source_idx])
-            inherited["inherited"] = True
-            inherited["inherited_from"] = samples[source_idx].get("id")
-            all_labels[unlabeled_idx] = inherited
+    resolved_labels = apply_inherited_labels(samples, all_labels, collector.inherit_map)
+    all_labels[:] = resolved_labels
 
-    # Attach labels to samples
-    for idx, sample in enumerate(samples):
-        sample["labels"] = all_labels[idx]
-        sample.setdefault("metadata", {})["source_file"] = str(collector.abs_path)
-        if all_monitors[idx]:
-            sample["labeling_monitor"] = {
-                "llm_calls": all_monitors[idx]["llm_calls"],
-                "arbitrated": all_monitors[idx]["arbitrated"],
-                "validation_issues": all_monitors[idx]["validation_issues"],
-                "consistency_warnings": all_monitors[idx]["consistency_warnings"],
-            }
-
-    # Write outputs
     output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"_{prefix}" if prefix else ""
+    suffix = "" if collector.inline_output else (f"_{prefix}" if prefix else "")
 
     labeled_json = f"labeled{suffix}.json"
     labeled_jsonl = f"labeled{suffix}.jsonl"
@@ -1358,32 +1459,43 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     dashboard_file = pass1_dashboard_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
 
-    with open(output_dir / labeled_json, "w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False, indent=2)
+    if collector.inline_output:
+        merge_result = merge_pass1_results(
+            collector.row_bundles or [],
+            samples,
+            resolved_labels,
+            all_monitors,
+            collector.sample_to_bundle or [],
+            source_file=collector.abs_path,
+            mode=collector.run_mode,
+            bundle_plans=collector.bundle_plans,
+            updated_sample_indices=collector.updated_sample_indices,
+        )
+        _write_jsonl_atomic(collector.dataset_output_path, merge_result.rows)
+        _write_json_atomic(output_dir / labeled_json, merge_result.samples)
+        _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
+        _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
+        if merge_result.failed_samples:
+            _write_jsonl_atomic(output_dir / failed_samples_file, merge_result.failed_samples)
+    else:
+        rendered_samples, monitor_records, failed_samples = build_sample_artifacts(
+            samples,
+            resolved_labels,
+            all_monitors,
+            source_file=collector.abs_path,
+        )
+        _write_json_atomic(output_dir / labeled_json, rendered_samples)
+        _write_jsonl_atomic(output_dir / labeled_jsonl, rendered_samples)
+        _write_jsonl_atomic(output_dir / monitor_file, monitor_records)
+        if failed_samples:
+            _write_jsonl_atomic(output_dir / failed_samples_file, failed_samples)
 
-    with open(output_dir / labeled_jsonl, "w", encoding="utf-8") as f:
-        for sample in samples:
-            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-
-    with open(output_dir / monitor_file, "w", encoding="utf-8") as f:
-        for m in all_monitors:
-            if m:
-                f.write(json.dumps(m, ensure_ascii=False) + "\n")
-
-    # Write failed samples (original, without labels) for easy retry
     # Inherited samples have no monitor — they are not failures
     inherited_indices = set(collector.inherit_map.keys())
     failed_indices = [
         i for i, l in enumerate(all_labels)
         if (l is None or is_partial_labels(l)) and i not in inherited_indices
     ]
-    if failed_indices:
-        with open(output_dir / failed_samples_file, "w", encoding="utf-8") as f:
-            for i in failed_indices:
-                s = dict(samples[i])
-                s.pop("labels", None)
-                s.pop("labeling_monitor", None)
-                f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
     # Append to global failure log at run_dir root
     failure_records = []
@@ -1399,7 +1511,9 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
         }
         failure_records.append(record)
     if failure_records:
-        with open(run_dir / "failures.jsonl", "a", encoding="utf-8") as f:
+        failure_log_path = collector.run_failure_log_path or (run_dir / "failures.jsonl")
+        failure_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(failure_log_path, "a", encoding="utf-8") as f:
             for r in failure_records:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
@@ -1407,20 +1521,16 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     valid_monitors = [m for m in all_monitors if m is not None]
     stats = compute_stats(valid_monitors, all_labels, inherit_map=collector.inherit_map)
     stats["input_file"] = str(collector.abs_path)
+    stats["mode"] = collector.run_mode
+    if collector.plan_stats:
+        stats.update(collector.plan_stats)
     sparse_inherited = len(collector.inherit_map)
     if sparse_inherited > 0:
         stats["sparse_labeled"] = collector.label_count
         stats["sparse_inherited"] = sparse_inherited
-        # Adjust totals: inherited samples count as success
-        stats["total_samples"] = total
-        inherited_ok = sum(1 for i in inherited_indices if is_usable_labels(all_labels[i]))
-        stats["success"] += inherited_ok
-        stats["failed"] = stats["total_samples"] - stats["success"]
-        stats["success_rate"] = round(stats["success"] / max(total, 1), 4)
 
     stats_path = output_dir / stats_file
-    with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    _write_json_atomic(stats_path, stats)
 
     # Per-file dashboard
     try:
@@ -1534,13 +1644,12 @@ class StatsAccumulator:
         to avoid inflating counts from duplicated labels.
         """
         inherited_indices = set(inherit_map.keys()) if inherit_map else set()
+        self.total += len(all_labels)
+        self.success += sum(1 for labels in all_labels if is_usable_labels(labels))
 
         for m in all_monitors:
             if m is None:
                 continue
-            self.total += 1
-            if m["status"] == "success":
-                self.success += 1
             self.total_calls += m["llm_calls"]
             self.total_pt += m["total_prompt_tokens"]
             self.total_ct += m["total_completion_tokens"]
@@ -1590,16 +1699,8 @@ class StatsAccumulator:
             key = f"{intent}|{diff}"
             self.cross_matrix[key] = self.cross_matrix.get(key, 0) + 1
 
-        # Count inherited samples toward total (they have labels but no monitor)
         if inherit_map:
-            inherited_indices = set(inherit_map.keys())
-            inherited_ok = sum(
-                1 for i in inherited_indices
-                if i < len(all_labels) and is_usable_labels(all_labels[i])
-            )
             self.sparse_inherited += len(inherit_map)
-            self.total += len(inherit_map)
-            self.success += inherited_ok
 
     def set_sparse_labeled(self, count):
         """Track total sparse-labeled count across chunks."""
@@ -1659,8 +1760,14 @@ class ChunkCollector:
     """Track per-chunk labeling results for chunked JSONL pipeline."""
     chunk_idx: int
     samples: list
+    row_bundles: list | None = None
+    sample_to_bundle: list | None = None
     label_count: int = 0
     inherit_map: dict = field(default_factory=dict)
+    updated_sample_indices: set[int] = field(default_factory=set)
+    bundle_plans: list | None = None
+    plan_stats: dict = field(default_factory=dict)
+    run_mode: str = "refresh"
     done: int = 0
     ok: int = 0
     fail: int = 0
@@ -1675,50 +1782,50 @@ class ChunkCollector:
         self.monitors = [None] * n
 
 
-def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
-                 input_path, pprint=print):
+def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_acc,
+                 input_path, pprint=print, run_failure_log_path=None):
     """Finalize a completed chunk: inherit, attach labels, write, release memory."""
     samples = chunk.samples
     all_labels = chunk.labels
     all_monitors = chunk.monitors
 
-    # Inherit labels for sparse-sampled slices
-    for unlabeled_idx, source_idx in chunk.inherit_map.items():
-        if all_labels[source_idx] is not None:
-            inherited = dict(all_labels[source_idx])
-            inherited["inherited"] = True
-            inherited["inherited_from"] = samples[source_idx].get("id")
-            all_labels[unlabeled_idx] = inherited
+    resolved_labels = apply_inherited_labels(samples, all_labels, chunk.inherit_map)
+    all_labels[:] = resolved_labels
 
-    # Attach labels to samples
-    for idx, sample in enumerate(samples):
-        sample["labels"] = all_labels[idx]
-        sample.setdefault("metadata", {})["source_file"] = str(input_path)
-        if all_monitors[idx]:
-            sample["labeling_monitor"] = {
-                "llm_calls": all_monitors[idx]["llm_calls"],
-                "arbitrated": all_monitors[idx]["arbitrated"],
-                "validation_issues": all_monitors[idx]["validation_issues"],
-                "consistency_warnings": all_monitors[idx]["consistency_warnings"],
-            }
+    merge_result = merge_pass1_results(
+        chunk.row_bundles or [],
+        samples,
+        resolved_labels,
+        all_monitors,
+        chunk.sample_to_bundle or [],
+        source_file=input_path,
+        mode=chunk.run_mode,
+        bundle_plans=chunk.bundle_plans,
+        updated_sample_indices=chunk.updated_sample_indices,
+    )
 
-    # Write labeled samples (append)
-    for sample in samples:
+    append_rows_jsonl(out_rows, merge_result.rows)
+    for sample in merge_result.samples:
         out_labeled.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    for monitor in merge_result.monitor_records:
+        out_monitor.write(json.dumps(monitor, ensure_ascii=False) + "\n")
+    for failed in merge_result.failed_samples:
+        out_failed.write(json.dumps(failed, ensure_ascii=False) + "\n")
 
-    # Write monitors (append)
-    for m in all_monitors:
-        if m:
-            out_monitor.write(json.dumps(m, ensure_ascii=False) + "\n")
-
-    # Write failed samples
-    inherited_indices = set(chunk.inherit_map.keys())
-    for i, l in enumerate(all_labels):
-        if (l is None or is_partial_labels(l)) and i not in inherited_indices:
-            s = dict(samples[i])
-            s.pop("labels", None)
-            s.pop("labeling_monitor", None)
-            out_failed.write(json.dumps(s, ensure_ascii=False) + "\n")
+    if run_failure_log_path and merge_result.failed_samples:
+        run_failure_log_path = Path(run_failure_log_path)
+        run_failure_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(run_failure_log_path, "a", encoding="utf-8") as f:
+            for idx, failed in enumerate(merge_result.failed_samples):
+                monitor = failed.get("labeling_monitor") or {}
+                f.write(json.dumps({
+                    "sample_id": failed.get("id", f"sample-{idx}"),
+                    "source_file": str(input_path),
+                    "status": monitor.get("status", "no_result"),
+                    "error": monitor.get("error", ""),
+                    "error_response": monitor.get("error_response", ""),
+                    "attempts": monitor.get("sample_attempt", 0) + 1 if monitor else 0,
+                }, ensure_ascii=False) + "\n")
 
     # Update stats accumulator
     stats_acc.update(all_labels, all_monitors, inherit_map=chunk.inherit_map)
@@ -1734,7 +1841,11 @@ def _flush_chunk(chunk, out_labeled, out_monitor, out_failed, stats_acc,
 async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  enable_arbitration=True, limit=0, shuffle=False,
                                  progress=None, sample_task=None, config=None,
-                                 rate_limiter=None, llm_progress_cb=None):
+                                 rate_limiter=None, llm_progress_cb=None,
+                                 dataset_output_path=None,
+                                 run_failure_log_path=None,
+                                 mode: str = "refresh",
+                                 migration_index: dict | None = None):
     """Chunked JSONL labeling: watermark-based processing for large files.
 
     Processes JSONL files in chunks to bound memory usage. Each chunk is
@@ -1762,9 +1873,23 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                           threshold=config.sparse_threshold)
 
     stats_acc = StatsAccumulator()
-    chunk_gen = iter_chunks_from_jsonl(input_path, chunk_size, limit=limit)
+    chunk_gen = iter_row_sample_bundle_chunks_from_jsonl(input_path, chunk_size, limit=limit)
+    plan_totals = {
+        "rows_total": 0,
+        "rows_skipped": 0,
+        "rows_changed": 0,
+        "rows_migrated": 0,
+        "rows_pass2_invalidated": 0,
+        "preserved_samples": 0,
+    }
 
     # Open output file handles
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if dataset_output_path is None:
+        dataset_output_path = output_dir / input_path.name
+    dataset_output_path = Path(dataset_output_path)
+    dataset_output_path.parent.mkdir(parents=True, exist_ok=True)
+    out_rows = open(dataset_output_path, "w", encoding="utf-8")
     out_labeled = open(output_dir / "labeled.jsonl", "w", encoding="utf-8")
     out_monitor = open(output_dir / "monitor.jsonl", "w", encoding="utf-8")
     out_failed = open(output_dir / "failed_samples.jsonl", "w", encoding="utf-8")
@@ -1782,23 +1907,27 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         def load_next_chunk(pending_futures):
             nonlocal chunks_loaded, global_sample_offset
             try:
-                raw_records = next(chunk_gen)
+                row_bundles = next(chunk_gen)
             except StopIteration:
                 return None
 
-            # Normalize and slice
-            samples = []
-            for raw in raw_records:
-                samples.extend(normalize_and_slice(raw))
-            del raw_records
+            prepared = prepare_inline_pass1_batch(
+                row_bundles,
+                mode=mode,
+                label_version=DEFAULT_LABEL_VERSION,
+                sparse_kwargs=_sparse_kw,
+                migration_index=migration_index,
+            )
+            samples = prepared.samples
+            sample_to_bundle = prepared.sample_to_bundle
 
             # Assign global IDs
             for i, s in enumerate(samples):
                 if not s.get("id"):
                     s["id"] = f"sample-{global_sample_offset + i:06d}"
 
-            # Sparse sampling
-            label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
+            label_indices = prepared.label_indices
+            inherit_map = prepared.inherit_map
             label_count = len(label_indices)
             sparse_inherited = len(inherit_map)
 
@@ -1809,10 +1938,19 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
             collector = ChunkCollector(
                 chunk_idx=chunk_idx,
                 samples=samples,
+                row_bundles=prepared.bundles,
+                sample_to_bundle=sample_to_bundle,
                 label_count=label_count,
                 inherit_map=inherit_map,
+                updated_sample_indices=prepared.updated_sample_indices,
+                bundle_plans=prepared.bundle_plans,
+                plan_stats=prepared.stats,
+                run_mode=mode,
                 sample_id_offset=global_sample_offset,
             )
+            collector.labels = list(prepared.labels)
+            for key in plan_totals:
+                plan_totals[key] += prepared.stats.get(key, 0)
 
             global_sample_offset += len(samples)
 
@@ -1859,12 +1997,28 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         # --- Main watermark-driven loop ---
         collectors = {}
         pending_futures = set()
+        next_chunk_to_flush = 0
+
+        def flush_ready_chunks():
+            nonlocal next_chunk_to_flush
+            while True:
+                c = collectors.get(next_chunk_to_flush)
+                if c is None or c.completed:
+                    break
+                if c.done < c.label_count:
+                    break
+                _flush_chunk(c, out_rows, out_labeled, out_monitor, out_failed,
+                             stats_acc, input_path, pprint=pprint,
+                             run_failure_log_path=run_failure_log_path)
+                pprint(f"  [chunk {c.chunk_idx + 1}] ✓ {c.ok} ok, {c.fail} fail — flushed")
+                next_chunk_to_flush += 1
 
         if progress and sample_task is not None:
             progress.update(sample_task, total=0, completed=0, visible=True, info="loading...")
 
         # Initial load
         maybe_load_more(pending_futures, collectors)
+        flush_ready_chunks()
 
         file_start = time.time()
 
@@ -1899,24 +2053,17 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                             info = f"{info} • {run_info}"
                     progress.update(sample_task, advance=1, info=info)
 
-                # Check if chunk is fully done
-                if c.done >= c.label_count and not c.completed:
-                    _flush_chunk(c, out_labeled, out_monitor, out_failed,
-                                 stats_acc, input_path, pprint=pprint)
-                    pprint(f"  [chunk {c.chunk_idx + 1}] ✓ {c.ok} ok, {c.fail} fail — flushed")
-
+            flush_ready_chunks()
             # After processing batch, check if we should load more chunks
             maybe_load_more(pending_futures, collectors)
+            flush_ready_chunks()
 
-        # Handle chunks with 0 labels (all inherited)
-        for c in collectors.values():
-            if not c.completed and c.label_count == 0:
-                _flush_chunk(c, out_labeled, out_monitor, out_failed,
-                             stats_acc, input_path, pprint=pprint)
+        flush_ready_chunks()
 
         file_elapsed = time.time() - file_start
 
     finally:
+        out_rows.close()
         out_labeled.close()
         out_monitor.close()
         out_failed.close()
@@ -1930,13 +2077,14 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     stats = stats_acc.finalize()
     stats["total_elapsed_seconds"] = round(file_elapsed, 1)
     stats["input_file"] = str(input_path)
+    stats["mode"] = mode
     stats["chunked"] = True
     stats["chunk_size"] = chunk_size
     stats["chunks_processed"] = chunks_loaded
+    stats.update(plan_totals)
 
     stats_path = output_dir / PASS1_STATS_FILE
-    with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    _write_json_atomic(stats_path, stats)
 
     # Dashboard (stats-only mode — no labeled.json)
     try:
@@ -1955,7 +2103,10 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 async def run_one_file(input_path, output_dir, http_client, sem, model,
                        enable_arbitration=True, limit=0, shuffle=False,
                        file_prefix=None, progress=None, sample_task=None,
-                       config=None, rate_limiter=None, llm_progress_cb=None):
+                       config=None, rate_limiter=None, llm_progress_cb=None,
+                       dataset_output_path=None, run_failure_log_path=None,
+                       inline_output=False, mode: str = "refresh",
+                       migration_index: dict | None = None):
     """Label a single file. Writes outputs to output_dir. Returns stats dict.
 
     file_prefix: if set, output files are named e.g. labeled_<prefix>.json
@@ -1968,15 +2119,16 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             enable_arbitration=enable_arbitration, limit=limit, shuffle=shuffle,
             progress=progress, sample_task=sample_task, config=config,
             rate_limiter=rate_limiter, llm_progress_cb=llm_progress_cb,
+            dataset_output_path=dataset_output_path,
+            run_failure_log_path=run_failure_log_path,
+            mode=mode,
+            migration_index=migration_index,
         )
 
     # Load input — streaming for JSONL
-    samples, n_raw = iter_samples_from_file(input_path, limit=limit, shuffle=shuffle)
-
-    total = len(samples)
-    pprint = progress.console.print if progress else print
-
-    # Sparse sampling: only label a subset of multi-turn slices
+    row_bundles = None
+    sample_to_bundle = None
+    prepared_batch = None
     _sparse_kw = {}
     if config:
         _sparse_kw = dict(full_label_count=config.sparse_full_label_count,
@@ -1984,7 +2136,31 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                           min_gap=config.sparse_min_gap,
                           max_gap=config.sparse_max_gap,
                           threshold=config.sparse_threshold)
-    label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
+    if inline_output and str(input_path).endswith(".jsonl"):
+        raw_row_bundles = list(iter_row_sample_bundles_from_jsonl(input_path, limit=limit))
+        prepared_batch = prepare_inline_pass1_batch(
+            raw_row_bundles,
+            mode=mode,
+            label_version=DEFAULT_LABEL_VERSION,
+            sparse_kwargs=_sparse_kw,
+            migration_index=migration_index,
+        )
+        samples = prepared_batch.samples
+        n_raw = len(prepared_batch.bundles)
+        row_bundles = prepared_batch.bundles
+        sample_to_bundle = prepared_batch.sample_to_bundle
+    else:
+        samples, n_raw = iter_samples_from_file(input_path, limit=limit, shuffle=shuffle)
+
+    total = len(samples)
+    pprint = progress.console.print if progress else print
+
+    # Sparse sampling: only label a subset of multi-turn slices
+    if prepared_batch is not None:
+        label_indices = list(prepared_batch.label_indices)
+        inherit_map = dict(prepared_batch.inherit_map)
+    else:
+        label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
     label_count = len(label_indices)
     sparse_inherited = len(inherit_map)
     if sparse_inherited > 0:
@@ -1998,7 +2174,10 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         progress.reset(sample_task, total=label_count, completed=0, visible=True, info="starting..." + sparse_info)
 
     # Pre-allocate result slots
-    all_labels = [None] * total
+    if prepared_batch is not None:
+        all_labels = list(prepared_batch.labels)
+    else:
+        all_labels = [None] * total
     all_monitors = [None] * total
 
     # Submit tasks in shuffled order — only for indices that need labeling
@@ -2062,29 +2241,12 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     file_elapsed = time.time() - file_start
 
-    # Inherit labels for sparse-sampled slices
-    for unlabeled_idx, source_idx in inherit_map.items():
-        if all_labels[source_idx] is not None:
-            inherited = dict(all_labels[source_idx])
-            inherited["inherited"] = True
-            inherited["inherited_from"] = samples[source_idx].get("id")
-            all_labels[unlabeled_idx] = inherited
-
-    # Attach labels to samples
-    for idx, sample in enumerate(samples):
-        sample["labels"] = all_labels[idx]
-        sample.setdefault("metadata", {})["source_file"] = str(input_path)
-        if all_monitors[idx]:
-            sample["labeling_monitor"] = {
-                "llm_calls": all_monitors[idx]["llm_calls"],
-                "arbitrated": all_monitors[idx]["arbitrated"],
-                "validation_issues": all_monitors[idx]["validation_issues"],
-                "consistency_warnings": all_monitors[idx]["consistency_warnings"],
-            }
+    resolved_labels = apply_inherited_labels(samples, all_labels, inherit_map)
+    all_labels[:] = resolved_labels
 
     # Write outputs
     output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"_{file_prefix}" if file_prefix else ""
+    suffix = "" if inline_output else (f"_{file_prefix}" if file_prefix else "")
 
     labeled_json = f"labeled{suffix}.json"
     labeled_jsonl = f"labeled{suffix}.jsonl"
@@ -2093,17 +2255,36 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     dashboard_file = pass1_dashboard_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
 
-    with open(output_dir / labeled_json, "w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False, indent=2)
-
-    with open(output_dir / labeled_jsonl, "w", encoding="utf-8") as f:
-        for sample in samples:
-            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-
-    with open(output_dir / monitor_file, "w", encoding="utf-8") as f:
-        for m in all_monitors:
-            if m:
-                f.write(json.dumps(m, ensure_ascii=False) + "\n")
+    if inline_output:
+        merge_result = merge_pass1_results(
+            row_bundles or [],
+            samples,
+            resolved_labels,
+            all_monitors,
+            sample_to_bundle or [],
+            source_file=input_path,
+            mode=mode,
+            bundle_plans=prepared_batch.bundle_plans if prepared_batch else None,
+            updated_sample_indices=prepared_batch.updated_sample_indices if prepared_batch else None,
+        )
+        _write_jsonl_atomic(dataset_output_path, merge_result.rows)
+        _write_json_atomic(output_dir / labeled_json, merge_result.samples)
+        _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
+        _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
+        if merge_result.failed_samples:
+            _write_jsonl_atomic(output_dir / failed_samples_file, merge_result.failed_samples)
+    else:
+        rendered_samples, monitor_records, failed_samples = build_sample_artifacts(
+            samples,
+            resolved_labels,
+            all_monitors,
+            source_file=input_path,
+        )
+        _write_json_atomic(output_dir / labeled_json, rendered_samples)
+        _write_jsonl_atomic(output_dir / labeled_jsonl, rendered_samples)
+        _write_jsonl_atomic(output_dir / monitor_file, monitor_records)
+        if failed_samples:
+            _write_jsonl_atomic(output_dir / failed_samples_file, failed_samples)
 
     # Write failed samples (original, without labels) for easy retry
     # Inherited samples have no monitor — they are not failures
@@ -2122,7 +2303,9 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     # Write failure log
     if failed_indices:
-        with open(output_dir / "failures.jsonl", "w", encoding="utf-8") as f:
+        failure_log_path = Path(run_failure_log_path) if run_failure_log_path else (output_dir / "failures.jsonl")
+        failure_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(failure_log_path, "w", encoding="utf-8") as f:
             for i in failed_indices:
                 m = all_monitors[i]
                 record = {
@@ -2140,19 +2323,15 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     stats = compute_stats(valid_monitors, all_labels, inherit_map=inherit_map)
     stats["total_elapsed_seconds"] = round(file_elapsed, 1)
     stats["input_file"] = str(input_path)
+    stats["mode"] = mode
+    if prepared_batch is not None:
+        stats.update(prepared_batch.stats)
     if sparse_inherited > 0:
         stats["sparse_labeled"] = label_count
         stats["sparse_inherited"] = sparse_inherited
-        # Adjust totals: inherited samples count as success
-        stats["total_samples"] = total
-        inherited_ok = sum(1 for i in inherited_indices if is_usable_labels(all_labels[i]))
-        stats["success"] += inherited_ok
-        stats["failed"] = stats["total_samples"] - stats["success"]
-        stats["success_rate"] = round(stats["success"] / max(total, 1), 4)
 
     stats_path = output_dir / stats_file
-    with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    _write_json_atomic(stats_path, stats)
 
     # Per-file dashboard
     try:
@@ -2206,7 +2385,9 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                                  http_client=None, sem=None, enable_arbitration=True,
                                  config=None, rate_limiter=None,
                                  llm_task=None, workload_estimate=None,
-                                 llm_progress_cb=None):
+                                 llm_progress_cb=None, layout: InlineRunLayout | None = None,
+                                 mode: str = "refresh",
+                                 migration_index: dict | None = None):
     """Cross-file pipeline with watermark-based file loading.
 
     Instead of processing files serially, loads new files whenever in-flight
@@ -2228,9 +2409,9 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         rel_str = str(rel_path)
         if rel_str in completed_set:
             # Load existing stats for summary
-            file_out_dir = run_dir / rel_path.with_suffix("")
+            file_out_dir = layout.file_artifact_dir(abs_path) if layout else (run_dir / rel_path.with_suffix(""))
             prefix = rel_path.stem
-            existing_stats = file_out_dir / f"stats_{prefix}.json"
+            existing_stats = file_out_dir / (PASS1_STATS_FILE if layout else f"stats_{prefix}.json")
             if existing_stats.exists():
                 with open(existing_stats, "r", encoding="utf-8") as f:
                     skipped_stats.append(json.load(f))
@@ -2251,13 +2432,12 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     def load_and_submit(file_entry, pending_futures):
         orig_idx, abs_path, rel_path = file_entry
         rel_str = str(rel_path)
-        file_out_dir = run_dir / rel_path.with_suffix("")
+        inline_jsonl = layout is not None and str(abs_path).endswith(".jsonl")
+        file_out_dir = layout.file_artifact_dir(abs_path) if inline_jsonl else (run_dir / rel_path.with_suffix(""))
+        dataset_output_path = layout.mirrored_dataset_path(abs_path) if inline_jsonl else None
+        run_failure_log_path = layout.run_artifact_path("failures.jsonl") if layout else (run_dir / "failures.jsonl")
         prefix = rel_path.stem
 
-        samples, n_raw = iter_samples_from_file(
-            abs_path, limit=limit, shuffle=shuffle)
-
-        # Sparse sampling
         _sparse_kw = {}
         if config:
             _sparse_kw = dict(full_label_count=config.sparse_full_label_count,
@@ -2265,7 +2445,33 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                               min_gap=config.sparse_min_gap,
                               max_gap=config.sparse_max_gap,
                               threshold=config.sparse_threshold)
-        label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
+
+        row_bundles = None
+        sample_to_bundle = None
+        prepared = None
+        if inline_jsonl:
+            raw_row_bundles = list(iter_row_sample_bundles_from_jsonl(abs_path, limit=limit))
+            prepared = prepare_inline_pass1_batch(
+                raw_row_bundles,
+                mode=mode,
+                label_version=DEFAULT_LABEL_VERSION,
+                sparse_kwargs=_sparse_kw,
+                migration_index=migration_index,
+            )
+            samples = prepared.samples
+            n_raw = len(prepared.bundles)
+            row_bundles = prepared.bundles
+            sample_to_bundle = prepared.sample_to_bundle
+        else:
+            samples, n_raw = iter_samples_from_file(
+                abs_path, limit=limit, shuffle=shuffle)
+
+        # Sparse sampling
+        if prepared is not None:
+            label_indices = list(prepared.label_indices)
+            inherit_map = dict(prepared.inherit_map)
+        else:
+            label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
         label_count = len(label_indices)
         sparse_inherited = len(inherit_map)
 
@@ -2277,10 +2483,21 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             prefix=prefix,
             total=len(samples),
             samples=samples,
+            row_bundles=row_bundles,
+            sample_to_bundle=sample_to_bundle,
+            dataset_output_path=dataset_output_path,
+            run_failure_log_path=run_failure_log_path,
+            inline_output=inline_jsonl,
             label_count=label_count,
             inherit_map=inherit_map,
+            updated_sample_indices=prepared.updated_sample_indices if prepared else set(),
+            bundle_plans=prepared.bundle_plans if prepared else None,
+            plan_stats=prepared.stats if prepared else {},
+            run_mode=mode,
             sparse_info=f" ({len(samples)} total, {round(sparse_inherited/len(samples)*100)}% sparse)" if sparse_inherited > 0 else "",
         )
+        if prepared is not None:
+            collector.labels = list(prepared.labels)
 
         # Fallback behavior: if no pre-scan estimate, grow total dynamically.
         if progress and sample_task is not None and workload_estimate is None:
@@ -2441,6 +2658,8 @@ def print_summary(stats, run_dir, is_batch=False):
     print(f"{'='*80}")
     if is_batch:
         print(f"Files:       {stats.get('files_processed', '?')}")
+    if stats.get("mode"):
+        print(f"Mode:        {stats['mode']}")
     print(f"Success:     {stats['success']}/{stats['total_samples']} ({stats.get('success_rate', 0)*100:.1f}%)")
     print(f"LLM calls:   {stats['total_llm_calls']} total, {stats.get('avg_calls_per_sample', 0):.1f} avg/sample")
     print(f"Tokens:      {stats['total_tokens']:,}")
@@ -2490,7 +2709,11 @@ def print_summary(stats, run_dir, is_batch=False):
 
 
 def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrency, batch_start,
-                          rate_limiter=None, workload_estimate=None):
+                          rate_limiter=None, workload_estimate=None,
+                          layout: InlineRunLayout | None = None,
+                          mode: str = "refresh",
+                          migrate_from: str | None = None,
+                          migration_stats: dict | None = None):
     """Write global summary stats + dashboard for a batch run."""
     batch_elapsed = time.time() - batch_start
     summary = merge_stats(all_file_stats) if all_file_stats else {
@@ -2506,6 +2729,15 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     summary["timestamp"] = datetime.now().isoformat()
     summary["input_path"] = str(input_path)
     summary["run_dir"] = str(run_dir)
+    summary["mode"] = mode
+    if migrate_from:
+        summary["migrate_from"] = str(migrate_from)
+    if migration_stats:
+        summary["migration_indexed_rows"] = migration_stats.get("indexed_rows", 0)
+        summary["migration_unique_data_ids"] = migration_stats.get("unique_data_ids", 0)
+        duplicate_data_ids = migration_stats.get("duplicate_data_ids", 0)
+        if duplicate_data_ids:
+            summary["migration_duplicate_data_ids"] = duplicate_data_ids
     if workload_estimate is not None:
         summary["planned_files"] = workload_estimate.files_planned
         summary["planned_raw_conversations"] = workload_estimate.total_raw_conversations
@@ -2518,7 +2750,8 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     if rate_limiter:
         summary["http_request_stats"] = rate_limiter.stats.to_dict()
 
-    summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+    summary_path = _summary_path_for_run(run_dir, layout=layout)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
@@ -2526,14 +2759,33 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     global_dashboard = pass1_global_dashboard_filename(input_name)
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
-        generate_dashboard(run_dir, labeled_file=None,
+        dashboard_source = layout.meta_root if layout is not None else run_dir
+        dashboard_output = (
+            layout.dashboard_path(global_dashboard) if layout is not None
+            else (run_dir / global_dashboard)
+        )
+        generate_dashboard(dashboard_source, labeled_file=None,
                            stats_file=PASS1_SUMMARY_STATS_FILE,
-                           output_file=global_dashboard)
-        print(f"\nGlobal dashboard generated: {run_dir / global_dashboard}")
+                           output_file=str(dashboard_output))
+        print(f"\nGlobal dashboard generated: {dashboard_output}")
     except Exception as e:
         print(f"\nGlobal dashboard generation skipped: {e}")
 
     print_summary(summary, run_dir, is_batch=True)
+
+
+def _print_migration_warning(migration_stats: dict | None):
+    """Warn when migration source contains ambiguous duplicate data_ids."""
+    if not migration_stats:
+        return
+    duplicate_data_ids = int(migration_stats.get("duplicate_data_ids", 0) or 0)
+    if duplicate_data_ids <= 0:
+        return
+    print(
+        "  Warning | "
+        f"migration source has {duplicate_data_ids} duplicate data_id rows; "
+        "the first match wins for copy-forward."
+    )
 
 
 async def run(
@@ -2545,6 +2797,8 @@ async def run(
     shuffle: bool = False,
     enable_arbitration: bool = True,
     config: PipelineConfig | None = None,
+    mode: str = "refresh",
+    migrate_from: str | Path | None = None,
     llm_progress_cb=None,
 ) -> dict:
     """Library entry point for the labeling pipeline.
@@ -2568,15 +2822,52 @@ async def run(
     if config is None:
         config = PipelineConfig()
 
+    mode = _resolve_mode(mode)
+
+    normalized_input = None
+    inline_input_target = None
+    if input_path is not None:
+        normalized_input, inline_input_target = _normalize_run_input(input_path)
+
+    if mode == "recompute":
+        if resume:
+            raise ValueError("--resume is not supported with --mode recompute")
+        if normalized_input is None:
+            raise ValueError("--input is required for --mode recompute")
+
+        from sft_label.tools.recompute import (
+            run_recompute,
+            run_refresh_rarity,
+            run_regenerate_dashboard,
+        )
+
+        written = run_recompute(normalized_input, pass_num="both")
+        if any(key in written for key in ("stats_value", "summary_stats_value")):
+            run_refresh_rarity(normalized_input, config=config)
+        dashboards = run_regenerate_dashboard(normalized_input, pass_num="both")
+        run_root = (
+            inline_input_target.layout.run_root
+            if inline_input_target is not None
+            else Path(normalized_input).resolve()
+        )
+        return {
+            "status": "recomputed",
+            "mode": mode,
+            "run_dir": str(run_root),
+            "input_path": str(normalized_input),
+            "written": written,
+            "dashboards": dashboards,
+        }
+
     # Create shared rate limiter (one per run, shared across all LLM calls)
     rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
 
     # ── Resume mode ──────────────────────────────────────
     if resume:
-        run_dir = Path(resume)
+        run_dir = Path(resume).resolve()
         if not run_dir.is_dir():
             raise FileNotFoundError(f"--resume path does not exist: {run_dir}")
-        checkpoint_path = run_dir / "checkpoint.json"
+        checkpoint_path = _checkpoint_path_for_run(run_dir)
         ckpt = load_checkpoint(checkpoint_path)
         if ckpt is None:
             raise FileNotFoundError(f"no checkpoint.json in {run_dir}")
@@ -2584,22 +2875,31 @@ async def run(
             print(f"All files already completed in {run_dir}")
             return {"status": "already_done", "run_dir": str(run_dir)}
 
+        ckpt_meta = ckpt.get("metadata") or {}
         # Recover settings from summary_stats or checkpoint
-        summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+        summary_path = _summary_path_for_run(run_dir)
+        prev_summary = {}
         if summary_path.exists():
             with open(summary_path, "r", encoding="utf-8") as f:
                 prev_summary = json.load(f)
-            _input_path = Path(prev_summary.get("input_path", str(input_path)))
-            _model = prev_summary.get("model", config.labeling_model)
-        else:
-            if input_path is None:
-                raise FileNotFoundError(
-                    f"missing {PASS1_SUMMARY_STATS_FILE} in {run_dir}; "
-                    "please run 'sft-label optimize-layout --input <run_dir> --apply' "
-                    "for legacy runs or provide --input explicitly when resuming"
-                )
-            _input_path = Path(input_path)
-            _model = config.labeling_model
+        recovered_input = prev_summary.get("input_path") or ckpt_meta.get("input_path")
+        if recovered_input is None and input_path is not None:
+            recovered_input = str(input_path)
+        if recovered_input is None:
+            raise FileNotFoundError(
+                f"missing {PASS1_SUMMARY_STATS_FILE} in {run_dir}; "
+                "please run 'sft-label optimize-layout --input <run_dir> --apply' "
+                "for legacy runs or provide --input explicitly when resuming"
+            )
+
+        _input_path, _inline_target = _normalize_run_input(recovered_input)
+        _model = prev_summary.get("model", config.labeling_model)
+        _mode = _resolve_mode(prev_summary.get("mode", ckpt_meta.get("mode", mode)))
+        _migrate_from = prev_summary.get("migrate_from") or ckpt_meta.get("migrate_from") or (
+            str(migrate_from) if migrate_from else None
+        )
+
+        layout = InlineRunLayout.from_paths(_input_path, run_dir)
 
         files = discover_input_files(_input_path)
         dir_files = [(a, r) for a, r in files if r is not None]
@@ -2608,8 +2908,18 @@ async def run(
 
         completed = set(ckpt.get("completed", []))
         _concurrency = config.concurrency
+        migration_index = None
+        migration_stats = None
+        if _mode == "migrate":
+            if not _migrate_from:
+                raise ValueError("resume metadata is missing migrate_from for migrate mode")
+            migration_index, migration_stats = load_inline_migration_index(_migrate_from)
+            _print_migration_warning(migration_stats)
 
-        print(f"Pipeline RESUME | {run_dir} | model={_model} concurrency={_concurrency} | {len(completed)}/{len(dir_files)} files done")
+        print(
+            f"Pipeline RESUME | {run_dir} | mode={_mode} model={_model} "
+            f"concurrency={_concurrency} | {len(completed)}/{len(dir_files)} files done"
+        )
         workload_estimate = estimate_directory_workload(
             dir_files,
             limit=limit,
@@ -2617,6 +2927,8 @@ async def run(
             config=config,
             completed_set=completed,
             enable_arbitration=enable_arbitration,
+            mode=_mode,
+            migration_index=migration_index,
         )
         print(
             "  Plan | "
@@ -2663,31 +2975,59 @@ async def run(
                     enable_arbitration=enable_arbitration,
                     config=config, rate_limiter=rate_limiter,
                     llm_progress_cb=llm_progress_cb,
+                    layout=layout,
+                    mode=_mode,
+                    migration_index=migration_index,
                 )
 
         # Write global summary
         _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start,
-                              rate_limiter=rate_limiter, workload_estimate=workload_estimate)
-        summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+                              rate_limiter=rate_limiter, workload_estimate=workload_estimate,
+                              layout=layout, mode=_mode, migrate_from=_migrate_from,
+                              migration_stats=migration_stats)
+        summary_path = _summary_path_for_run(run_dir, layout=layout)
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     # ── Normal mode ──────────────────────────────────────
-    _input_path = Path(input_path)
+    if normalized_input is None:
+        raise ValueError("--input is required")
+    _input_path = normalized_input
     files = discover_input_files(_input_path)
     is_directory = _input_path.is_dir()
+    migration_index = None
+    migration_stats = None
+    if mode == "migrate":
+        if not migrate_from:
+            raise ValueError("--migrate-from is required for --mode migrate")
+        migration_index, migration_stats = load_inline_migration_index(migrate_from)
+        _print_migration_warning(migration_stats)
 
     # Determine output directory
-    run_dir = resolve_run_dir(str(output) if output is not None else None, _input_path)
+    base_dir = (
+        inline_input_target.layout.run_root.parent
+        if inline_input_target is not None
+        else None
+    )
+    run_dir = resolve_run_dir(str(output) if output is not None else None, _input_path, base_dir=base_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    layout = InlineRunLayout.from_paths(_input_path, run_dir)
 
     _concurrency = config.concurrency
 
     _arb = "off" if not enable_arbitration else f"threshold={config.confidence_threshold}"
     _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
     _src = f"directory, {len(files)} files" if is_directory else "single file"
-    print(f"Pipeline | {_input_path} ({_src}) | model={config.labeling_model} concurrency={_concurrency} {_rps} arb={_arb}")
+    print(
+        f"Pipeline | {_input_path} ({_src}) | mode={mode} "
+        f"model={config.labeling_model} concurrency={_concurrency} {_rps} arb={_arb}"
+    )
     print(f"  run_dir={run_dir}")
+    if migration_stats:
+        print(
+            "  Migrate | "
+            f"{migration_stats['unique_data_ids']} unique ids from {migration_stats['source_input']}"
+        )
 
     if is_directory:
         # ── Directory mode: cross-file pipeline ──
@@ -2695,8 +3035,17 @@ async def run(
         if not dir_files:
             raise FileNotFoundError("No .json/.jsonl files found in directory")
 
-        checkpoint_path = run_dir / "checkpoint.json"
-        create_checkpoint(checkpoint_path, dir_files)
+        checkpoint_path = _checkpoint_path_for_run(run_dir, layout=layout)
+        create_checkpoint(
+            checkpoint_path,
+            dir_files,
+            metadata={
+                "mode": mode,
+                "input_path": str(_input_path),
+                "migrate_from": str(migrate_from) if migrate_from else None,
+                "created_at": datetime.now().isoformat(),
+            },
+        )
         workload_estimate = estimate_directory_workload(
             dir_files,
             limit=limit,
@@ -2704,6 +3053,8 @@ async def run(
             config=config,
             completed_set=None,
             enable_arbitration=enable_arbitration,
+            mode=mode,
+            migration_index=migration_index,
         )
         print(
             "  Plan | "
@@ -2749,11 +3100,17 @@ async def run(
                     enable_arbitration=enable_arbitration,
                     config=config, rate_limiter=rate_limiter,
                     llm_progress_cb=llm_progress_cb,
+                    layout=layout,
+                    mode=mode,
+                    migration_index=migration_index,
                 )
 
         _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start,
-                              rate_limiter=rate_limiter, workload_estimate=workload_estimate)
-        summary_path = run_dir / PASS1_SUMMARY_STATS_FILE
+                              rate_limiter=rate_limiter, workload_estimate=workload_estimate,
+                              layout=layout, mode=mode,
+                              migrate_from=str(migrate_from) if migrate_from else None,
+                              migration_stats=migration_stats)
+        summary_path = _summary_path_for_run(run_dir, layout=layout)
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -2772,31 +3129,58 @@ async def run(
             with create_progress() as progress:
                 sample_task = progress.add_task("Pass 1", total=None, info="starting...")
                 stats = await run_one_file(
-                    _input_path, run_dir, http_client, sem, config.labeling_model,
+                    _input_path,
+                    layout.file_artifact_dir(_input_path) if str(_input_path).endswith(".jsonl") else run_dir,
+                    http_client,
+                    sem,
+                    config.labeling_model,
                     enable_arbitration=enable_arbitration,
                     limit=limit, shuffle=shuffle,
                     progress=progress, sample_task=sample_task,
                     config=config, rate_limiter=rate_limiter,
                     llm_progress_cb=llm_progress_cb,
+                    dataset_output_path=layout.mirrored_dataset_path(_input_path) if str(_input_path).endswith(".jsonl") else None,
+                    run_failure_log_path=layout.run_artifact_path("failures.jsonl") if str(_input_path).endswith(".jsonl") else None,
+                    inline_output=str(_input_path).endswith(".jsonl"),
+                    mode=mode,
+                    migration_index=migration_index,
                 )
 
         stats["model"] = config.labeling_model
         stats["concurrency"] = _concurrency
         stats["timestamp"] = datetime.now().isoformat()
         stats["run_dir"] = str(run_dir)
+        stats["mode"] = mode
+        if migrate_from:
+            stats["migrate_from"] = str(migrate_from)
+        if migration_stats:
+            stats["migration_indexed_rows"] = migration_stats.get("indexed_rows", 0)
+            stats["migration_unique_data_ids"] = migration_stats.get("unique_data_ids", 0)
+            duplicate_data_ids = migration_stats.get("duplicate_data_ids", 0)
+            if duplicate_data_ids:
+                stats["migration_duplicate_data_ids"] = duplicate_data_ids
         if rate_limiter:
             stats["http_request_stats"] = rate_limiter.stats.to_dict()
 
         # Overwrite stats with enriched version
-        stats_path = run_dir / PASS1_STATS_FILE
-        with open(stats_path, "w", encoding="utf-8") as f:
-            json.dump(stats, f, ensure_ascii=False, indent=2)
+        stats_path = (
+            layout.file_artifact_path(_input_path, PASS1_STATS_FILE)
+            if str(_input_path).endswith(".jsonl")
+            else (run_dir / PASS1_STATS_FILE)
+        )
+        _write_json_atomic(stats_path, stats)
 
         print_summary(stats, run_dir)
-        print(f"Output:  {run_dir / 'labeled.json'}")
-        print(f"JSONL:   {run_dir / 'labeled.jsonl'}")
-        print(f"Stats:   {run_dir / PASS1_STATS_FILE}")
-        print(f"Monitor: {run_dir / 'monitor.jsonl'}")
+        if str(_input_path).endswith(".jsonl"):
+            print(f"Dataset: {layout.mirrored_dataset_path(_input_path)}")
+            print(f"Meta:    {layout.file_artifact_dir(_input_path)}")
+            print(f"Stats:   {layout.file_artifact_path(_input_path, PASS1_STATS_FILE)}")
+            print(f"Monitor: {layout.file_artifact_path(_input_path, 'monitor.jsonl')}")
+        else:
+            print(f"Output:  {run_dir / 'labeled.json'}")
+            print(f"JSONL:   {run_dir / 'labeled.jsonl'}")
+            print(f"Stats:   {run_dir / PASS1_STATS_FILE}")
+            print(f"Monitor: {run_dir / 'monitor.jsonl'}")
         return stats
 
 
@@ -2811,6 +3195,8 @@ async def run_pipeline(args):
         shuffle=args.shuffle,
         enable_arbitration=not args.no_arbitration,
         config=config,
+        mode=getattr(args, "mode", "refresh"),
+        migrate_from=getattr(args, "migrate_from", None),
     )
 
 
@@ -2821,6 +3207,9 @@ def main():
                         help="Output directory: omit for sibling of input, or an explicit path")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from an existing run directory (reads checkpoint.json)")
+    parser.add_argument("--mode", type=str, default="refresh",
+                        choices=sorted(INLINE_RUN_MODES))
+    parser.add_argument("--migrate-from", type=str, default=None)
     parser.add_argument("--model", type=str, default=DEFAULT_LABELING_MODEL)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--limit", type=int, default=0,

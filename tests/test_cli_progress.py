@@ -41,6 +41,8 @@ def test_estimate_end_to_end_llm_calls_single_file(tmp_path):
         limit=0,
         shuffle=False,
         no_arbitration=False,
+        mode="refresh",
+        migrate_from=None,
     )
     config = PipelineConfig(sample_max_retries=1)
     plan = _estimate_end_to_end_llm_calls(args, config)
@@ -85,6 +87,14 @@ def test_cmd_run_semantic_cluster_failure_exits_cleanly(monkeypatch, capsys):
     assert exc.value.code == 1
     out = capsys.readouterr().out
     assert "Error: semantic failed" in out
+
+
+def test_cmd_run_recompute_rejects_score(monkeypatch):
+    parser = build_parser()
+    args = parser.parse_args(["run", "--input", "input.json", "--mode", "recompute", "--score"])
+    with pytest.raises(SystemExit) as exc:
+        cmd_run(args)
+    assert exc.value.code == 1
 
 
 def test_semantic_progress_printer_shows_progress_without_spam(capsys):

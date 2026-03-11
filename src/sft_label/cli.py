@@ -9,9 +9,9 @@ Subcommands:
   sft-label semantic-cluster     — Run trajectory SemHash + ANN clustering
   sft-label export-semantic      — Export representative windows from clustering artifacts
   sft-label optimize-layout      — One-time optimize historical output layout
-  sft-label filter               — Filter scored data by value threshold
+  sft-label filter               — Filter scored or inline-labeled data by value threshold
   sft-label validate             — Validate taxonomy definitions
-  sft-label export-review        — Export labeled data to review CSV
+  sft-label export-review        — Export labeled or inline-labeled data to review CSV
   sft-label recompute-stats      — Recompute stats from labeled/scored output (no LLM)
   sft-label regenerate-dashboard — Regenerate HTML dashboards from stats/data
 
@@ -169,7 +169,7 @@ def _estimate_pass2_calls(total_samples: int, sample_max_retries: int) -> int:
 
 def _estimate_end_to_end_llm_calls(args, config):
     """Estimate Pass1+Pass2 total LLM calls for run --score mode."""
-    if args.resume or not args.input:
+    if args.resume or not args.input or getattr(args, "mode", "refresh") == "recompute":
         return None
 
     input_path = Path(args.input)
@@ -182,6 +182,21 @@ def _estimate_end_to_end_llm_calls(args, config):
         iter_samples_from_file,
         apply_sparse_sampling,
     )
+    from sft_label.inline_pass1 import prepare_inline_pass1_batch
+    from sft_label.inline_rows import iter_row_sample_bundles_from_jsonl
+    from sft_label.inline_migration import load_inline_migration_index
+    from sft_label.inline_scoring import infer_inline_scoring_target
+
+    inline_target = infer_inline_scoring_target(input_path)
+    if inline_target is not None and input_path.is_dir() and input_path == inline_target.layout.run_root:
+        input_path = inline_target.layout.dataset_root
+
+    migration_index = None
+    if getattr(args, "mode", None) == "migrate" and getattr(args, "migrate_from", None):
+        try:
+            migration_index, _stats = load_inline_migration_index(args.migrate_from)
+        except (FileNotFoundError, ValueError):
+            return None
 
     if input_path.is_dir():
         files = discover_input_files(input_path)
@@ -194,21 +209,13 @@ def _estimate_end_to_end_llm_calls(args, config):
             shuffle=args.shuffle,
             config=config,
             enable_arbitration=not args.no_arbitration,
+            mode=getattr(args, "mode", "refresh"),
+            migration_index=migration_index,
         )
         pass1_calls = est.initial_estimated_llm_calls
         pass1_labeled = est.total_labeled_samples
         pass2_samples = est.total_samples
     else:
-        rng_state = random.getstate()
-        try:
-            samples, _ = iter_samples_from_file(
-                input_path,
-                limit=args.limit,
-                shuffle=args.shuffle,
-            )
-        finally:
-            random.setstate(rng_state)
-
         sparse_kw = dict(
             full_label_count=config.sparse_full_label_count,
             gap_multiplier=config.sparse_gap_multiplier,
@@ -216,9 +223,29 @@ def _estimate_end_to_end_llm_calls(args, config):
             max_gap=config.sparse_max_gap,
             threshold=config.sparse_threshold,
         )
-        label_indices, _ = apply_sparse_sampling(samples, **sparse_kw)
-        pass1_labeled = len(label_indices)
-        pass2_samples = len(samples)
+        if str(input_path).endswith(".jsonl"):
+            row_bundles = list(iter_row_sample_bundles_from_jsonl(input_path, limit=args.limit))
+            prepared = prepare_inline_pass1_batch(
+                row_bundles,
+                mode=getattr(args, "mode", "refresh"),
+                sparse_kwargs=sparse_kw,
+                migration_index=migration_index,
+            )
+            pass1_labeled = len(prepared.label_indices)
+            pass2_samples = len(prepared.samples)
+        else:
+            rng_state = random.getstate()
+            try:
+                samples, _ = iter_samples_from_file(
+                    input_path,
+                    limit=args.limit,
+                    shuffle=args.shuffle,
+                )
+            finally:
+                random.setstate(rng_state)
+            label_indices, _ = apply_sparse_sampling(samples, **sparse_kw)
+            pass1_labeled = len(label_indices)
+            pass2_samples = len(samples)
         baseline = pass1_labeled * 2
         calls_per_sample = 2.2 if not args.no_arbitration else 2.0
         pass1_calls = max(int(round(pass1_labeled * calls_per_sample)), baseline)
@@ -237,6 +264,21 @@ def cmd_run(args):
     """Run the labeling pipeline."""
     if not args.input and not args.resume:
         print("Error: --input is required (unless using --resume)")
+        sys.exit(1)
+    if args.mode == "migrate" and not args.migrate_from and not args.resume:
+        print("Error: --migrate-from is required when --mode migrate")
+        sys.exit(1)
+    if args.mode != "migrate" and args.migrate_from:
+        print("Error: --migrate-from only applies to --mode migrate")
+        sys.exit(1)
+    if args.mode == "recompute" and args.resume:
+        print("Error: --resume is not supported when --mode recompute")
+        sys.exit(1)
+    if args.mode == "recompute" and args.score:
+        print("Error: --score cannot be combined with --mode recompute")
+        sys.exit(1)
+    if args.mode == "recompute" and args.semantic_cluster:
+        print("Error: --semantic-cluster cannot be combined with --mode recompute")
         sys.exit(1)
 
     from sft_label.config import PipelineConfig
@@ -270,6 +312,8 @@ def cmd_run(args):
             shuffle=args.shuffle,
             enable_arbitration=not args.no_arbitration,
             config=config,
+            mode=args.mode,
+            migrate_from=args.migrate_from,
             llm_progress_cb=llm_progress_cb,
         ))
     except (FileNotFoundError, ValueError) as e:
@@ -287,6 +331,7 @@ def cmd_run(args):
                 output_dir=run_dir,
                 tag_stats_path=getattr(args, "tag_stats", None),
                 config=config,
+                resume=args.mode in {"incremental", "migrate"},
                 llm_progress_cb=llm_progress_cb,
             ))
 
@@ -330,7 +375,7 @@ def cmd_validate(args):
 
 
 def cmd_export_review(args):
-    """Export labeled data to review CSV."""
+    """Export labeled or inline-labeled data to review CSV."""
     from sft_label.tools.export_review import main as export_main
     # Patch sys.argv for the tool's own argparse
     patched = [
@@ -714,6 +759,11 @@ def build_parser():
                             help="Output directory (default: sibling of input)")
     run_parser.add_argument("--resume", type=str, default=None,
                             help="Resume from an existing run directory")
+    run_parser.add_argument("--mode", type=str, default="refresh",
+                            choices=["incremental", "refresh", "migrate", "recompute"],
+                            help="Inline dataset mode: incremental, refresh, migrate, or recompute")
+    run_parser.add_argument("--migrate-from", type=str, default=None,
+                            help="Inline-labeled source dataset/run to copy data_label from (used with --mode migrate)")
     run_parser.add_argument("--limit", type=int, default=0,
                             help="Max samples per file, 0 = all (default: 0)")
     run_parser.add_argument("--shuffle", action="store_true",
@@ -929,10 +979,10 @@ def build_parser():
     # --- export-review ---
     review_parser = subparsers.add_parser(
         "export-review",
-        help="Export labeled data to review CSV",
+        help="Export labeled or inline-labeled data to review CSV",
     )
     review_parser.add_argument("--input", type=str, required=True,
-                               help="Input labeled JSON file")
+                               help="Input labeled JSON/JSONL, mirrored inline JSONL, or run directory")
     review_parser.add_argument("--monitor", type=str, default="",
                                help="Monitor JSONL file (optional)")
     review_parser.add_argument("--output", type=str, required=True,
@@ -944,13 +994,13 @@ def build_parser():
     # --- filter ---
     filter_parser = subparsers.add_parser(
         "filter",
-        help="Filter scored data by value and other criteria",
-        description="Select high-value samples from scored data. "
+        help="Filter scored or inline-labeled data by value and other criteria",
+        description="Select high-value samples from scored artifacts or mirrored inline datasets. "
                     "Supports multi-condition filtering and training format output.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     filter_parser.add_argument("--input", type=str, required=True,
-                                help="Input scored file (.json/.jsonl) or directory")
+                                help="Input scored file, mirrored inline JSONL, or directory/run root")
     filter_parser.add_argument("--value-min", type=float, default=None,
                                 help="Minimum value_score to retain")
     filter_parser.add_argument("--threshold", type=float, default=None,
