@@ -1725,6 +1725,7 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
         config,
         resume=resume,
         llm_progress_cb=llm_progress_cb,
+        file_label=target.layout.relative_source_path(source_file).as_posix(),
     )
 
     scored_samples, conversation_records = _sync_inline_scored_cache_to_dataset(
@@ -1736,6 +1737,7 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
 
     stats["input_file"] = str(source_file)
     stats["mirrored_file"] = str(source_file)
+    stats["file"] = target.layout.relative_source_path(source_file).as_posix()
     stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
     if conversation_records:
         stats["conversation_records"] = len(conversation_records)
@@ -1771,10 +1773,11 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
         llm_progress_cb=llm_progress_cb,
     )
 
+    corrected_file_stats = []
     all_conv_records = []
     for source_file in source_files:
         artifact_dir = target.layout.file_artifact_dir(source_file)
-        _scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
+        scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
             source_file,
             artifact_dir,
             limit=limit,
@@ -1782,6 +1785,40 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
         if conv_records:
             all_conv_records.extend(conv_records)
         _generate_inline_file_dashboard(target, source_file)
+
+        stats = _load_existing_pass2_stats(artifact_dir)
+        if stats:
+            stats["input_file"] = str(source_file)
+            stats["mirrored_file"] = str(source_file)
+            stats["file"] = target.layout.relative_source_path(source_file).as_posix()
+            stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
+            if conv_records:
+                stats["conversation_records"] = len(conv_records)
+            _write_json_atomic(
+                artifact_dir / PASS2_STATS_FILE,
+                {k: v for k, v in stats.items() if k != "_raw_scores"},
+            )
+            corrected_file_stats.append(stats)
+
+    if corrected_file_stats:
+        corrected_summary = _merge_value_stats(corrected_file_stats)
+        for key in (
+            "elapsed_seconds",
+            "model",
+            "files_processed",
+            "planned_files",
+            "planned_samples",
+            "planned_baseline_llm_calls",
+            "planned_initial_llm_calls",
+            "planning_elapsed_seconds",
+            "rarity_config",
+            "http_request_stats",
+        ):
+            if key in summary:
+                corrected_summary[key] = summary[key]
+        corrected_summary["input_path"] = str(target.target_path)
+        _write_json_atomic(target.layout.meta_root / PASS2_SUMMARY_STATS_FILE, corrected_summary)
+        summary = corrected_summary
 
     if all_conv_records:
         _write_json_atomic(target.layout.meta_root / "conversation_scores.json", all_conv_records)
@@ -1873,7 +1910,8 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
 
 async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                      limit, config, resume=False,
-                                     llm_progress_cb=None):
+                                     llm_progress_cb=None,
+                                     file_label=None):
     """Score a JSONL labeled file in chunks to bound memory.
 
     Two-pass approach:
@@ -2279,6 +2317,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(input_path)
+    stats["file"] = file_label or stats.get("file") or input_path.name
     if rate_limiter:
         stats["http_request_stats"] = rate_limiter.stats.to_dict()
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
@@ -2562,7 +2601,7 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
 
 
 async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=False,
-                            llm_progress_cb=None):
+                            llm_progress_cb=None, file_label=None):
     """Score a single labeled file."""
     input_path = Path(input_path)
 
@@ -2572,6 +2611,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             input_path, output_dir, tag_stats_path, limit, config,
             resume=resume,
             llm_progress_cb=llm_progress_cb,
+            file_label=file_label,
         )
 
     if output_dir is None:
@@ -2810,6 +2850,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(input_path)
+    stats["file"] = file_label or stats.get("file") or input_path.name
     if rate_limiter:
         stats["http_request_stats"] = rate_limiter.stats.to_dict()
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
@@ -3076,6 +3117,10 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
             if key in existing_stats:
                 stats[key] = existing_stats[key]
 
+        input_file = existing_stats.get("input_file")
+        file_label_source = Path(input_file) if input_file else scored_path
+        stats["file"] = _relative_file_label(file_label_source, input_dir)
+
         stats_path = scored_path.parent / PASS2_STATS_FILE
         tmp_stats = stats_path.with_suffix(".tmp.json")
         with open(tmp_stats, "w", encoding="utf-8") as f:
@@ -3093,16 +3138,12 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
             )
         except Exception:
             pass
-
-        input_file = existing_stats.get("input_file")
-        file_label_source = Path(input_file) if input_file else scored_path
-        stats["file"] = _relative_file_label(file_label_source, input_dir)
         updated_stats.append(stats)
 
     return updated_stats
 
 
-def _flush_scoring_file(collector, config, pprint=print):
+def _flush_scoring_file(collector, config, pprint=print, file_label=None):
     """Write all scoring outputs for a completed file and release memory.
 
     Returns the stats dict.
@@ -3170,6 +3211,7 @@ def _flush_scoring_file(collector, config, pprint=print):
     stats = compute_value_stats(samples, valid_monitors)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(collector.labeled_path)
+    stats["file"] = file_label or stats.get("file") or collector.labeled_path.name
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": collector.stats_source,
@@ -3511,8 +3553,9 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 config,
                 resume=resume,
                 llm_progress_cb=llm_progress_cb,
+                file_label=_relative_file_label(labeled_path, input_dir),
             )
-            stats["file"] = _relative_file_label(labeled_path, input_dir)
+            stats["file"] = stats.get("file") or _relative_file_label(labeled_path, input_dir)
             all_file_stats.append(stats)
 
         if resident_files:
@@ -3546,8 +3589,13 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         for collector in collectors.values():
                             if collector.done < collector.total or collector.completed:
                                 continue
-                            stats = _flush_scoring_file(collector, config, pprint=pprint)
-                            stats["file"] = _relative_file_label(collector.labeled_path, input_dir)
+                            stats = _flush_scoring_file(
+                                collector,
+                                config,
+                                pprint=pprint,
+                                file_label=_relative_file_label(collector.labeled_path, input_dir),
+                            )
+                            stats["file"] = stats.get("file") or _relative_file_label(collector.labeled_path, input_dir)
                             all_file_stats.append(stats)
                             progress.update(file_task, advance=1)
                             flushed += 1

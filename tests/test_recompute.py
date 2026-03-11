@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from sft_label.artifacts import PASS1_STATS_FILE
+from sft_label.artifacts import PASS1_STATS_FILE, DASHBOARDS_DIRNAME
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
 from sft_label.tools.recompute import (
@@ -904,7 +904,7 @@ class TestRegenerateDashboard:
         assert "RuntimeError: boom" in out
         assert str(tmp_path) in out
 
-    def test_inline_run_root_dashboards_land_at_run_root(self, tmp_path):
+    def test_inline_dashboards_land_under_meta_dashboard_dir(self, tmp_path):
         run_root = tmp_path / "dataset_labeled_20260311_120000"
         source_file = run_root / "dataset" / "multi" / "b.jsonl"
         rows = _inline_rows_for_file(
@@ -927,5 +927,7 @@ class TestRegenerateDashboard:
         generated = run_regenerate_dashboard(str(run_root), pass_num="both")
 
         assert len(generated) >= 2
-        assert any(Path(path).parent == run_root for path in map(Path, generated))
-        assert len(list(run_root.glob("dashboard_scoring*.html"))) >= 1
+        expected_dir = run_root / "meta_label_data" / DASHBOARDS_DIRNAME
+        assert expected_dir.is_dir()
+        assert all(Path(path).parent == expected_dir for path in map(Path, generated))
+        assert len(list(expected_dir.glob("dashboard_scoring*.html"))) >= 1

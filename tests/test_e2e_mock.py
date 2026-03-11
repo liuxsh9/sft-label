@@ -19,6 +19,7 @@ from sft_label.artifacts import (
     PASS1_STATS_FILE,
     PASS2_STATS_FILE,
     PASS2_DASHBOARD_FILE,
+    dashboard_relpath,
 )
 from sft_label.config import PipelineConfig
 
@@ -269,7 +270,7 @@ class TestE2ESingleFile:
             assert isinstance(labels["concept"], list)
 
         # ── Verify dashboard ──
-        dashboards = list(run_dir.glob("dashboard*.html"))
+        dashboards = list(run_dir.glob("**/dashboard*.html"))
         assert len(dashboards) >= 1, "Dashboard HTML should be generated"
 
         # ── Verify terminal output is condensed ──
@@ -394,7 +395,7 @@ class TestE2EScoring:
         assert (tmp_path / PASS2_STATS_FILE).exists()
 
         # ── Verify dashboard ──
-        assert (tmp_path / PASS2_DASHBOARD_FILE).exists()
+        assert (tmp_path / dashboard_relpath(PASS2_DASHBOARD_FILE)).exists()
 
         # ── Verify terminal output ──
         captured = capsys.readouterr()

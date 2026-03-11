@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from sft_label.artifacts import DASHBOARDS_DIRNAME
 
 META_LABEL_DATA_DIRNAME = "meta_label_data"
 FILE_ARTIFACTS_DIRNAME = "files"
@@ -90,5 +91,5 @@ class InlineRunLayout:
         return self.cache_root.joinpath(*parts)
 
     def dashboard_path(self, filename: str) -> Path:
-        """Return a run-root dashboard path."""
-        return self.run_root / filename
+        """Return the runtime dashboard path under meta_label_data/dashboards."""
+        return self.meta_root / DASHBOARDS_DIRNAME / filename

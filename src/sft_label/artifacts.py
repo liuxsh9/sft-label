@@ -10,6 +10,9 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
+# Shared output directory for runtime-generated dashboards
+DASHBOARDS_DIRNAME = "dashboards"
+
 # Pass 1 (labeling)
 PASS1_STATS_FILE = "stats_labeling.json"
 PASS1_STATS_FILE_LEGACY = "stats.json"
@@ -57,6 +60,26 @@ def pass2_global_dashboard_filename(input_name: str) -> str:
 
 def pass2_global_dashboard_legacy_filename(input_name: str) -> str:
     return f"dashboard_value_{input_name}.html"
+
+
+def dashboard_relpath(filename: str) -> Path:
+    """Return the relative runtime location for a dashboard HTML file."""
+    return Path(DASHBOARDS_DIRNAME) / filename
+
+
+def resolve_dashboard_output(base_dir: Path | str, output_file: str | Path) -> Path:
+    """Resolve a dashboard output path under the runtime dashboards directory.
+
+    Relative filenames are written to ``<base_dir>/dashboards/<filename>``.
+    Absolute paths and explicit relative subpaths are preserved.
+    """
+    base_dir = Path(base_dir)
+    output_path = Path(output_file)
+    if output_path.is_absolute():
+        return output_path
+    if len(output_path.parts) > 1:
+        return base_dir / output_path
+    return base_dir / dashboard_relpath(output_path.name)
 
 
 def sync_legacy_aliases(src_path: Path, alias_names: Iterable[str]) -> None:

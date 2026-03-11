@@ -16,6 +16,7 @@ from pathlib import Path
 from sft_label.artifacts import (
     PASS2_STATS_FILE,
     PASS2_DASHBOARD_FILE,
+    dashboard_relpath,
 )
 from sft_label.preprocessing import (
     detect_thinking_mode,
@@ -1971,7 +1972,7 @@ class TestIntegrationScoring:
         assert (tmp_path / "scored.jsonl").exists()
         assert (tmp_path / PASS2_STATS_FILE).exists()
         assert (tmp_path / "monitor_value.jsonl").exists()
-        assert (tmp_path / PASS2_DASHBOARD_FILE).exists()
+        assert (tmp_path / dashboard_relpath(PASS2_DASHBOARD_FILE)).exists()
 
         # Verify scored.json structure
         with open(tmp_path / "scored.json", encoding="utf-8") as f:
@@ -2018,9 +2019,10 @@ class TestIntegrationScoring:
         assert "weights_used" in stats_out
 
         # Verify dashboard is valid HTML
-        html = (tmp_path / PASS2_DASHBOARD_FILE).read_text(encoding="utf-8")
+        html = (tmp_path / dashboard_relpath(PASS2_DASHBOARD_FILE)).read_text(encoding="utf-8")
         assert "<!DOCTYPE html>" in html
-        assert "SFT Labeling & Value Dashboard" in html or "SFT Value Scoring Dashboard" in html
+        assert "SFT Labeling & Scoring Dashboard" in html
+        assert "Scope Navigator" in html
 
         # Verify stats return value
         assert result is not None

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sft_label.artifacts import DASHBOARDS_DIRNAME
 from sft_label.config import PipelineConfig
 from sft_label.inline_labels import build_turn_id
 from sft_label.inline_pass1 import merge_pass1_results
@@ -154,6 +155,8 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
     assert (artifact_dir / "scored.jsonl").exists()
     assert (artifact_dir / "monitor_value.jsonl").exists()
     assert (artifact_dir / "stats_scoring.json").exists()
+    stats_payload = json.loads((artifact_dir / "stats_scoring.json").read_text(encoding="utf-8"))
+    assert stats_payload["file"] == "train.jsonl"
 
     updated_rows = [json.loads(line) for line in source_file.read_text(encoding="utf-8").splitlines()]
     turns = updated_rows[0]["extra_info"]["unique_info"]["data_label"]["turns"]
@@ -225,7 +228,8 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
     assert summary["files_processed"] == 2
     assert (run_root / "meta_label_data" / "summary_stats_scoring.json").exists()
     assert (run_root / "meta_label_data" / "conversation_scores.json").exists()
-    assert len(list(run_root.glob("dashboard_scoring*.html"))) >= 1
+    assert len(list((run_root / "meta_label_data" / DASHBOARDS_DIRNAME).glob("dashboard_scoring*.html"))) >= 1
+    assert {row["file"] for row in summary.get("per_file_summary", [])} == {"code/a.jsonl", "multi/b.jsonl"}
 
     updated_b = [json.loads(line) for line in file_b.read_text(encoding="utf-8").splitlines()]
     turns = updated_b[0]["extra_info"]["unique_info"]["data_label"]["turns"]

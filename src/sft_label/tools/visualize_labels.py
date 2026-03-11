@@ -1,36 +1,40 @@
-"""
-Label Statistics Dashboard Generator
+"""Interactive Pass 1 dashboard generation."""
 
-Reads labeled.json from a pipeline run and generates a standalone HTML dashboard
-with tag distributions, confidence heatmap, coverage analysis, and cross-dimension matrix.
+from __future__ import annotations
 
-Usage:
-  python3 labeling/tools/visualize_labels.py labeling/data/runs/<run_dir>
-  python3 labeling/tools/visualize_labels.py labeling/data/runs/<run_dir> --open
-"""
-
+import argparse
 import json
 import sys
-import argparse
 import webbrowser
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 
-from sft_label.prompts import TAG_POOLS, SINGLE_SELECT, MULTI_SELECT
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
+    PASS1_SUMMARY_STATS_FILE,
+    resolve_dashboard_output,
 )
+from sft_label.prompts import TAG_POOLS
+from sft_label.tools.dashboard_scopes import build_scope_tree
+from sft_label.tools.dashboard_template import render_dashboard_html
 
-DIMENSIONS = ["intent", "difficulty", "language", "domain", "concept",
-              "task", "agentic", "constraint", "context"]
+
+DIMENSIONS = [
+    "intent",
+    "difficulty",
+    "language",
+    "domain",
+    "concept",
+    "task",
+    "agentic",
+    "constraint",
+    "context",
+]
 
 
 def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_FILE):
-    """Load samples and stats from a run directory.
-
-    If labeled_file is None or doesn't exist, returns empty samples list
-    (stats-only mode for global dashboards).
-    """
+    """Load samples and stats from a run directory."""
+    run_dir = Path(run_dir)
     samples = []
     if labeled_file:
         labeled_path = run_dir / labeled_file
@@ -48,21 +52,18 @@ def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_
 
 
 def compute_viz_data(samples, stats):
-    """Compute all data needed for the dashboard."""
-    # Tag distributions (from stats or recompute)
+    """Compute all visualization data needed for Pass 1 dashboards."""
     distributions = stats.get("tag_distributions", {})
 
-    # Confidence per dimension per sample (for heatmap)
     conf_matrix = []
-    for s in samples:
-        labels = s.get("labels") or {}
+    for sample in samples:
+        labels = sample.get("labels") or {}
         conf = labels.get("confidence", {})
         conf_matrix.append({
-            "id": s.get("id", "?"),
-            "values": {d: conf.get(d, 0) for d in DIMENSIONS}
+            "id": sample.get("id", "?"),
+            "values": {dim: conf.get(dim, 0) for dim in DIMENSIONS},
         })
 
-    # Coverage: used tags vs pool
     coverage = {}
     for dim in DIMENSIONS:
         pool = set(TAG_POOLS.get(dim, []))
@@ -74,28 +75,23 @@ def compute_viz_data(samples, stats):
             "rate": len(used & pool) / len(pool) if pool else 0,
         }
 
-    # Cross-dimension: intent × difficulty matrix
     cross = Counter()
-    for s in samples:
-        labels = s.get("labels") or {}
-        intent = labels.get("intent", "?")
-        diff = labels.get("difficulty", "?")
-        cross[(intent, diff)] += 1
+    for sample in samples:
+        labels = sample.get("labels") or {}
+        cross[(labels.get("intent", "?"), labels.get("difficulty", "?"))] += 1
 
-    # Fall back to stats cross_matrix when samples are empty (global dashboard)
     if not cross and stats.get("cross_matrix"):
-        cross_data = stats["cross_matrix"]
-        for key, count in cross_data.items():
+        for key, count in (stats.get("cross_matrix") or {}).items():
             parts = key.split("|", 1)
             if len(parts) == 2:
-                cross[tuple(parts)] = count
+                cross[(parts[0], parts[1])] = count
 
-    intents = sorted({k[0] for k in cross})
-    diffs = ["beginner", "intermediate", "upper-intermediate", "advanced", "expert"]
+    intents = sorted({key[0] for key in cross})
+    difficulty_order = ["beginner", "intermediate", "upper-intermediate", "advanced", "expert"]
     cross_matrix = {
         "rows": intents,
-        "cols": [d for d in diffs if any(cross.get((i, d), 0) for i in intents)],
-        "data": {f"{i}|{d}": cross.get((i, d), 0) for i in intents for d in diffs},
+        "cols": [dim for dim in difficulty_order if any(cross.get((intent, dim), 0) for intent in intents)],
+        "data": {f"{intent}|{diff}": cross.get((intent, diff), 0) for intent in intents for diff in difficulty_order},
     }
 
     return {
@@ -117,205 +113,118 @@ def compute_viz_data(samples, stats):
     }
 
 
-HTML_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Label Statistics Dashboard</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f7; color: #1d1d1f; }
-.header { background: linear-gradient(135deg, #1d1d1f 0%, #2d3748 100%); color: white; padding: 20px 28px; }
-.header h1 { font-size: 1.4em; font-weight: 700; }
-.header .sub { font-size: 0.82em; color: #a1a1aa; margin-top: 4px; }
-.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-.overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
-.card { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-.card .label { font-size: 0.75em; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
-.card .value { font-size: 1.6em; font-weight: 700; margin-top: 4px; }
-.section { margin-bottom: 28px; }
-.section h2 { font-size: 1.1em; font-weight: 600; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #e5e7eb; }
-.dim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
-.dim-card { background: white; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-.dim-card h3 { font-size: 0.95em; font-weight: 600; margin-bottom: 10px; display: flex; justify-content: space-between; }
-.dim-card h3 .badge { font-size: 0.75em; background: #f3f4f6; padding: 2px 8px; border-radius: 4px; font-weight: 500; color: #6b7280; }
-.bar-row { display: flex; align-items: center; margin-bottom: 4px; font-size: 0.82em; }
-.bar-label { width: 130px; text-align: right; padding-right: 8px; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bar-track { flex: 1; height: 18px; background: #f3f4f6; border-radius: 3px; overflow: hidden; position: relative; }
-.bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
-.bar-count { width: 50px; text-align: right; font-size: 0.78em; color: #6b7280; padding-left: 6px; }
-/* Confidence heatmap */
-.conf-table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
-.conf-table th { padding: 6px 8px; text-align: center; font-weight: 600; background: #f9fafb; }
-.conf-table td { padding: 5px 8px; text-align: center; border: 1px solid #f3f4f6; }
-.conf-cell { border-radius: 4px; padding: 3px 6px; font-weight: 500; }
-/* Coverage */
-.cov-row { display: flex; align-items: center; margin-bottom: 6px; font-size: 0.82em; }
-.cov-label { width: 90px; font-weight: 500; }
-.cov-bar { flex: 1; height: 14px; background: #f3f4f6; border-radius: 3px; overflow: hidden; }
-.cov-fill { height: 100%; background: #3b82f6; border-radius: 3px; }
-.cov-text { width: 100px; text-align: right; font-size: 0.78em; color: #6b7280; }
-/* Cross matrix */
-.cross-table { border-collapse: collapse; font-size: 0.82em; }
-.cross-table th, .cross-table td { padding: 6px 14px; text-align: center; border: 1px solid #e5e7eb; }
-.cross-table th { background: #f9fafb; font-weight: 600; }
-.cross-cell { border-radius: 4px; padding: 2px 8px; }
-/* Unused tags */
-.unused-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.unused-tag { font-size: 0.72em; background: #fef2f2; color: #991b1b; padding: 2px 6px; border-radius: 3px; }
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>Label Statistics Dashboard</h1>
-  <div class="sub" id="subtitle"></div>
-</div>
-<div class="container">
-  <div class="overview" id="overview"></div>
-  <div class="section"><h2>Tag Distributions</h2><div class="dim-grid" id="distributions"></div></div>
-  <div class="section"><h2>Confidence Summary</h2><div class="card" id="confidence"></div></div>
-  <div class="section"><h2>Intent × Difficulty</h2><div class="card" id="cross"></div></div>
-  <div class="section"><h2>Tag Pool Coverage</h2><div class="card" id="coverage"></div></div>
-</div>
-<script>
-const DATA = __DATA_PLACEHOLDER__;
-
-const COLORS = {
-  intent: '#3b82f6', language: '#8b5cf6', domain: '#06b6d4', task: '#f59e0b',
-  difficulty: '#10b981', concept: '#ec4899', agentic: '#f97316', constraint: '#6366f1', context: '#14b8a6'
-};
-
-function confColor(v) {
-  if (v >= 0.9) return '#dcfce7';
-  if (v >= 0.8) return '#fef9c3';
-  if (v >= 0.7) return '#fed7aa';
-  return '#fecaca';
-}
-
-function render() {
-  const d = DATA;
-  const inputFile = d.input_file ? ` \u00b7 ${d.input_file}` : '';
-  document.getElementById('subtitle').textContent =
-    `${d.total} samples${inputFile}`;
-
-  // Overview cards
-  const ov = d.overview;
-  const cards = [
-    ['Samples', d.total],
-    ['Success', (ov.success_rate * 100).toFixed(1) + '%'],
-    ['Tokens', ov.total_tokens.toLocaleString()],
-    ['Arbitrated', (ov.arbitrated_rate * 100).toFixed(1) + '%'],
-    ['Unmapped', ov.unmapped_unique],
-  ];
-  if (ov.sparse_inherited > 0) {
-    cards.push(['LLM Labeled', ov.sparse_labeled]);
-    cards.push(['Inherited', ov.sparse_inherited]);
-  }
-  document.getElementById('overview').innerHTML = cards
-    .map(([l, v]) => `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
-
-  // Distributions
-  const distHtml = [];
-  for (const dim of Object.keys(d.distributions)) {
-    const dist = d.distributions[dim];
-    const entries = Object.entries(dist).sort((a, b) => b[1] - a[1]);
-    const maxVal = entries.length ? entries[0][1] : 1;
-    const total = entries.reduce((s, e) => s + e[1], 0);
-    const color = COLORS[dim] || '#6b7280';
-    let bars = entries.map(([tag, count]) => {
-      const pct = (count / maxVal * 100).toFixed(0);
-      return `<div class="bar-row">
-        <div class="bar-label" title="${tag}">${tag}</div>
-        <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
-        <div class="bar-count">${count} (${(count/total*100).toFixed(0)}%)</div>
-      </div>`;
-    }).join('');
-    distHtml.push(`<div class="dim-card"><h3>${dim} <span class="badge">${entries.length} tags</span></h3>${bars}</div>`);
-  }
-  document.getElementById('distributions').innerHTML = distHtml.join('');
-
-  // Confidence summary table
-  const dims = Object.keys(d.confidence_stats);
-  let confHtml = '<table class="conf-table"><tr><th>Dimension</th><th>Mean</th><th>Min</th><th>Max</th><th>Below Threshold</th></tr>';
-  for (const dim of dims) {
-    const cs = d.confidence_stats[dim];
-    confHtml += `<tr>
-      <td style="font-weight:600">${dim}</td>
-      <td><span class="conf-cell" style="background:${confColor(cs.mean)}">${cs.mean.toFixed(3)}</span></td>
-      <td>${cs.min.toFixed(2)}</td><td>${cs.max.toFixed(2)}</td>
-      <td>${cs.below_threshold}</td>
-    </tr>`;
-  }
-  confHtml += '</table>';
-  document.getElementById('confidence').innerHTML = confHtml;
-
-  // Cross matrix
-  const cm = d.cross_matrix;
-  let crossHtml = '<table class="cross-table"><tr><th></th>';
-  cm.cols.forEach(c => crossHtml += `<th>${c}</th>`);
-  crossHtml += '<th>Total</th></tr>';
-  for (const row of cm.rows) {
-    crossHtml += `<tr><th>${row}</th>`;
-    let rowTotal = 0;
-    for (const col of cm.cols) {
-      const v = cm.data[`${row}|${col}`] || 0;
-      rowTotal += v;
-      const bg = v > 0 ? `background:${COLORS.intent}22` : '';
-      crossHtml += `<td><span class="cross-cell" style="${bg}">${v || '-'}</span></td>`;
+def _scope_summary(scope: dict) -> dict:
+    pass1 = scope.get("pass1")
+    return {
+        "pass1_total": (pass1 or {}).get("total", 0),
+        "scored_total": 0,
+        "mean_value": None,
+        "file_count": len(scope.get("descendant_files", [])) if scope.get("kind") != "file" else 1,
     }
-    crossHtml += `<td style="font-weight:600">${rowTotal}</td></tr>`;
-  }
-  crossHtml += '</table>';
-  document.getElementById('cross').innerHTML = crossHtml;
 
-  // Coverage
-  let covHtml = '';
-  for (const dim of Object.keys(d.coverage)) {
-    const c = d.coverage[dim];
-    if (!c.pool_size) continue;
-    const pct = (c.rate * 100).toFixed(0);
-    covHtml += `<div class="cov-row">
-      <div class="cov-label">${dim}</div>
-      <div class="cov-bar"><div class="cov-fill" style="width:${pct}%"></div></div>
-      <div class="cov-text">${c.used}/${c.pool_size} (${pct}%)</div>
-    </div>`;
-    if (c.unused.length && c.unused.length <= 20) {
-      covHtml += `<div style="margin-left:90px;margin-bottom:8px"><div class="unused-tags">${c.unused.map(t => `<span class="unused-tag">${t}</span>`).join('')}</div></div>`;
-    } else if (c.unused.length > 20) {
-      covHtml += `<div style="margin-left:90px;margin-bottom:8px;font-size:0.75em;color:#991b1b">${c.unused.length} unused tags (expand dataset for better coverage)</div>`;
+
+def _dashboard_subtitle(run_dir: Path, root_label: str | None = None) -> str:
+    if run_dir.name == "meta_label_data" and root_label:
+        dataset_path = run_dir.parent / root_label
+        if dataset_path.exists():
+            return str(dataset_path)
+    return str(run_dir)
+
+
+def _single_scope_payload(run_dir: Path, viz_data: dict, stats: dict) -> dict:
+    label = Path(stats.get("input_file") or run_dir.name or "current").name
+    scopes = {
+        "global": {
+            "id": "global",
+            "label": label,
+            "kind": "file",
+            "path": stats.get("input_file") or label,
+            "parent_id": None,
+            "children": [],
+            "descendant_files": [stats.get("input_file") or label],
+            "pass1": viz_data,
+        }
     }
-  }
-  document.getElementById('coverage').innerHTML = covHtml;
-}
+    scopes["global"]["summary"] = _scope_summary(scopes["global"])
+    return {
+        "title": "SFT Labeling Dashboard",
+        "subtitle": _dashboard_subtitle(run_dir, label),
+        "root_id": "global",
+        "default_scope_id": "global",
+        "initially_expanded": ["global"],
+        "scopes": scopes,
+    }
 
-render();
-</script>
-</body>
-</html>"""
+
+def _tree_payload(run_dir: Path) -> dict:
+    tree = build_scope_tree(
+        run_dir,
+        pass1_stats_file=PASS1_STATS_FILE,
+        pass1_summary_file=PASS1_SUMMARY_STATS_FILE,
+        pass2_stats_file=None,
+        pass2_summary_file=None,
+    )
+    scopes = {}
+    for scope_id, raw_scope in tree["scopes"].items():
+        pass1 = compute_viz_data([], raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
+        scopes[scope_id] = {
+            "id": raw_scope["id"],
+            "label": raw_scope["label"],
+            "kind": raw_scope["kind"],
+            "path": raw_scope["path"],
+            "parent_id": raw_scope["parent_id"],
+            "children": raw_scope["children"],
+            "descendant_files": raw_scope["descendant_files"],
+            "pass1": pass1,
+        }
+        scopes[scope_id]["summary"] = _scope_summary(scopes[scope_id])
+
+    root_pass1 = tree["scopes"][tree["root_id"]].get("raw_pass1") or {}
+    root_label = Path(root_pass1.get("input_path") or root_pass1.get("input_file") or run_dir.name).name
+    scopes[tree["root_id"]]["label"] = root_label
+
+    initially_expanded = ["global"]
+    initially_expanded.extend(
+        scope_id for scope_id, scope in scopes.items()
+        if scope["kind"] == "dir" and scope.get("parent_id") == "global"
+    )
+
+    return {
+        "title": "SFT Labeling Dashboard",
+        "subtitle": _dashboard_subtitle(run_dir, scopes[tree["root_id"]]["label"]),
+        "root_id": tree["root_id"],
+        "default_scope_id": tree["root_id"],
+        "initially_expanded": initially_expanded,
+        "scopes": scopes,
+    }
 
 
 def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                        stats_file=PASS1_STATS_FILE, output_file="dashboard_labeling.html") -> Path:
-    """Generate dashboard HTML. Supports stats-only mode (no labeled.json)."""
+    """Generate an interactive Pass 1 dashboard."""
     run_dir = Path(run_dir)
-    samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)
-    viz_data = compute_viz_data(samples, stats)
-    html = HTML_TEMPLATE.replace("__DATA_PLACEHOLDER__", json.dumps(viz_data, ensure_ascii=False))
-    out = run_dir / output_file
-    out.write_text(html, encoding="utf-8")
-    return out
+    output_path = resolve_dashboard_output(run_dir, output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if labeled_file is None or stats_file == PASS1_SUMMARY_STATS_FILE:
+        payload = _tree_payload(run_dir)
+    else:
+        samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)
+        payload = _single_scope_payload(run_dir, compute_viz_data(samples, stats), stats)
+
+    output_path.write_text(render_dashboard_html(payload), encoding="utf-8")
+    return output_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate label statistics dashboard")
+    parser = argparse.ArgumentParser(description="Generate an interactive label statistics dashboard")
     parser.add_argument("run_dir", help="Path to pipeline run directory")
     parser.add_argument("--open", action="store_true", help="Open in browser")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    if not (run_dir / "labeled.json").exists():
-        print(f"Error: {run_dir}/labeled.json not found")
+    if not (run_dir / "labeled.json").exists() and not (run_dir / PASS1_SUMMARY_STATS_FILE).exists():
+        print(f"Error: no labeling artifacts found in {run_dir}")
         sys.exit(1)
 
     out = generate_dashboard(run_dir)
