@@ -1,0 +1,77 @@
+<svg width="1280" height="760" viewBox="0 0 1280 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="760" rx="28" fill="#F6F8FC"/>
+  <rect x="28" y="28" width="1224" height="704" rx="24" fill="#FCFDFE" stroke="#D9E1EE"/>
+
+  <text x="72" y="98" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="34" font-weight="700">
+    From raw SFT corpora to ranked training data
+  </text>
+  <text x="72" y="136" fill="#4D627D" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18">
+    Normalize, label, score, aggregate, filter, and cluster.
+  </text>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8AA0C2"/>
+    </marker>
+  </defs>
+
+  <rect x="72" y="214" width="178" height="188" rx="22" fill="#EFF4FF" stroke="#C8D9FF"/>
+  <text x="96" y="255" fill="#315AA8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">INPUT</text>
+  <text x="96" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Raw Corpora</text>
+  <text x="96" y="328" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">ShareGPT</text>
+  <text x="96" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Pangu JSONL</text>
+  <text x="96" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Inline runs</text>
+
+  <rect x="290" y="214" width="188" height="188" rx="22" fill="#F4F7FB" stroke="#D6DFEC"/>
+  <text x="314" y="255" fill="#5F6F88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">PASS 1</text>
+  <text x="314" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Tag Labeling</text>
+  <text x="314" y="328" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Slice replies</text>
+  <text x="314" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">2 LLM calls</text>
+  <text x="314" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Validate labels</text>
+
+  <rect x="518" y="214" width="188" height="188" rx="22" fill="#FDF8F0" stroke="#F3D8A8"/>
+  <text x="542" y="255" fill="#A66A09" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">PASS 2</text>
+  <text x="542" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Value Scoring</text>
+  <text x="542" y="328" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Rarity from stats</text>
+  <text x="542" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Keep CoT context</text>
+  <text x="542" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Rank sample value</text>
+
+  <rect x="746" y="214" width="214" height="188" rx="22" fill="#EEF9F4" stroke="#BFE6D4"/>
+  <text x="770" y="255" fill="#0E7A54" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">PASS 2.5</text>
+  <text x="770" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Conversation</text>
+  <text x="770" y="320" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Aggregation</text>
+  <text x="770" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Weight later turns</text>
+  <text x="770" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Apply penalties</text>
+
+  <rect x="1000" y="214" width="196" height="188" rx="22" fill="#F4F7FB" stroke="#D6DFEC"/>
+  <text x="1024" y="255" fill="#5F6F88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">PASS 3 + 4</text>
+  <text x="1024" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Select And</text>
+  <text x="1024" y="320" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Cluster</text>
+  <text x="1024" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Filter subsets</text>
+  <text x="1024" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Keep reps</text>
+
+  <line x1="250" y1="308" x2="288" y2="308" stroke="#8AA0C2" stroke-width="4" marker-end="url(#arrow)"/>
+  <line x1="478" y1="308" x2="516" y2="308" stroke="#8AA0C2" stroke-width="4" marker-end="url(#arrow)"/>
+  <line x1="706" y1="308" x2="744" y2="308" stroke="#8AA0C2" stroke-width="4" marker-end="url(#arrow)"/>
+  <line x1="960" y1="308" x2="998" y2="308" stroke="#8AA0C2" stroke-width="4" marker-end="url(#arrow)"/>
+
+  <rect x="72" y="458" width="1134" height="208" rx="24" fill="#10233F"/>
+  <text x="104" y="507" fill="#F8FBFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">Artifacts kept around the run</text>
+
+  <rect x="104" y="540" width="238" height="76" rx="18" fill="#173253" stroke="#35537B"/>
+  <text x="126" y="570" fill="#DCE8FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Pass 1</text>
+  <text x="126" y="598" fill="#F8FBFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">labels and labeling stats</text>
+
+  <rect x="366" y="540" width="238" height="76" rx="18" fill="#173253" stroke="#35537B"/>
+  <text x="388" y="570" fill="#DCE8FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Pass 2</text>
+  <text x="388" y="598" fill="#F8FBFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">scores and ranking stats</text>
+
+  <rect x="628" y="540" width="248" height="76" rx="18" fill="#173253" stroke="#35537B"/>
+  <text x="650" y="570" fill="#DCE8FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Pass 2.5</text>
+  <text x="650" y="598" fill="#F8FBFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">conversation scores</text>
+
+  <rect x="900" y="540" width="274" height="76" rx="18" fill="#173253" stroke="#35537B"/>
+  <text x="922" y="570" fill="#DCE8FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Pass 3 and 4</text>
+  <text x="922" y="598" fill="#F8FBFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">filtered sets, dashboards,</text>
+  <text x="922" y="620" fill="#8FB7FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">trajectory representatives</text>
+</svg>

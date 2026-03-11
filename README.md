@@ -1,20 +1,56 @@
 # sft-label
 
-SFT Capability Taxonomy & Auto-Labeling Pipeline.
+SFT Capability Taxonomy and Auto-Labeling Pipeline for code-generation corpora.
 
-Multi-pass automated labeling pipeline for SFT code-generation training data:
-- **Pass 1 (Tag Labeling)**: 9-category taxonomy (224 tags) via LLM calls
-- **Pass 2 (Value Scoring)**: Complexity, quality, reasoning, and rarity scoring for data selection
-- **Pass 2.5 (Conversation Aggregation)**: Conversation-level metrics from multi-turn slices (no LLM)
-- **Pass 3 (Filtering & Selection)**: Multi-condition sample and conversation filtering
-- **Pass 4 (Trajectory Semantic Clustering)**: Pinned-prefix windowing + SemHash + ANN clustering + SNR representative selection
+`sft-label` is a curation pipeline, not just a tagger. It takes raw or previously labeled SFT data, normalizes it into per-reply samples, assigns a 9-dimension taxonomy (225 tags), scores training value, aggregates multi-turn conversations, filters high-signal subsets, and can cluster long agent trajectories to keep representative windows.
+
+It is designed for real dataset operations:
+- preserve source-row provenance instead of only producing detached artifacts
+- support mirrored inline JSONL runs where labels live inside the original rows
+- recompute downstream stats, rarity, and dashboards offline after manual edits or migration
+- treat multi-turn conversations and long tool-using trajectories as first-class data shapes
+
+![Pipeline overview](docs/assets/pipeline-overview.svg)
+
+## What You Give It And What You Get Back
+
+| Input shape | What `sft-label` does | Primary outputs |
+|------------|------------------------|-----------------|
+| ShareGPT JSON / labeled JSON | Normalize, slice, label, score, filter | `labeled.json`, `scored.json`, stats, dashboards |
+| Dataset directories | Process files recursively and keep per-file plus run-level summaries | per-file artifacts, summary stats, global dashboards |
+| Pangu JSONL / mirrored inline runs | Preserve row order and embed annotations under `extra_info.unique_info.data_label` | mirrored dataset tree, `meta_label_data/`, dashboards |
+| Long agent trajectories | Segment into windows, cluster semantically, export representatives | clustering artifacts and representative windows |
+
+## Pipeline At A Glance
+
+| Stage | Purpose | Core behavior |
+|------|---------|---------------|
+| Pass 1: Tag Labeling | Describe what capability a sample exercises | 2 LLM calls, validation against taxonomy pools, optional arbitration |
+| Pass 2: Value Scoring | Estimate usefulness for training-set selection | rarity from tag stats, CoT-preserving truncation, multi-axis scoring |
+| Pass 2.5: Conversation Aggregation | Treat a multi-turn dialog as one unit | later-turn weighting, inherited confidence penalty, quality-floor penalties |
+| Pass 3: Filtering | Produce subsets for review or training | sample-level, conversation-level, and turn-level criteria |
+| Pass 4: Semantic Clustering | Deduplicate long trajectories by behavior | pinned-prefix windowing, SemHash, ANN refinement, SNR representative pick |
+
+![Operating modes and outputs](docs/assets/operating-modes.svg)
+
+## Operating Modes
+
+1. **Single-file mode**: write conventional `labeled.json` / `scored.json` style outputs plus canonical stats and dashboards.
+2. **Directory mode**: walk a tree of files, keep per-file artifacts, and emit run-level summaries and dashboards.
+3. **Mirrored inline JSONL mode**: keep the original JSONL rows as the source of truth, store annotations under `data_label`, and place rebuildable caches under `meta_label_data/`.
+4. **Offline maintenance mode**: rebuild stats, refresh rarity, and regenerate dashboards without calling the LLM again.
 
 ## Install
 
 ```bash
+# Recommended
+uv sync --extra dev
+
+# Optional: dataset tooling used by scripts/download_hf_dataset.py and scripts/sample_to_sft.py
+uv sync --extra dev --extra data
+
+# Alternative editable install
 pip install -e .
-# or with uv
-uv sync
 ```
 
 ## Quick Start
@@ -24,33 +60,30 @@ uv sync
 export LITELLM_BASE="http://localhost:4000/v1"
 export LITELLM_KEY="your-key"
 
-# If your env vars live in ~/.zshrc, use an interactive zsh shell for one-off runs
-zsh -ic 'cd /path/to/sft-label && uv run sft-label start'
-
-# Recommended: interactive launcher (grouped by workflow)
-sft-label start
+# Recommended when you are not sure which flags you need
+uv run sft-label start
 
 # Preview generated command without executing
-sft-label start --dry-run
-
-# Pass 1: Tag labeling
-sft-label run --input data.json
-
-# Pass 2: Value scoring (standalone, on pre-labeled data)
-sft-label score --input labeled.json --tag-stats stats.json
+uv run sft-label start --dry-run
 
 # Pass 1 + Pass 2 in one go
-sft-label run --input data.json --score
+uv run sft-label run --input data.json --score
 
-# Compact mode: reduced prompt size (~32% smaller, for size-limited endpoints)
-sft-label run --input data.json --score --prompt-mode compact
+# Pass 2: Value scoring (standalone, on pre-labeled data)
+uv run sft-label score --input labeled.json --tag-stats stats_labeling.json
 
-# Pass 1 + Pass 2 + Pass 4 in one go
-sft-label run --input data.json --score --semantic-cluster
+# Filter a training subset
+uv run sft-label filter --input run_dir/ --value-min 7 --format training
 
-# Standalone Pass 4
-sft-label semantic-cluster --input run_dir/
-sft-label export-semantic --input run_dir/ --output representatives.jsonl
+# Cluster long trajectories and export representatives
+uv run sft-label semantic-cluster --input run_dir/
+uv run sft-label export-semantic --input run_dir/ --output representatives.jsonl
+```
+
+If your environment variables are only initialized in shell startup files, run one-off commands through an interactive shell, for example:
+
+```bash
+zsh -ic 'cd /path/to/sft-label && uv run sft-label start'
 ```
 
 ## Usage
@@ -257,7 +290,7 @@ config = PipelineConfig(
 
 stats = asyncio.run(run_scoring(
     input_path="labeled.json",
-    tag_stats_path="stats.json",
+    tag_stats_path="stats_labeling.json",
     config=config,
 ))
 ```
@@ -274,7 +307,7 @@ Input (ShareGPT JSON / Pangu JSONL)
   │   ├─ Call 2 (LLM): Concept, Agentic, Constraint, Context
   │   ├─ Validation: tag pool check, cross-dimension consistency
   │   ├─ Arbitration (optional): re-run low-confidence dimensions
-  │   └─ Output: labeled.json + stats.json + dashboard.html
+  │   └─ Output: labeled.json + stats_labeling.json + dashboard_labeling.html
   │
   ├─ Pass 2: Value Scoring (scoring.py)
   │   ├─ Rarity computation: tag IDF + combo rarity from tag distributions
@@ -282,7 +315,7 @@ Input (ShareGPT JSON / Pangu JSONL)
   │   ├─ LLM scoring: complexity, quality, reasoning (1 call per sample)
   │   ├─ Weighted aggregation: value_score = Σ(weight × dimension)
   │   ├─ Selection score: intra-class rank + absolute quality + global rarity
-  │   └─ Output: scored.json + stats_value.json + dashboard_value.html
+  │   └─ Output: scored.json + stats_scoring.json + dashboard_scoring.html
   │
   ├─ Pass 2.5: Conversation Aggregation (conversation.py)
   │   ├─ Group multi-turn slices by source conversation
@@ -311,12 +344,12 @@ Input (ShareGPT JSON / Pangu JSONL)
 
 ## Taxonomy (Pass 1)
 
-9 orthogonal categories, 224 tags:
+9 orthogonal categories, 225 tags:
 
 | Category   | Tags | Select |
 |-----------|------|--------|
 | Intent     | 6    | single |
-| Difficulty | 4    | single |
+| Difficulty | 5    | single |
 | Context    | 10   | single |
 | Language   | 75   | multi  |
 | Domain     | 38   | multi  |
@@ -348,8 +381,8 @@ Additional outputs per sample:
 |------|----------|
 | `scored.json` | Labeled samples with `value` field added |
 | `conversation_scores.json` | Conversation-level aggregated metrics (multi-turn) |
-| `stats_value.json` | Aggregate statistics, score distributions, cross-analysis |
-| `dashboard_value.html` | Self-contained interactive dashboard |
+| `stats_scoring.json` | Aggregate statistics, score distributions, cross-analysis |
+| `dashboard_scoring.html` | Self-contained interactive dashboard |
 | `monitor_value.jsonl` | Per-sample LLM call metadata |
 | `failed_value.jsonl` | Samples that failed scoring |
 
@@ -497,7 +530,7 @@ Requires stats files to exist — run `recompute-stats` first if they are missin
 
 ### Cross-Dataset Rarity with `--tag-stats`
 
-Use a historical or global stats.json as the rarity baseline when scoring new data:
+Use a historical or global Pass 1 stats file as the rarity baseline when scoring new data:
 
 ```bash
 # Score new data using global tag distributions for rarity
@@ -507,15 +540,15 @@ uv run sft-label score --input new_labeled.json --tag-stats global_stats.json
 uv run sft-label run --input data.json --score --tag-stats /path/to/reference_stats.json
 ```
 
-### Where to Find stats.json
+### Where to Find Pass 1 And Pass 2 Stats
 
 | Mode | Pass 1 | Pass 2 |
 |------|--------|--------|
 | Inline mirrored run | `<run_root>/meta_label_data/summary_stats_labeling.json` | `<run_root>/meta_label_data/summary_stats_scoring.json` |
 | Inline per-file | `<run_root>/meta_label_data/files/<relpath>/stats_labeling.json` | `<run_root>/meta_label_data/files/<relpath>/stats_scoring.json` |
-| Single file | `<run_dir>/stats.json` | `<run_dir>/stats_value.json` |
-| Directory | `<run_dir>/<subdir>/stats.json` | `<run_dir>/<subdir>/stats_value.json` |
-| Directory summary | `<run_dir>/summary_stats.json` | `<run_dir>/summary_stats_value.json` |
+| Single file | `<run_dir>/stats_labeling.json` (legacy alias: `stats.json`) | `<run_dir>/stats_scoring.json` (legacy alias: `stats_value.json`) |
+| Directory | `<run_dir>/<subdir>/stats_labeling.json` (legacy alias: `stats.json`) | `<run_dir>/<subdir>/stats_scoring.json` (legacy alias: `stats_value.json`) |
+| Directory summary | `<run_dir>/summary_stats_labeling.json` (legacy alias: `summary_stats.json`) | `<run_dir>/summary_stats_scoring.json` (legacy alias: `summary_stats_value.json`) |
 
 ### Typical Workflows
 
@@ -531,7 +564,7 @@ uv run sft-label run --input data.json --score --tag-stats /path/to/reference_st
    # Copy scored files into a single directory, then:
    uv run sft-label recompute-stats --input merged_dir/
    # Use the merged stats as rarity baseline for new scoring:
-   uv run sft-label score --input new_data.json --tag-stats merged_dir/summary_stats.json
+   uv run sft-label score --input new_data.json --tag-stats merged_dir/summary_stats_labeling.json
    ```
 
 3. **Lost dashboards → regenerate:**
