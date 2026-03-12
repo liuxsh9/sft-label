@@ -30,6 +30,8 @@ from sft_label.artifacts import (
     PASS2_SUMMARY_STATS_FILE,
     PASS2_SUMMARY_STATS_FILE_LEGACY,
 )
+from sft_label.inline_scoring import infer_inline_scoring_target
+from sft_label.semantic_artifacts import SEMANTIC_DIRNAME, iter_semantic_artifact_paths
 
 
 MANIFEST_FILENAME = "layout_optimization_manifest.json"
@@ -79,11 +81,16 @@ def _is_candidate_dir(path: Path) -> bool:
             return True
         if name == "conversation_scores.json":
             return True
+        if name == "semantic_cluster_manifest.json":
+            return True
+        if name == "semantic_cluster_stats.json":
+            return True
         if name.endswith(".json") and (
             name.startswith("labeled")
             or name.startswith("scored")
             or name.startswith("stats")
             or name.startswith("summary_stats")
+            or name.endswith("_clusters.json")
         ):
             return True
         if name.endswith(".jsonl") and (
@@ -92,6 +99,11 @@ def _is_candidate_dir(path: Path) -> bool:
             or name.startswith("monitor")
             or name.startswith("failed")
             or name.endswith("failures.jsonl")
+            or name.endswith("_windows.jsonl")
+            or name.endswith("_embeddings.jsonl")
+            or name.endswith("_semhash.jsonl")
+            or name.endswith("_cluster_membership.jsonl")
+            or name.endswith("_representatives.jsonl")
         ):
             return True
         if name.startswith("dashboard") and name.endswith(".html"):
@@ -290,6 +302,60 @@ def _plan_prune_legacy(path: Path, actions: list[LayoutAction], dedup: set[tuple
                 continue
 
 
+def _plan_semantic_relocation(root: Path, actions: list[LayoutAction], dedup: set[tuple]):
+    """Move legacy root-level semantic artifacts under meta_label_data/semantic."""
+    target = infer_inline_scoring_target(root)
+    if target is None or target.target_path != target.layout.run_root:
+        return
+
+    semantic_dir = target.layout.run_artifact_path(SEMANTIC_DIRNAME)
+    for src in iter_semantic_artifact_paths(root):
+        try:
+            rel = src.relative_to(root)
+        except ValueError:
+            continue
+        if len(rel.parts) != 1:
+            continue
+
+        dst = semantic_dir / rel.name
+        if src.resolve() == dst.resolve():
+            continue
+        if not dst.exists():
+            _append_action(
+                actions,
+                LayoutAction(
+                    kind="move",
+                    reason="relocate_semantic_artifacts_under_meta",
+                    src=str(src),
+                    dst=str(dst),
+                ),
+                dedup,
+            )
+            continue
+        if _files_identical(src, dst):
+            _append_action(
+                actions,
+                LayoutAction(
+                    kind="delete",
+                    reason="drop_duplicate_legacy_semantic_artifact",
+                    src=str(src),
+                ),
+                dedup,
+            )
+        else:
+            _append_action(
+                actions,
+                LayoutAction(
+                    kind="conflict",
+                    reason="conflicting_legacy_and_meta_semantic_artifacts",
+                    src=str(src),
+                    dst=str(dst),
+                    status="conflict",
+                ),
+                dedup,
+            )
+
+
 def _plan_actions(root: Path, prune_legacy: bool) -> tuple[list[LayoutAction], list[Path]]:
     actions: list[LayoutAction] = []
     dedup: set[tuple] = set()
@@ -300,6 +366,8 @@ def _plan_actions(root: Path, prune_legacy: bool) -> tuple[list[LayoutAction], l
         _plan_promote_legacy(path, actions, dedup)
         if prune_legacy:
             _plan_prune_legacy(path, actions, dedup)
+
+    _plan_semantic_relocation(root, actions, dedup)
 
     return actions, dirs
 

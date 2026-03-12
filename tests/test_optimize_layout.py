@@ -1,5 +1,6 @@
 import json
 
+from sft_label.semantic_artifacts import SEMANTIC_DIRNAME
 from sft_label.tools.optimize_layout import MANIFEST_FILENAME, run_optimize_layout
 
 
@@ -76,3 +77,49 @@ def test_optimize_layout_apply_with_prune(tmp_path):
     manifest = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["summary"]["apply"] is True
     assert manifest["summary"]["prune_legacy"] is True
+
+
+def test_optimize_layout_relocates_legacy_semantic_artifacts(tmp_path):
+    run_root = tmp_path / "demo_labeled_20260312_030303"
+    dataset_root = run_root / "demo"
+    _write(dataset_root / "scored.jsonl", '{"id":"s1"}\n')
+
+    _write(
+        run_root / "semantic_cluster_manifest.json",
+        '{"parameters":{"output_prefix":"trajectory"}}',
+    )
+    _write(run_root / "semantic_cluster_stats.json", '{"total_clusters":1}')
+    _write(run_root / "trajectory_windows.jsonl", '{"window_id":"w1"}\n')
+    _write(
+        run_root / "trajectory_cluster_membership.jsonl",
+        '{"window_id":"w1","cluster_id":"c1","representative":true}\n',
+    )
+
+    summary = run_optimize_layout(run_root, apply=True, prune_legacy=False)
+
+    semantic_dir = run_root / "meta_label_data" / SEMANTIC_DIRNAME
+    assert summary["apply"] is True
+    assert summary["errors"] == 0
+    assert (semantic_dir / "semantic_cluster_manifest.json").exists()
+    assert (semantic_dir / "trajectory_windows.jsonl").exists()
+    assert (semantic_dir / "trajectory_cluster_membership.jsonl").exists()
+    assert not (run_root / "semantic_cluster_manifest.json").exists()
+    assert not (run_root / "trajectory_windows.jsonl").exists()
+
+
+def test_optimize_layout_ignores_invalid_semantic_manifest(tmp_path):
+    run_root = tmp_path / "demo_labeled_20260312_030304"
+    dataset_root = run_root / "demo"
+    _write(dataset_root / "scored.jsonl", '{"id":"s1"}\n')
+
+    _write(run_root / "semantic_cluster_manifest.json", "{bad json")
+    _write(run_root / "trajectory_windows.jsonl", '{"window_id":"w1"}\n')
+    _write(
+        run_root / "trajectory_cluster_membership.jsonl",
+        '{"window_id":"w1","cluster_id":"c1","representative":true}\n',
+    )
+
+    summary = run_optimize_layout(run_root, apply=False, prune_legacy=False)
+
+    assert summary["planned_actions"] >= 2
+    assert summary["conflicts"] == 0

@@ -28,6 +28,11 @@ import httpx
 
 from sft_label.config import PipelineConfig
 from sft_label.preprocessing import estimate_tokens, normalize_sample
+from sft_label.semantic_artifacts import (
+    SEMANTIC_MANIFEST_FILE,
+    SEMANTIC_STATS_FILE,
+    resolve_semantic_output_dir,
+)
 
 
 SemanticProgressCb = Callable[[str, str, int | None, int | None], None]
@@ -1005,10 +1010,14 @@ def run_semantic_clustering(
     validate_semantic_config(config)
 
     in_path = Path(input_path)
-    out_dir = Path(output_dir) if output_dir else (in_path if in_path.is_dir() else in_path.parent)
+    out_dir = resolve_semantic_output_dir(
+        in_path,
+        output_dir,
+        prefer_existing=resume,
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_path = out_dir / "semantic_cluster_manifest.json"
+    manifest_path = out_dir / SEMANTIC_MANIFEST_FILE
     if resume:
         ensure_manifest_compatible(load_manifest(manifest_path), config)
 
@@ -1071,7 +1080,7 @@ def run_semantic_clustering(
     members_file = out_dir / f"{prefix}_cluster_membership.jsonl"
     clusters_file = out_dir / f"{prefix}_clusters.json"
     reps_file = out_dir / f"{prefix}_representatives.jsonl"
-    stats_file = out_dir / "semantic_cluster_stats.json"
+    stats_file = out_dir / SEMANTIC_STATS_FILE
 
     t_stage = time.time()
     _write_jsonl(windows_file, (asdict(w) for w in windows))
@@ -1152,6 +1161,7 @@ def run_semantic_clustering(
         artifacts["representatives"] = str(reps_file)
 
     stats.update({
+        "output_dir": str(out_dir),
         "artifacts": artifacts,
         "representative_count": rep_count,
     })
@@ -1176,4 +1186,7 @@ def format_semantic_summary(stats: dict) -> str:
         parts = [f"{k}={stage_seconds[k]}s" for k in ordered if k in stage_seconds]
         if parts:
             summary += "\nStages: " + ", ".join(parts)
+    output_dir = stats.get("output_dir")
+    if output_dir:
+        summary += f"\nArtifacts: {output_dir}"
     return summary

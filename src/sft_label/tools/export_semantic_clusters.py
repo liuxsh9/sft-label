@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from sft_label.semantic_artifacts import (
+    manifest_output_prefix,
+    resolve_semantic_artifact_dir,
+)
+
 
 def _load_jsonl(path: Path):
     with open(path, "r", encoding="utf-8") as f:
@@ -21,19 +26,6 @@ def _discover_file(input_dir: Path, suffix: str) -> Path:
     return candidates[0]
 
 
-def _manifest_output_prefix(input_dir: Path) -> str | None:
-    manifest_path = input_dir / "semantic_cluster_manifest.json"
-    if not manifest_path.exists():
-        return None
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
-    params = manifest.get("parameters") or {}
-    prefix = params.get("output_prefix")
-    if isinstance(prefix, str) and prefix.strip():
-        return prefix.strip()
-    return None
-
-
 def run_export_semantic_clusters(
     input_dir: str | Path,
     output_path: str | Path,
@@ -43,8 +35,9 @@ def run_export_semantic_clusters(
     base = Path(input_dir)
     if not base.exists():
         raise FileNotFoundError(f"Input directory does not exist: {base}")
+    base = resolve_semantic_artifact_dir(base)
 
-    prefix = _manifest_output_prefix(base)
+    prefix = manifest_output_prefix(base)
     if prefix:
         windows_file = base / f"{prefix}_windows.jsonl"
         members_file = base / f"{prefix}_cluster_membership.jsonl"

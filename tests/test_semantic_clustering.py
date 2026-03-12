@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from sft_label.config import PipelineConfig
+from sft_label.semantic_artifacts import SEMANTIC_DIRNAME
 from sft_label.semantic_clustering import (
     APIEmbeddingProvider,
     TrajectoryWindow,
@@ -447,6 +448,76 @@ def test_stats_file_matches_return_payload_when_no_representative_export(tmp_pat
     assert on_disk["artifacts"] == stats["artifacts"]
 
 
+def test_inline_run_defaults_semantic_artifacts_under_meta_label_data(tmp_path: Path):
+    run_root = tmp_path / "demo_labeled_20260312_010101"
+    dataset_root = run_root / "demo"
+    dataset_root.mkdir(parents=True)
+    row = {
+        "id": "s1",
+        "conversations": [
+            {"from": "human", "value": "Q"},
+            {"from": "gpt", "value": "A"},
+        ],
+    }
+    (dataset_root / "scored.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    cfg = PipelineConfig(
+        semantic_embedding_provider="local",
+        semantic_embedding_dim=64,
+        semantic_semhash_bits=64,
+        semantic_semhash_bands=8,
+        semantic_hamming_radius=4,
+        semantic_ann_top_k=4,
+        semantic_ann_sim_threshold=0.1,
+    )
+    stats = run_semantic_clustering(
+        input_path=run_root,
+        config=cfg,
+        export_representatives=False,
+    )
+
+    semantic_dir = run_root / "meta_label_data" / SEMANTIC_DIRNAME
+    assert stats["output_dir"] == str(semantic_dir)
+    assert (semantic_dir / "semantic_cluster_manifest.json").exists()
+    assert (semantic_dir / "trajectory_windows.jsonl").exists()
+    assert not (run_root / "trajectory_windows.jsonl").exists()
+
+
+def test_inline_single_file_keeps_semantic_artifacts_next_to_file(tmp_path: Path):
+    run_root = tmp_path / "demo_labeled_20260312_010102"
+    dataset_root = run_root / "demo"
+    dataset_root.mkdir(parents=True)
+    row = {
+        "id": "s1",
+        "conversations": [
+            {"from": "human", "value": "Q"},
+            {"from": "gpt", "value": "A"},
+        ],
+    }
+    input_file = dataset_root / "scored.jsonl"
+    input_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    cfg = PipelineConfig(
+        semantic_embedding_provider="local",
+        semantic_embedding_dim=64,
+        semantic_semhash_bits=64,
+        semantic_semhash_bands=8,
+        semantic_hamming_radius=4,
+        semantic_ann_top_k=4,
+        semantic_ann_sim_threshold=0.1,
+    )
+    stats = run_semantic_clustering(
+        input_path=input_file,
+        config=cfg,
+        export_representatives=False,
+    )
+
+    assert stats["output_dir"] == str(dataset_root)
+    assert (dataset_root / "semantic_cluster_manifest.json").exists()
+    assert (dataset_root / "trajectory_windows.jsonl").exists()
+    assert not (run_root / "meta_label_data" / SEMANTIC_DIRNAME / "trajectory_windows.jsonl").exists()
+
+
 def test_export_semantic_prefers_manifest_prefix_and_detects_mismatch(tmp_path: Path):
     manifest = {
         "parameters": {"output_prefix": "foo"},
@@ -484,6 +555,48 @@ def test_export_semantic_prefers_manifest_prefix_and_detects_mismatch(tmp_path: 
     )
     with pytest.raises(ValueError, match="missing windows"):
         run_export_semantic_clusters(tmp_path, out)
+
+
+def test_export_semantic_falls_back_when_manifest_is_invalid(tmp_path: Path):
+    (tmp_path / "semantic_cluster_manifest.json").write_text("{bad json", encoding="utf-8")
+    (tmp_path / "trajectory_windows.jsonl").write_text(
+        json.dumps({"window_id": "w1", "body": []}) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "trajectory_cluster_membership.jsonl").write_text(
+        json.dumps({"window_id": "w1", "cluster_id": "c1", "representative": True}) + "\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "export-invalid-manifest.jsonl"
+    count = run_export_semantic_clusters(tmp_path, out)
+    assert count == 1
+
+
+def test_export_semantic_accepts_inline_run_root(tmp_path: Path):
+    run_root = tmp_path / "demo_labeled_20260312_020202"
+    dataset_root = run_root / "demo"
+    dataset_root.mkdir(parents=True)
+    (dataset_root / "scored.jsonl").write_text('{"id":"s1"}\n', encoding="utf-8")
+
+    semantic_dir = run_root / "meta_label_data" / SEMANTIC_DIRNAME
+    semantic_dir.mkdir(parents=True)
+    (semantic_dir / "semantic_cluster_manifest.json").write_text(
+        json.dumps({"parameters": {"output_prefix": "trajectory"}}),
+        encoding="utf-8",
+    )
+    (semantic_dir / "trajectory_windows.jsonl").write_text(
+        json.dumps({"window_id": "w1", "body": []}) + "\n",
+        encoding="utf-8",
+    )
+    (semantic_dir / "trajectory_cluster_membership.jsonl").write_text(
+        json.dumps({"window_id": "w1", "cluster_id": "c1", "representative": True}) + "\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "export-inline.jsonl"
+    count = run_export_semantic_clusters(run_root, out)
+    assert count == 1
 
 
 def test_semantic_progress_callback_receives_stage_updates(tmp_path: Path):
