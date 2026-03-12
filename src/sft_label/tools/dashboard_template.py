@@ -83,13 +83,19 @@ body { min-height: 100vh; }
 .breadcrumbs { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 0.84rem; }
 .crumb-btn { border: none; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 .scope-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scope-toolbar-extra { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .action-btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 999px; padding: 8px 12px; font: inherit; cursor: pointer; }
 .action-btn:hover { border-color: var(--accent); color: var(--accent); }
+.toolbar-inline-copy { color: var(--muted); font-size: 0.8rem; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .card { background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%); border: 1px solid rgba(223,216,199,0.9); border-radius: 18px; padding: 14px; }
 .card-label { font-size: 0.76rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .card-value { margin-top: 6px; font-size: 1.6rem; font-weight: 700; line-height: 1; }
 .card-sub { margin-top: 6px; color: var(--muted); font-size: 0.82rem; }
+.segmented { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.segmented-btn { border: 1px solid rgba(223,216,199,0.95); background: rgba(255,255,255,0.82); color: var(--muted); border-radius: 999px; padding: 8px 12px; font: inherit; cursor: pointer; transition: border-color 180ms ease, color 180ms ease, background 180ms ease; }
+.segmented-btn:hover { border-color: rgba(31,111,95,0.35); color: var(--accent); }
+.segmented-btn.active { background: rgba(31,111,95,0.12); border-color: rgba(31,111,95,0.28); color: var(--accent); }
 .section-card { border: 1px solid rgba(223,216,199,0.9); border-radius: 18px; background: rgba(255,255,255,0.55); overflow: hidden; }
 .section-card + .section-card { margin-top: 14px; }
 .section-summary { list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; cursor: pointer; padding: 16px 18px; background: linear-gradient(90deg, rgba(31,111,95,0.08) 0%, rgba(198,107,61,0.06) 100%); }
@@ -113,11 +119,17 @@ body { min-height: 100vh; }
 .data-table th, .data-table td { padding: 10px 12px; border-top: 1px solid #e7e0d2; text-align: left; vertical-align: top; }
 .data-table th { color: var(--muted); font-weight: 600; background: rgba(248,245,235,0.72); }
 .data-table tr:hover td { background: rgba(31,111,95,0.05); }
+.data-table tr:hover .rank-tag-bar { opacity: 1; }
 .th-sort-btn { width: 100%; display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; border: none; background: none; padding: 0; color: inherit; font: inherit; cursor: pointer; }
 .th-sort-btn.active { color: var(--accent); }
 .sort-indicator { color: var(--muted); font-size: 0.78rem; }
 .compact-table th, .compact-table td { padding: 7px 8px; font-size: 0.8rem; }
 .rank-cell { width: 42px; color: var(--muted); }
+.rank-tag-cell { min-width: 180px; }
+.rank-tag-wrap { position: relative; min-height: 32px; display: flex; align-items: center; border-radius: 10px; overflow: hidden; }
+.rank-tag-bar { position: absolute; inset: 4px auto 4px 4px; width: 0; border-radius: 8px; opacity: 0.82; pointer-events: none; transition: opacity 160ms ease, width 220ms ease; }
+.rank-tag-content { position: relative; z-index: 1; min-width: 0; width: 100%; padding: 7px 10px; }
+.rank-tag-link, .rank-tag-text { display: block; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .metric-cell { white-space: nowrap; text-align: right; }
 .link-btn { border: none; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
 .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
@@ -219,6 +231,7 @@ body { min-height: 100vh; }
             <div class="scope-path" id="scope-path"></div>
           </div>
           <div class="scope-actions">
+            <div class="scope-toolbar-extra" id="scope-toolbar-extra"></div>
             <button class="action-btn" id="go-parent">Up One Level</button>
             <button class="action-btn" id="go-global">Back To Global</button>
           </div>
@@ -236,6 +249,7 @@ const STATE = {
   query: "",
   expanded: new Set(DATA.initially_expanded || [DATA.root_id]),
   sidebarCollapsed: false,
+  tagBarMode: "relative",
   fileRankingSort: { key: "mean_value", direction: "desc" },
   explorer: {
     runId: 0,
@@ -362,6 +376,15 @@ function scoreClass(value) {
   return "value-low";
 }
 
+function hexToRgba(hex, alpha) {
+  const value = String(hex || "").replace("#", "").trim();
+  if (value.length !== 6) return `rgba(37, 99, 235, ${alpha})`;
+  const r = Number.parseInt(value.slice(0, 2), 16);
+  const g = Number.parseInt(value.slice(2, 4), 16);
+  const b = Number.parseInt(value.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function confColor(value) {
   if (value >= 0.9) return "#d1fae5";
   if (value >= 0.8) return "#fef3c7";
@@ -430,6 +453,7 @@ function persistDashboardState() {
   try {
     const state = {
       scope: STATE.currentId,
+      tagBarMode: STATE.tagBarMode,
       explorer: {
         sort: STATE.explorer.sort,
         query: STATE.explorer.queryModel,
@@ -452,6 +476,9 @@ function restoreDashboardState() {
     const payload = JSON.parse(decodeURIComponent(raw.slice("dashboard=".length)));
     if (payload.scope && DATA.scopes[payload.scope]) {
       STATE.currentId = payload.scope;
+    }
+    if (payload.tagBarMode && ["hidden", "relative", "global-log"].includes(payload.tagBarMode)) {
+      STATE.tagBarMode = payload.tagBarMode;
     }
     if (payload.explorer && typeof payload.explorer === "object") {
       if (payload.explorer.sort) STATE.explorer.sort = payload.explorer.sort;
@@ -749,17 +776,56 @@ function renderHistogram(label, bins, color, stats, bucketActionBuilder = null) 
   </div>`;
 }
 
-function renderRankingTable(items, metricLabel, valueRenderer, actionBuilder = null) {
+function renderRankingTable(items, metricLabel, valueRenderer, actionBuilder = null, options = null) {
   if (!items || !items.length) return `<div class="empty">No data</div>`;
+  const rankOptions = options || {};
+  const barMetricKey = rankOptions.barMetricKey || "";
+  const barColor = rankOptions.barColor || "#2563eb";
+  const barMetricLabel = rankOptions.barMetricLabel || "Count";
+  const globalBarMax = Number(rankOptions.globalBarMax) || 0;
+  const barValues = barMetricKey
+    ? items.map((item) => Number(item?.[barMetricKey]) || 0)
+    : [];
+  const localBarMax = barValues.length ? Math.max(...barValues, 1) : 0;
+  const barMax = STATE.tagBarMode === "global-log" && globalBarMax > 0 ? globalBarMax : localBarMax;
   const rows = items.map((item, index) => `<tr>
     <td class="rank-cell">${index + 1}</td>
-    <td>${actionBuilder ? `<button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson(actionBuilder(item))}">${escapeHtml(item.label)}</button>` : escapeHtml(item.label)}</td>
+    <td class="rank-tag-cell">${renderRankingTagCell(item, actionBuilder, {
+      barMetricKey,
+      barMetricLabel,
+      barMax,
+      barColor,
+    })}</td>
     <td class="metric-cell">${escapeHtml(valueRenderer(item))}</td>
   </tr>`).join("");
   return `<table class="data-table compact-table">
     <thead><tr><th>#</th><th>Tag</th><th>${escapeHtml(metricLabel)}</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+}
+
+function renderRankingTagCell(item, actionBuilder, options = null) {
+  const rankOptions = options || {};
+  const metricKey = rankOptions.barMetricKey || "";
+  const rawMetric = metricKey ? Number(item?.[metricKey]) || 0 : 0;
+  const barMax = Number(rankOptions.barMax) || 0;
+  const mode = STATE.tagBarMode || "relative";
+  let pct = 0;
+  if (metricKey && barMax > 0 && mode !== "hidden") {
+    if (mode === "global-log") {
+      pct = (Math.log1p(Math.max(rawMetric, 0)) / Math.log1p(barMax)) * 100;
+    } else {
+      pct = (rawMetric / barMax) * 100;
+    }
+    pct = Math.max(6, pct);
+  }
+  const fill = metricKey && mode !== "hidden"
+    ? `<div class="rank-tag-bar" style="width:${pct.toFixed(1)}%;background:linear-gradient(90deg, ${hexToRgba(rankOptions.barColor, 0.18)} 0%, ${hexToRgba(rankOptions.barColor, 0.10)} 85%, ${hexToRgba(rankOptions.barColor, 0.04)} 100%);border:1px solid ${hexToRgba(rankOptions.barColor, 0.12)}" title="${escapeHtml(`${item.label} · ${rankOptions.barMetricLabel || "Count"}: ${rawMetric}`)}"></div>`
+    : "";
+  const labelHtml = actionBuilder
+    ? `<button class="link-btn rank-tag-link" type="button" data-explorer-patch="${escapeAttrJson(actionBuilder(item))}" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`
+    : `<span class="rank-tag-text" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>`;
+  return `<div class="rank-tag-wrap">${fill}<div class="rank-tag-content">${labelHtml}</div></div>`;
 }
 
 const FILE_RANKING_COLUMNS = {
@@ -1262,9 +1328,24 @@ function renderChildren(scope) {
   );
 }
 
+function renderTagBarControlsInline(scope) {
+  if (!scope || (!scope.pass1 && !scope.pass2)) return "";
+  const buttons = [
+    ["hidden", "隐藏", "Hide tag bars"],
+    ["relative", "归一化", "Scale by current panel max"],
+    ["global-log", "全局对数", "Scale by section-wide log max"],
+  ].map(([value, label, hint]) => (
+    `<button class="segmented-btn ${STATE.tagBarMode === value ? "active" : ""}" type="button" data-tag-bar-mode="${escapeHtml(value)}" title="${escapeHtml(hint)}">${escapeHtml(label)}</button>`
+  )).join("");
+  return `<div class="toolbar-inline-copy" title="归一化按当前面板最大值缩放；全局对数按当前 section 内全部 tag 的计数做对数缩放。">Tag Bars</div><div class="segmented">${buttons}</div>`;
+}
+
 function renderPass1(pass1) {
   if (!pass1) return "";
   const sections = [];
+  const globalTagCountMax = Object.values(pass1.distributions || {}).flatMap((dist) => (
+    Object.values(dist || {}).map((value) => Number(value) || 0)
+  )).reduce((maxValue, value) => Math.max(maxValue, value), 0);
 
   const cards = [];
   const overview = pass1.overview || {};
@@ -1286,10 +1367,16 @@ function renderPass1(pass1) {
       .map(([label, value]) => ({
         label,
         value,
+        count: value,
       }));
     return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>${renderRankingTable(entries, "Count", (entry) => (
       total > 0 ? `${entry.value} (${((entry.value / total) * 100).toFixed(1)}%)` : `${entry.value}`
-    ), (entry) => explorerPatchForTag(dim, entry.label, "quality_asc"))}</div>`;
+    ), (entry) => explorerPatchForTag(dim, entry.label, "quality_asc"), {
+      barMetricKey: "count",
+      barMetricLabel: "Count",
+      barColor: DIM_COLORS[dim] || "#2563eb",
+      globalBarMax: globalTagCountMax,
+    })}</div>`;
   }).join("");
   if (distPanels) {
     sections.push(section("Tag Distributions", `<div class="grid">${distPanels}</div>`, "All tags, sorted by frequency", true));
@@ -1392,6 +1479,9 @@ function renderPass2(pass2) {
     ["Value By Tag", pass2.value_by_tag || {}],
     ["Selection By Tag", pass2.selection_by_tag || {}],
   ]) {
+    const globalTagCountMax = Object.values(bucket).flatMap((dist) => (
+      Object.values(dist || {}).map((info) => Number(info?.n) || 0)
+    )).reduce((maxValue, value) => Math.max(maxValue, value), 0);
     const panels = Object.entries(bucket).map(([dim, dist]) => {
       const items = Object.entries(dist || {})
         .sort((a, b) => (b[1]?.mean || 0) - (a[1]?.mean || 0) || a[0].localeCompare(b[0]))
@@ -1400,7 +1490,12 @@ function renderPass2(pass2) {
           mean: info.mean,
           n: info.n || 0,
         }));
-      return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>${renderRankingTable(items, "Score", (item) => `${fmt(item.mean, 2)} (n=${item.n})`, (item) => explorerPatchForTag(dim, item.label, title === "Selection By Tag" ? "selection_desc" : "quality_asc"))}</div>`;
+      return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>${renderRankingTable(items, "Score", (item) => `${fmt(item.mean, 2)} (n=${item.n})`, (item) => explorerPatchForTag(dim, item.label, title === "Selection By Tag" ? "selection_desc" : "quality_asc"), {
+        barMetricKey: "n",
+        barMetricLabel: "Count",
+        barColor: DIM_COLORS[dim] || "#2563eb",
+        globalBarMax: globalTagCountMax,
+      })}</div>`;
     }).join("");
     if (panels) {
       byTagSections.push(section(title, `<div class="grid">${panels}</div>`, "All tags, sorted by score", false));
@@ -1733,6 +1828,7 @@ function renderScope() {
 
   document.getElementById("scope-title").textContent = scope.label;
   document.getElementById("scope-path").textContent = scope.path || "Global overview";
+  document.getElementById("scope-toolbar-extra").innerHTML = renderTagBarControlsInline(scope);
   renderBreadcrumbs(scope);
   document.getElementById("scope-content").innerHTML = renderScopeContent(scope);
 
@@ -1741,6 +1837,13 @@ function renderScope() {
   });
   document.querySelectorAll("[data-file-sort]").forEach((node) => {
     node.addEventListener("click", () => toggleFileRankingSort(node.getAttribute("data-file-sort")));
+  });
+  document.querySelectorAll("[data-tag-bar-mode]").forEach((node) => {
+    node.addEventListener("click", () => {
+      STATE.tagBarMode = node.getAttribute("data-tag-bar-mode") || "relative";
+      persistDashboardState();
+      renderScope();
+    });
   });
   const explorerRun = document.getElementById("explorer-run");
   if (explorerRun) {
