@@ -1,5 +1,7 @@
 # sft-label
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/liuxsh9/sft-label)
+
 SFT Capability Taxonomy and Auto-Labeling Pipeline for code-generation corpora.
 
 `sft-label` is a curation pipeline, not just a tagger. It takes raw or previously labeled SFT data, normalizes it into per-reply samples, assigns a 9-dimension taxonomy (225 tags), scores training value, aggregates multi-turn conversations, filters high-signal subsets, and can cluster long agent trajectories to keep representative windows.
