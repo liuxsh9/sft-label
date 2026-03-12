@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
 from sft_label.tools.visualize_labels import compute_viz_data, generate_dashboard
@@ -114,3 +115,41 @@ def test_generate_dashboard_tree_payload_keeps_unmapped_counts(tmp_path):
     assert "Unmapped Tags" in html
     assert "gpu-porting" in html
     assert "No example sample loaded for this scope." in html
+
+
+def test_generate_dashboard_stats_only_single_scope_uses_stats_and_explorer_assets(tmp_path):
+    sample = _sample_with_unmapped(
+        "sample-1",
+        "Add WebGPU rendering support to this pipeline.",
+        [{"dimension": "task", "value": "gpu-porting"}],
+    )
+    (tmp_path / "labeled.jsonl").write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+    stats = {
+        "total_samples": 1,
+        "input_file": "train.jsonl",
+        "success_rate": 1.0,
+        "total_tokens": 123,
+        "arbitrated_rate": 0.0,
+        "unmapped_unique_count": 1,
+        "tag_distributions": {"task": {"feature-implementation": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {"task:gpu-porting": 1},
+    }
+    (tmp_path / PASS1_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+
+    out = generate_dashboard(tmp_path, labeled_file=None, stats_file=PASS1_STATS_FILE)
+    html = out.read_text(encoding="utf-8")
+    assets_dir = out.with_suffix("").with_name(f"{out.stem}.assets")
+
+    assert assets_dir.exists()
+    assert any(path.name.startswith("preview_") for path in assets_dir.iterdir())
+    assert any(path.name.startswith("detail_") for path in assets_dir.iterdir())
+
+    match = re.search(r"const DATA = (.*?);\nconst STATE", html, re.S)
+    assert match is not None
+    payload = json.loads(match.group(1))
+    assert payload["scopes"]["global"]["summary"]["pass1_total"] == 1
+    assert payload["scopes"]["global"]["pass1"]["unmapped_details"]["total_occurrences"] == 1
+    assert payload["explorer"]["enabled"] is True
+    assert payload["scopes"]["global"]["explorer"]["sample_count"] == 1

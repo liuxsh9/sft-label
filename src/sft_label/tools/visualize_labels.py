@@ -15,6 +15,7 @@ from sft_label.artifacts import (
     resolve_dashboard_output,
 )
 from sft_label.prompts import TAG_POOLS
+from sft_label.tools.dashboard_explorer import build_explorer_assets
 from sft_label.tools.dashboard_scopes import build_scope_tree
 from sft_label.tools.dashboard_template import render_dashboard_html
 
@@ -242,7 +243,7 @@ def _single_scope_payload(run_dir: Path, viz_data: dict, stats: dict) -> dict:
     }
 
 
-def _tree_payload(run_dir: Path) -> dict:
+def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     tree = build_scope_tree(
         run_dir,
         pass1_stats_file=PASS1_STATS_FILE,
@@ -251,6 +252,7 @@ def _tree_payload(run_dir: Path) -> dict:
         pass2_summary_file=None,
     )
     scopes = {}
+    explorer_sources = []
     for scope_id, raw_scope in tree["scopes"].items():
         pass1 = compute_viz_data([], raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
         scopes[scope_id] = {
@@ -264,6 +266,15 @@ def _tree_payload(run_dir: Path) -> dict:
             "pass1": pass1,
         }
         scopes[scope_id]["summary"] = _scope_summary(scopes[scope_id])
+        data_path = raw_scope.get("pass1_data_path")
+        if raw_scope.get("kind") == "file" and data_path:
+            explorer_sources.append(
+                {
+                    "scope_id": scope_id,
+                    "scope_path": raw_scope["path"],
+                    "data_path": data_path,
+                }
+            )
 
     root_pass1 = tree["scopes"][tree["root_id"]].get("raw_pass1") or {}
     root_label = Path(root_pass1.get("input_path") or root_pass1.get("input_file") or run_dir.name).name
@@ -282,6 +293,19 @@ def _tree_payload(run_dir: Path) -> dict:
         "default_scope_id": tree["root_id"],
         "initially_expanded": initially_expanded,
         "scopes": scopes,
+    }, explorer_sources
+
+
+def _attach_explorer_payload(payload: dict, explorer_meta: dict[str, dict]) -> None:
+    if not explorer_meta:
+        return
+    for scope_id, meta in explorer_meta.items():
+        if scope_id in payload.get("scopes", {}):
+            payload["scopes"][scope_id]["explorer"] = meta
+    payload["explorer"] = {
+        "enabled": True,
+        "result_limit": 200,
+        "detail_limit_notice": "Explorer scans preview shards progressively and loads full details on demand.",
     }
 
 
@@ -292,11 +316,43 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
     output_path = resolve_dashboard_output(run_dir, output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if labeled_file is None or stats_file == PASS1_SUMMARY_STATS_FILE:
-        payload = _tree_payload(run_dir)
+    if labeled_file is None:
+        if stats_file == PASS1_SUMMARY_STATS_FILE:
+            payload, explorer_sources = _tree_payload(run_dir)
+        else:
+            _, stats = load_run(run_dir, labeled_file=None, stats_file=stats_file)
+            payload = _single_scope_payload(run_dir, compute_viz_data([], stats), stats)
+            explorer_sources = []
+            data_path = next(
+                (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / "labeled.json") if candidate.exists()),
+                None,
+            )
+            if data_path is not None:
+                explorer_sources.append(
+                    {
+                        "scope_id": "global",
+                        "scope_path": payload["scopes"]["global"]["path"],
+                        "data_path": str(data_path),
+                    }
+                )
     else:
         samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)
         payload = _single_scope_payload(run_dir, compute_viz_data(samples, stats), stats)
+        explorer_sources = []
+        data_path = next(
+            (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / labeled_file) if candidate.exists()),
+            None,
+        )
+        if data_path is not None:
+            explorer_sources.append(
+                {
+                    "scope_id": "global",
+                    "scope_path": payload["scopes"]["global"]["path"],
+                    "data_path": str(data_path),
+                }
+            )
+
+    _attach_explorer_payload(payload, build_explorer_assets(output_path, explorer_sources))
 
     output_path.write_text(render_dashboard_html(payload), encoding="utf-8")
     return output_path
