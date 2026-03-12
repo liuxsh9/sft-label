@@ -32,6 +32,91 @@ DIMENSIONS = [
 ]
 
 
+def _group_unmapped_counts(stats: dict) -> dict[str, list[dict]]:
+    """Group flattened stats unmapped tags by dimension."""
+    grouped: dict[str, list[dict]] = {}
+    counts_by_dim: dict[str, Counter] = {}
+    for key, count in (stats.get("unmapped_tags") or {}).items():
+        dim, value = str(key).split(":", 1) if ":" in str(key) else ("unknown", str(key))
+        counts_by_dim.setdefault(dim, Counter())[value] += int(count)
+
+    for dim, counter in counts_by_dim.items():
+        grouped[dim] = [
+            {"label": value, "count": count, "examples": []}
+            for value, count in counter.most_common()
+        ]
+    return grouped
+
+
+def _collect_unmapped_examples(
+    samples: list[dict],
+    *,
+    per_tag_limit: int = 2,
+) -> dict[tuple[str, str], list[dict]]:
+    """Collect a few sample ids/query previews for each unmapped tag."""
+    examples: dict[tuple[str, str], list[dict]] = {}
+    for sample in samples:
+        labels = sample.get("labels") or {}
+        unmapped = labels.get("unmapped") or []
+        if not unmapped:
+            continue
+
+        query = ""
+        for msg in sample.get("conversations", []):
+            if msg.get("from") == "human":
+                query = str(msg.get("value", "")).replace("\n", " ")[:120]
+                break
+
+        seen: set[tuple[str, str]] = set()
+        for item in unmapped:
+            if isinstance(item, dict):
+                dim = str(item.get("dimension", "unknown"))
+                value = str(item.get("value", "?"))
+            else:
+                dim = "unknown"
+                value = str(item)
+            key = (dim, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            bucket = examples.setdefault(key, [])
+            if len(bucket) < per_tag_limit:
+                bucket.append({"id": str(sample.get("id", "?")), "query": query})
+    return examples
+
+
+def _build_unmapped_details(samples: list[dict], stats: dict) -> dict:
+    """Build dashboard-friendly unmapped tag detail payload."""
+    grouped = _group_unmapped_counts(stats)
+    example_map = _collect_unmapped_examples(samples)
+
+    ordered_dims = sorted(
+        grouped,
+        key=lambda dim: sum(item["count"] for item in grouped.get(dim, [])),
+        reverse=True,
+    )
+    by_dimension = {}
+    total_occurrences = 0
+    for dim in ordered_dims:
+        rows = []
+        for item in grouped.get(dim, []):
+            count = int(item.get("count", 0))
+            total_occurrences += count
+            rows.append(
+                {
+                    "label": item["label"],
+                    "count": count,
+                    "examples": example_map.get((dim, item["label"]), []),
+                }
+            )
+        by_dimension[dim] = rows
+
+    return {
+        "total_occurrences": total_occurrences,
+        "by_dimension": by_dimension,
+    }
+
+
 def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_FILE):
     """Load samples and stats from a run directory."""
     run_dir = Path(run_dir)
@@ -98,6 +183,7 @@ def compute_viz_data(samples, stats):
         "total": stats.get("total_samples", len(samples)) or len(samples),
         "input_file": stats.get("input_file") or stats.get("input_path", ""),
         "distributions": distributions,
+        "unmapped_details": _build_unmapped_details(samples, stats),
         "confidence_stats": stats.get("confidence_stats", {}),
         "conf_matrix": conf_matrix,
         "coverage": coverage,

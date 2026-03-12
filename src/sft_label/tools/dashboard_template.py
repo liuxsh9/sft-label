@@ -1360,6 +1360,38 @@ function renderPass1(pass1) {
   }
   sections.push(section("Labeling Overview", renderCards(cards), `${pass1.total || 0} samples`, true));
 
+  const unmappedDetails = pass1.unmapped_details || {};
+  const unmappedByDim = unmappedDetails.by_dimension || {};
+  const unmappedPanels = Object.entries(unmappedByDim).map(([dim, rows]) => {
+    const ranked = (rows || []).slice(0, 10).map((row) => ({
+      label: row.label,
+      count: row.count || 0,
+      examples: Array.isArray(row.examples) ? row.examples : [],
+    }));
+    if (!ranked.length) return "";
+    const htmlRows = ranked.map((row, index) => {
+      const examples = row.examples.length
+        ? row.examples.map((item) => `<div class="note">[${escapeHtml(item.id || "?")}] ${escapeHtml(item.query || "")}</div>`).join("")
+        : `<div class="note">No example sample loaded for this scope.</div>`;
+      return `<tr>
+        <td class="rank-cell">${index + 1}</td>
+        <td class="rank-tag-cell"><span class="rank-tag-text" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span></td>
+        <td class="metric-cell">${fmtInt(row.count)}</td>
+        <td>${examples}</td>
+      </tr>`;
+    }).join("");
+    return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>
+      <table class="data-table compact-table">
+        <thead><tr><th>#</th><th>Tag</th><th>Count</th><th>Examples</th></tr></thead>
+        <tbody>${htmlRows}</tbody>
+      </table>
+    </div>`;
+  }).join("");
+  if (unmappedPanels) {
+    const subtitle = `${fmtInt(unmappedDetails.total_occurrences || 0)} occurrences · top 10 per dimension`;
+    sections.push(section("Unmapped Tags", `<div class="grid">${unmappedPanels}</div>`, subtitle, false));
+  }
+
   const distPanels = Object.entries(pass1.distributions || {}).map(([dim, dist]) => {
     const total = Object.values(dist || {}).reduce((sum, value) => sum + value, 0);
     const entries = Object.entries(dist || {})

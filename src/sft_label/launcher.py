@@ -181,6 +181,12 @@ WORKFLOWS = [
         group="维护 / Maintenance",
     ),
     Workflow(
+        key="analyze-unmapped",
+        label="查看 unmapped 标签 / Inspect unmapped tags",
+        description="查看超出 tag pool 的标签及样例 / Review out-of-pool tags and examples",
+        group="维护 / Maintenance",
+    ),
+    Workflow(
         key="optimize-layout",
         label="优化历史文件布局 / Optimize legacy layout",
         description="统一旧版命名并可选清理 legacy 别名 / Normalize old naming and optionally prune legacy aliases",
@@ -564,6 +570,8 @@ def build_launch_plan(
                 return _build_export_review_plan(input_fn, output_fn)
             if wf.key == "validate":
                 return LaunchPlan(argv=["validate"])
+            if wf.key == "analyze-unmapped":
+                return _build_analyze_unmapped_plan(input_fn, output_fn)
             if wf.key == "optimize-layout":
                 return _build_optimize_layout_plan(input_fn, output_fn)
             raise ValueError(f"Unknown workflow key: {wf.key}")
@@ -1483,6 +1491,38 @@ def _build_refresh_rarity_plan(input_fn: InputFn, output_fn: OutputFn) -> Launch
     workers = _ask_maintenance_workers(input_fn, output_fn)
     if workers != DEFAULT_MAINTENANCE_WORKERS:
         argv.extend(["--workers", str(workers)])
+
+    argv.extend(_ask_extra_flags(input_fn))
+    return LaunchPlan(argv=argv)
+
+
+def _build_analyze_unmapped_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+    argv = ["analyze-unmapped"]
+    _section(output_fn, "基础输入 / Basic input")
+    argv.extend(["--input", _ask_required_text(
+        input_fn,
+        "已标注/已评分文件、运行目录、inline run，或 stats_labeling.json / "
+        "Labeled/scored file, run dir, inline run, or stats_labeling.json",
+    )])
+
+    _section(output_fn, "查看选项 / Inspection options")
+    dimension = _ask_optional_text(
+        input_fn,
+        "仅查看某个维度（可选，如 task/concept/unknown） / Only one dimension (optional, e.g. task/concept/unknown)",
+    )
+    if dimension:
+        argv.extend(["--dimension", dimension])
+
+    top = _ask_int(input_fn, "每个维度显示多少个标签 / Tags to show per dimension", default=20)
+    if top != 20:
+        argv.extend(["--top", str(top)])
+
+    examples = _ask_int(input_fn, "每个标签显示多少条样例 / Examples to show per tag", default=2)
+    if examples != 2:
+        argv.extend(["--examples", str(examples)])
+
+    if _ask_yes_no(input_fn, "仅从 stats 汇总读取 / Read summary from stats only", default=False):
+        argv.append("--stats-only")
 
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)

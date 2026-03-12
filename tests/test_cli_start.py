@@ -163,3 +163,26 @@ def test_parser_accepts_maintenance_workers():
         ["regenerate-dashboard", "--input", "run_dir", "--workers", "4"]
     )
     assert regen_args.workers == 4
+
+
+def test_parser_accepts_analyze_unmapped_flags():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "analyze-unmapped",
+            "--input",
+            "run_dir",
+            "--dimension",
+            "task",
+            "--top",
+            "15",
+            "--examples",
+            "1",
+            "--stats-only",
+        ]
+    )
+    assert args.input == "run_dir"
+    assert args.dimension == "task"
+    assert args.top == 15
+    assert args.examples == 1
+    assert args.stats_only is True

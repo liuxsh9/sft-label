@@ -10,6 +10,7 @@ Subcommands:
   sft-label export-semantic      — Export representative windows from clustering artifacts
   sft-label optimize-layout      — One-time optimize historical output layout
   sft-label filter               — Filter scored or inline-labeled data by value threshold
+  sft-label analyze-unmapped     — Inspect out-of-pool tags from labeling output or stats
   sft-label validate             — Validate taxonomy definitions
   sft-label export-review        — Export labeled or inline-labeled data to review CSV
   sft-label recompute-stats      — Recompute stats from labeled/scored output (no LLM)
@@ -475,6 +476,23 @@ def cmd_filter(args):
             input_path=args.input,
             output_path=args.output,
             config=config,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_analyze_unmapped(args):
+    """Inspect unmapped tags from labeling outputs or labeling stats."""
+    from sft_label.tools.analyze_unmapped import run_unmapped_analysis
+
+    try:
+        run_unmapped_analysis(
+            input_path=args.input,
+            top=args.top,
+            examples=args.examples,
+            dimension=args.dimension,
+            stats_only=args.stats_only,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -1049,6 +1067,25 @@ def build_parser():
     filter_parser.add_argument("--preserve-structure", action="store_true",
                                 help="Directory input only: mirror input folder structure and per-file format (skip empty output files)")
 
+    # --- analyze-unmapped ---
+    unmapped_parser = subparsers.add_parser(
+        "analyze-unmapped",
+        help="Inspect unmapped tags from labeled/scored output or stats",
+        description="Inspect out-of-pool tags from labeled/scored artifacts, inline runs, "
+                    "or Pass 1 labeling stats.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    unmapped_parser.add_argument("--input", type=str, required=True,
+                                 help="Labeled/scored file, inline run root/file, run directory, or stats_labeling.json")
+    unmapped_parser.add_argument("--dimension", type=str, default=None,
+                                 help="Only show one dimension (e.g. task, concept, unknown)")
+    unmapped_parser.add_argument("--top", type=int, default=20,
+                                 help="Max unmapped tags to show per dimension (default: 20)")
+    unmapped_parser.add_argument("--examples", type=int, default=2,
+                                 help="Max sample examples to show per unmapped tag (default: 2)")
+    unmapped_parser.add_argument("--stats-only", action="store_true",
+                                 help="Only read unmapped summary from stats_labeling.json/stats.json")
+
     return parser
 
 
@@ -1070,6 +1107,8 @@ def dispatch_command(args, parser):
         cmd_optimize_layout(args)
     elif args.command == "filter":
         cmd_filter(args)
+    elif args.command == "analyze-unmapped":
+        cmd_analyze_unmapped(args)
     elif args.command == "export-review":
         cmd_export_review(args)
     elif args.command == "recompute-stats":

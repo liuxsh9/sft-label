@@ -247,12 +247,14 @@ def test_all_workflows_generate_parseable_argv():
         9: ["run_dir/", "", "", "", ""],
         # 10. validate
         10: [],
-        # 11. optimize-layout
-        11: ["run_dir/", "", "", "", ""],
-        # 12. export-semantic
-        12: ["run_dir/", "out.jsonl", "", ""],
-        # 13. export-review
-        13: ["labeled.json", "review.csv", "", "", ""],
+        # 11. analyze-unmapped
+        11: ["run_dir/", "", "", "", "", ""],
+        # 12. optimize-layout
+        12: ["run_dir/", "", "", "", ""],
+        # 13. export-semantic
+        13: ["run_dir/", "out.jsonl", "", ""],
+        # 14. export-review
+        14: ["labeled.json", "review.csv", "", "", ""],
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -410,7 +412,7 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
     io = StubIO(["0"])
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
     assert plan is None
-    assert any("请选择任务编号 [0-13, 默认 1]：" in str(item) for item in io.outputs)
+    assert any("请选择任务编号 [0-14, 默认 1]：" in str(item) for item in io.outputs)
     assert not any("Select workflow number" in str(item) for item in io.outputs)
 
 
@@ -438,7 +440,7 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
 def test_build_optimize_layout_plan():
     io = StubIO(
         [
-            "11",          # workflow: optimize-layout
+            "12",          # workflow: optimize-layout
             "run_dir",     # --input
             "y",           # --apply
             "y",           # --prune-legacy
@@ -456,6 +458,34 @@ def test_build_optimize_layout_plan():
         "--prune-legacy",
         "--manifest",
         "plan.json",
+    ]
+
+
+def test_build_analyze_unmapped_plan():
+    io = StubIO(
+        [
+            "11",          # workflow: analyze-unmapped
+            "run_dir",     # --input
+            "task",        # --dimension
+            "10",          # --top
+            "1",           # --examples
+            "y",           # --stats-only
+            "",            # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "analyze-unmapped",
+        "--input",
+        "run_dir",
+        "--dimension",
+        "task",
+        "--top",
+        "10",
+        "--examples",
+        "1",
+        "--stats-only",
     ]
 
 
