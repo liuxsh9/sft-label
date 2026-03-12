@@ -23,6 +23,7 @@ import time
 import asyncio
 import argparse
 import random
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -565,6 +566,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                         "prompt_tokens": 0, "completion_tokens": 0,
                         "error": f"HTTP 400 (content filtered): {error_text[:300]}",
                         "error_response": resp.text,
+                        "content_filtered": True,
                         "non_retryable": True,
                     }
                 # Likely a transient proxy/supplier error — retry with backoff
@@ -709,6 +711,8 @@ TAG_ALIASES = {
     # task
     "test-creation": "testing-task",
     "write-tests": "testing-task",
+    "code-fixing": "bug-fixing",
+    "code-correction": "bug-fixing",
     # domain
     "security": "cybersecurity",
     # intent — modify aliases
@@ -728,6 +732,11 @@ TAG_ALIASES = {
     "async-await": "concurrency",
     "system-programming": "concurrency",
 }
+
+TAG_DIMENSION_INDEX = {}
+for _dim, _pool in TAG_POOLS.items():
+    for _tag in _pool:
+        TAG_DIMENSION_INDEX.setdefault(_tag, set()).add(_dim)
 
 # Tags that belong to a DIFFERENT category — drop from the current dimension
 # and log a warning, but do NOT add to unmapped (they're valid, just misplaced).
@@ -786,6 +795,97 @@ def _sanitize_confidence(confidence, dims, issues):
     return cleaned
 
 
+CONTENT_FILTER_REPLACEMENTS = (
+    (r"\bplease\s+reason\s+step\s+by\s+step\b", "briefly explain your approach"),
+    (r"\breason\s+step\s+by\s+step\b", "briefly explain the approach"),
+    (r"\bthink\s+step\s+by\s+step\b", "explain briefly"),
+    (r"\bstep\s+by\s+step\b", "succinctly"),
+    (r"\berroneous code\b", "reference code"),
+    (r"\bbuggy code\b", "reference code"),
+    (r"\bincrease misdirection\b", "add context"),
+    (r"\bmisdirection\b", "extra context"),
+)
+
+
+def sanitize_conversations_for_content_filter(conversations):
+    """Apply tiny wording softeners before one content-filter retry."""
+    sanitized = []
+    changed = False
+    for turn in conversations:
+        cloned = dict(turn)
+        for key in ("value", "content"):
+            text = cloned.get(key)
+            if not isinstance(text, str) or not text:
+                continue
+            updated = text
+            for pattern, replacement in CONTENT_FILTER_REPLACEMENTS:
+                updated = re.sub(pattern, replacement, updated, flags=re.IGNORECASE)
+            if updated != text:
+                cloned[key] = updated
+                changed = True
+        sanitized.append(cloned)
+    return sanitized, changed
+
+
+def _candidate_tag_values(value):
+    """Return raw + alias-resolved candidates for rescue checks."""
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return []
+    candidates = [raw]
+    alias = TAG_ALIASES.get(raw)
+    if alias and alias not in candidates:
+        candidates.append(alias)
+    return candidates
+
+
+def _find_cross_dim_tag(value, exclude_dim=None):
+    """Find a uniquely matching tag in another dimension."""
+    for candidate in _candidate_tag_values(value):
+        matched_dims = sorted(
+            dim for dim in TAG_DIMENSION_INDEX.get(candidate, set())
+            if dim != exclude_dim
+        )
+        if len(matched_dims) == 1:
+            return matched_dims[0], candidate
+    return None, None
+
+
+def _queue_rescued_tag(rescued, dim, value):
+    """Stage a rescued tag for merge into cleaned output."""
+    if dim in SINGLE_SELECT:
+        rescued.setdefault(dim, value)
+        return
+    bucket = rescued.setdefault(dim, [])
+    if value not in bucket:
+        bucket.append(value)
+
+
+def _try_rescue_unmapped_value(value, source_dim, rescued, current_dims):
+    """Rescue values that already exist elsewhere in the taxonomy."""
+    target_dim, rescued_value = _find_cross_dim_tag(value, exclude_dim=source_dim)
+    if not target_dim:
+        return False
+    if target_dim in current_dims:
+        _queue_rescued_tag(rescued, target_dim, rescued_value)
+    return True
+
+
+def _normalize_unmapped_items(items):
+    """Normalize LLM unmapped output to {dimension, value} objects."""
+    normalized = []
+    for item in items:
+        if isinstance(item, dict):
+            dim = str(item.get("dimension", "?") or "?")
+            value = str(item.get("value", "") or "").strip()
+        else:
+            dim = "?"
+            value = str(item or "").strip()
+        if value:
+            normalized.append({"dimension": dim, "value": value})
+    return normalized
+
+
 def _build_partial_labels(call1_cleaned, reason):
     """Wrap Call 1 output so downstream stages can block partial labels."""
     labels = {
@@ -802,10 +902,12 @@ def _build_partial_labels(call1_cleaned, reason):
 
 def validate_tags(result, call_name="call1"):
     issues = []
-    unmapped = result.get("unmapped", [])
-    if not isinstance(unmapped, list):
-        unmapped = []
+    raw_unmapped = result.get("unmapped", [])
+    if not isinstance(raw_unmapped, list):
+        raw_unmapped = []
     cleaned = dict(result)
+    rescued = {}
+    pending_unmapped = []
 
     dims = (["intent", "language", "domain", "task", "difficulty"] if call_name == "call1"
             else ["concept", "agentic", "constraint", "context"])
@@ -829,8 +931,9 @@ def validate_tags(result, call_name="call1"):
                 raw_val = str(raw_val)
             val = raw_val if (not raw_val or raw_val in pool) else TAG_ALIASES.get(raw_val, raw_val)
             if val and val not in pool:
-                issues.append(f"{dim}: '{val}' not in pool")
-                unmapped.append({"dimension": dim, "value": val})
+                if not _try_rescue_unmapped_value(val, dim, rescued, dims):
+                    issues.append(f"{dim}: '{val}' not in pool")
+                    pending_unmapped.append({"dimension": dim, "value": val})
                 cleaned[dim] = ""
             else:
                 cleaned[dim] = val
@@ -842,18 +945,41 @@ def validate_tags(result, call_name="call1"):
                 if v in pool:
                     valid.append(v)
                 else:
-                    issues.append(f"{dim}: '{v}' not in pool")
-                    unmapped.append({"dimension": dim, "value": v})
+                    if not _try_rescue_unmapped_value(v, dim, rescued, dims):
+                        issues.append(f"{dim}: '{v}' not in pool")
+                        pending_unmapped.append({"dimension": dim, "value": v})
             cleaned[dim] = valid
 
-    # Normalize string items to dict format (LLM may return plain strings)
-    unmapped = [
-        item if isinstance(item, dict) else {"dimension": "?", "value": item}
-        for item in unmapped
-    ]
+    for item in _normalize_unmapped_items(raw_unmapped):
+        dim = item["dimension"]
+        value = item["value"]
+        if dim in dims:
+            same_dim_hit = next(
+                (candidate for candidate in _candidate_tag_values(value) if candidate in TAG_POOLS.get(dim, set())),
+                None,
+            )
+            if same_dim_hit:
+                _queue_rescued_tag(rescued, dim, same_dim_hit)
+                continue
+        if _try_rescue_unmapped_value(value, dim if dim in TAG_POOLS else None, rescued, dims):
+            continue
+        pending_unmapped.append(item)
+
+    for dim, rescued_value in rescued.items():
+        if dim in SINGLE_SELECT:
+            current = cleaned.get(dim)
+            if not current:
+                cleaned[dim] = rescued_value
+            continue
+        merged = list(cleaned.get(dim, []))
+        for value in rescued_value:
+            if value not in merged:
+                merged.append(value)
+        cleaned[dim] = merged
+
     # Filter out LLM explanation sentences — unmapped should be short tag IDs
     unmapped = [
-        item for item in unmapped
+        item for item in pending_unmapped
         if len(item.get("value", "")) <= 60 and item.get("value", "").count(" ") <= 3
     ]
 
@@ -924,6 +1050,9 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                          per_turn_ratio=config.truncation_per_turn_ratio)
     truncated_convs, was_truncated = truncate_conversations_for_labeling(
         conversations, **_trunc_kw)
+    base_conversations_json = json.dumps(truncated_convs, ensure_ascii=False)
+    effective_conversations_json = base_conversations_json
+    sanitized_conversations_json = None
 
     _cached_call1 = None  # Cache successful Call 1 across sample retries
 
@@ -953,7 +1082,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 signals = preprocess(sample)
                 signals_str = format_signals_for_prompt(signals)
                 # Use truncated conversations for LLM prompt
-                conversations_json = json.dumps(truncated_convs, ensure_ascii=False)
+                conversations_json = effective_conversations_json
                 if was_truncated:
                     monitor["truncated"] = True
 
@@ -969,6 +1098,35 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     monitor["llm_calls"] += 1
                     monitor["total_prompt_tokens"] += usage1["prompt_tokens"]
                     monitor["total_completion_tokens"] += usage1["completion_tokens"]
+
+                    if call1_result is None and usage1.get("content_filtered"):
+                        if sanitized_conversations_json is None:
+                            sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
+                            if changed:
+                                sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
+                        if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
+                            retry_msgs1 = build_call1_messages(
+                                sanitized_conversations_json, signals_str, compact=_compact
+                            )
+                            retry_result, retry_raw, retry_usage = await async_llm_call(
+                                http_client,
+                                retry_msgs1,
+                                model,
+                                max_retries=0,
+                                config=config,
+                                rate_limiter=rate_limiter,
+                            )
+                            monitor["llm_calls"] += 1
+                            monitor["total_prompt_tokens"] += retry_usage["prompt_tokens"]
+                            monitor["total_completion_tokens"] += retry_usage["completion_tokens"]
+                            monitor["content_filter_retry"] = "call1"
+                            if retry_result is not None:
+                                call1_result, call1_raw, usage1 = retry_result, retry_raw, retry_usage
+                                msgs1 = retry_msgs1
+                                conversations_json = sanitized_conversations_json
+                                effective_conversations_json = sanitized_conversations_json
+                            else:
+                                call1_result, call1_raw, usage1 = retry_result, retry_raw, retry_usage
 
                     if call1_result is None:
                         monitor["status"] = "call1_failed"
@@ -994,6 +1152,34 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 monitor["llm_calls"] += 1
                 monitor["total_prompt_tokens"] += usage2["prompt_tokens"]
                 monitor["total_completion_tokens"] += usage2["completion_tokens"]
+
+                if call2_result is None and usage2.get("content_filtered"):
+                    if sanitized_conversations_json is None:
+                        sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
+                        if changed:
+                            sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
+                    if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
+                        retry_msgs2 = build_call2_messages(
+                            sanitized_conversations_json, signals_str, call1_context, compact=_compact
+                        )
+                        retry_result, retry_raw, retry_usage = await async_llm_call(
+                            http_client,
+                            retry_msgs2,
+                            model,
+                            max_retries=0,
+                            config=config,
+                            rate_limiter=rate_limiter,
+                        )
+                        monitor["llm_calls"] += 1
+                        monitor["total_prompt_tokens"] += retry_usage["prompt_tokens"]
+                        monitor["total_completion_tokens"] += retry_usage["completion_tokens"]
+                        monitor["content_filter_retry"] = "call2"
+                        if retry_result is not None:
+                            call2_result, call2_raw, usage2 = retry_result, retry_raw, retry_usage
+                            conversations_json = sanitized_conversations_json
+                            effective_conversations_json = sanitized_conversations_json
+                        else:
+                            call2_result, call2_raw, usage2 = retry_result, retry_raw, retry_usage
 
                 if call2_result is None:
                     monitor["status"] = "call2_failed"

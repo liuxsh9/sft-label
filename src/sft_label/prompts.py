@@ -176,7 +176,7 @@ Rules for output:
 - Multi-select fields are arrays (can be empty [])
 - Single-select fields are strings
 - confidence: 0.0-1.0 per dimension (how sure you are)
-- unmapped: tags you wanted to assign but couldn't find in the pool (short kebab-case IDs only, NOT sentences or explanations. If none, return empty array [])
+- unmapped: [{"dimension":"...","value":"..."}] for missing tags only; use [] if none, with short kebab-case values
 - The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
 
@@ -304,7 +304,7 @@ Return ONLY valid JSON (no markdown, no explanation):
   "unmapped": []
 }
 
-Rules: All tags must be lowercase kebab-case from lists above. Multi-select = arrays. Single-select = strings. confidence: 0.0-1.0. unmapped: short kebab-case IDs only.
+Rules: All tags lowercase kebab-case from lists above. Multi-select = arrays. Single-select = strings. confidence: 0.0-1.0. unmapped: [{"dimension":"...","value":"..."}] or [].
 Ignore XML tags, diff markers, or formatting tokens — evaluate semantic content only."""
 
 
@@ -666,7 +666,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 
 Rules for output:
 - Use ONLY exact lowercase kebab-case tag IDs from the pools above
-- unmapped: tags you wanted to assign but couldn't find in the pool (short kebab-case IDs only, NOT sentences or explanations. If none, return empty array [])
+- unmapped: [{"dimension":"...","value":"..."}] for missing tags only; use [] if none, with short kebab-case values
 - The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
 
@@ -843,7 +843,7 @@ Return ONLY valid JSON:
   "unmapped": []
 }
 
-Use ONLY exact lowercase kebab-case tag IDs from the pools above. unmapped: short kebab-case IDs only (not sentences).
+Use ONLY exact lowercase kebab-case tag IDs from the pools above. unmapped: [{"dimension":"...","value":"..."}] or [].
 Ignore XML tags, diff markers, formatting — evaluate semantic content only."""
 
 
