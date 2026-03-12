@@ -350,8 +350,19 @@ def _with_scoring_file_label(stats: dict | None, file_label: str) -> dict | None
     return payload
 
 
+def _find_sibling_artifact(stats_path: Path, candidates: list[str] | None) -> str | None:
+    if not candidates:
+        return None
+    for name in candidates:
+        candidate = stats_path.parent / name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _discover_leaf_records(root_dir: Path, stats_filename: str | None, *,
-                           include_conversations: bool = False) -> dict[str, dict]:
+                           include_conversations: bool = False,
+                           data_candidates: list[str] | None = None) -> dict[str, dict]:
     if not stats_filename:
         return {}
 
@@ -377,16 +388,20 @@ def _discover_leaf_records(root_dir: Path, stats_filename: str | None, *,
 
         rel_path = _guess_leaf_path(rel_dir, stats).as_posix()
         conv_records = []
+        conv_path_str = None
         if include_conversations:
             conv_path = stats_path.parent / "conversation_scores.json"
             payload = _load_json(conv_path)
             if isinstance(payload, list):
                 conv_records = payload
+                conv_path_str = str(conv_path)
 
         discovered[rel_path] = {
             "path": rel_path,
             "stats": stats,
             "conv_records": conv_records,
+            "conv_path": conv_path_str,
+            "data_path": _find_sibling_artifact(stats_path, data_candidates),
         }
     return discovered
 
@@ -467,8 +482,17 @@ def build_scope_tree(
 ) -> dict:
     """Build a global/dir/file scope tree for interactive dashboards."""
     root_dir = Path(root_dir)
-    pass1_leaves = _discover_leaf_records(root_dir, pass1_stats_file)
-    pass2_leaves = _discover_leaf_records(root_dir, pass2_stats_file, include_conversations=True)
+    pass1_leaves = _discover_leaf_records(
+        root_dir,
+        pass1_stats_file,
+        data_candidates=["labeled.jsonl", "labeled.json"],
+    )
+    pass2_leaves = _discover_leaf_records(
+        root_dir,
+        pass2_stats_file,
+        include_conversations=True,
+        data_candidates=["scored.jsonl", "scored.json"],
+    )
     pass1_leaves, pass2_leaves = _normalize_leaf_records(pass1_leaves, pass2_leaves)
 
     leaf_paths = sorted(set(pass1_leaves) | set(pass2_leaves), key=lambda value: Path(value).as_posix())
@@ -506,6 +530,9 @@ def build_scope_tree(
             "raw_pass1": (pass1_leaves.get(leaf_path) or {}).get("stats"),
             "raw_pass2": (pass2_leaves.get(leaf_path) or {}).get("stats"),
             "raw_conversations": (pass2_leaves.get(leaf_path) or {}).get("conv_records", []),
+            "pass1_data_path": (pass1_leaves.get(leaf_path) or {}).get("data_path"),
+            "pass2_data_path": (pass2_leaves.get(leaf_path) or {}).get("data_path"),
+            "conversation_data_path": (pass2_leaves.get(leaf_path) or {}).get("conv_path"),
             "descendant_files": [leaf_path],
         }
 
@@ -539,6 +566,8 @@ def build_scope_tree(
             "raw_pass1": pass1_stats,
             "raw_pass2": pass2_stats,
             "raw_conversations": conv_records,
+            "pass1_data_path": None,
+            "pass2_data_path": None,
             "descendant_files": dir_to_files[dir_path][:],
         }
 

@@ -17,6 +17,14 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_build_scope_tree_deduplicates_inline_artifact_leaf_paths(tmp_path):
     run_root = tmp_path / "dataset_labeled_20260311_120000"
     meta_root = run_root / "meta_label_data"
@@ -51,6 +59,31 @@ def test_build_scope_tree_deduplicates_inline_artifact_leaf_paths(tmp_path):
             "histograms": {},
             "flag_counts": {},
         },
+    )
+    _write_jsonl(
+        artifact_dir / "scored.jsonl",
+        [
+            {
+                "id": "sample-1",
+                "conversations": [{"from": "human", "value": "hi"}, {"from": "gpt", "value": "hello"}],
+                "labels": {"intent": "learn", "language": ["python"], "difficulty": "beginner"},
+                "value": {"value_score": 6.5, "quality": {"overall": 6.0}},
+            }
+        ],
+    )
+    _write_json(
+        artifact_dir / "conversation_scores.json",
+        [
+            {
+                "conversation_id": "sample-1",
+                "conversation_key": "code/sample.jsonl::sample-1",
+                "source_file": "code/sample.jsonl",
+                "turn_count": 2,
+                "conv_value": 6.5,
+                "conv_selection": 6.2,
+                "peak_complexity": 7,
+            }
+        ],
     )
     _write_json(
         meta_root / PASS1_SUMMARY_STATS_FILE,
@@ -96,5 +129,7 @@ def test_build_scope_tree_deduplicates_inline_artifact_leaf_paths(tmp_path):
     assert len(file_scopes) == 1
     assert len(dir_scopes) == 1
     assert file_scopes[0]["path"] == "code/sample.jsonl"
+    assert file_scopes[0]["pass2_data_path"].endswith("scored.jsonl")
+    assert file_scopes[0]["conversation_data_path"].endswith("conversation_scores.json")
     assert all(not scope["path"].endswith("labeled.json") for scope in file_scopes)
     assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["file"] == "code/sample.jsonl"
