@@ -153,3 +153,5 @@ def test_generate_dashboard_stats_only_single_scope_uses_stats_and_explorer_asse
     assert payload["scopes"]["global"]["pass1"]["unmapped_details"]["total_occurrences"] == 1
     assert payload["explorer"]["enabled"] is True
     assert payload["scopes"]["global"]["explorer"]["sample_count"] == 1
+    assert payload["scopes"]["global"].get("pass2") is None
+    assert 'scopeHasPass2Data(scope)' in html

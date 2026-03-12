@@ -275,6 +275,7 @@ const STATE = {
       flagQuery: "",
       convValueMin: "",
       convSelectionMin: "",
+      convSelectionMax: "",
       peakComplexityMin: "",
       turnCountMin: "",
       observedTurnRatioMin: "",
@@ -285,6 +286,7 @@ const STATE = {
       maxValue: "",
       maxQuality: "",
       minSelection: "",
+      maxSelection: "",
       maxConfidence: "",
       thinkingMode: "",
       hasFlags: false,
@@ -534,6 +536,7 @@ function resetExplorerView(resetQuery = false) {
       flagQuery: "",
       convValueMin: "",
       convSelectionMin: "",
+      convSelectionMax: "",
       peakComplexityMin: "",
       turnCountMin: "",
       observedTurnRatioMin: "",
@@ -544,6 +547,7 @@ function resetExplorerView(resetQuery = false) {
       maxValue: "",
       maxQuality: "",
       minSelection: "",
+      maxSelection: "",
       maxConfidence: "",
       thinkingMode: "",
       hasFlags: false,
@@ -580,6 +584,10 @@ function explorerTotalSamples(scope) {
 
 function scopeSupportsExplorer(scope) {
   return !!(DATA.explorer && DATA.explorer.enabled && explorerFileScopeIds(scope, {}).length);
+}
+
+function scopeHasPass2Data(scope) {
+  return explorerFileScopeIds(scope, {}).some((scopeId) => !!((getScope(scopeId) || {}).pass2));
 }
 
 function toggleExpanded(id) {
@@ -1041,6 +1049,7 @@ function parseExplorerQueryFromDom() {
     flagQuery: (document.getElementById("explorer-flag-query") || {}).value || "",
     convValueMin: (document.getElementById("explorer-conv-value-min") || {}).value || "",
     convSelectionMin: (document.getElementById("explorer-conv-selection-min") || {}).value || "",
+    convSelectionMax: (document.getElementById("explorer-conv-selection-max") || {}).value || "",
     peakComplexityMin: (document.getElementById("explorer-peak-complexity-min") || {}).value || "",
     turnCountMin: (document.getElementById("explorer-turn-count-min") || {}).value || "",
     observedTurnRatioMin: (document.getElementById("explorer-observed-turn-ratio-min") || {}).value || "",
@@ -1051,6 +1060,7 @@ function parseExplorerQueryFromDom() {
     maxValue: (document.getElementById("explorer-max-value") || {}).value || "",
     maxQuality: (document.getElementById("explorer-max-quality") || {}).value || "",
     minSelection: (document.getElementById("explorer-min-selection") || {}).value || "",
+    maxSelection: (document.getElementById("explorer-max-selection") || {}).value || "",
     maxConfidence: (document.getElementById("explorer-max-confidence") || {}).value || "",
     thinkingMode: (document.getElementById("explorer-thinking-mode") || {}).value || "",
     hasFlags: !!((document.getElementById("explorer-has-flags") || {}).checked),
@@ -1109,6 +1119,8 @@ function rowMatchesExplorerQuery(row, query) {
   if (convValueMin !== null && (row.conv_value === null || row.conv_value === undefined || Number(row.conv_value) < convValueMin)) return false;
   const convSelectionMin = parseNumber(query.convSelectionMin);
   if (convSelectionMin !== null && (row.conv_selection === null || row.conv_selection === undefined || Number(row.conv_selection) < convSelectionMin)) return false;
+  const convSelectionMax = parseNumber(query.convSelectionMax);
+  if (convSelectionMax !== null && (row.conv_selection === null || row.conv_selection === undefined || Number(row.conv_selection) > convSelectionMax)) return false;
   const peakComplexityMin = parseNumber(query.peakComplexityMin);
   if (peakComplexityMin !== null && (row.peak_complexity === null || row.peak_complexity === undefined || Number(row.peak_complexity) < peakComplexityMin)) return false;
   const observedTurnRatioMin = parseNumber(query.observedTurnRatioMin);
@@ -1125,6 +1137,8 @@ function rowMatchesExplorerQuery(row, query) {
   if (maxQuality !== null && (row.quality_overall === null || row.quality_overall === undefined || Number(row.quality_overall) > maxQuality)) return false;
   const minSelection = parseNumber(query.minSelection);
   if (minSelection !== null && (row.selection_score === null || row.selection_score === undefined || Number(row.selection_score) < minSelection)) return false;
+  const maxSelection = parseNumber(query.maxSelection);
+  if (maxSelection !== null && (row.selection_score === null || row.selection_score === undefined || Number(row.selection_score) > maxSelection)) return false;
   const turnCountMin = parseNumber(query.turnCountMin);
   if (turnCountMin !== null && (row.turn_count === null || row.turn_count === undefined || Number(row.turn_count) < turnCountMin)) return false;
   const maxConfidence = parseNumber(query.maxConfidence);
@@ -1718,22 +1732,27 @@ function renderConversations(conversation) {
   return section("Conversation Aggregation", body, "", false);
 }
 
-function explorerSortOptions() {
-  return [
-    ["quality_asc", "Quality Asc"],
-    ["value_asc", "Value Asc"],
-    ["confidence_asc", "Confidence Asc"],
-    ["selection_desc", "Selection Desc"],
-    ["conv_value_desc", "Conv Value Desc"],
-    ["conv_selection_desc", "Conv Selection Desc"],
-    ["turn_count_desc", "Turn Count Desc"],
-    ["observed_turn_ratio_asc", "Observed Ratio Asc"],
-    ["observed_turn_ratio_desc", "Observed Ratio Desc"],
-    ["rarity_confidence_asc", "Rarity Confidence Asc"],
-    ["rarity_confidence_desc", "Rarity Confidence Desc"],
-    ["rarity_desc", "Rarity Desc"],
+function explorerSortOptions(includeScores = true) {
+  const options = [
     ["sample_id_asc", "Sample Id"],
   ];
+  if (includeScores) {
+    options.unshift(
+      ["quality_asc", "Quality Asc"],
+      ["value_asc", "Value Asc"],
+      ["confidence_asc", "Confidence Asc"],
+      ["selection_desc", "Selection Desc"],
+      ["conv_value_desc", "Conv Value Desc"],
+      ["conv_selection_desc", "Conv Selection Desc"],
+      ["turn_count_desc", "Turn Count Desc"],
+      ["observed_turn_ratio_asc", "Observed Ratio Asc"],
+      ["observed_turn_ratio_desc", "Observed Ratio Desc"],
+      ["rarity_confidence_asc", "Rarity Confidence Asc"],
+      ["rarity_confidence_desc", "Rarity Confidence Desc"],
+      ["rarity_desc", "Rarity Desc"],
+    );
+  }
+  return options;
 }
 
 function explorerQueryHasFilters(query) {
@@ -1747,6 +1766,7 @@ function explorerQueryHasFilters(query) {
     query.flagQuery,
     query.convValueMin,
     query.convSelectionMin,
+    query.convSelectionMax,
     query.peakComplexityMin,
     query.turnCountMin,
     query.observedTurnRatioMin,
@@ -1757,6 +1777,7 @@ function explorerQueryHasFilters(query) {
     query.maxValue,
     query.maxQuality,
     query.minSelection,
+    query.maxSelection,
     query.maxConfidence,
     query.thinkingMode,
   ].some((value) => String(value || "").trim() !== "")
@@ -1845,20 +1866,31 @@ function renderExplorer(scope) {
   if (!scopeSupportsExplorer(scope)) return "";
   const totalSamples = explorerTotalSamples(scope);
   const query = STATE.explorer.queryModel;
+  const supportsScores = scopeHasPass2Data(scope);
   const candidateFileCount = explorerFileScopeIds(scope, query).length;
-  const sortOptions = explorerSortOptions().map(([value, label]) => (
+  const availableSorts = explorerSortOptions(supportsScores);
+  if (!availableSorts.some(([value]) => value === STATE.explorer.sort)) {
+    STATE.explorer.sort = "sample_id_asc";
+  }
+  const sortOptions = availableSorts.map(([value, label]) => (
     `<option value="${escapeHtml(value)}" ${STATE.explorer.sort === value ? "selected" : ""}>${escapeHtml(label)}</option>`
   )).join("");
   const presets = [
-    { id: "quality", label: "Lowest Quality", query: { sort: "quality_asc" } },
-    { id: "value", label: "Lowest Value", query: { sort: "value_asc" } },
-    { id: "confidence", label: "Low Confidence", query: { sort: "confidence_asc" } },
-    { id: "python-debug", label: "Python + Debug", query: { tagQuery: "python, debug", sort: "quality_asc" } },
-    { id: "flags", label: "Has Flags", query: { hasFlags: true, sort: "quality_asc" } },
-    { id: "long-multiturn", label: "Long Multi-turn", query: { turnCountMin: "8", sort: "turn_count_desc" } },
-    { id: "low-coverage", label: "Low Coverage", query: { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" } },
-    { id: "low-rarity-confidence", label: "Low Rarity Conf", query: { rarityConfidenceMax: "0.60", sort: "rarity_confidence_asc" } },
+    { id: "python-debug", label: "Python + Debug", query: { tagQuery: "python, debug", sort: supportsScores ? "quality_asc" : "sample_id_asc" } },
   ];
+  if (supportsScores) {
+    presets.unshift(
+      { id: "quality", label: "Lowest Quality", query: { sort: "quality_asc" } },
+      { id: "value", label: "Lowest Value", query: { sort: "value_asc" } },
+      { id: "confidence", label: "Low Confidence", query: { sort: "confidence_asc" } },
+    );
+    presets.push(
+      { id: "flags", label: "Has Flags", query: { hasFlags: true, sort: "quality_asc" } },
+      { id: "long-multiturn", label: "Long Multi-turn", query: { turnCountMin: "8", sort: "turn_count_desc" } },
+      { id: "low-coverage", label: "Low Coverage", query: { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" } },
+      { id: "low-rarity-confidence", label: "Low Rarity Conf", query: { rarityConfidenceMax: "0.60", sort: "rarity_confidence_asc" } },
+    );
+  }
   const status = STATE.explorer.busy
     ? `Scanning ${fmtInt(STATE.explorer.scopeDone)}/${fmtInt(STATE.explorer.scopeTotal)} files · ${fmtInt(STATE.explorer.scanned)} rows checked · ${fmtInt(STATE.explorer.matched)} matches`
     : (STATE.explorer.status || `Ready to scan ${fmtInt(totalSamples)} indexed previews in this scope.`);
@@ -1878,23 +1910,25 @@ function renderExplorer(scope) {
       <div class="field"><label>Intent</label><input id="explorer-intent" type="text" value="${escapeHtml(query.intent)}" placeholder="debug"></div>
       <div class="field"><label>Source File</label><input id="explorer-source-path" type="text" value="${escapeHtml(query.sourcePath)}" placeholder="multi_turn/coderforge"></div>
       <div class="field"><label>Text Contains</label><input id="explorer-text-query" type="text" value="${escapeHtml(query.textQuery)}" placeholder="OOM"></div>
-      <div class="field"><label>Flag</label><input id="explorer-flag-query" type="text" value="${escapeHtml(query.flagQuery)}" placeholder="low-correctness"></div>
-      <div class="field"><label>Conv Value ≥</label><input id="explorer-conv-value-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convValueMin)}"></div>
-      <div class="field"><label>Conv Sel ≥</label><input id="explorer-conv-selection-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMin)}"></div>
-      <div class="field"><label>Peak Cplx ≥</label><input id="explorer-peak-complexity-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.peakComplexityMin)}"></div>
-      <div class="field"><label>Turns ≥</label><input id="explorer-turn-count-min" type="number" min="1" step="1" value="${escapeHtml(query.turnCountMin)}"></div>
-      <div class="field"><label>Observed Ratio ≥</label><input id="explorer-observed-turn-ratio-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMin)}"></div>
-      <div class="field"><label>Observed Ratio ≤</label><input id="explorer-observed-turn-ratio-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMax)}"></div>
-      <div class="field"><label>Rarity Conf ≥</label><input id="explorer-rarity-confidence-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMin)}"></div>
-      <div class="field"><label>Rarity Conf ≤</label><input id="explorer-rarity-confidence-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMax)}"></div>
-      <div class="field"><label>Value ≥</label><input id="explorer-min-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minValue)}"></div>
-      <div class="field"><label>Value ≤</label><input id="explorer-max-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxValue)}"></div>
-      <div class="field"><label>Quality ≤</label><input id="explorer-max-quality" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxQuality)}"></div>
-      <div class="field"><label>Selection ≥</label><input id="explorer-min-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minSelection)}"></div>
-      <div class="field"><label>Confidence ≤</label><input id="explorer-max-confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(query.maxConfidence)}"></div>
+      ${supportsScores ? `<div class="field"><label>Flag</label><input id="explorer-flag-query" type="text" value="${escapeHtml(query.flagQuery)}" placeholder="low-correctness"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Conv Value ≥</label><input id="explorer-conv-value-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convValueMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Conv Sel ≥</label><input id="explorer-conv-selection-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Conv Sel ≤</label><input id="explorer-conv-selection-max" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMax)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Peak Cplx ≥</label><input id="explorer-peak-complexity-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.peakComplexityMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Turns ≥</label><input id="explorer-turn-count-min" type="number" min="1" step="1" value="${escapeHtml(query.turnCountMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Observed Ratio ≥</label><input id="explorer-observed-turn-ratio-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Observed Ratio ≤</label><input id="explorer-observed-turn-ratio-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMax)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Rarity Conf ≥</label><input id="explorer-rarity-confidence-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Rarity Conf ≤</label><input id="explorer-rarity-confidence-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMax)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Value ≥</label><input id="explorer-min-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minValue)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Value ≤</label><input id="explorer-max-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxValue)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Quality ≤</label><input id="explorer-max-quality" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxQuality)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Selection ≥</label><input id="explorer-min-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minSelection)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Selection ≤</label><input id="explorer-max-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxSelection)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>Confidence ≤</label><input id="explorer-max-confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(query.maxConfidence)}"></div>` : ""}
       <div class="field"><label>Thinking Mode</label><select id="explorer-thinking-mode"><option value="">Any</option><option value="fast" ${query.thinkingMode === "fast" ? "selected" : ""}>fast</option><option value="slow" ${query.thinkingMode === "slow" ? "selected" : ""}>slow</option></select></div>
       <div class="field"><label>Sort</label><select id="explorer-sort">${sortOptions}</select></div>
-      <div class="field-check"><input id="explorer-has-flags" type="checkbox" ${query.hasFlags ? "checked" : ""}><label for="explorer-has-flags">Only samples with flags</label></div>
+      ${supportsScores ? `<div class="field-check"><input id="explorer-has-flags" type="checkbox" ${query.hasFlags ? "checked" : ""}><label for="explorer-has-flags">Only samples with flags</label></div>` : ""}
       <div class="field-check"><input id="explorer-include-inherited" type="checkbox" ${query.includeInherited ? "checked" : ""}><label for="explorer-include-inherited">Include inherited labels</label></div>
     </div>
     <div class="explorer-actions">
@@ -1902,7 +1936,7 @@ function renderExplorer(scope) {
       <button class="action-btn" type="button" id="explorer-reset">Reset</button>
     </div>
     <div class="result-meta">
-      <div class="result-count">Current scope: ${fmtInt(totalSamples)} indexed samples · ${fmtInt(candidateFileCount)} candidate files · showing top ${fmtInt(STATE.explorer.limit)} results sorted by ${escapeHtml((explorerSortOptions().find(([value]) => value === STATE.explorer.sort) || ["", STATE.explorer.sort])[1])}</div>
+      <div class="result-count">Current scope: ${fmtInt(totalSamples)} indexed samples · ${fmtInt(candidateFileCount)} candidate files · showing top ${fmtInt(STATE.explorer.limit)} results sorted by ${escapeHtml((availableSorts.find(([value]) => value === STATE.explorer.sort) || ["", STATE.explorer.sort])[1])}</div>
       <div class="result-count">${fmtInt(STATE.explorer.matched)} matches retained after scanning ${fmtInt(STATE.explorer.scanned)} rows</div>
     </div>
     ${renderExplorerResults(STATE.explorer.results)}
@@ -1988,10 +2022,10 @@ function renderScope() {
     node.addEventListener("click", async () => {
       const presetId = node.getAttribute("data-explorer-preset");
       const presetMap = {
+        "python-debug": { tagQuery: "python, debug", sort: scopeHasPass2Data(getCurrentScope()) ? "quality_asc" : "sample_id_asc" },
         quality: { sort: "quality_asc" },
         value: { sort: "value_asc" },
         confidence: { sort: "confidence_asc" },
-        "python-debug": { tagQuery: "python, debug", sort: "quality_asc" },
         flags: { hasFlags: true, sort: "quality_asc" },
         "long-multiturn": { turnCountMin: "8", sort: "turn_count_desc" },
         "low-coverage": { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" },

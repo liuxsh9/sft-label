@@ -121,11 +121,13 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     assert 'id="explorer-flag-query"' in html
     assert 'id="explorer-conv-value-min"' in html
     assert 'id="explorer-turn-count-min"' in html
+    assert 'id="explorer-conv-selection-max"' in html
     assert 'id="explorer-observed-turn-ratio-min"' in html
     assert 'id="explorer-observed-turn-ratio-max"' in html
     assert 'id="explorer-rarity-confidence-min"' in html
     assert 'id="explorer-rarity-confidence-max"' in html
     assert 'id="explorer-source-path"' in html
+    assert 'id="explorer-max-selection"' in html
     assert 'candidate files' in html
     assert "stream large files chunk-by-chunk" in html
     assert "Preview limited to first" in html
