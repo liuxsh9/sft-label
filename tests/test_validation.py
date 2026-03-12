@@ -198,6 +198,49 @@ class TestCrossCategoryCorrection:
         assert "documentation" in cleaned["task"]
 
 
+class TestCrossDimensionRescue:
+    """Verify valid tags are rescued instead of counted as unmapped."""
+
+    def test_call1_rescues_language_from_wrong_dimension(self):
+        result = {"intent": "build", "language": [],
+                  "domain": ["go"], "task": ["feature-implementation"],
+                  "difficulty": "intermediate", "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["domain"] == []
+        assert cleaned["language"] == ["go"]
+        assert cleaned["unmapped"] == []
+        assert len(issues) == 0
+
+    def test_call2_rescues_agentic_from_concept(self):
+        result = {"concept": ["file-operations"], "agentic": [],
+                  "constraint": [], "context": "repository",
+                  "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call2")
+        assert cleaned["concept"] == []
+        assert cleaned["agentic"] == ["file-operations"]
+        assert cleaned["unmapped"] == []
+        assert len(issues) == 0
+
+    def test_raw_unmapped_string_rescues_into_current_dimension(self):
+        result = {"concept": [], "agentic": [],
+                  "constraint": [], "context": "repository",
+                  "confidence": {}, "unmapped": ["planning"]}
+        cleaned, issues = validate_tags(result, "call2")
+        assert cleaned["agentic"] == ["planning"]
+        assert cleaned["unmapped"] == []
+        assert len(issues) == 0
+
+    def test_raw_unmapped_same_dimension_alias_resolves(self):
+        result = {"intent": "debug", "language": ["python"],
+                  "domain": [], "task": [],
+                  "difficulty": "intermediate", "confidence": {},
+                  "unmapped": [{"dimension": "task", "value": "code-fixing"}]}
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["task"] == ["bug-fixing"]
+        assert cleaned["unmapped"] == []
+        assert len(issues) == 0
+
+
 class TestModifyConsistency:
     """Verify consistency rules for the modify intent tag."""
 
