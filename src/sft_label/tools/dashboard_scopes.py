@@ -53,6 +53,7 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
         "rows_pass2_invalidated": 0,
         "preserved_samples": 0,
         "tag_distributions": {},
+        "combo_distributions": {},
         "confidence_stats": {},
         "cross_matrix": {},
         "unmapped_tags": {},
@@ -89,6 +90,8 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
             bucket = merged["tag_distributions"].setdefault(dim, {})
             for tag, count in dist.items():
                 bucket[tag] = bucket.get(tag, 0) + count
+        for combo_key, count in st.get("combo_distributions", {}).items():
+            merged["combo_distributions"][combo_key] = merged["combo_distributions"].get(combo_key, 0) + count
 
         for tag, count in st.get("unmapped_tags", {}).items():
             merged["unmapped_tags"][tag] = merged["unmapped_tags"].get(tag, 0) + count
@@ -112,6 +115,7 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
 
     for dim, dist in merged["tag_distributions"].items():
         merged["tag_distributions"][dim] = dict(sorted(dist.items(), key=lambda item: -item[1]))
+    merged["combo_distributions"] = dict(sorted(merged["combo_distributions"].items(), key=lambda item: -item[1]))
 
     merged["unmapped_tags"] = dict(sorted(merged["unmapped_tags"].items(), key=lambda item: -item[1]))
     merged["unmapped_unique_count"] = len(merged["unmapped_tags"])

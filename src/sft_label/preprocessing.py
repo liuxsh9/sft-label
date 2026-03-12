@@ -92,6 +92,23 @@ def strip_cot(text):
     return text.strip()
 
 
+def extract_turn_cot_text(text):
+    """Extract explicit CoT text from a single assistant turn."""
+    cot_parts = []
+    for match in _SHAREGPT_COT_RE.finditer(text):
+        inner = match.group()
+        inner = re.sub(r'^<(?:think|thinking)>', '', inner)
+        inner = re.sub(r'</(?:think|thinking)>$', '', inner)
+        if inner.strip():
+            cot_parts.append(inner.strip())
+    for match in _PANGU_COT_RE.finditer(text):
+        inner = match.group()
+        inner = inner.replace('[unused16]', '').replace('[unused17]', '')
+        if inner.strip():
+            cot_parts.append(inner.strip())
+    return "\n\n".join(cot_parts)
+
+
 def _strip_pangu_tokens(text):
     """Remove Pangu training tokens and CoT content."""
     text = strip_cot(text)
@@ -138,6 +155,7 @@ def normalize_pangu(sample):
     conversations = []
     is_pseudo_multiturn = False
     cot_parts = []
+    assistant_cot_by_reply = []
 
     for turn in data:
         role = PANGU_ROLE_MAP.get(turn.get("role", ""), turn.get("role", ""))
@@ -149,11 +167,10 @@ def normalize_pangu(sample):
 
         # Extract COT before stripping (for Pass 2 scoring)
         if role == "gpt":
-            for match in _PANGU_COT_RE.finditer(content):
-                inner = match.group()
-                inner = inner.replace('[unused16]', '').replace('[unused17]', '')
-                if inner.strip():
-                    cot_parts.append(inner.strip())
+            turn_cot = extract_turn_cot_text(content)
+            assistant_cot_by_reply.append(turn_cot)
+            if turn_cot:
+                cot_parts.append(turn_cot)
 
         conversations.append({
             "from": role,
@@ -181,6 +198,8 @@ def normalize_pangu(sample):
     if cot_parts:
         pangu_meta["thinking_mode"] = "slow"
         pangu_meta["cot_text"] = "\n\n".join(cot_parts)
+    if assistant_cot_by_reply:
+        pangu_meta["assistant_cot_by_reply"] = assistant_cot_by_reply
     normalized["metadata"] = {**normalized["metadata"], **pangu_meta}
 
     return normalized
@@ -200,6 +219,7 @@ def normalize_and_slice(sample):
         normalized = dict(sample)
         if "conversations" in normalized:
             raw_convs = normalized["conversations"]
+            reply_cot = []
             # Detect and save COT metadata before stripping (Pangu parity)
             thinking_mode = detect_thinking_mode(raw_convs)
             if thinking_mode == "slow":
@@ -207,6 +227,11 @@ def normalize_and_slice(sample):
                 normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
                 if cot_text:
                     normalized["metadata"]["cot_text"] = cot_text
+            for turn in raw_convs:
+                if turn.get("from") == "gpt":
+                    reply_cot.append(extract_turn_cot_text(turn.get("value", "")))
+            if reply_cot:
+                normalized.setdefault("metadata", {})["assistant_cot_by_reply"] = reply_cot
             # Strip CoT from conversations
             for turn in raw_convs:
                 if turn.get("from") == "gpt" and turn.get("value"):
@@ -228,6 +253,7 @@ def normalize_and_slice(sample):
     results = []
     base_id = normalized.get("id", "")
     base_meta = normalized.get("metadata", {})
+    reply_cot = list(base_meta.get("assistant_cot_by_reply", []))
     for i, conv_slice in enumerate(slices):
         slice_meta = {
             **base_meta,
@@ -235,12 +261,14 @@ def normalize_and_slice(sample):
             "turn_index": i + 1,
             "total_turns": len(slices),
         }
-        # Per-slice thinking mode: don't inherit the whole-conversation
-        # thinking_mode/cot_text since sliced COT is not attributable
-        # to individual turns. Mark as "fast" so Pass 2 doesn't try to
-        # evaluate COT quality on content that has no visible COT.
-        slice_meta["thinking_mode"] = "fast"
-        slice_meta.pop("cot_text", None)
+        final_turn_cot = reply_cot[i] if i < len(reply_cot) else ""
+        # Preserve COT only when it belongs to this slice's final assistant reply.
+        if final_turn_cot:
+            slice_meta["thinking_mode"] = "slow"
+            slice_meta["cot_text"] = final_turn_cot
+        else:
+            slice_meta["thinking_mode"] = "fast"
+            slice_meta.pop("cot_text", None)
 
         s = {
             "id": f"{base_id}_t{i+1}",
@@ -269,7 +297,7 @@ def to_pangu_pseudo_multiturn(sample):
     - Human turns in prior context get /no_think suffix
     - GPT turns in prior context get 助手：[unused16][unused17] prefix
     - Role labels (用户：, 助手：) added
-    - COT restored for non-sliced samples with cot_text
+    - COT restored when the current final assistant turn has attributable cot_text
 
     For pseudo-multiturn samples (already packed before normalization),
     uses raw_pangu_data from metadata for faithful reconstruction.
@@ -339,14 +367,13 @@ def to_pangu_pseudo_multiturn(sample):
 
     # Build last assistant content
     response = conversations[last_reply_idx].get("value", "")
-    is_sliced = "source_id" in metadata
     cot_text = metadata.get("cot_text", "")
 
-    if cot_text and not is_sliced:
-        # Restore COT for non-sliced samples
+    if cot_text:
+        # Restore COT whenever it is attributable to the current final reply.
         assistant_content = f"[unused16]{cot_text}[unused17]{response}"
     else:
-        # Fast thinking (no COT or sliced sample)
+        # Fast thinking (no attributable COT)
         assistant_content = f"[unused16][unused17]{response}"
 
     result = {
@@ -1199,6 +1226,35 @@ def generate_sparse_schedule(n, full_label_count=8, gap_multiplier=1.3, min_gap=
 _FILE_SCOPE_RE = re.compile(r'(?:[\w./-]+\.[A-Za-z0-9]{1,8}|[\w./-]+/[\w./-]+)')
 
 
+def _normalized_char_ngrams(text, n=3, max_ngrams=256):
+    """Build a lightweight language-agnostic shingle set for semantic drift checks."""
+    normalized = re.sub(r'\s+', ' ', (text or '').lower()).strip()
+    if not normalized:
+        return set()
+    if len(normalized) <= n:
+        return {normalized}
+    total = len(normalized) - n + 1
+    step = max(total // max_ngrams, 1)
+    ngrams = []
+    for i in range(0, total, step):
+        gram = normalized[i:i + n]
+        if gram.strip():
+            ngrams.append(gram)
+        if len(ngrams) >= max_ngrams:
+            break
+    return set(ngrams)
+
+
+def _jaccard_similarity(left, right):
+    """Return Jaccard similarity between two sets."""
+    if not left or not right:
+        return None
+    union = left | right
+    if not union:
+        return None
+    return len(left & right) / len(union)
+
+
 def _current_turn_signature(sample):
     """Build lightweight structural signals for inheritance decisions."""
     convs = sample.get("conversations", [])
@@ -1228,6 +1284,12 @@ def _current_turn_signature(sample):
         "code_block_count": count_code_blocks(window_text),
         "has_file_scope": bool(_FILE_SCOPE_RE.search(window_text)),
         "role_pattern": tuple(role_pattern),
+        "request_len": len(request.strip()),
+        "response_len": len(response.strip()),
+        "window_len": len(window_text.strip()),
+        "request_ngrams": _normalized_char_ngrams(request),
+        "response_ngrams": _normalized_char_ngrams(response),
+        "window_ngrams": _normalized_char_ngrams(window_text),
     }
 
 
@@ -1270,6 +1332,34 @@ def _should_force_label(source_sample, target_sample):
     s_keywords = source_sig["keyword_groups"]
     t_keywords = target_sig["keyword_groups"]
     if s_keywords and t_keywords and s_keywords != t_keywords:
+        return True
+
+    # Semantic drift: similar structure but materially different request/answer.
+    request_similarity = _jaccard_similarity(
+        source_sig["request_ngrams"], target_sig["request_ngrams"]
+    )
+    if (request_similarity is not None
+            and min(source_sig["request_len"], target_sig["request_len"]) >= 24
+            and min(len(source_sig["request_ngrams"]), len(target_sig["request_ngrams"])) >= 8
+            and request_similarity < 0.25):
+        return True
+
+    response_similarity = _jaccard_similarity(
+        source_sig["response_ngrams"], target_sig["response_ngrams"]
+    )
+    if (response_similarity is not None
+            and min(source_sig["response_len"], target_sig["response_len"]) >= 32
+            and min(len(source_sig["response_ngrams"]), len(target_sig["response_ngrams"])) >= 8
+            and response_similarity < 0.20):
+        return True
+
+    window_similarity = _jaccard_similarity(
+        source_sig["window_ngrams"], target_sig["window_ngrams"]
+    )
+    if (window_similarity is not None
+            and min(source_sig["window_len"], target_sig["window_len"]) >= 48
+            and min(len(source_sig["window_ngrams"]), len(target_sig["window_ngrams"])) >= 12
+            and window_similarity < 0.22):
         return True
 
     return False

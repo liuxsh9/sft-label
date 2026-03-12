@@ -70,8 +70,8 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     _write_json(
         tmp_path / "conversation_scores.json",
         [
-            {"conversation_id": "conv-1", "conversation_key": "train.jsonl::conv-1", "source_file": "train.jsonl", "turn_count": 4, "conv_value": 6.8, "conv_selection": 7.1, "peak_complexity": 7},
-            {"conversation_id": "conv-2", "conversation_key": "train.jsonl::conv-2", "source_file": "train.jsonl", "turn_count": 1, "conv_value": 7.9, "conv_selection": 8.3, "peak_complexity": 6},
+            {"conversation_id": "conv-1", "conversation_key": "train.jsonl::conv-1", "source_file": "train.jsonl", "turn_count": 4, "conv_value": 6.8, "conv_selection": 7.1, "peak_complexity": 7, "conv_rarity": 6.3, "observed_turn_ratio": 0.5, "inherited_turn_ratio": 0.5, "rarity_confidence": 0.62},
+            {"conversation_id": "conv-2", "conversation_key": "train.jsonl::conv-2", "source_file": "train.jsonl", "turn_count": 1, "conv_value": 7.9, "conv_selection": 8.3, "peak_complexity": 6, "conv_rarity": 7.7, "observed_turn_ratio": 1.0, "inherited_turn_ratio": 0.0, "rarity_confidence": 0.95},
         ],
     )
     _write_json(
@@ -121,11 +121,19 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     assert 'id="explorer-flag-query"' in html
     assert 'id="explorer-conv-value-min"' in html
     assert 'id="explorer-turn-count-min"' in html
+    assert 'id="explorer-observed-turn-ratio-min"' in html
+    assert 'id="explorer-observed-turn-ratio-max"' in html
+    assert 'id="explorer-rarity-confidence-min"' in html
+    assert 'id="explorer-rarity-confidence-max"' in html
     assert 'id="explorer-source-path"' in html
     assert 'candidate files' in html
     assert "stream large files chunk-by-chunk" in html
     assert "Preview limited to first" in html
     assert "Raw JSON Preview" in html
+    assert "Observed Turn Coverage" in html
+    assert "Rarity Confidence" in html
+    assert "Low Coverage" in html
+    assert "Low Rarity Conf" in html
     assert "EXPLORER_PREVIEW_CACHE_LIMIT = 6" in html
     assert "EXPLORER_DETAIL_CACHE_LIMIT = 18" in html
     assert "restoreDashboardState();" in html
@@ -134,6 +142,8 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     preview_text = preview_asset.read_text(encoding="utf-8")
     assert '"conv_value": 6.8' in preview_text
     assert '"turn_count": 4' in preview_text
+    assert '"observed_turn_ratio": 0.5' in preview_text
+    assert '"rarity_confidence": 0.62' in preview_text
 
 
 def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Path) -> None:
@@ -146,7 +156,7 @@ def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Pa
     _write_json(
         artifact_dir / "conversation_scores.json",
         [
-            {"conversation_id": "conv-1", "conversation_key": "code/sample.jsonl::conv-1", "source_file": "code/sample.jsonl", "turn_count": 3, "conv_value": 6.5, "conv_selection": 6.9, "peak_complexity": 7},
+            {"conversation_id": "conv-1", "conversation_key": "code/sample.jsonl::conv-1", "source_file": "code/sample.jsonl", "turn_count": 3, "conv_value": 6.5, "conv_selection": 6.9, "peak_complexity": 7, "conv_rarity": 6.2, "observed_turn_ratio": 0.67, "inherited_turn_ratio": 0.33, "rarity_confidence": 0.71},
         ],
     )
     _write_json(
@@ -203,6 +213,7 @@ def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Pa
     assert "file:code/sample.jsonl" in html
     assert '"explorer"' in html
     assert "Conv Value" in html
+    assert "Observed Turn Coverage" in html
     assert "Source File" in html
     assets_dir = dashboard_path.with_suffix("").with_name(f"{dashboard_path.stem}.assets")
     assert any(path.name.startswith("preview_") for path in assets_dir.iterdir())

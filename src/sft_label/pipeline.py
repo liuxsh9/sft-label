@@ -215,6 +215,7 @@ def merge_stats(all_file_stats):
         "rows_migrated": 0, "rows_pass2_invalidated": 0,
         "preserved_samples": 0,
         "tag_distributions": {},
+        "combo_distributions": {},
         "confidence_stats": {},
         "cross_matrix": {},
         "unmapped_tags": {},
@@ -237,6 +238,8 @@ def merge_stats(all_file_stats):
                 merged["tag_distributions"][dim] = {}
             for tag, count in dist.items():
                 merged["tag_distributions"][dim][tag] = merged["tag_distributions"][dim].get(tag, 0) + count
+        for combo_key, count in st.get("combo_distributions", {}).items():
+            merged["combo_distributions"][combo_key] = merged["combo_distributions"].get(combo_key, 0) + count
         # Merge unmapped
         for tag, count in st.get("unmapped_tags", {}).items():
             merged["unmapped_tags"][tag] = merged["unmapped_tags"].get(tag, 0) + count
@@ -260,6 +263,7 @@ def merge_stats(all_file_stats):
     # Sort distributions and unmapped
     for dim in merged["tag_distributions"]:
         merged["tag_distributions"][dim] = dict(sorted(merged["tag_distributions"][dim].items(), key=lambda x: -x[1]))
+    merged["combo_distributions"] = dict(sorted(merged["combo_distributions"].items(), key=lambda x: -x[1]))
     merged["unmapped_tags"] = dict(sorted(merged["unmapped_tags"].items(), key=lambda x: -x[1]))
     merged["unmapped_unique_count"] = len(merged["unmapped_tags"])
 
@@ -1098,6 +1102,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
         if is_usable_labels(labels) and idx not in inherited_indices
     )
 
+    combo_counts = {}
     distributions = {}
     for dim in ["intent", "language", "domain", "concept", "task", "agentic", "constraint", "context", "difficulty"]:
         dist = {}
@@ -1111,6 +1116,13 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
             elif val:
                 dist[val] = dist.get(val, 0) + 1
         distributions[dim] = dict(sorted(dist.items(), key=lambda x: -x[1]))
+
+    for idx, labels in enumerate(all_labels):
+        if not is_usable_labels(labels) or idx in inherited_indices:
+            continue
+        combo_key = _combo_key_from_labels(labels)
+        if combo_key:
+            combo_counts[combo_key] = combo_counts.get(combo_key, 0) + 1
 
     all_unmapped = {}
     for idx, labels in enumerate(all_labels):
@@ -1167,6 +1179,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
              for d in set(lc["dim"] for m in all_monitors for lc in m.get("low_confidence_dims", []))}.items(),
             key=lambda x: -x[1])),
         "tag_distributions": distributions,
+        "combo_distributions": dict(sorted(combo_counts.items(), key=lambda x: -x[1])),
         "cross_matrix": cross,
     }
 
@@ -1623,6 +1636,7 @@ class StatsAccumulator:
         self.consistency_warning_count = 0
 
         self.distributions = {dim: {} for dim in self.DIMS}
+        self.combo_counts = {}
         self.unmapped = {}
         self.cross_matrix = {}
 
@@ -1674,6 +1688,9 @@ class StatsAccumulator:
                         self.distributions[dim][v] = self.distributions[dim].get(v, 0) + 1
                 elif val:
                     self.distributions[dim][val] = self.distributions[dim].get(val, 0) + 1
+            combo_key = _combo_key_from_labels(labels)
+            if combo_key:
+                self.combo_counts[combo_key] = self.combo_counts.get(combo_key, 0) + 1
             # Unmapped
             for item in labels.get("unmapped", []):
                 key = f"{item.get('dimension', '?')}:{item.get('value', '?')}" if isinstance(item, dict) else str(item)
@@ -1746,6 +1763,7 @@ class StatsAccumulator:
             "confidence_stats": conf_stats,
             "low_confidence_frequency": dict(sorted(self.low_conf_freq.items(), key=lambda x: -x[1])),
             "tag_distributions": sorted_dist,
+            "combo_distributions": dict(sorted(self.combo_counts.items(), key=lambda x: -x[1])),
             "cross_matrix": self.cross_matrix,
         }
         if self.sparse_inherited > 0:
@@ -1753,6 +1771,44 @@ class StatsAccumulator:
             result["sparse_inherited"] = self.sparse_inherited
 
         return result
+
+
+def _normalize_combo_dim(labels, dim, limit):
+    """Normalize one combo-key dimension into a bounded list of string tags."""
+    value = labels.get(dim)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    cleaned = sorted({item for item in value if isinstance(item, str) and item})
+    if limit > 0:
+        return cleaned[:limit]
+    return cleaned
+
+
+def _combo_key_from_labels(labels):
+    """Build the richer combo key used by Pass 2 rarity baselines."""
+    parts = []
+    for dim in ("intent", "difficulty", "context"):
+        value = labels.get(dim)
+        if isinstance(value, str) and value:
+            parts.append(f"{dim}={value}")
+
+    for dim, limit in (
+        ("language", 2),
+        ("domain", 2),
+        ("task", 2),
+        ("concept", 3),
+        ("agentic", 2),
+        ("constraint", 2),
+    ):
+        values = _normalize_combo_dim(labels, dim, limit)
+        if values:
+            parts.append(f"{dim}={','.join(values)}")
+
+    if not parts:
+        return None
+    return "|".join(parts)
 
 
 @dataclass

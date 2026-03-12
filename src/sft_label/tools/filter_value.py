@@ -44,6 +44,8 @@ class FilterConfig:
     conv_value_min: float | None = None     # min conversation-level value
     conv_selection_min: float | None = None  # min conversation-level selection
     peak_complexity_min: float | None = None # min peak complexity across turns
+    rarity_confidence_min: float | None = None  # min conversation rarity confidence
+    observed_turn_ratio_min: float | None = None  # min directly-labeled turn coverage
     # Turn count criteria (multi-turn only)
     turn_count_min: int | None = None       # min total_turns in conversation
     turn_count_max: int | None = None       # max total_turns in conversation
@@ -265,6 +267,14 @@ def _matches_conv_criteria(conv_record, config):
         pc = conv_record.get("peak_complexity")
         if pc is None or pc < config.peak_complexity_min:
             return False
+    if config.rarity_confidence_min is not None:
+        rc = conv_record.get("rarity_confidence")
+        if rc is None or rc < config.rarity_confidence_min:
+            return False
+    if config.observed_turn_ratio_min is not None:
+        otr = conv_record.get("observed_turn_ratio")
+        if otr is None or otr < config.observed_turn_ratio_min:
+            return False
     if config.turn_count_min is not None:
         tc = conv_record.get("turn_count")
         if tc is None or tc < config.turn_count_min:
@@ -282,6 +292,8 @@ def _has_conv_criteria(config):
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
         config.peak_complexity_min is not None,
+        config.rarity_confidence_min is not None,
+        config.observed_turn_ratio_min is not None,
         config.turn_count_min is not None,
         config.turn_count_max is not None,
     ])
@@ -676,6 +688,10 @@ def _build_suffix(config):
         parts.append(f"cs{config.conv_selection_min:g}")
     if config.peak_complexity_min is not None:
         parts.append(f"pc{config.peak_complexity_min:g}")
+    if config.rarity_confidence_min is not None:
+        parts.append(f"rc{config.rarity_confidence_min:g}")
+    if config.observed_turn_ratio_min is not None:
+        parts.append(f"otr{config.observed_turn_ratio_min:g}")
     if config.turn_count_min is not None:
         parts.append(f"tc{config.turn_count_min}")
     if config.turn_count_max is not None:
@@ -710,6 +726,10 @@ def _build_filter_desc(config):
         criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
     if config.peak_complexity_min is not None:
         criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
+    if config.rarity_confidence_min is not None:
+        criteria.append(f"rarity_confidence >= {config.rarity_confidence_min:g}")
+    if config.observed_turn_ratio_min is not None:
+        criteria.append(f"observed_turn_ratio >= {config.observed_turn_ratio_min:g}")
     if config.turn_count_min is not None:
         criteria.append(f"turn_count >= {config.turn_count_min}")
     if config.turn_count_max is not None:

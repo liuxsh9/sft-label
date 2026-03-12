@@ -277,6 +277,10 @@ const STATE = {
       convSelectionMin: "",
       peakComplexityMin: "",
       turnCountMin: "",
+      observedTurnRatioMin: "",
+      observedTurnRatioMax: "",
+      rarityConfidenceMin: "",
+      rarityConfidenceMax: "",
       minValue: "",
       maxValue: "",
       maxQuality: "",
@@ -532,6 +536,10 @@ function resetExplorerView(resetQuery = false) {
       convSelectionMin: "",
       peakComplexityMin: "",
       turnCountMin: "",
+      observedTurnRatioMin: "",
+      observedTurnRatioMax: "",
+      rarityConfidenceMin: "",
+      rarityConfidenceMax: "",
       minValue: "",
       maxValue: "",
       maxQuality: "",
@@ -1035,6 +1043,10 @@ function parseExplorerQueryFromDom() {
     convSelectionMin: (document.getElementById("explorer-conv-selection-min") || {}).value || "",
     peakComplexityMin: (document.getElementById("explorer-peak-complexity-min") || {}).value || "",
     turnCountMin: (document.getElementById("explorer-turn-count-min") || {}).value || "",
+    observedTurnRatioMin: (document.getElementById("explorer-observed-turn-ratio-min") || {}).value || "",
+    observedTurnRatioMax: (document.getElementById("explorer-observed-turn-ratio-max") || {}).value || "",
+    rarityConfidenceMin: (document.getElementById("explorer-rarity-confidence-min") || {}).value || "",
+    rarityConfidenceMax: (document.getElementById("explorer-rarity-confidence-max") || {}).value || "",
     minValue: (document.getElementById("explorer-min-value") || {}).value || "",
     maxValue: (document.getElementById("explorer-max-value") || {}).value || "",
     maxQuality: (document.getElementById("explorer-max-quality") || {}).value || "",
@@ -1099,6 +1111,14 @@ function rowMatchesExplorerQuery(row, query) {
   if (convSelectionMin !== null && (row.conv_selection === null || row.conv_selection === undefined || Number(row.conv_selection) < convSelectionMin)) return false;
   const peakComplexityMin = parseNumber(query.peakComplexityMin);
   if (peakComplexityMin !== null && (row.peak_complexity === null || row.peak_complexity === undefined || Number(row.peak_complexity) < peakComplexityMin)) return false;
+  const observedTurnRatioMin = parseNumber(query.observedTurnRatioMin);
+  if (observedTurnRatioMin !== null && (row.observed_turn_ratio === null || row.observed_turn_ratio === undefined || Number(row.observed_turn_ratio) < observedTurnRatioMin)) return false;
+  const observedTurnRatioMax = parseNumber(query.observedTurnRatioMax);
+  if (observedTurnRatioMax !== null && (row.observed_turn_ratio === null || row.observed_turn_ratio === undefined || Number(row.observed_turn_ratio) > observedTurnRatioMax)) return false;
+  const rarityConfidenceMin = parseNumber(query.rarityConfidenceMin);
+  if (rarityConfidenceMin !== null && (row.rarity_confidence === null || row.rarity_confidence === undefined || Number(row.rarity_confidence) < rarityConfidenceMin)) return false;
+  const rarityConfidenceMax = parseNumber(query.rarityConfidenceMax);
+  if (rarityConfidenceMax !== null && (row.rarity_confidence === null || row.rarity_confidence === undefined || Number(row.rarity_confidence) > rarityConfidenceMax)) return false;
   const maxValue = parseNumber(query.maxValue);
   if (maxValue !== null && (row.value_score === null || row.value_score === undefined || Number(row.value_score) > maxValue)) return false;
   const maxQuality = parseNumber(query.maxQuality);
@@ -1138,6 +1158,10 @@ function compareExplorerRows(left, right, sortKey) {
     conv_value_desc: ["conv_value", -1],
     conv_selection_desc: ["conv_selection", -1],
     turn_count_desc: ["turn_count", -1],
+    observed_turn_ratio_asc: ["observed_turn_ratio", 1],
+    observed_turn_ratio_desc: ["observed_turn_ratio", -1],
+    rarity_confidence_asc: ["rarity_confidence", 1],
+    rarity_confidence_desc: ["rarity_confidence", -1],
     rarity_desc: ["rarity_score", -1],
   };
   if (sortKey === "sample_id_asc") {
@@ -1223,6 +1247,10 @@ function setExplorerPreset(preset) {
     convSelectionMin: "",
     peakComplexityMin: "",
     turnCountMin: "",
+    observedTurnRatioMin: "",
+    observedTurnRatioMax: "",
+    rarityConfidenceMin: "",
+    rarityConfidenceMax: "",
     minValue: "",
     maxValue: "",
     maxQuality: "",
@@ -1635,6 +1663,8 @@ function renderConversations(conversation) {
     {label: "Conv Selection", value: fmt(conversation.mean_conv_selection, 1), className: scoreClass(conversation.mean_conv_selection)},
     {label: "Peak Complexity", value: fmt(conversation.mean_peak_complexity, 1), className: scoreClass(conversation.mean_peak_complexity)},
     {label: "Mean Turns", value: fmt(conversation.mean_turns, 1)},
+    {label: "Observed Ratio", value: fmt((conversation.mean_observed_turn_ratio || 0) * 100, 0) + "%", sub: `${fmtInt(conversation.low_observed_coverage_count || 0)} convs < 50% observed`},
+    {label: "Rarity Confidence", value: fmt((conversation.mean_rarity_confidence || 0), 2), sub: `${fmtInt(conversation.low_rarity_confidence_count || 0)} convs < 0.60`},
   ];
 
   let body = renderCards(cards);
@@ -1662,6 +1692,26 @@ function renderConversations(conversation) {
     }));
     histBlocks.push(`<div class="mini-panel"><h4>Turn Distribution</h4>${renderBarChart(items, "#0f766e", null, (item) => ({ turnCountMin: String(item.turns), sort: "turn_count_desc" }))}</div>`);
   }
+  const observedBands = conversation.observed_turn_ratio_bands || {};
+  if (Object.keys(observedBands).length) {
+    const items = Object.entries(observedBands).map(([label, count], index) => ({
+      label,
+      value: count,
+      display: `${count}`,
+      threshold: [0.0, 0.25, 0.5, 0.75][index] ?? 0.0,
+    }));
+    histBlocks.push(`<div class="mini-panel"><h4>Observed Turn Coverage</h4>${renderBarChart(items, "#0f766e", null, (item) => ({ observedTurnRatioMin: String(item.threshold), sort: "observed_turn_ratio_desc" }))}</div>`);
+  }
+  const rarityBands = conversation.rarity_confidence_bands || {};
+  if (Object.keys(rarityBands).length) {
+    const items = Object.entries(rarityBands).map(([label, count], index) => ({
+      label,
+      value: count,
+      display: `${count}`,
+      threshold: [0.0, 0.25, 0.5, 0.75][index] ?? 0.0,
+    }));
+    histBlocks.push(`<div class="mini-panel"><h4>Rarity Confidence</h4>${renderBarChart(items, "#7c3aed", null, (item) => ({ rarityConfidenceMin: String(item.threshold), sort: "rarity_confidence_desc" }))}</div>`);
+  }
   if (histBlocks.length) {
     body += `<div class="grid" style="margin-top:14px">${histBlocks.join("")}</div>`;
   }
@@ -1677,6 +1727,10 @@ function explorerSortOptions() {
     ["conv_value_desc", "Conv Value Desc"],
     ["conv_selection_desc", "Conv Selection Desc"],
     ["turn_count_desc", "Turn Count Desc"],
+    ["observed_turn_ratio_asc", "Observed Ratio Asc"],
+    ["observed_turn_ratio_desc", "Observed Ratio Desc"],
+    ["rarity_confidence_asc", "Rarity Confidence Asc"],
+    ["rarity_confidence_desc", "Rarity Confidence Desc"],
     ["rarity_desc", "Rarity Desc"],
     ["sample_id_asc", "Sample Id"],
   ];
@@ -1695,6 +1749,10 @@ function explorerQueryHasFilters(query) {
     query.convSelectionMin,
     query.peakComplexityMin,
     query.turnCountMin,
+    query.observedTurnRatioMin,
+    query.observedTurnRatioMax,
+    query.rarityConfidenceMin,
+    query.rarityConfidenceMax,
     query.minValue,
     query.maxValue,
     query.maxQuality,
@@ -1721,12 +1779,14 @@ function renderExplorerResults(rows) {
       <td>${row.quality_overall === null || row.quality_overall === undefined ? "-" : `<span class="${scoreClass(row.quality_overall)}">${fmt(row.quality_overall, 1)}</span>`}</td>
       <td>${row.selection_score === null || row.selection_score === undefined ? "-" : fmt(row.selection_score, 1)}</td>
       <td>${row.conv_value === null || row.conv_value === undefined ? "-" : `<span class="${scoreClass(row.conv_value)}">${fmt(row.conv_value, 1)}</span>`}</td>
+      <td>${row.observed_turn_ratio === null || row.observed_turn_ratio === undefined ? "-" : fmt(row.observed_turn_ratio, 2)}</td>
+      <td>${row.rarity_confidence === null || row.rarity_confidence === undefined ? "-" : fmt(row.rarity_confidence, 2)}</td>
       <td>${row.turn_count === null || row.turn_count === undefined ? "-" : fmtInt(row.turn_count)}</td>
       <td title="${escapeHtml(row.source_file || row.scope_path || "")}"><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ sourcePath: row.scope_path || row.source_file || "", sort: "quality_asc" })}">${escapeHtml(row.scope_path || row.source_file || "-")}</button></td>
     </tr>`;
   }).join("");
   return `<div class="result-table-wrap"><table class="data-table">
-    <thead><tr><th>Sample</th><th>Query</th><th>Response</th><th>Tags</th><th>Value</th><th>Quality</th><th>Selection</th><th>Conv Value</th><th>Turns</th><th>Source</th></tr></thead>
+    <thead><tr><th>Sample</th><th>Query</th><th>Response</th><th>Tags</th><th>Value</th><th>Quality</th><th>Selection</th><th>Conv Value</th><th>Observed</th><th>Rarity Conf</th><th>Turns</th><th>Source</th></tr></thead>
     <tbody>${body}</tbody>
   </table></div>`;
 }
@@ -1755,6 +1815,9 @@ function renderExplorerDrawer() {
       ["Selection", value.selection_score],
       ["Conv Value", (detail.conversation || {}).conv_value],
       ["Conv Sel", (detail.conversation || {}).conv_selection],
+      ["Conv Rarity", (detail.conversation || {}).conv_rarity],
+      ["Observed", (detail.conversation || {}).observed_turn_ratio],
+      ["Rarity Conf", (detail.conversation || {}).rarity_confidence],
       ["Confidence", value.confidence],
       ["Thinking", value.thinking_mode || ((detail.metadata || {}).thinking_mode || "")],
       ["Turns", (detail.conversation || {}).turn_count || (detail.metadata || {}).total_turns || (detail.conversations || []).length],
@@ -1793,6 +1856,8 @@ function renderExplorer(scope) {
     { id: "python-debug", label: "Python + Debug", query: { tagQuery: "python, debug", sort: "quality_asc" } },
     { id: "flags", label: "Has Flags", query: { hasFlags: true, sort: "quality_asc" } },
     { id: "long-multiturn", label: "Long Multi-turn", query: { turnCountMin: "8", sort: "turn_count_desc" } },
+    { id: "low-coverage", label: "Low Coverage", query: { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" } },
+    { id: "low-rarity-confidence", label: "Low Rarity Conf", query: { rarityConfidenceMax: "0.60", sort: "rarity_confidence_asc" } },
   ];
   const status = STATE.explorer.busy
     ? `Scanning ${fmtInt(STATE.explorer.scopeDone)}/${fmtInt(STATE.explorer.scopeTotal)} files · ${fmtInt(STATE.explorer.scanned)} rows checked · ${fmtInt(STATE.explorer.matched)} matches`
@@ -1818,6 +1883,10 @@ function renderExplorer(scope) {
       <div class="field"><label>Conv Sel ≥</label><input id="explorer-conv-selection-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMin)}"></div>
       <div class="field"><label>Peak Cplx ≥</label><input id="explorer-peak-complexity-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.peakComplexityMin)}"></div>
       <div class="field"><label>Turns ≥</label><input id="explorer-turn-count-min" type="number" min="1" step="1" value="${escapeHtml(query.turnCountMin)}"></div>
+      <div class="field"><label>Observed Ratio ≥</label><input id="explorer-observed-turn-ratio-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMin)}"></div>
+      <div class="field"><label>Observed Ratio ≤</label><input id="explorer-observed-turn-ratio-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMax)}"></div>
+      <div class="field"><label>Rarity Conf ≥</label><input id="explorer-rarity-confidence-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMin)}"></div>
+      <div class="field"><label>Rarity Conf ≤</label><input id="explorer-rarity-confidence-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMax)}"></div>
       <div class="field"><label>Value ≥</label><input id="explorer-min-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minValue)}"></div>
       <div class="field"><label>Value ≤</label><input id="explorer-max-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxValue)}"></div>
       <div class="field"><label>Quality ≤</label><input id="explorer-max-quality" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxQuality)}"></div>
@@ -1918,12 +1987,17 @@ function renderScope() {
   document.querySelectorAll("[data-explorer-preset]").forEach((node) => {
     node.addEventListener("click", async () => {
       const presetId = node.getAttribute("data-explorer-preset");
-      if (presetId === "quality") setExplorerPreset({ sort: "quality_asc" });
-      if (presetId === "value") setExplorerPreset({ sort: "value_asc" });
-      if (presetId === "confidence") setExplorerPreset({ sort: "confidence_asc" });
-      if (presetId === "python-debug") setExplorerPreset({ tagQuery: "python, debug", sort: "quality_asc" });
-      if (presetId === "flags") setExplorerPreset({ hasFlags: true, sort: "quality_asc" });
-      if (presetId === "long-multiturn") setExplorerPreset({ turnCountMin: "8", sort: "turn_count_desc" });
+      const presetMap = {
+        quality: { sort: "quality_asc" },
+        value: { sort: "value_asc" },
+        confidence: { sort: "confidence_asc" },
+        "python-debug": { tagQuery: "python, debug", sort: "quality_asc" },
+        flags: { hasFlags: true, sort: "quality_asc" },
+        "long-multiturn": { turnCountMin: "8", sort: "turn_count_desc" },
+        "low-coverage": { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" },
+        "low-rarity-confidence": { rarityConfidenceMax: "0.60", sort: "rarity_confidence_asc" },
+      };
+      if (presetMap[presetId]) setExplorerPreset(presetMap[presetId]);
       await runExplorerQuery();
     });
   });

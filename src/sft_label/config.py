@@ -154,6 +154,10 @@ CONV_QUALITY_PENALTIES = {3: 0.5, 5: 0.8} # quality_floor < key → penalty mult
 CONV_QUALITY_PENALTY_DEFAULT = 1.0        # penalty when floor >= max(keys)
 CONV_FLAG_PENALTY_BASE = 0.95             # 0.95 ^ len(negative_flags)
 CONV_AGENTIC_QUALITY_PERCENTILE = 0.1     # use p10 instead of min for agentic conversations
+CONV_RARITY_MEAN_WEIGHT = 0.75            # weighted mean rarity remains the main signal
+CONV_RARITY_PEAK_WEIGHT = 0.25            # preserve one genuinely rare turn without max-pooling
+CONV_RARITY_DIVERSITY_BONUS = 0.4         # reward conversations that traverse distinct label states
+CONV_COVERAGE_CONFIDENCE_FLOOR = 0.35     # all-inherited conversations shrink high scores toward neutral
 
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)

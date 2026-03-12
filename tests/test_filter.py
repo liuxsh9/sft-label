@@ -932,6 +932,40 @@ class TestConversationFilter:
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 0
 
+    def test_rarity_confidence_min(self, tmp_path):
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        conv_records = [
+            {
+                "conversation_id": "c1",
+                "conv_value": 7.0,
+                "conv_selection": 7.0,
+                "peak_complexity": 6,
+                "rarity_confidence": 0.45,
+                "observed_turn_ratio": 1.0,
+            },
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(rarity_confidence_min=0.6)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+
+    def test_observed_turn_ratio_min(self, tmp_path):
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        conv_records = [
+            {
+                "conversation_id": "c1",
+                "conv_value": 8.0,
+                "conv_selection": 8.0,
+                "peak_complexity": 7,
+                "rarity_confidence": 0.9,
+                "observed_turn_ratio": 0.4,
+            },
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(observed_turn_ratio_min=0.5)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+
     def test_single_turn_unaffected(self, tmp_path):
         """Single-turn samples should not be affected by conv criteria."""
         samples = [

@@ -27,6 +27,7 @@ from sft_label.conversation import (
 def _slice(source_id, turn_index, total_turns, value_score=6.0,
            complexity=5, quality=6, reasoning=5, rarity=4.0,
            inherited=False, flags=None, labels=None, thinking_mode=None,
+           score_confidence=None,
            source_file=None):
     """Build a minimal multi-turn slice sample."""
     s = {
@@ -53,6 +54,8 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
         s["labels"]["inherited"] = True
     if thinking_mode:
         s["value"]["thinking_mode"] = thinking_mode
+    if score_confidence is not None:
+        s["value"]["confidence"] = score_confidence
     if source_file:
         s["metadata"]["source_file"] = source_file
     return s
@@ -292,6 +295,52 @@ class TestAggregateConversation:
         rec = aggregate_conversation("c", slices)
         assert 1.0 <= rec["conv_value"] <= 10.0
 
+    def test_low_score_confidence_shrinks_conv_value(self):
+        high_conf = aggregate_conversation("c", [
+            _slice("c", 1, 2, value_score=9.0, quality=9, reasoning=9, score_confidence=0.95),
+            _slice("c", 2, 2, value_score=9.0, quality=9, reasoning=9, score_confidence=0.95),
+        ])
+        low_conf = aggregate_conversation("c", [
+            _slice("c", 1, 2, value_score=9.0, quality=9, reasoning=9, score_confidence=0.2),
+            _slice("c", 2, 2, value_score=9.0, quality=9, reasoning=9, score_confidence=0.2),
+        ])
+        assert low_conf["conv_value"] < high_conf["conv_value"]
+
+    def test_conv_rarity_rewards_observed_label_diversity(self):
+        uniform = aggregate_conversation("uniform", [
+            _slice("uniform", 1, 3, rarity=7.0,
+                   labels={"intent": "build", "difficulty": "intermediate", "language": ["python"]}),
+            _slice("uniform", 2, 3, rarity=7.0,
+                   labels={"intent": "build", "difficulty": "intermediate", "language": ["python"]}),
+            _slice("uniform", 3, 3, rarity=7.0,
+                   labels={"intent": "build", "difficulty": "intermediate", "language": ["python"]}),
+        ])
+        diverse = aggregate_conversation("diverse", [
+            _slice("diverse", 1, 3, rarity=7.0,
+                   labels={"intent": "build", "difficulty": "intermediate", "language": ["python"]}),
+            _slice("diverse", 2, 3, rarity=7.0,
+                   labels={"intent": "debug", "difficulty": "advanced", "language": ["rust"]}),
+            _slice("diverse", 3, 3, rarity=7.0,
+                   labels={"intent": "modify", "difficulty": "advanced", "language": ["go"]}),
+        ])
+        assert diverse["conv_rarity"] > uniform["conv_rarity"]
+        assert diverse["detail"]["label_signature_count"] > uniform["detail"]["label_signature_count"]
+
+    def test_conv_rarity_shrinks_when_inheritance_dominates(self):
+        observed = aggregate_conversation("observed", [
+            _slice("observed", 1, 3, rarity=8.5, score_confidence=0.95),
+            _slice("observed", 2, 3, rarity=8.5, score_confidence=0.95),
+            _slice("observed", 3, 3, rarity=8.5, score_confidence=0.95),
+        ])
+        inherited = aggregate_conversation("inherited", [
+            _slice("inherited", 1, 3, rarity=8.5, score_confidence=0.95, inherited=True),
+            _slice("inherited", 2, 3, rarity=8.5, score_confidence=0.95, inherited=True),
+            _slice("inherited", 3, 3, rarity=8.5, score_confidence=0.95, inherited=True),
+        ])
+        assert inherited["conv_rarity"] < observed["conv_rarity"]
+        assert inherited["rarity_confidence"] < observed["rarity_confidence"]
+        assert inherited["observed_turn_ratio"] < observed["observed_turn_ratio"]
+
 
 # ── TestComputeConvSelectionScores ──
 
@@ -317,6 +366,32 @@ class TestComputeConvSelectionScores:
 
     def test_empty_input(self):
         compute_conv_selection_scores([])  # should not raise
+
+    def test_selection_shrinks_when_inheritance_bias_is_high(self):
+        observed = [
+            aggregate_conversation(
+                f"obs{i}",
+                [
+                    _slice(f"obs{i}", 1, 2, value_score=9.0, quality=9, reasoning=9, rarity=8.5, score_confidence=0.95),
+                    _slice(f"obs{i}", 2, 2, value_score=9.0, quality=9, reasoning=9, rarity=8.5, score_confidence=0.95),
+                ],
+            )
+            for i in range(5)
+        ]
+        inherited = [
+            aggregate_conversation(
+                f"inh{i}",
+                [
+                    _slice(f"inh{i}", 1, 2, value_score=9.0, quality=9, reasoning=9, rarity=8.5, score_confidence=0.95, inherited=True),
+                    _slice(f"inh{i}", 2, 2, value_score=9.0, quality=9, reasoning=9, rarity=8.5, score_confidence=0.95, inherited=True),
+                ],
+            )
+            for i in range(5)
+        ]
+        records = observed + inherited
+        compute_conv_selection_scores(records)
+        assert inherited[0]["conv_selection"] < observed[0]["conv_selection"]
+        assert inherited[0]["detail"]["selection_confidence"] < observed[0]["detail"]["selection_confidence"]
 
 
 # ── TestAggregateConversations ──

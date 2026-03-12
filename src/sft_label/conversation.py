@@ -19,6 +19,10 @@ from sft_label.config import (
     CONV_QUALITY_PENALTY_DEFAULT,
     CONV_FLAG_PENALTY_BASE,
     CONV_AGENTIC_QUALITY_PERCENTILE,
+    CONV_RARITY_MEAN_WEIGHT,
+    CONV_RARITY_PEAK_WEIGHT,
+    CONV_RARITY_DIVERSITY_BONUS,
+    CONV_COVERAGE_CONFIDENCE_FLOOR,
     VALUE_WEIGHTS,
     RARITY_WEIGHTS,
     SELECTION_INTRA_WEIGHT,
@@ -28,6 +32,7 @@ from sft_label.config import (
     KNOWN_FLAGS_NEGATIVE,
 )
 from sft_label.labels import LABEL_META_KEYS
+from sft_label.score_confidence import apply_score_confidence, score_confidence
 
 
 def build_conversation_key(source_id, source_file=None):
@@ -122,6 +127,12 @@ def _effective_weights(slices):
         conf = CONV_CONFIDENCE_INHERITED if labels.get("inherited") else 1.0
         weights.append(pw * conf)
     return weights
+
+
+def _position_weights(slices):
+    """Return raw position weights without inherited confidence discount."""
+    n = len(slices)
+    return [_position_weight(i, n) for i, _s in enumerate(slices)]
 
 
 def _weighted_average(slices, weights, extract_fn):
@@ -231,6 +242,129 @@ def _merge_labels(slices):
     return merged
 
 
+def _label_signature(labels):
+    """Build a stable label-state signature for trajectory diversity."""
+    if not isinstance(labels, dict):
+        return ()
+
+    parts = []
+    for dim in sorted(_SINGLE_SELECT_DIMS | _MULTI_SELECT_DIMS):
+        if dim in _SINGLE_SELECT_DIMS:
+            value = labels.get(dim)
+            if isinstance(value, str) and value:
+                parts.append((dim, value))
+            continue
+
+        value = labels.get(dim)
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            continue
+        cleaned = tuple(sorted({item for item in value if isinstance(item, str) and item}))
+        if cleaned:
+            parts.append((dim, cleaned))
+
+    return tuple(parts)
+
+
+def _coverage_metrics(slices):
+    """Estimate how much of a conversation is directly labeled vs inherited."""
+    if not slices:
+        return {
+            "observed_turns": 0,
+            "inherited_turns": 0,
+            "observed_turn_ratio": 0.0,
+            "inherited_turn_ratio": 0.0,
+            "observed_weight_ratio": 0.0,
+            "coverage_confidence": CONV_COVERAGE_CONFIDENCE_FLOOR,
+        }
+
+    raw_weights = _position_weights(slices)
+    total_weight = sum(raw_weights) or 1.0
+
+    observed_turns = 0
+    inherited_turns = 0
+    observed_weight = 0.0
+
+    for s, raw_weight in zip(slices, raw_weights):
+        labels = s.get("labels") or {}
+        if labels.get("inherited"):
+            inherited_turns += 1
+        else:
+            observed_turns += 1
+            observed_weight += raw_weight
+
+    observed_turn_ratio = observed_turns / len(slices)
+    observed_weight_ratio = observed_weight / total_weight
+    coverage_confidence = (
+        CONV_COVERAGE_CONFIDENCE_FLOOR
+        + (1.0 - CONV_COVERAGE_CONFIDENCE_FLOOR) * observed_weight_ratio
+    )
+
+    return {
+        "observed_turns": observed_turns,
+        "inherited_turns": inherited_turns,
+        "observed_turn_ratio": observed_turn_ratio,
+        "inherited_turn_ratio": inherited_turns / len(slices),
+        "observed_weight_ratio": observed_weight_ratio,
+        "coverage_confidence": min(1.0, max(0.0, coverage_confidence)),
+    }
+
+
+def _compute_conv_rarity(slices, weights, score_conf):
+    """Aggregate conversation rarity with diversity and inheritance shrinkage."""
+    rarity_values = []
+    for s, weight in zip(slices, weights):
+        rarity = ((s.get("value") or {}).get("rarity") or {}).get("score")
+        if rarity is None:
+            continue
+        labels = s.get("labels") or {}
+        rarity_values.append((rarity, weight, bool(labels.get("inherited"))))
+
+    if not rarity_values:
+        return None, {}
+
+    total_weight = sum(weight for _rarity, weight, _inherited in rarity_values) or 1.0
+    rarity_mean = sum(rarity * weight for rarity, weight, _inherited in rarity_values) / total_weight
+
+    observed_rarities = [rarity for rarity, _weight, inherited in rarity_values if not inherited]
+    rarity_peak = max(observed_rarities) if observed_rarities else max(rarity for rarity, _weight, _inherited in rarity_values)
+
+    signatures = {
+        _label_signature(s.get("labels") or {})
+        for s in slices
+        if not (s.get("labels") or {}).get("inherited")
+    }
+    signatures.discard(())
+    signature_count = len(signatures)
+    transition_scale = max(len(slices) - 1, 1)
+    diversity_ratio = min(1.0, max(0.0, (signature_count - 1) / transition_scale))
+    diversity_bonus = CONV_RARITY_DIVERSITY_BONUS * diversity_ratio
+
+    coverage = _coverage_metrics(slices)
+    rarity_conf = min(
+        1.0,
+        0.5 * coverage["coverage_confidence"] + 0.5 * max(0.0, min(1.0, score_conf or 1.0)),
+    )
+
+    raw_rarity = (
+        CONV_RARITY_MEAN_WEIGHT * rarity_mean
+        + CONV_RARITY_PEAK_WEIGHT * rarity_peak
+        + diversity_bonus
+    )
+    conv_rarity = apply_score_confidence(min(10.0, raw_rarity), rarity_conf)
+    conv_rarity = max(1.0, min(10.0, conv_rarity))
+
+    return conv_rarity, {
+        "rarity_mean": rarity_mean,
+        "rarity_peak": rarity_peak,
+        "rarity_diversity_bonus": diversity_bonus,
+        "label_signature_count": signature_count,
+        "rarity_confidence": rarity_conf,
+        **coverage,
+    }
+
+
 # ─── Pure quality from slice ─────────────────────────────
 
 def _compute_pure_quality_from_slice(s):
@@ -268,6 +402,7 @@ def _compute_pure_quality_from_slice(s):
     # The sample-level _extract_pure_quality (in scoring.py) keeps its own
     # 0.7× penalty because it feeds directly into selection_score.
 
+    pq = apply_score_confidence(pq, score_confidence(v))
     return pq
 
 
@@ -308,8 +443,14 @@ def aggregate_conversation(conversation_key, slices):
     # Penalty
     penalty, quality_floor, neg_flags = _compute_penalty(slices)
 
+    score_conf = _weighted_average(
+        slices, weights,
+        lambda s: score_confidence(s.get("value") or {}, default=1.0)
+    )
+
     # conv_value = q_base × penalty, clamped to [1, 10]
-    conv_value = max(1.0, min(10.0, q_base * penalty))
+    conv_value = apply_score_confidence(q_base * penalty, score_conf)
+    conv_value = max(1.0, min(10.0, conv_value))
 
     # Peak complexity
     complexities = []
@@ -320,11 +461,9 @@ def aggregate_conversation(conversation_key, slices):
             complexities.append(c)
     peak_complexity = max(complexities) if complexities else None
 
-    # Weighted rarity
-    conv_rarity = _weighted_average(
-        slices, weights,
-        lambda s: ((s.get("value") or {}).get("rarity") or {}).get("score")
-    )
+    # Conversation rarity: weighted mean + peak + label-state diversity,
+    # then shrink when the conversation is dominated by inherited slices.
+    conv_rarity, rarity_detail = _compute_conv_rarity(slices, weights, score_conf)
 
     # Pure quality (for selection score computation)
     pure_quality = _weighted_average(
@@ -362,6 +501,10 @@ def aggregate_conversation(conversation_key, slices):
             "effective_weight": round(w, 3),
         })
 
+    observed_turn_ratio = rarity_detail.get("observed_turn_ratio")
+    inherited_turn_ratio = rarity_detail.get("inherited_turn_ratio")
+    rarity_confidence = rarity_detail.get("rarity_confidence")
+
     return {
         "conversation_id": source_id,
         "conversation_key": build_conversation_key(source_id, source_file),
@@ -371,6 +514,9 @@ def aggregate_conversation(conversation_key, slices):
         "conv_selection": None,  # filled by compute_conv_selection_scores
         "peak_complexity": peak_complexity,
         "conv_rarity": round(conv_rarity, 2) if conv_rarity is not None else None,
+        "observed_turn_ratio": round(observed_turn_ratio, 2) if observed_turn_ratio is not None else None,
+        "inherited_turn_ratio": round(inherited_turn_ratio, 2) if inherited_turn_ratio is not None else None,
+        "rarity_confidence": round(rarity_confidence, 2) if rarity_confidence is not None else None,
         "thinking_mode": thinking_mode,
         "merged_labels": merged_labels,
         "detail": {
@@ -379,7 +525,17 @@ def aggregate_conversation(conversation_key, slices):
             "quality_floor": quality_floor,
             "negative_flags": neg_flags,
             "pure_quality": round(pure_quality, 2) if pure_quality is not None else None,
+            "score_confidence": round(score_conf, 2) if score_conf is not None else None,
+            "observed_turns": rarity_detail.get("observed_turns"),
+            "inherited_turns": rarity_detail.get("inherited_turns"),
+            "observed_weight_ratio": round(rarity_detail["observed_weight_ratio"], 3) if "observed_weight_ratio" in rarity_detail else None,
+            "coverage_confidence": round(rarity_detail["coverage_confidence"], 3) if "coverage_confidence" in rarity_detail else None,
+            "rarity_mean": round(rarity_detail["rarity_mean"], 2) if "rarity_mean" in rarity_detail else None,
+            "rarity_peak": round(rarity_detail["rarity_peak"], 2) if "rarity_peak" in rarity_detail else None,
+            "rarity_diversity_bonus": round(rarity_detail["rarity_diversity_bonus"], 3) if "rarity_diversity_bonus" in rarity_detail else None,
+            "label_signature_count": rarity_detail.get("label_signature_count"),
             "conv_intra_class_rank": None,  # filled later
+            "selection_confidence": None,  # filled later
         },
         "slices": slice_details,
     }
@@ -486,9 +642,16 @@ def compute_conv_selection_scores(records):
             conv_selection = ((intra_weight + rarity_fuse_weight * 0.5) * intra_rank_scaled +
                               (quality_weight + rarity_fuse_weight * 0.5) * pq_scaled)
 
+        selection_conf = min(
+            1.0,
+            0.5 * max(0.0, min(1.0, (rec.get("rarity_confidence") or 1.0))) +
+            0.5 * max(0.0, min(1.0, ((rec.get("detail") or {}).get("score_confidence") or 1.0))),
+        )
+        conv_selection = apply_score_confidence(conv_selection, selection_conf)
         conv_selection = max(1.0, min(10.0, conv_selection))
         rec["conv_selection"] = round(conv_selection, 2)
         rec["detail"]["conv_intra_class_rank"] = round(intra_rank_scaled, 2)
+        rec["detail"]["selection_confidence"] = round(selection_conf, 2)
 
 
 # ─── Top-level entry points ─────────────────────────────

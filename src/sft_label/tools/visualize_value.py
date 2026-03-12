@@ -153,6 +153,29 @@ def _compute_conv_viz_data(conv_records):
     selections = [row["conv_selection"] for row in conv_records if row.get("conv_selection") is not None]
     peaks = [row["peak_complexity"] for row in conv_records if row.get("peak_complexity") is not None]
     turns = [row.get("turn_count", 0) for row in conv_records]
+    observed_ratios = [row["observed_turn_ratio"] for row in conv_records if row.get("observed_turn_ratio") is not None]
+    rarity_confidences = [row["rarity_confidence"] for row in conv_records if row.get("rarity_confidence") is not None]
+    inherited_ratios = [row["inherited_turn_ratio"] for row in conv_records if row.get("inherited_turn_ratio") is not None]
+
+    def _ratio_bands(rows):
+        bands = {
+            "0-25%": 0,
+            "25-50%": 0,
+            "50-75%": 0,
+            "75-100%": 0,
+        }
+        for value in rows:
+            if not isinstance(value, (int, float)):
+                continue
+            if value < 0.25:
+                bands["0-25%"] += 1
+            elif value < 0.5:
+                bands["25-50%"] += 1
+            elif value < 0.75:
+                bands["50-75%"] += 1
+            else:
+                bands["75-100%"] += 1
+        return bands
 
     payload = {
         "total": total,
@@ -160,6 +183,11 @@ def _compute_conv_viz_data(conv_records):
         "mean_conv_selection": sum(selections) / len(selections) if selections else 0,
         "mean_peak_complexity": sum(peaks) / len(peaks) if peaks else 0,
         "mean_turns": sum(turns) / len(turns) if turns else 0,
+        "mean_observed_turn_ratio": sum(observed_ratios) / len(observed_ratios) if observed_ratios else 0,
+        "mean_inherited_turn_ratio": sum(inherited_ratios) / len(inherited_ratios) if inherited_ratios else 0,
+        "mean_rarity_confidence": sum(rarity_confidences) / len(rarity_confidences) if rarity_confidences else 0,
+        "low_observed_coverage_count": sum(1 for value in observed_ratios if value < 0.5),
+        "low_rarity_confidence_count": sum(1 for value in rarity_confidences if value < 0.6),
     }
 
     for key, rows in (
@@ -177,6 +205,8 @@ def _compute_conv_viz_data(conv_records):
     for turns_value in turns:
         turn_distribution[turns_value] = turn_distribution.get(turns_value, 0) + 1
     payload["turn_distribution"] = turn_distribution
+    payload["observed_turn_ratio_bands"] = _ratio_bands(observed_ratios)
+    payload["rarity_confidence_bands"] = _ratio_bands(rarity_confidences)
     return payload
 
 

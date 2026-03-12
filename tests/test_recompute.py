@@ -330,6 +330,7 @@ class TestRecomputePass1Stats:
         # Check tag distributions
         assert stats["tag_distributions"]["intent"]["build"] == 2
         assert stats["tag_distributions"]["intent"]["debug"] == 1
+        assert stats["combo_distributions"]
 
     def test_inherited_excluded_from_distributions(self):
         samples = [
@@ -341,6 +342,8 @@ class TestRecomputePass1Stats:
         assert stats["total_samples"] == 2
         # Only the non-inherited sample should count in distributions
         assert stats["tag_distributions"]["intent"]["build"] == 1
+        combo_key = next(iter(stats["combo_distributions"]))
+        assert stats["combo_distributions"][combo_key] == 1
         assert stats["sparse_inherited"] == 1
         assert stats["sparse_labeled"] == 1
 
@@ -731,7 +734,7 @@ class TestRefreshRarity:
         assert "summary_stats_value" in written
         assert int(written.get("files_refreshed", "0")) == 2
 
-    def test_external_stats_without_combo_disables_combo_rarity(self, tmp_path):
+    def test_external_stats_without_combo_uses_local_combo_fallback(self, tmp_path):
         from sft_label.config import PipelineConfig
 
         samples = [
@@ -764,10 +767,10 @@ class TestRefreshRarity:
         refreshed = json.loads((tmp_path / "scored.json").read_text(encoding="utf-8"))
         for sample in refreshed:
             rarity = (sample.get("value") or {}).get("rarity") or {}
-            assert rarity.get("combo_rarity") == 0.0
+            assert rarity.get("combo_rarity", 0.0) > 0.0
 
         stats_out = json.loads(Path(written["stats_value"]).read_text(encoding="utf-8"))
-        assert stats_out["rarity_config"]["combo_mode"] == "disabled"
+        assert stats_out["rarity_config"]["combo_mode"] == "hybrid"
 
     def test_inline_directory_refresh_syncs_back_to_rows(self, tmp_path):
         from sft_label.config import PipelineConfig

@@ -241,6 +241,10 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict]) -> dict[
                     "conv_value": conversation.get("conv_value"),
                     "conv_selection": conversation.get("conv_selection"),
                     "peak_complexity": conversation.get("peak_complexity"),
+                    "conv_rarity": conversation.get("conv_rarity"),
+                    "observed_turn_ratio": conversation.get("observed_turn_ratio"),
+                    "inherited_turn_ratio": conversation.get("inherited_turn_ratio"),
+                    "rarity_confidence": conversation.get("rarity_confidence"),
                     "thinking_mode": conversation.get("thinking_mode"),
                 }
             detail_rows[doc_id] = detail_payload
@@ -260,6 +264,10 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict]) -> dict[
                         "conv_selection": conversation.get("conv_selection"),
                         "peak_complexity": conversation.get("peak_complexity"),
                         "turn_count": conversation.get("turn_count"),
+                        "conv_rarity": conversation.get("conv_rarity"),
+                        "observed_turn_ratio": conversation.get("observed_turn_ratio"),
+                        "inherited_turn_ratio": conversation.get("inherited_turn_ratio"),
+                        "rarity_confidence": conversation.get("rarity_confidence"),
                     }
                 )
             preview_rows.append(preview)

@@ -182,6 +182,7 @@ sft-label filter --input scored.json --value-min 6 --thinking-mode slow
 # Filter by conversation-level metrics (multi-turn)
 sft-label filter --input scored.json --conv-value-min 7
 sft-label filter --input run_dir/ --conv-value-min 6 --conv-selection-min 5
+sft-label filter --input scored.json --observed-turn-ratio-min 0.5 --rarity-confidence-min 0.6
 sft-label filter --input scored.json --turn-value-min 5 --turn-count-min 3
 
 # Validate taxonomy
@@ -537,6 +538,8 @@ See [benchmark_semantic_clustering_report.md](scripts/benchmark_semantic_cluster
 - Thinking Mode Analysis (slow vs fast comparison)
 - Flag Analysis (frequency and value impact)
 - Coverage Impact Analysis (tag retention at different thresholds)
+- Conversation Aggregation (conv value/selection, observed-turn coverage, rarity confidence)
+- Sample Explorer presets for low coverage / low rarity-confidence conversations
 - File Ranking Table (global dashboard, sortable)
 
 ## Filtering (Pass 3)
@@ -563,6 +566,8 @@ Conversation-level criteria (multi-turn):
 | Conv value | `--conv-value-min` | `--conv-value-min 7` |
 | Conv selection | `--conv-selection-min` | `--conv-selection-min 5` |
 | Peak complexity | `--peak-complexity-min` | `--peak-complexity-min 6` |
+| Observed turn ratio | `--observed-turn-ratio-min` | `--observed-turn-ratio-min 0.5` |
+| Rarity confidence | `--rarity-confidence-min` | `--rarity-confidence-min 0.6` |
 | Turn count | `--turn-count-min/max` | `--turn-count-min 3 --turn-count-max 20` |
 | Turn-level pruning | `--turn-value-min` | `--turn-value-min 5` (prune low-value turns) |
 

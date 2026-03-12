@@ -377,6 +377,9 @@ def compact_conversation_record(conversation_record: dict | None) -> dict:
         "conv_selection",
         "peak_complexity",
         "conv_rarity",
+        "observed_turn_ratio",
+        "inherited_turn_ratio",
+        "rarity_confidence",
         "thinking_mode",
     ):
         value = conversation_record.get(key)
@@ -443,6 +446,9 @@ def clear_pass2_state(data_label: dict, *, timestamp: str | None = None) -> dict
             "conv_selection",
             "peak_complexity",
             "conv_rarity",
+            "observed_turn_ratio",
+            "inherited_turn_ratio",
+            "rarity_confidence",
             "thinking_mode",
             "merged_labels",
             "detail",

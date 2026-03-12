@@ -403,6 +403,21 @@ class TestComputeSampleRarity:
         )
         assert result["combo_rarity"] > 0
 
+    def test_richer_combo_uses_agentic_and_context_when_available(self):
+        labels = {
+            "intent": "build",
+            "difficulty": "advanced",
+            "context": "multi-file",
+            "concept": ["algorithms"],
+            "agentic": ["tool-calling"],
+            "task": ["feature-implementation"],
+        }
+        combo_counts = {
+            "intent=build|difficulty=advanced|context=multi-file|task=feature-implementation|concept=algorithms|agentic=tool-calling": 4,
+        }
+        result = compute_sample_rarity(labels, self.idf_map, 1000, combo_counts=combo_counts)
+        assert result["combo_rarity"] > 0
+
     def test_unknown_tag_uses_conservative_prior_not_max_idf(self):
         """Unknown tags should shrink toward the dimension prior, not max rarity."""
         labels = {"intent": "never-seen-before"}
@@ -536,8 +551,8 @@ class TestBuildComboCounts:
             {"labels": {"intent": "learn", "difficulty": "beginner", "concept": ["data-types"]}},
         ]
         counts = build_combo_counts(samples)
-        assert counts["build|advanced|algorithms"] == 2
-        assert counts["learn|beginner|data-types"] == 1
+        assert counts["intent=build|difficulty=advanced|concept=algorithms"] == 2
+        assert counts["intent=learn|difficulty=beginner|concept=data-types"] == 1
 
     def test_empty_samples(self):
         assert build_combo_counts([]) == {}
@@ -550,9 +565,27 @@ class TestBuildComboCounts:
             {},  # no labels key at all
         ]
         counts = build_combo_counts(samples)
-        assert counts["build|advanced|algorithms"] == 1
+        assert counts["intent=build|difficulty=advanced|concept=algorithms"] == 1
         # null/missing labels should be ignored
         assert "||" not in counts
+
+    def test_richer_combo_distinguishes_same_legacy_bucket(self):
+        samples = [
+            {"labels": {
+                "intent": "build",
+                "difficulty": "advanced",
+                "concept": ["algorithms"],
+                "agentic": ["tool-calling"],
+            }},
+            {"labels": {
+                "intent": "build",
+                "difficulty": "advanced",
+                "concept": ["algorithms"],
+                "context": "multi-file",
+            }},
+        ]
+        counts = build_combo_counts(samples)
+        assert len(counts) == 2
 
 
 class TestLoadTagStats:
@@ -884,6 +917,18 @@ class TestComputeValueScore:
         # Explicit 5.0 rarity
         value_with_default = compute_value_score(score_result, {"score": 5.0})
         assert value_with_none == value_with_default
+
+    def test_low_confidence_shrinks_high_score(self):
+        score_result = {
+            "complexity": {"overall": 9},
+            "quality": {"overall": 9},
+            "reasoning": {"overall": 9},
+            "confidence": 0.25,
+        }
+        rarity_result = {"score": 9.0}
+        value = compute_value_score(score_result, rarity_result)
+        assert value is not None
+        assert value < 9.0
 
     def test_quality_overall_clamped_by_correctness(self):
         """validate_score_response enforces overall <= correctness + 2."""
@@ -1432,7 +1477,7 @@ class TestResumeScoringFile:
         assert rarity_by_id["rare-1"] is not None
         assert rarity_by_id["rare-1"] > rarity_by_id["common-1"]
 
-    def test_external_stats_without_combo_disables_combo_rarity(self, tmp_path):
+    def test_external_stats_without_combo_uses_local_combo_fallback(self, tmp_path):
         from sft_label.scoring import _run_scoring_file
         from sft_label.config import PipelineConfig
         from unittest.mock import patch
@@ -1505,8 +1550,8 @@ class TestResumeScoringFile:
 
         rarity = captured_rarity["s1"]
         assert rarity is not None
-        assert rarity["combo_rarity"] == 0.0
-        assert stats["rarity_config"]["combo_mode"] == "disabled"
+        assert rarity["combo_rarity"] > 0.0
+        assert stats["rarity_config"]["combo_mode"] == "hybrid"
 
 
 # ─────────────────────────────────────────────────────────

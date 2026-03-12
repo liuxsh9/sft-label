@@ -497,6 +497,27 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
         for combo_key, count in incoming.items():
             base[combo_key] = base.get(combo_key, 0) + count
 
+    def _build_local_combo_fallback():
+        agg_combo_counts = {}
+        _log_refresh_rarity(
+            f"Building local combo fallback from {len(scored_files)} scored file(s)"
+        )
+        for index, sf in enumerate(scored_files, start=1):
+            phase = f"[combo {index}/{len(scored_files)}] {_display_path(sf)}"
+            size_hint = _format_file_size(sf)
+            size_msg = f" ({size_hint})" if size_hint else ""
+            _log_refresh_rarity(f"{phase}: loading samples{size_msg}")
+            try:
+                samples = load_samples(sf)
+            except Exception as e:
+                _log_refresh_rarity(
+                    f"{phase}: failed while loading combo fallback source: "
+                    f"{type(e).__name__}: {e}"
+                )
+                raise
+            _merge_combo_counts(agg_combo_counts, build_combo_counts(samples))
+        return agg_combo_counts
+
     def _resolve_stats_source():
         if tag_stats_path:
             p = Path(tag_stats_path)
@@ -560,10 +581,18 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
             if baseline_combo_counts:
                 combo_mode = "external"
             else:
-                _log_refresh_rarity(
-                    "External stats has no combo_distributions; "
-                    "combo rarity disabled for cross-dataset comparability"
-                )
+                baseline_combo_counts = _build_local_combo_fallback()
+                if baseline_combo_counts:
+                    combo_mode = "hybrid"
+                    _log_refresh_rarity(
+                        "External stats has no combo_distributions; "
+                        "using local combo fallback"
+                    )
+                else:
+                    _log_refresh_rarity(
+                        "External stats has no combo_distributions; "
+                        "combo rarity disabled"
+                    )
             _log_refresh_rarity(
                 f"Using external rarity baseline: {stats_source_path} "
                 f"({total_stats_samples} samples)"

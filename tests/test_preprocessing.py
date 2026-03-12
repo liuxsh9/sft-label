@@ -149,8 +149,8 @@ class TestNormalizeAndSlice:
         # COT should be stripped from conversation text
         assert "<think>" not in result[0]["conversations"][1]["value"]
 
-    def test_sharegpt_multiturn_sliced_still_fast(self):
-        """Multi-turn ShareGPT with COT: slices should be marked fast (COT not attributable)."""
+    def test_sharegpt_multiturn_preserves_turn_local_cot(self):
+        """Multi-turn ShareGPT should keep COT only on the slice whose final reply contains it."""
         sample = {
             "id": "cot_mt",
             "conversations": [
@@ -162,10 +162,10 @@ class TestNormalizeAndSlice:
         }
         result = normalize_and_slice(sample)
         assert len(result) == 2
-        # Both slices should be fast (COT not attributable to individual turns)
-        for s in result:
-            assert s["metadata"]["thinking_mode"] == "fast"
-            assert "cot_text" not in s["metadata"]
+        assert result[0]["metadata"]["thinking_mode"] == "slow"
+        assert result[0]["metadata"]["cot_text"] == "reasoning"
+        assert result[1]["metadata"]["thinking_mode"] == "fast"
+        assert "cot_text" not in result[1]["metadata"]
 
 
 class TestLanguageDetection:
@@ -262,6 +262,30 @@ class TestApplySparseSampling:
         label_indices, inherit_map = apply_sparse_sampling(samples)
         assert label_indices == {0, 1, 2}
         assert len(inherit_map) == 0
+
+    def test_semantic_drift_forces_label_even_when_structure_matches(self):
+        samples = []
+        for i in range(13):
+            request = f"Implement feature {i}"
+            response = f"Here is feature code {i}"
+            if i == 9:
+                request = "Explain Python decorators"
+                response = "Decorators wrap functions"
+            if i == 10:
+                request = "Implement rate limiting middleware"
+                response = "Here is the middleware implementation"
+            samples.append({
+                "id": f"m_t{i + 1}",
+                "metadata": {"source_id": "m", "turn_index": i + 1, "total_turns": 13},
+                "conversations": [
+                    {"from": "human", "value": request},
+                    {"from": "gpt", "value": response},
+                ],
+            })
+
+        label_indices, inherit_map = apply_sparse_sampling(samples)
+        assert 9 in label_indices
+        assert 9 not in inherit_map
 
 
 class TestTruncation:
@@ -423,8 +447,8 @@ class TestToPanguPseudoMultiturn:
             "[unused16]Let me think about this step by step[unused17]The answer is 42"
         )
 
-    def test_sliced_sample_no_cot_restored(self):
-        """Sliced sample (source_id present) → fast thinking, COT not restored."""
+    def test_sliced_sample_restores_turn_local_cot(self):
+        """Sliced sample with attributable cot_text should restore the final-turn COT."""
         sample = {
             "conversations": [
                 {"from": "human", "value": "Q1"},
@@ -432,11 +456,11 @@ class TestToPanguPseudoMultiturn:
             ],
             "metadata": {
                 "source_id": "original-123",
-                "cot_text": "This COT is from aggregation, not this turn",
+                "cot_text": "Turn-local reasoning",
             },
         }
         result = to_pangu_pseudo_multiturn(sample)
-        assert result["data"][1]["content"] == "[unused16][unused17]A1"
+        assert result["data"][1]["content"] == "[unused16]Turn-local reasoning[unused17]A1"
 
     def test_multi_turn_packing(self):
         """Multi-turn → prior turns packed with separators and role labels."""

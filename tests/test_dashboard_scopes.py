@@ -9,7 +9,7 @@ from sft_label.artifacts import (
     PASS2_STATS_FILE,
     PASS2_SUMMARY_STATS_FILE,
 )
-from sft_label.tools.dashboard_scopes import build_scope_tree
+from sft_label.tools.dashboard_scopes import build_scope_tree, merge_label_stats
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -23,6 +23,39 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
         encoding="utf-8",
     )
+
+
+def test_merge_label_stats_preserves_combo_distributions():
+    merged = merge_label_stats(
+        [
+            {
+                "total_samples": 2,
+                "success": 2,
+                "failed": 0,
+                "tag_distributions": {"intent": {"build": 2}},
+                "combo_distributions": {"intent=build|difficulty=beginner": 2},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            },
+            {
+                "total_samples": 1,
+                "success": 1,
+                "failed": 0,
+                "tag_distributions": {"intent": {"debug": 1}},
+                "combo_distributions": {"intent=debug|difficulty=expert": 1},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            },
+        ]
+    )
+
+    assert merged is not None
+    assert merged["combo_distributions"] == {
+        "intent=build|difficulty=beginner": 2,
+        "intent=debug|difficulty=expert": 1,
+    }
 
 
 def test_build_scope_tree_deduplicates_inline_artifact_leaf_paths(tmp_path):

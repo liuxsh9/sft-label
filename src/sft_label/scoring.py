@@ -70,6 +70,7 @@ from sft_label.inline_scoring import (
     write_inline_labeled_cache,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
+from sft_label.score_confidence import apply_score_confidence, score_confidence
 
 
 # ─────────────────────────────────────────────────────────
@@ -343,9 +344,8 @@ def compute_sample_rarity(sample_labels, idf_map, total_samples,
     # Combo rarity
     combo_rarity = 0.0
     if combo_counts is not None:
-        combo_key = _combo_key_from_labels(sample_labels)
-        if combo_key:
-            combo_count = combo_counts.get(combo_key, 0)
+        combo_count = _lookup_combo_count(combo_counts, sample_labels)
+        if combo_count is not None:
             raw_combo_rarity = math.log2(total_samples / (combo_count + 1))
             combo_confidence = _sample_label_confidence(sample_labels, dims=list(rarity_weights.keys()))
             combo_rarity = (
@@ -390,8 +390,21 @@ def _normalize_concepts(labels):
     return sorted([c for c in concepts if isinstance(c, str) and c])
 
 
-def _combo_key_from_labels(labels):
-    """Build combo key from (intent, difficulty, concept[:3])."""
+def _normalize_combo_dim(labels, dim, limit):
+    """Normalize one combo-key dimension into a bounded list of string tags."""
+    value = labels.get(dim)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    cleaned = sorted({item for item in value if isinstance(item, str) and item})
+    if limit > 0:
+        return cleaned[:limit]
+    return cleaned
+
+
+def _legacy_combo_key_from_labels(labels):
+    """Backward-compatible combo key from (intent, difficulty, concept[:3])."""
     intent = labels.get("intent", "")
     difficulty = labels.get("difficulty", "")
     intent = intent if isinstance(intent, str) else ""
@@ -400,6 +413,53 @@ def _combo_key_from_labels(labels):
     if not intent and not difficulty and not concepts:
         return None
     return f"{intent}|{difficulty}|{','.join(concepts)}"
+
+
+def _combo_key_from_labels(labels):
+    """Build a richer combo key for multi-turn/code-SFT rarity."""
+    parts = []
+    for dim in ("intent", "difficulty", "context"):
+        value = labels.get(dim)
+        if isinstance(value, str) and value:
+            parts.append(f"{dim}={value}")
+
+    for dim, limit in (
+        ("language", 2),
+        ("domain", 2),
+        ("task", 2),
+        ("concept", 3),
+        ("agentic", 2),
+        ("constraint", 2),
+    ):
+        values = _normalize_combo_dim(labels, dim, limit)
+        if values:
+            parts.append(f"{dim}={','.join(values)}")
+
+    if not parts:
+        return None
+    return "|".join(parts)
+
+
+def _combo_keys_from_labels(labels):
+    """Return candidate combo keys, supporting both richer and legacy baselines."""
+    primary = _combo_key_from_labels(labels)
+    legacy = _legacy_combo_key_from_labels(labels)
+    keys = []
+    if primary:
+        keys.append(primary)
+    if legacy and legacy not in keys:
+        keys.append(legacy)
+    return keys
+
+
+def _lookup_combo_count(combo_counts, labels):
+    """Resolve the most conservative matching combo count across key versions."""
+    best_count = None
+    for key in _combo_keys_from_labels(labels):
+        if key in combo_counts:
+            count = combo_counts[key]
+            best_count = count if best_count is None else max(best_count, count)
+    return best_count
 
 
 def _update_combo_counts_from_labels(combo_counts, labels):
@@ -422,6 +482,26 @@ def build_combo_counts(samples):
         labels = s.get("labels") or {}
         _update_combo_counts_from_labels(counts, labels)
     return counts
+
+
+def _resolve_combo_baseline(external_combo_counts, local_combo_counts=None):
+    """Resolve combo counts, preferring external stats then local fallback."""
+    if external_combo_counts:
+        return external_combo_counts, "external", None
+
+    local_combo_counts = _normalize_combo_counts(local_combo_counts)
+    if local_combo_counts:
+        return (
+            local_combo_counts,
+            "hybrid",
+            "  External stats has no combo_distributions; using local combo fallback",
+        )
+
+    return (
+        None,
+        "disabled",
+        "  External stats has no combo_distributions; combo rarity disabled",
+    )
 
 
 def build_tag_distributions(samples, rarity_weights=None):
@@ -744,6 +824,7 @@ def compute_value_score(score_result, rarity_result, weights=None):
     if quality_overall is not None and quality_overall < 4 and quality_weight > 0:
         value *= 0.7
 
+    value = apply_score_confidence(value, score_confidence(score_result))
     return round(max(1.0, min(10.0, value)), 1)
 
 
@@ -788,6 +869,7 @@ def _extract_pure_quality(value_dict, quality_weights=None):
     if quality_overall is not None and quality_overall < 4:
         pq *= 0.7
 
+    pq = apply_score_confidence(pq, score_confidence(value_dict))
     return pq
 
 
@@ -812,6 +894,7 @@ def _selection_summary_from_sample(sample):
         "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
         "rarity_score": (value.get("rarity") or {}).get("score"),
         "value_score": value.get("value_score"),
+        "confidence": value.get("confidence"),
     }
 
 
@@ -1034,6 +1117,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
             # Quality floor penalty: consistent with compute_value_score
             if pq is not None and components.get("quality") is not None and components["quality"] < 4:
                 pq *= 0.7
+            pq = apply_score_confidence(pq, score_confidence(s))
         else:
             pq = None
         pure_qualities.append(pq)
@@ -1911,7 +1995,9 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
 async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                      limit, config, resume=False,
                                      llm_progress_cb=None,
-                                     file_label=None):
+                                     file_label=None,
+                                     combo_counts_override=None,
+                                     combo_mode_override=None):
     """Score a JSONL labeled file in chunks to bound memory.
 
     Two-pass approach:
@@ -1940,6 +2026,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     total_stats_samples = 0
     combo_counts = None
     combo_mode = "disabled"
+    baseline_combo_counts = None
 
     if tag_stats_path is None:
         candidate = input_path.parent / PASS1_STATS_FILE
@@ -1951,7 +2038,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         distributions, total_stats_samples, ts, meta = load_tag_stats_context(stats_source)
         if distributions:
             idf_map = compute_tag_idf(distributions, total_stats_samples)
-            combo_counts = meta.get("combo_counts")
+            baseline_combo_counts = meta.get("combo_counts")
             stats_ref_info = {
                 "source": str(stats_source),
                 "total_samples": total_stats_samples,
@@ -1964,12 +2051,6 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if missing_dims:
                 print("  Warning: rarity baseline missing dimensions; ignored in IDF: "
                       + ", ".join(missing_dims))
-            if combo_counts:
-                combo_mode = "external"
-            else:
-                combo_mode = "disabled"
-                print("  External stats has no combo_distributions; "
-                      "combo rarity disabled for cross-dataset comparability")
         else:
             print(f"  Warning: {stats_source} has no tag_distributions, fallback to local baseline")
     else:
@@ -2013,8 +2094,15 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             combo_counts = local_combo_counts
             combo_mode = "local"
             print(f"  Using local rarity baseline ({total_stats_samples} samples)")
-    elif idf_map and combo_counts:
-        combo_mode = "external"
+    elif idf_map:
+        combo_counts, combo_mode, combo_msg = _resolve_combo_baseline(
+            baseline_combo_counts,
+            combo_counts_override or local_combo_counts,
+        )
+        if combo_mode_override and combo_mode == "hybrid":
+            combo_mode = combo_mode_override
+        if combo_msg:
+            print(combo_msg)
 
     if not idf_map:
         print("  Warning: rarity unavailable (no valid tag distributions)")
@@ -2179,6 +2267,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             "rarity_score": (value.get("rarity") or {}).get("score"),
                             "flags": value.get("flags", []),
                             "thinking_mode": value.get("thinking_mode"),
+                            "confidence": value.get("confidence"),
                             "labels": sample.get("labels"),
                         })
                     else:
@@ -2640,6 +2729,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     total_stats_samples = 0
     combo_counts = None
     combo_mode = "disabled"
+    baseline_combo_counts = None
 
     if tag_stats_path:
         stats_source = tag_stats_path
@@ -2652,7 +2742,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         distributions, total_stats_samples, ts, meta = load_tag_stats_context(stats_source)
         if distributions:
             idf_map = compute_tag_idf(distributions, total_stats_samples)
-            combo_counts = meta.get("combo_counts")
+            baseline_combo_counts = meta.get("combo_counts")
             stats_ref_info = {
                 "source": str(stats_source),
                 "total_samples": total_stats_samples,
@@ -2665,16 +2755,20 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             if missing_dims:
                 print("  Warning: rarity baseline missing dimensions; ignored in IDF: "
                       + ", ".join(missing_dims))
-            if combo_counts:
-                combo_mode = "external"
-            else:
-                combo_mode = "disabled"
-                print("  External stats has no combo_distributions; "
-                      "combo rarity disabled for cross-dataset comparability")
         else:
             print(f"  Warning: {stats_source} has no tag_distributions, fallback to local baseline")
     else:
         print("  No external tag stats found, fallback to local rarity baseline")
+
+    local_combo_counts = None
+    if idf_map and not baseline_combo_counts and samples:
+        local_combo_counts = build_combo_counts(samples)
+        combo_counts, combo_mode, combo_msg = _resolve_combo_baseline(
+            baseline_combo_counts,
+            local_combo_counts,
+        )
+        if combo_msg:
+            print(combo_msg)
 
     if not idf_map and samples:
         local_distributions, local_total = build_tag_distributions(
@@ -2689,9 +2783,12 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                 "total_samples": total_stats_samples,
                 "timestamp": datetime.now().isoformat(),
             }
-            combo_counts = build_combo_counts(samples)
+            combo_counts = local_combo_counts or build_combo_counts(samples)
             combo_mode = "local"
             print(f"  Using local rarity baseline ({total_stats_samples} samples)")
+    elif idf_map and baseline_combo_counts:
+        combo_counts = baseline_combo_counts
+        combo_mode = "external"
 
     if not idf_map:
         print("  Warning: rarity unavailable (no valid tag distributions)")
@@ -3363,12 +3460,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         return distributions, total, combo_counts
 
     local_distributions = None
+    local_combo_counts = None
 
     if tag_stats_path:
         distributions, global_total_stats_samples, ts, meta = load_tag_stats_context(tag_stats_path)
         if distributions:
             global_idf_map = compute_tag_idf(distributions, global_total_stats_samples)
-            global_combo_counts = meta.get("combo_counts")
             global_stats_ref_info = {
                 "source": str(tag_stats_path),
                 "total_samples": global_total_stats_samples,
@@ -3381,17 +3478,24 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             if missing_dims:
                 print("  Warning: rarity baseline missing dimensions; ignored in IDF: "
                       + ", ".join(missing_dims))
+            global_combo_counts = meta.get("combo_counts")
             if global_combo_counts:
                 global_combo_mode = "external"
-            else:
-                global_combo_mode = "disabled"
-                print("  External stats has no combo_distributions; "
-                      "combo rarity disabled for cross-dataset comparability")
         else:
             print(f"  Warning: {tag_stats_path} has no tag_distributions, fallback to local baseline")
 
-    if not global_idf_map:
+    if not global_idf_map or not global_combo_counts:
         local_distributions, local_total, local_combo_counts = _scan_local_distributions()
+
+    if global_idf_map and not global_combo_counts:
+        global_combo_counts, global_combo_mode, combo_msg = _resolve_combo_baseline(
+            None,
+            local_combo_counts,
+        )
+        if combo_msg:
+            print(combo_msg)
+
+    if not global_idf_map:
         if local_distributions and local_total > 0:
             global_total_stats_samples = local_total
             global_idf_map = compute_tag_idf(local_distributions, local_total)
@@ -3554,6 +3658,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 resume=resume,
                 llm_progress_cb=llm_progress_cb,
                 file_label=_relative_file_label(labeled_path, input_dir),
+                combo_counts_override=global_combo_counts,
+                combo_mode_override=global_combo_mode,
             )
             stats["file"] = stats.get("file") or _relative_file_label(labeled_path, input_dir)
             all_file_stats.append(stats)

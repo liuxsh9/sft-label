@@ -437,6 +437,8 @@ def cmd_filter(args):
         conv_value_min=args.conv_value_min,
         conv_selection_min=args.conv_selection_min,
         peak_complexity_min=args.peak_complexity_min,
+        rarity_confidence_min=args.rarity_confidence_min,
+        observed_turn_ratio_min=args.observed_turn_ratio_min,
         turn_count_min=args.turn_count_min,
         turn_count_max=args.turn_count_max,
         correctness_min=args.correctness_min,
@@ -460,6 +462,8 @@ def cmd_filter(args):
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
         config.peak_complexity_min is not None,
+        config.rarity_confidence_min is not None,
+        config.observed_turn_ratio_min is not None,
         config.turn_count_min is not None,
         config.turn_count_max is not None,
         config.correctness_min is not None,
@@ -1050,6 +1054,10 @@ def build_parser():
                                 help="Min conversation-level selection score (multi-turn)")
     filter_parser.add_argument("--peak-complexity-min", type=float, default=None,
                                 help="Min peak complexity across turns (multi-turn)")
+    filter_parser.add_argument("--rarity-confidence-min", type=float, default=None,
+                                help="Min conversation rarity confidence (multi-turn)")
+    filter_parser.add_argument("--observed-turn-ratio-min", type=float, default=None,
+                                help="Min directly labeled turn ratio in conversation (multi-turn)")
     filter_parser.add_argument("--turn-count-min", type=int, default=None,
                                 help="Min total turns in conversation (multi-turn)")
     filter_parser.add_argument("--turn-count-max", type=int, default=None,
