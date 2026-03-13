@@ -34,10 +34,18 @@ from sft_label.scoring import (
     compute_value_stats,
     load_tag_stats,
     load_tag_stats_context,
+    _infer_selection_features,
+    _infer_domain_backfill,
 )
+from sft_label.prompts_value import SCORING_SYSTEM_COMPACT, build_scoring_messages
+from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _load_selection_regression_fixture():
+    return load_selection_regression_pack(FIXTURES_DIR / "nemotron_selection_regression.json")
 
 
 # ─────────────────────────────────────────────────────────
@@ -1871,6 +1879,120 @@ class TestComputeSelectionScoresFromSummaries:
         uncertain_scores = compute_selection_scores_from_summaries(uncertain, min_group_size=2)
 
         assert uncertain_scores[1]["intra_class_rank"] < confident_scores[1]["intra_class_rank"]
+
+
+# ─────────────────────────────────────────────────────────
+# 8.6b Selection stability regressions
+# ─────────────────────────────────────────────────────────
+
+class TestSelectionStabilityRegression:
+    def test_feature_inference_on_audited_fixture(self):
+        fixture = {sample["audit_label"]: sample for sample in _load_selection_regression_fixture()}
+
+        opener = _infer_selection_features(sample=fixture["opener_incomplete"])
+        exploration = _infer_selection_features(sample=fixture["tool_exploration_low_info"])
+        common_final = _infer_selection_features(sample=fixture["common_final_bugfix"])
+        summary_final = _infer_selection_features(sample=fixture["summary_heavy_final"])
+
+        assert opener["trajectory_stage"] == "opener"
+        assert exploration["trajectory_stage"] == "exploration"
+        assert exploration["is_low_information_tool"] is True
+        assert common_final["has_summary_evidence"] is True
+        assert summary_final["trajectory_stage"] == "final-summary"
+        assert summary_final["has_summary_evidence"] is False
+
+    def test_relative_ordering_on_audited_fixture(self):
+        samples = _load_selection_regression_fixture()
+        compute_selection_scores(samples, min_group_size=1, config=PipelineConfig())
+        by_label = {sample["audit_label"]: sample["value"] for sample in samples}
+
+        assert by_label["opener_incomplete"]["selection_score"] < by_label["tool_exploration_low_info"]["selection_score"]
+        assert by_label["tool_exploration_low_info"]["selection_score"] < by_label["common_final_bugfix"]["selection_score"]
+        assert by_label["summary_heavy_final"]["selection_score"] < by_label["rare_domain_final_ml"]["selection_score"]
+        assert by_label["common_final_bugfix"]["selection_score"] >= by_label["summary_heavy_final"]["selection_score"]
+
+    def test_comparison_utility_reports_expected_shift(self):
+        report = compare_selection_configs(_load_selection_regression_fixture())
+        by_label = {row["label"]: row for row in report["deltas"]}
+
+        assert report["count"] == 5
+        assert "opener_incomplete" in by_label
+        assert by_label["tool_exploration_low_info"]["delta"] < 0
+        assert by_label["summary_heavy_final"]["current_selection"] < by_label["rare_domain_final_ml"]["current_selection"]
+        assert by_label["summary_heavy_final"]["current_selection"] < by_label["common_final_bugfix"]["current_selection"]
+        assert by_label["tool_exploration_low_info"]["current_selection"] < 4.0
+        assert report["threshold_counts"]["current_ge_8"] <= report["threshold_counts"]["legacy_ge_8"]
+
+    def test_selection_output_stays_schema_compatible(self):
+        samples = _load_selection_regression_fixture()
+        compute_selection_scores(samples, min_group_size=1, config=PipelineConfig())
+        stats = compute_value_stats(samples, [])
+
+        assert "selection_score" in stats["score_distributions"]
+        assert "intra_class_rank" in stats["score_distributions"]
+        assert "selection_score" in samples[0]["value"]
+        assert "intra_class_rank" in samples[0]["value"]
+        assert "trajectory_stage" not in samples[0]["value"]
+
+
+class TestDomainBackfill:
+    def test_obvious_domains_backfill(self):
+        assert _infer_domain_backfill(
+            {"current_request": "Fix the parser crash in the compiler lexer and AST lowering path."},
+            {"domain": []},
+        ) == ["compiler-development"]
+        assert _infer_domain_backfill(
+            {"current_request": "Make epoch_length optional in the PyTorch dataloader training engine."},
+            {"domain": []},
+        ) == ["machine-learning"]
+        assert _infer_domain_backfill(
+            {"current_request": "Add a per-connection Storage API toggle for the BigQuery client."},
+            {"domain": []},
+        ) == ["cloud-computing"]
+        assert _infer_domain_backfill(
+            {"current_request": "Add a REST API endpoint and update request/response validation for this DBAPI client."},
+            {"domain": []},
+        ) == ["api-development"]
+
+    def test_ambiguous_domain_stays_empty(self):
+        assert _infer_domain_backfill(
+            {"current_request": "Refactor the Python utility and improve tests."},
+            {"domain": []},
+        ) == []
+
+
+class TestPromptBudgetRegression:
+    def test_compact_prompt_budget_does_not_grow(self):
+        truncated = {
+            "original_prior_context_chars": 120,
+            "original_cot_chars": 0,
+            "original_trajectory_chars": 340,
+            "original_response_chars": 220,
+            "trajectory_turn_count": 4,
+            "trajectory_tool_turns": 2,
+            "prior_context": "prior",
+            "current_request": "fix the failing parser edge case",
+            "trajectory": "[Assistant Step] inspect file\\n[Tool Result] failing test output",
+            "response": "I updated parser.py and added a regression test in tests/test_parser.py",
+        }
+        labels = {
+            "intent": "debug",
+            "language": ["python"],
+            "domain": ["compiler-development"],
+            "task": ["bug-fixing", "testing-task"],
+            "difficulty": "upper-intermediate",
+        }
+        messages = build_scoring_messages(
+            truncated,
+            "fast",
+            labels,
+            total_turns=8,
+            code_block_count=1,
+            compact=True,
+        )
+
+        assert len(SCORING_SYSTEM_COMPACT) <= 5996
+        assert sum(len(message["content"]) for message in messages) <= 10888
 
 
 # ─────────────────────────────────────────────────────────

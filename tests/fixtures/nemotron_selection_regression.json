@@ -1,0 +1,167 @@
+[
+  {
+    "id": "tid:v1:955aa5a841c08e7745b0",
+    "audit_label": "opener_incomplete",
+    "labels": {
+      "intent": "modify",
+      "language": ["python"],
+      "domain": [],
+      "task": ["code-refactoring"],
+      "difficulty": "upper-intermediate",
+      "concept": [],
+      "agentic": [],
+      "constraint": [],
+      "context": "repository",
+      "confidence": {"intent": 0.95, "language": 0.99, "domain": 0.85, "task": 0.9, "difficulty": 0.8, "context": 0.85}
+    },
+    "metadata": {"turn_index": 1, "total_turns": 55, "source_id": "9fd85398-4d82-3ac0-635f-1c6318fad1cb"},
+    "selection_view": {
+      "current_request": "I've uploaded a python repository and need you to implement the issue requirements, update the code, and ensure tests pass.",
+      "trajectory": "",
+      "response": "I'll help you implement the necessary changes to meet the requirements in the issue description. Let me start by following the structured approach you've outlined. {\"name\": \"str_replace_editor\", \"arguments\": {\"command\": \"view\", \"path\": \"/workspace\"}}",
+      "trajectory_turn_count": 0,
+      "trajectory_tool_turns": 0
+    },
+    "value": {
+      "complexity": {"overall": 6},
+      "quality": {"overall": 1},
+      "reasoning": {"overall": 1},
+      "rarity": {"score": 3.7},
+      "flags": ["incomplete"],
+      "value_score": 1.9,
+      "confidence": 0.5
+    }
+  },
+  {
+    "id": "tid:v1:376861a565cf01abb3fe",
+    "audit_label": "tool_exploration_low_info",
+    "labels": {
+      "intent": "debug",
+      "language": ["python"],
+      "domain": [],
+      "task": ["bug-fixing", "code-exploration", "testing-task"],
+      "difficulty": "upper-intermediate",
+      "concept": ["debugging", "testing", "error-handling"],
+      "agentic": ["bash-execution", "iterative-refinement", "multi-file-coordination"],
+      "constraint": [],
+      "context": "repository",
+      "confidence": {"intent": 0.95, "language": 0.99, "domain": 0.8, "task": 0.92, "difficulty": 0.85, "concept": 0.9, "agentic": 0.95, "context": 0.85}
+    },
+    "metadata": {"turn_index": 49, "total_turns": 62, "source_id": "fb5546e9-9658-783b-14f3-dceb68596118"},
+    "selection_view": {
+      "current_request": "Fix the issue with converting A-ASSOCIATE-AC PDU to the A-ASSOCIATE primitive without breaking existing tests.",
+      "trajectory": "[Assistant Step] I inspected the parser and ran failing tests. [Tool Result] Several pytest cases reference transfer syntax handling in pynetdicom/tests/test_pdu.py.",
+      "response": "{\"name\": \"execute_bash\", \"arguments\": {\"command\": \"cd /workspace/pydicom__pynetdicom__1.3 && grep -n \\\"class.*Test.*ASSOCIATE\\\" pynetdicom/tests/test_pdu.py\"}}",
+      "trajectory_turn_count": 6,
+      "trajectory_tool_turns": 4
+    },
+    "value": {
+      "complexity": {"overall": 6},
+      "quality": {"overall": 5},
+      "reasoning": {"overall": 5},
+      "rarity": {"score": 2.8},
+      "flags": [],
+      "value_score": 4.9,
+      "confidence": 0.75
+    }
+  },
+  {
+    "id": "tid:v1:9c93c77ff0800856b2be",
+    "audit_label": "common_final_bugfix",
+    "labels": {
+      "intent": "build",
+      "language": ["python"],
+      "domain": [],
+      "task": ["feature-implementation", "code-refactoring", "testing-task"],
+      "difficulty": "upper-intermediate",
+      "concept": ["error-handling", "functions", "algorithms"],
+      "agentic": ["bash-execution", "file-operations", "multi-file-coordination", "planning", "iterative-refinement"],
+      "constraint": [],
+      "context": "repository",
+      "confidence": {"intent": 0.95, "language": 0.99, "domain": 0.85, "task": 0.9, "difficulty": 0.8, "concept": 0.85, "agentic": 0.9, "context": 0.8}
+    },
+    "metadata": {"turn_index": 58, "total_turns": 58, "source_id": "28a05edd-d9cc-c123-f50c-777d997b023e"},
+    "selection_view": {
+      "current_request": "Support keyword-only arguments in the punq dependency injection library and add tests.",
+      "trajectory": "[Assistant Step] I traced resolution through punq/container.py and updated the dependency matching path. [Tool Result] pytest tests/test_container.py passed after the keyword-only handling change.",
+      "response": "I successfully implemented support for keyword-only arguments in punq. Updated /workspace/bobthemighty__punq__0.7/punq/container.py, extended _match_defaults to pass keyword-only values, and added regression coverage in tests/test_container.py for direct resolution, defaults, and overrides. All targeted pytest cases now pass.",
+      "trajectory_turn_count": 8,
+      "trajectory_tool_turns": 3
+    },
+    "value": {
+      "complexity": {"overall": 8},
+      "quality": {"overall": 9},
+      "reasoning": {"overall": 8},
+      "rarity": {"score": 4.3},
+      "flags": [],
+      "value_score": 7.7,
+      "confidence": 0.95
+    }
+  },
+  {
+    "id": "tid:v1:14fb5ec12eac6eada46d",
+    "audit_label": "rare_domain_final_ml",
+    "labels": {
+      "intent": "modify",
+      "language": ["python"],
+      "domain": ["machine-learning"],
+      "task": ["feature-implementation", "code-refactoring"],
+      "difficulty": "upper-intermediate",
+      "concept": ["object-oriented-programming", "error-handling", "algorithms"],
+      "agentic": ["file-operations", "multi-file-coordination", "multi-step-reasoning", "planning"],
+      "constraint": [],
+      "context": "repository",
+      "confidence": {"intent": 0.95, "language": 0.99, "domain": 0.9, "task": 0.92, "difficulty": 0.8, "concept": 0.85, "agentic": 0.9, "context": 0.8}
+    },
+    "metadata": {"turn_index": 77, "total_turns": 77, "source_id": "e3e18113-eddc-9ca7-d497-e8be45f50a4f"},
+    "selection_view": {
+      "current_request": "Make epoch_length optional for finite iterators in the PyTorch Ignite engine and keep backward compatibility.",
+      "trajectory": "[Assistant Step] I inspected ignite/engine/engine.py and traced how iterator exhaustion and _is_done() interact with epoch_length. [Tool Result] Regression tests for finite iterators and explicit epoch_length passed after the change.",
+      "response": "Final review: updated /workspace/pytorch__ignite__0.3/ignite/engine/engine.py so finite iterators can omit epoch_length, taught _is_done() to treat None correctly, and added coverage for empty iterators, single-item iterators, and the explicit epoch_length path. The new tests pass and existing iterator behavior remains intact.",
+      "trajectory_turn_count": 9,
+      "trajectory_tool_turns": 3
+    },
+    "value": {
+      "complexity": {"overall": 7},
+      "quality": {"overall": 9},
+      "reasoning": {"overall": 8},
+      "rarity": {"score": 5.0},
+      "flags": [],
+      "value_score": 7.5,
+      "confidence": 0.9
+    }
+  },
+  {
+    "id": "tid:v1:855ec656356746b6a1a1",
+    "audit_label": "summary_heavy_final",
+    "labels": {
+      "intent": "modify",
+      "language": ["python"],
+      "domain": ["web-backend", "api-development"],
+      "task": ["feature-implementation", "code-refactoring", "testing-task"],
+      "difficulty": "upper-intermediate",
+      "concept": ["api-protocols", "design-patterns", "testing"],
+      "agentic": ["file-operations", "git-operations", "code-execution", "database-query", "multi-file-coordination", "planning"],
+      "constraint": [],
+      "context": "repository",
+      "confidence": {"intent": 0.95, "language": 0.99, "domain": 0.9, "task": 0.92, "difficulty": 0.8, "concept": 0.85, "agentic": 0.9, "context": 0.8}
+    },
+    "metadata": {"turn_index": 57, "total_turns": 57, "source_id": "28b585b9-2268-f8cd-c3e9-51ab8e0ea1b1"},
+    "selection_view": {
+      "current_request": "Allow enabling or disabling the Storage API on a per-connection basis in the BigQuery DB-API connection layer.",
+      "trajectory": "[Assistant Step] I explored the repository and iterated on the connection plumbing. [Tool Result] I ran the relevant tests before wrapping up.",
+      "response": "I have successfully implemented the requested feature and everything is complete. Summary: added the option, preserved backward compatibility, and wrapped up the issue requirements.",
+      "trajectory_turn_count": 8,
+      "trajectory_tool_turns": 3
+    },
+    "value": {
+      "complexity": {"overall": 7},
+      "quality": {"overall": 9},
+      "reasoning": {"overall": 7},
+      "rarity": {"score": 5.4},
+      "flags": [],
+      "value_score": 7.4,
+      "confidence": 0.9
+    }
+  }
+]

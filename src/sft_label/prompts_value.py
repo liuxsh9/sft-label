@@ -183,8 +183,8 @@ Anchors:
 Calibration:
 - Buggy logic = 3-4 max correctness. overall never exceeds correctness by >2.
 - CRITICAL: Most correct, working solutions score 5-6, NOT 7-8. 7+ needs notable qualities beyond correctness (elegant design, thorough edge-case handling, production-quality error handling, insightful explanations).
-- 9-10 is EXCEPTIONAL — production-ready code, no changes needed. Expected: ~5% of samples.
-- Negative anchors: Correct competitive-programming solution with single-letter vars and no explanation = quality 4-5. Well-commented textbook solution = 6, not 8.
+- 9-10 is EXCEPTIONAL — production-ready, no changes needed. Tool-only setup/navigation turns and polish-only summaries without files/fixes/tests cannot get top-end completeness/explanation.
+- Negative anchors: CP code with single-letter vars/no explanation = 4-5. Well-commented textbook code = 6, not 8.
 
 ## Dimension 3: Reasoning (1-10)
 
@@ -206,7 +206,7 @@ For fast-mode, absence of separate COT does NOT mean lower quality.
 Positive: excellent-explanation, clean-code, creative-solution, good-error-handling, comprehensive-testing
 Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation, hallucination
 
-Be selective — most samples should have 0 flags. 1 flag is notable, 2+ is rare.
+Be selective — most samples have 0 flags; 2+ rare.
 Flag criteria (err on the side of NOT flagging):
 - excellent-explanation: RARE (<5% of samples). Must provide unusual insight that teaches WHY something works, not just WHAT it does. A clear, well-structured, helpful explanation does NOT qualify — it must be exceptional educational depth that would make a senior developer say "I learned something new."
 - clean-code: RARELY awarded. Requires notably elegant abstractions, excellent naming, and thoughtful design visible throughout. Correct, working code with standard style does NOT qualify.
@@ -221,10 +221,10 @@ Flag criteria (err on the side of NOT flagging):
 
 - <meta> provides context (tags, original lengths, thinking mode). Longer does NOT mean higher quality.
 - <conversation> is current-turn centered: `<current_turn_request>` is the request, `<trajectory>` is the related assistant/tool trace, and `<final_response>` is the answer being scored.
-- For truncated content, assume same quality continues. Don't penalize completeness heavily.
+- For truncated content, assume quality continues; don't heavily penalize completeness.
 - When correctness is uncertain (complex algorithms, concurrency), set confidence lower (0.6-0.7).
 - Avoid middle-clustering: use the full 1-10 range. A trivial "hello world" IS 1-2, not 5.
-- overall should reflect sub-scores but you may adjust ±1 based on holistic judgment.
+- overall should reflect sub-scores; you may adjust ±1 holistically.
 
 ## Output Format
 

@@ -19,6 +19,7 @@ import os
 import time
 import asyncio
 import random
+import re
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -36,8 +37,12 @@ from sft_label.config import (
     VALUE_TRUNCATION_BUDGET,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
-    SELECTION_INTRA_WEIGHT, SELECTION_QUALITY_WEIGHT,
+    SELECTION_INTRA_WEIGHT, SELECTION_QUALITY_WEIGHT, SELECTION_RARITY_WEIGHT,
     SELECTION_MIN_GROUP_SIZE, SELECTION_SMOOTHING_PRIOR,
+    ENABLE_VALUE_STABILITY, ENABLE_SELECTION_STABILITY, ENABLE_DOMAIN_BACKFILL,
+    SELECTION_STAGE_VALUE_MULTIPLIERS, SELECTION_STAGE_SELECTION_MULTIPLIERS,
+    SELECTION_LOW_INFO_TOOL_PENALTY, SELECTION_SUMMARY_NO_EVIDENCE_PENALTY,
+    SELECTION_SUMMARY_EVIDENCE_BONUS,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -834,6 +839,339 @@ def compute_value_score(score_result, rarity_result, weights=None):
 
 _SELECTION_DIMS = ["intent", "language", "domain", "concept", "task",
                    "agentic", "constraint", "context", "difficulty"]
+_STAGE_ORDER = ("opener", "exploration", "implementation", "verification", "final-summary")
+_SUMMARY_MARKERS = (
+    "## summary", "summary", "final review", "changes made", "what i implemented",
+    "implemented the requested", "successfully implemented", "here's a summary",
+)
+_ROOT_CAUSE_MARKERS = (
+    "root cause", "caused by", "this issue was caused", "the bug was", "the failure was due",
+)
+_FIX_MARKERS = (
+    "added", "updated", "changed", "removed", "fixed", "implemented", "refactored",
+    "renamed", "patched", "handled",
+)
+_VERIFICATION_MARKERS = (
+    "pytest", "test", "tests passed", "verified", "verification", "regression",
+    "exit code: 0", "all tests pass", "passes now", "confirmed",
+)
+_FILE_PATH_RE = re.compile(
+    r"(?:(?:/workspace/)?[\w./-]+\.(?:py|pyi|js|jsx|ts|tsx|java|go|rs|sql|yml|yaml|json|toml|ini|cfg|c|cc|cpp|h|hpp|cs|rb|php|swift|kt|scala))",
+    re.IGNORECASE,
+)
+_SYMBOL_RE = re.compile(
+    r"`?[A-Za-z_][\w.]{2,}`?\s*(?:\(|class\b|def\b|method\b|function\b)",
+    re.IGNORECASE,
+)
+_TOOL_CALL_RE = re.compile(r"<tool_call>|\"name\"\s*:\s*\"[^\"]+\"", re.IGNORECASE)
+_LOW_INFO_TOOL_RE = re.compile(
+    r"\b(view|grep|ls|find|pwd|tree|cat|head|tail|sed|awk|pip install|npm install|poetry install|pytest)\b",
+    re.IGNORECASE,
+)
+_DOMAIN_HINTS = {
+    "compiler-development": (
+        "compiler", "parser", "lexer", "token", "ast", "bytecode", "transpile",
+        "transpilation", "interpreter", "macro", "typecheck",
+    ),
+    "machine-learning": (
+        "pytorch", "tensorflow", "torch", "tensor", "epoch_length", "optimizer",
+        "training", "inference", "dataloader", "gradient", "loss",
+    ),
+    "cloud-computing": (
+        "aws", "gcp", "azure", "cloud storage", "storage api", "lambda", "iam",
+        "bigquery", "s3", "gcs", "pubsub",
+    ),
+    "api-development": (
+        "api", "endpoint", "request", "response", "rest", "graphql",
+        "dbapi", "header",
+    ),
+    "devops": (
+        "docker", "kubernetes", "helm", "terraform", "github actions", "jenkins",
+        "ci", "cd", "deploy", "build profile",
+    ),
+}
+
+
+def _clamp_score(value, default=None):
+    if value is None:
+        return default
+    return max(1.0, min(10.0, float(value)))
+
+
+def _selection_view_from_sample(sample, config=None):
+    """Extract current-turn-centered text used by selection stability heuristics."""
+    preset = sample.get("selection_view")
+    if isinstance(preset, dict):
+        return {
+            "current_request": preset.get("current_request", ""),
+            "trajectory": preset.get("trajectory", ""),
+            "response": preset.get("response", ""),
+            "trajectory_turn_count": preset.get("trajectory_turn_count", 0),
+            "trajectory_tool_turns": preset.get("trajectory_tool_turns", 0),
+        }
+
+    conversations = sample.get("conversations") or []
+    if not conversations:
+        return {
+            "current_request": "",
+            "trajectory": "",
+            "response": "",
+            "trajectory_turn_count": 0,
+            "trajectory_tool_turns": 0,
+        }
+
+    metadata = sample.get("metadata") or {}
+    thinking_mode = metadata.get("thinking_mode") or detect_thinking_mode(conversations)
+    cot_text = metadata.get("cot_text", "")
+    if not cot_text:
+        cot_text, _chars, _cleaned = extract_cot_content(conversations)
+    budget = 4000
+    if config and getattr(config, "value_truncation_budget", None):
+        budget = min(int(config.value_truncation_budget), 4000)
+    truncated = truncate_for_scoring(
+        conversations,
+        thinking_mode,
+        cot_text=cot_text,
+        budget=budget,
+    )
+    return {
+        "current_request": truncated.get("current_request") or truncated.get("instruction") or "",
+        "trajectory": truncated.get("trajectory") or "",
+        "response": truncated.get("response") or "",
+        "trajectory_turn_count": truncated.get("trajectory_turn_count", 0),
+        "trajectory_tool_turns": truncated.get("trajectory_tool_turns", 0),
+    }
+
+
+def _text_signal_count(text, patterns):
+    lowered = (text or "").lower()
+    return sum(1 for marker in patterns if marker in lowered)
+
+
+def _infer_selection_features(*, sample=None, summary=None, config=None):
+    """Derive deterministic stage/evidence features from local sample text."""
+    if summary is None:
+        summary = {}
+    metadata = (sample or {}).get("metadata") or summary.get("metadata") or {}
+    view = summary.get("selection_view")
+    if not isinstance(view, dict):
+        view = _selection_view_from_sample(sample or {}, config=config)
+
+    request = view.get("current_request", "") or ""
+    trajectory = view.get("trajectory", "") or ""
+    response = view.get("response", "") or ""
+    combined = "\n".join(part for part in (request, trajectory, response) if part)
+    response_lower = response.lower()
+    combined_lower = combined.lower()
+
+    turn_index = metadata.get("turn_index")
+    total_turns = metadata.get("total_turns") or summary.get("total_turns")
+    if not isinstance(turn_index, int):
+        turn_index = summary.get("turn_index")
+    if not isinstance(total_turns, int):
+        total_turns = 1
+    position_ratio = (turn_index / total_turns) if turn_index and total_turns else 1.0
+
+    trajectory_turn_count = view.get("trajectory_turn_count") or 0
+    trajectory_tool_turns = view.get("trajectory_tool_turns") or 0
+    tool_density = (
+        trajectory_tool_turns / max(trajectory_turn_count, 1)
+        if trajectory_turn_count else 0.0
+    )
+
+    summary_marker_hits = _text_signal_count(response, _SUMMARY_MARKERS)
+    file_hits = len(_FILE_PATH_RE.findall(response))
+    symbol_hits = len(_SYMBOL_RE.findall(response))
+    root_cause_hits = _text_signal_count(response, _ROOT_CAUSE_MARKERS)
+    fix_hits = _text_signal_count(response, _FIX_MARKERS)
+    verification_hits = _text_signal_count(response, _VERIFICATION_MARKERS)
+    workflow_verification_hits = _text_signal_count(combined, _VERIFICATION_MARKERS)
+    evidence_categories = sum(
+        1 for value in (
+            file_hits > 0,
+            symbol_hits > 0,
+            root_cause_hits > 0,
+            fix_hits > 0,
+            verification_hits > 0,
+        ) if value
+    )
+    has_summary_evidence = evidence_categories >= 2 or (
+        file_hits > 0 and (fix_hits > 0 or verification_hits > 0)
+    )
+
+    tool_like = bool(_TOOL_CALL_RE.search(response) or _TOOL_CALL_RE.search(trajectory))
+    low_info_action_hits = len(_LOW_INFO_TOOL_RE.findall("\n".join((response, trajectory))))
+    response_words = len(re.findall(r"[A-Za-z_]{2,}", response))
+    tool_only_response = tool_like and response.lstrip().startswith(("{", "<tool_call>"))
+    is_low_information_tool = (
+        (tool_only_response and low_info_action_hits > 0 and response_words < 80)
+        or (
+            tool_like
+            and low_info_action_hits > 0
+            and not has_summary_evidence
+            and response_words < 80
+        )
+    )
+
+    if summary_marker_hits > 0 and position_ratio >= 0.7:
+        trajectory_stage = "final-summary"
+    elif position_ratio <= 0.18 and not trajectory and not has_summary_evidence:
+        trajectory_stage = "opener"
+    elif is_low_information_tool or (tool_density >= 0.6 and not has_summary_evidence):
+        trajectory_stage = "exploration"
+    elif workflow_verification_hits > 0 and position_ratio >= 0.5:
+        trajectory_stage = "verification"
+    else:
+        trajectory_stage = "implementation"
+
+    return {
+        "trajectory_stage": trajectory_stage,
+        "position_ratio": round(position_ratio, 3),
+        "tool_density": round(tool_density, 3),
+        "is_low_information_tool": is_low_information_tool,
+        "summary_marker_hits": summary_marker_hits,
+        "has_summary_evidence": has_summary_evidence,
+        "evidence_categories": evidence_categories,
+        "verification_hits": workflow_verification_hits,
+        "selection_view": view,
+    }
+
+
+def _selection_modifier_multiplier(features, *, for_selection):
+    """Compute bounded deterministic multiplier for value/selection."""
+    stage = features.get("trajectory_stage") or "implementation"
+    base = (
+        SELECTION_STAGE_SELECTION_MULTIPLIERS if for_selection
+        else SELECTION_STAGE_VALUE_MULTIPLIERS
+    ).get(stage, 1.0)
+
+    if features.get("is_low_information_tool"):
+        base *= SELECTION_LOW_INFO_TOOL_PENALTY
+
+    if stage == "final-summary":
+        if features.get("has_summary_evidence"):
+            if for_selection:
+                base *= SELECTION_SUMMARY_EVIDENCE_BONUS
+        else:
+            base *= SELECTION_SUMMARY_NO_EVIDENCE_PENALTY
+
+    return max(0.50, min(1.10, base))
+
+
+def _stability_enabled(config, attr_name, default):
+    return getattr(config, attr_name, default) if config else default
+
+
+def _selection_weights(config=None, intra_weight=None):
+    intra = intra_weight if intra_weight is not None else (
+        config.selection_intra_weight if config else SELECTION_INTRA_WEIGHT
+    )
+    quality = (
+        config.selection_quality_weight if config else SELECTION_QUALITY_WEIGHT
+    )
+    rarity = (
+        config.selection_rarity_weight if config else SELECTION_RARITY_WEIGHT
+    )
+    weights = {
+        "intra": max(0.0, float(intra or 0.0)),
+        "quality": max(0.0, float(quality or 0.0)),
+        "rarity": max(0.0, float(rarity or 0.0)),
+    }
+    total = sum(weights.values())
+    if total <= 0:
+        return {"intra": 1.0, "quality": 0.0, "rarity": 0.0}
+    return {key: value / total for key, value in weights.items()}
+
+
+def _compose_selection_score(intra_class_rank, pq_scaled, rarity_score, value_score, features,
+                             config=None, intra_weight=None):
+    """Blend intra-rank, quality, rarity, then apply bounded stage modifiers."""
+    if intra_class_rank is None and value_score is not None:
+        intra_class_rank = value_score
+    components = {
+        "intra": _clamp_score(intra_class_rank),
+        "quality": _clamp_score(pq_scaled),
+        "rarity": _clamp_score(rarity_score),
+    }
+    weights = _selection_weights(config=config, intra_weight=intra_weight)
+    active = {name: score for name, score in components.items() if score is not None}
+    if not active:
+        return value_score
+    active_weight_total = sum(weights[name] for name in active)
+    if active_weight_total <= 0:
+        return value_score
+    base = sum(weights[name] * score for name, score in active.items()) / active_weight_total
+    if _stability_enabled(config, "enable_selection_stability", ENABLE_SELECTION_STABILITY):
+        base *= _selection_modifier_multiplier(features, for_selection=True)
+    return round(max(1.0, min(10.0, base)), 2)
+
+
+def _apply_value_stability(value_score, features, config=None):
+    """Apply deterministic post-LLM value adjustment without changing schema."""
+    if value_score is None:
+        return None
+    if not _stability_enabled(config, "enable_value_stability", ENABLE_VALUE_STABILITY):
+        return round(max(1.0, min(10.0, value_score)), 1)
+    adjusted = value_score * _selection_modifier_multiplier(features, for_selection=False)
+    return round(max(1.0, min(10.0, adjusted)), 1)
+
+
+def _infer_domain_backfill(view, labels):
+    """Conservatively infer a missing domain from strong lexical evidence."""
+    if not isinstance(labels, dict):
+        return []
+    existing = labels.get("domain")
+    if isinstance(existing, list) and existing:
+        return existing
+    text = "\n".join(
+        part for part in (
+            (view or {}).get("current_request", ""),
+            (view or {}).get("trajectory", ""),
+            (view or {}).get("response", ""),
+        ) if part
+    ).lower()
+    if not text:
+        return []
+
+    scores = {}
+    for domain, keywords in _DOMAIN_HINTS.items():
+        score = 0
+        for keyword in keywords:
+            if keyword in text:
+                score += 2 if len(keyword) > 6 else 1
+        if domain == "api-development" and "api" in text:
+            score += 1 if any(term in text for term in ("endpoint", "request", "response", "rest", "graphql", "dbapi")) else 0
+            if not any(term in text for term in ("endpoint", "request", "response", "rest", "graphql", "dbapi")):
+                score = max(0, score - 1)
+        if domain == "cloud-computing" and any(term in text for term in ("bigquery", "storage api", "s3", "gcs", "lambda", "iam")):
+            score += 2
+        if score > 0:
+            scores[domain] = score
+
+    if not scores:
+        return []
+    ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    top_domain, top_score = ordered[0]
+    second_score = ordered[1][1] if len(ordered) > 1 else -1
+    if top_score < 3 or top_score <= second_score:
+        return []
+    return [top_domain]
+
+
+def _maybe_backfill_domain(sample, config=None):
+    """Mutate sample labels with a conservative inferred domain when empty."""
+    if not sample or not _stability_enabled(config, "enable_domain_backfill", ENABLE_DOMAIN_BACKFILL):
+        return
+    labels = sample.get("labels")
+    if not isinstance(labels, dict):
+        labels = {}
+        sample["labels"] = labels
+    domains = labels.get("domain")
+    if isinstance(domains, list) and domains:
+        return
+    inferred = _infer_domain_backfill(_selection_view_from_sample(sample, config=config), labels)
+    if inferred:
+        labels["domain"] = inferred
 
 
 def _extract_pure_quality(value_dict, quality_weights=None):
@@ -887,6 +1225,8 @@ def _selection_dim_confidence(labels, dim):
 def _selection_summary_from_sample(sample):
     """Extract the lightweight fields needed for global selection ranking."""
     value = sample.get("value") or {}
+    selection_view = _selection_view_from_sample(sample)
+    metadata = sample.get("metadata") or {}
     return {
         "labels": sample.get("labels") or {},
         "complexity_overall": (value.get("complexity") or {}).get("overall"),
@@ -895,6 +1235,11 @@ def _selection_summary_from_sample(sample):
         "rarity_score": (value.get("rarity") or {}).get("score"),
         "value_score": value.get("value_score"),
         "confidence": value.get("confidence"),
+        "selection_view": selection_view,
+        "metadata": {
+            "turn_index": metadata.get("turn_index"),
+            "total_turns": metadata.get("total_turns"),
+        },
     }
 
 
@@ -941,133 +1286,30 @@ def compute_selection_scores(samples, rarity_weights=None,
         min_group_size: min samples per tag for percentile computation (default: 30)
         config: PipelineConfig override
     """
-    if rarity_weights is None:
-        rarity_weights = (config.rarity_weights if config and config.rarity_weights
-                          else RARITY_WEIGHTS)
-    if intra_weight is None:
-        intra_weight = (config.selection_intra_weight if config
-                        else SELECTION_INTRA_WEIGHT)
-    if min_group_size is None:
-        min_group_size = (config.selection_min_group_size if config
-                          else SELECTION_MIN_GROUP_SIZE)
-
-    quality_weights = _selection_quality_weights(config)
-    label_confidences = [
-        {dim: _selection_dim_confidence(s.get("labels") or {}, dim) for dim in _SELECTION_DIMS}
-        for s in samples
-    ]
-
-    # Step 1: Compute pure_quality for each sample
-    pure_qualities = []
-    for s in samples:
-        v = s.get("value")
-        if v:
-            pure_qualities.append(_extract_pure_quality(v, quality_weights))
+    summaries = []
+    for sample in samples:
+        if sample.get("value"):
+            summaries.append(_selection_summary_from_sample(sample))
         else:
-            pure_qualities.append(None)
+            summaries.append({
+                "labels": sample.get("labels") or {},
+                "value_score": (sample.get("value") or {}).get("value_score"),
+            })
 
-    # Step 2: Global percentile (needed for Bayesian shrinkage)
-    valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
-    global_percentiles = _compute_percentiles(valid_pq)
+    selection_results = compute_selection_scores_from_summaries(
+        summaries,
+        rarity_weights=rarity_weights,
+        intra_weight=intra_weight,
+        min_group_size=min_group_size,
+        config=config,
+    )
 
-    # Step 3: Per-dimension, per-tag quality percentile with Bayesian shrinkage
-    smoothing_prior = (config.selection_smoothing_prior if config
-                       else SELECTION_SMOOTHING_PRIOR)
-    dim_percentiles = [{} for _ in samples]  # [{dim: (percentile_sum, count)}, ...]
-
-    for dim in _SELECTION_DIMS:
-        # Build tag -> list of (sample_idx, pure_quality)
-        tag_groups = {}
-        for i, s in enumerate(samples):
-            if pure_qualities[i] is None:
-                continue
-            labels = s.get("labels") or {}
-            if not is_usable_labels(labels):
-                continue
-            tags = labels.get(dim)
-            if tags is None:
-                continue
-            if isinstance(tags, list):
-                for t in tags:
-                    tag_groups.setdefault(t, []).append((i, pure_qualities[i]))
-            else:
-                tag_groups.setdefault(tags, []).append((i, pure_qualities[i]))
-
-        for tag, members in tag_groups.items():
-            if len(members) < min_group_size:
-                continue
-
-            effective_n = sum(label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
-                              for idx, _pq in members)
-            # Bayesian shrinkage: blend tag-group percentile toward global
-            shrinkage = effective_n / (effective_n + smoothing_prior)
-            tag_percentiles = _compute_percentiles(members)
-            for idx, _pq in members:
-                tag_pct = tag_percentiles[idx]
-                g_pct = global_percentiles.get(idx, 0.5)
-                sample_conf = label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
-                percentile = (
-                    sample_conf * (shrinkage * tag_pct + (1 - shrinkage) * g_pct)
-                    + (1 - sample_conf) * g_pct
-                )
-                # Multi-select: average across tags in this dimension
-                if dim in dim_percentiles[idx]:
-                    prev, cnt = dim_percentiles[idx][dim]
-                    dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
-                else:
-                    dim_percentiles[idx][dim] = (percentile, 1)
-
-    # Step 4: Weighted fusion across dimensions → intra_class_rank + selection_score
-    quality_weight = (config.selection_quality_weight if config
-                      else SELECTION_QUALITY_WEIGHT)
-    rarity_weight = 1.0 - intra_weight - quality_weight
-
-    for i, s in enumerate(samples):
-        v = s.get("value")
-        if v is None:
+    for sample, result in zip(samples, selection_results):
+        value = sample.get("value")
+        if value is None:
             continue
-
-        percs = dim_percentiles[i]
-
-        if percs:
-            weighted_sum = 0.0
-            weight_total = 0.0
-            for dim, (pct_sum, pct_cnt) in percs.items():
-                w = rarity_weights.get(dim, 1.0) * label_confidences[i].get(dim, _SELECTION_CONFIDENCE_FLOOR)
-                weighted_sum += w * (pct_sum / pct_cnt)  # mean percentile
-                weight_total += w
-            if weight_total > 0:
-                fused = weighted_sum / weight_total  # 0-1
-                intra_class_rank = round(fused * 9 + 1, 2)
-            else:
-                intra_class_rank = None
-        else:
-            # Fallback: global percentile
-            if i in global_percentiles:
-                intra_class_rank = round(global_percentiles[i] * 9 + 1, 2)
-            else:
-                intra_class_rank = None
-
-        v["intra_class_rank"] = intra_class_rank
-
-        rarity_score = (v.get("rarity") or {}).get("score")
-        pq = pure_qualities[i]
-        pq_scaled = max(1.0, min(10.0, pq)) if pq is not None else 5.5
-
-        if intra_class_rank is not None:
-            if rarity_score is not None:
-                v["selection_score"] = round(
-                    intra_weight * intra_class_rank +
-                    quality_weight * pq_scaled +
-                    rarity_weight * rarity_score, 2)
-            else:
-                # No rarity: redistribute rarity_weight into intra + quality
-                v["selection_score"] = round(
-                    (intra_weight + rarity_weight * 0.5) * intra_class_rank +
-                    (quality_weight + rarity_weight * 0.5) * pq_scaled, 2)
-        else:
-            # Ultimate fallback: use value_score
-            v["selection_score"] = v.get("value_score")
+        value["selection_score"] = result["selection_score"]
+        value["intra_class_rank"] = result["intra_class_rank"]
 
 
 def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
@@ -1096,9 +1338,19 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                           else SELECTION_MIN_GROUP_SIZE)
 
     quality_weights = _selection_quality_weights(config)
+    normalized_labels = []
+    features_list = []
+    for summary in summaries:
+        labels = copy.deepcopy(summary.get("labels") or {})
+        inferred = _infer_domain_backfill(summary.get("selection_view"), labels)
+        if inferred and not labels.get("domain"):
+            labels["domain"] = inferred
+        normalized_labels.append(labels)
+        features_list.append(_infer_selection_features(summary=summary, config=config))
+
     label_confidences = [
-        {dim: _selection_dim_confidence(s.get("labels") or {}, dim) for dim in _SELECTION_DIMS}
-        for s in summaries
+        {dim: _selection_dim_confidence(labels, dim) for dim in _SELECTION_DIMS}
+        for labels in normalized_labels
     ]
 
     # Step 1: pure_quality from summary fields
@@ -1136,7 +1388,7 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
         for i, s in enumerate(summaries):
             if pure_qualities[i] is None:
                 continue
-            labels = s.get("labels") or {}
+            labels = normalized_labels[i]
             if not is_usable_labels(labels):
                 continue
             tags = labels.get(dim)
@@ -1171,10 +1423,6 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                     dim_percentiles[idx][dim] = (percentile, 1)
 
     # Step 4: Fusion
-    quality_weight = (config.selection_quality_weight if config
-                      else SELECTION_QUALITY_WEIGHT)
-    rarity_weight = 1.0 - intra_weight - quality_weight
-
     results = []
     for i, s in enumerate(summaries):
         percs = dim_percentiles[i]
@@ -1199,20 +1447,16 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
 
         rarity_score = s.get("rarity_score")
         pq = pure_qualities[i]
-        pq_scaled = max(1.0, min(10.0, pq)) if pq is not None else 5.5
-
-        if intra_class_rank is not None:
-            if rarity_score is not None:
-                selection_score = round(
-                    intra_weight * intra_class_rank +
-                    quality_weight * pq_scaled +
-                    rarity_weight * rarity_score, 2)
-            else:
-                selection_score = round(
-                    (intra_weight + rarity_weight * 0.5) * intra_class_rank +
-                    (quality_weight + rarity_weight * 0.5) * pq_scaled, 2)
-        else:
-            selection_score = s.get("value_score")
+        pq_scaled = max(1.0, min(10.0, pq)) if pq is not None else None
+        selection_score = _compose_selection_score(
+            intra_class_rank,
+            pq_scaled,
+            rarity_score,
+            s.get("value_score"),
+            features_list[i],
+            config=config,
+            intra_weight=intra_weight,
+        )
 
         results.append({
             "selection_score": selection_score,
@@ -1244,6 +1488,9 @@ async def score_one(http_client, sample, model, rarity_result,
     conversations = sample.get("conversations", [])
     labels = sample.get("labels") or {}
     metadata = sample.get("metadata") or {}
+
+    _maybe_backfill_domain(sample, config=config)
+    labels = sample.get("labels") or labels
 
     monitor = {
         "sample_id": sample_id,
@@ -1345,6 +1592,24 @@ async def score_one(http_client, sample, model, rarity_result,
 
         # Success
         value_score = compute_value_score(score_result, rarity_result, _weights)
+        features = _infer_selection_features(
+            sample=sample,
+            summary={
+                "selection_view": {
+                    "current_request": truncated.get("current_request") or truncated.get("instruction") or "",
+                    "trajectory": truncated.get("trajectory") or "",
+                    "response": truncated.get("response") or "",
+                    "trajectory_turn_count": truncated.get("trajectory_turn_count", 0),
+                    "trajectory_tool_turns": truncated.get("trajectory_tool_turns", 0),
+                },
+                "metadata": {
+                    "turn_index": metadata.get("turn_index"),
+                    "total_turns": metadata.get("total_turns"),
+                },
+            },
+            config=config,
+        )
+        value_score = _apply_value_stability(value_score, features, config=config)
 
         value = {
             "complexity": score_result.get("complexity"),
@@ -2069,6 +2334,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if not line:
                 continue
             sample = json.loads(line)
+            _maybe_backfill_domain(sample, config=config)
             labels = sample.get("labels") or {}
             if _update_distributions_from_labels(local_distributions, labels, local_dims):
                 usable_count += 1
@@ -2115,6 +2381,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if not line:
                 continue
             sample = json.loads(line)
+            _maybe_backfill_domain(sample, config=config)
             labels = sample.get("labels") or {}
             rarity = compute_sample_rarity(
                 labels, idf_map, total_stats_samples,
@@ -2195,6 +2462,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 # These are already-labeled samples from the JSONL
                 samples = []
                 for raw in raw_records:
+                    _maybe_backfill_domain(raw, config=config)
                     samples.append(raw)
 
                 chunk_idx = chunks_loaded
@@ -2259,17 +2527,12 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         sample["value"] = value
                         scored_count += 1
                         # Summary for final stats
-                        score_summaries.append({
-                            "value_score": value.get("value_score"),
-                            "complexity_overall": (value.get("complexity") or {}).get("overall"),
-                            "quality_overall": (value.get("quality") or {}).get("overall"),
-                            "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
-                            "rarity_score": (value.get("rarity") or {}).get("score"),
+                        summary = _selection_summary_from_sample(sample)
+                        summary.update({
                             "flags": value.get("flags", []),
                             "thinking_mode": value.get("thinking_mode"),
-                            "confidence": value.get("confidence"),
-                            "labels": sample.get("labels"),
                         })
+                        score_summaries.append(summary)
                     else:
                         failed_count += 1
                         out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
@@ -2715,6 +2978,8 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     if limit > 0:
         samples = samples[:limit]
+    for sample in samples:
+        _maybe_backfill_domain(sample, config=config)
     total = len(samples)
 
     # Resume: load previously scored samples from scored.jsonl

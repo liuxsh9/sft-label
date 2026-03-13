@@ -142,11 +142,33 @@ KNOWN_FLAGS_NEGATIVE = frozenset({
 KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 
 # ─── Selection Score (Post-scoring, no LLM) ──────────
-SELECTION_INTRA_WEIGHT = 0.55          # weight for intra-class percentile ranking
+SELECTION_INTRA_WEIGHT = 0.49          # weight for intra-class percentile ranking
 SELECTION_QUALITY_WEIGHT = 0.20        # weight for absolute quality (pure_quality)
-SELECTION_RARITY_WEIGHT = 0.25         # weight for global rarity
-SELECTION_MIN_GROUP_SIZE = 5       # min samples per tag to compute intra-class percentile
-SELECTION_SMOOTHING_PRIOR = 30     # Bayesian shrinkage prior: blend toward global at n < prior
+SELECTION_RARITY_WEIGHT = 0.31         # weight for global rarity / diversity
+SELECTION_MIN_GROUP_SIZE = 5           # min samples per tag to compute intra-class percentile
+SELECTION_SMOOTHING_PRIOR = 30         # Bayesian shrinkage prior: blend toward global at n < prior
+
+# ─── Selection / Value Stability (deterministic post-LLM) ──────────
+ENABLE_VALUE_STABILITY = True
+ENABLE_SELECTION_STABILITY = True
+ENABLE_DOMAIN_BACKFILL = True
+SELECTION_STAGE_VALUE_MULTIPLIERS = {
+    "opener": 0.68,
+    "exploration": 0.90,
+    "implementation": 1.00,
+    "verification": 1.03,
+    "final-summary": 1.00,
+}
+SELECTION_STAGE_SELECTION_MULTIPLIERS = {
+    "opener": 0.67,
+    "exploration": 0.87,
+    "implementation": 1.00,
+    "verification": 1.05,
+    "final-summary": 0.985,
+}
+SELECTION_LOW_INFO_TOOL_PENALTY = 0.82
+SELECTION_SUMMARY_NO_EVIDENCE_PENALTY = 0.89
+SELECTION_SUMMARY_EVIDENCE_BONUS = 1.04
 
 # ─── Conversation-Level Aggregation (Post-scoring, no LLM) ──
 CONV_CONFIDENCE_INHERITED = 0.7           # confidence weight for inherited slices
@@ -239,8 +261,12 @@ class PipelineConfig:
     value_truncation_budget: int = VALUE_TRUNCATION_BUDGET
     selection_intra_weight: float = SELECTION_INTRA_WEIGHT
     selection_quality_weight: float = SELECTION_QUALITY_WEIGHT
+    selection_rarity_weight: float = SELECTION_RARITY_WEIGHT
     selection_min_group_size: int = SELECTION_MIN_GROUP_SIZE
     selection_smoothing_prior: int = SELECTION_SMOOTHING_PRIOR
+    enable_value_stability: bool = ENABLE_VALUE_STABILITY
+    enable_selection_stability: bool = ENABLE_SELECTION_STABILITY
+    enable_domain_backfill: bool = ENABLE_DOMAIN_BACKFILL
     enable_rationale: bool = ENABLE_RATIONALE
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
 
