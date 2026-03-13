@@ -62,7 +62,7 @@ from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
     DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
     REQUEST_TIMEOUT, REQUEST_TIMEOUT_ESCALATION,
-    MAX_CONVERSATION_CHARS,
+    MAX_CONVERSATION_CHARS, COMPACT_CONVERSATION_CHARS,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     PipelineConfig,
@@ -75,6 +75,11 @@ from sft_label.artifacts import (
     pass1_global_dashboard_filename,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
+from sft_label.tag_canonicalization import (
+    TAG_ALIASES,
+    canonicalization_stat_key,
+    make_canonicalization_event,
+)
 
 
 INLINE_RUN_MODES = {"incremental", "refresh", "migrate", "recompute"}
@@ -210,6 +215,8 @@ def merge_stats(all_file_stats):
         "arbitrated_count": 0,
         "validation_issue_count": 0, "consistency_warning_count": 0,
         "unmapped_unique_count": 0,
+        "canonicalization_total_count": 0,
+        "canonicalization_unique_count": 0,
         "total_elapsed_seconds": 0,
         "sparse_labeled": 0, "sparse_inherited": 0,
         "rows_total": 0, "rows_skipped": 0, "rows_changed": 0,
@@ -220,12 +227,14 @@ def merge_stats(all_file_stats):
         "confidence_stats": {},
         "cross_matrix": {},
         "unmapped_tags": {},
+        "canonicalization_counts": {},
         "files_processed": len(all_file_stats),
     }
     for st in all_file_stats:
         for k in ("total_samples", "success", "failed", "total_llm_calls",
                    "total_prompt_tokens", "total_completion_tokens", "total_tokens",
                    "arbitrated_count", "validation_issue_count", "consistency_warning_count",
+                   "canonicalization_total_count",
                    "sparse_labeled", "sparse_inherited",
                    "distribution_total_samples",
                    "rows_total", "rows_skipped", "rows_changed",
@@ -244,6 +253,8 @@ def merge_stats(all_file_stats):
         # Merge unmapped
         for tag, count in st.get("unmapped_tags", {}).items():
             merged["unmapped_tags"][tag] = merged["unmapped_tags"].get(tag, 0) + count
+        for key, count in st.get("canonicalization_counts", {}).items():
+            merged["canonicalization_counts"][key] = merged["canonicalization_counts"].get(key, 0) + count
         # Merge confidence_stats (weighted by count for proper averaging)
         for dim, cs in st.get("confidence_stats", {}).items():
             if dim not in merged["confidence_stats"]:
@@ -267,6 +278,8 @@ def merge_stats(all_file_stats):
     merged["combo_distributions"] = dict(sorted(merged["combo_distributions"].items(), key=lambda x: -x[1]))
     merged["unmapped_tags"] = dict(sorted(merged["unmapped_tags"].items(), key=lambda x: -x[1]))
     merged["unmapped_unique_count"] = len(merged["unmapped_tags"])
+    merged["canonicalization_counts"] = dict(sorted(merged["canonicalization_counts"].items(), key=lambda x: (-x[1], x[0])))
+    merged["canonicalization_unique_count"] = len(merged["canonicalization_counts"])
 
     # Finalize confidence_stats: convert accumulated sum/count to mean
     for dim, entry in merged["confidence_stats"].items():
@@ -683,60 +696,6 @@ def build_call2_messages(conversation_json, preprocessed_signals, call1_result, 
 # Validation
 # ─────────────────────────────────────────────────────────
 
-# Alias → canonical tag mapping.  Applied before pool validation so that
-# common LLM outputs (underscore variants, abbreviations, sub-topic names)
-# are silently resolved instead of becoming unmapped.
-TAG_ALIASES = {
-    # language
-    "c++": "cpp",
-    "c#": "csharp",
-    "f#": "fsharp",
-    # concept — algorithm sub-topics
-    "dynamic-programming": "algorithms",
-    "dp": "algorithms",
-    "graph-theory": "algorithms",
-    "geometry": "algorithms",
-    "combinatorics": "algorithms",
-    "bit-manipulation": "algorithms",
-    "string-manipulation": "algorithms",
-    "string-algorithms": "algorithms",
-    "mathematics": "algorithms",
-    "greedy": "algorithms",
-    "backtracking": "algorithms",
-    "divide-and-conquer": "algorithms",
-    # agentic — format variants
-    "execute_python_code": "code-execution",
-    "execute_python": "code-execution",
-    "execute_code": "code-execution",
-    "run_code": "code-execution",
-    "execute_bash": "bash-execution",
-    "run_bash": "bash-execution",
-    "shell_execution": "bash-execution",
-    # task
-    "test-creation": "testing-task",
-    "write-tests": "testing-task",
-    "code-fixing": "bug-fixing",
-    "code-correction": "bug-fixing",
-    # domain
-    "security": "cybersecurity",
-    # intent — modify aliases
-    "refactor": "modify",
-    "optimize": "modify",
-    "transform": "modify",
-    # language — common abbreviations
-    "objc": "objective-c",
-    "objective_c": "objective-c",
-    "js": "javascript",
-    "ts": "typescript",
-    "rb": "ruby",
-    "py": "python",
-    # concept — additional mappings
-    "regex": "algorithms",
-    "regular-expressions": "algorithms",
-    "async-await": "concurrency",
-    "system-programming": "concurrency",
-}
-
 TAG_DIMENSION_INDEX = {}
 for _dim, _pool in TAG_POOLS.items():
     for _tag in _pool:
@@ -753,7 +712,26 @@ CROSS_CATEGORY_CORRECTIONS = {
 }
 
 
-def _resolve_aliases(dim, values):
+def _append_canonicalization(canonicalized, source_dim, source_value, target_dim, canonical_value, reason):
+    """Record a canonicalization event, deduplicated within one sample."""
+    if canonicalized is None:
+        return
+    source_value = "" if source_value is None else str(source_value).strip()
+    canonical_value = "" if canonical_value is None else str(canonical_value).strip()
+    if not source_value or not canonical_value:
+        return
+    event = make_canonicalization_event(
+        source_dimension=source_dim or "?",
+        source_value=source_value,
+        target_dimension=target_dim or source_dim or "?",
+        canonical_value=canonical_value,
+        reason=reason,
+    )
+    if event not in canonicalized:
+        canonicalized.append(event)
+
+
+def _resolve_aliases(dim, values, canonicalized=None):
     """Resolve aliases and deduplicate, preserving order.
 
     Only applies alias mapping when the original value is NOT already
@@ -766,12 +744,17 @@ def _resolve_aliases(dim, values):
     for v in values:
         # Only map alias if the raw value is not already valid in this pool
         canonical = v if v in pool else TAG_ALIASES.get(v, v)
+        if canonical != v and canonical in pool:
+            _append_canonicalization(canonicalized, dim, v, dim, canonical, "alias")
+            canonical_for_dim = canonical
+        else:
+            canonical_for_dim = v
         # Cross-category correction: silently drop misplaced tags
-        if dim in CROSS_CATEGORY_CORRECTIONS and canonical in CROSS_CATEGORY_CORRECTIONS[dim]:
+        if dim in CROSS_CATEGORY_CORRECTIONS and canonical_for_dim in CROSS_CATEGORY_CORRECTIONS[dim]:
             continue
-        if canonical not in seen:
-            seen.add(canonical)
-            resolved.append(canonical)
+        if canonical_for_dim not in seen:
+            seen.add(canonical_for_dim)
+            resolved.append(canonical_for_dim)
     return resolved
 
 
@@ -865,13 +848,20 @@ def _queue_rescued_tag(rescued, dim, value):
         bucket.append(value)
 
 
-def _try_rescue_unmapped_value(value, source_dim, rescued, current_dims):
+def _try_rescue_unmapped_value(value, source_dim, rescued, current_dims, canonicalized=None, reason="cross_dimension_rescue"):
     """Rescue values that already exist elsewhere in the taxonomy."""
     target_dim, rescued_value = _find_cross_dim_tag(value, exclude_dim=source_dim)
     if not target_dim:
         return False
-    if target_dim in current_dims:
-        _queue_rescued_tag(rescued, target_dim, rescued_value)
+    _queue_rescued_tag(rescued, target_dim, rescued_value)
+    _append_canonicalization(
+        canonicalized,
+        source_dim or "?",
+        value,
+        target_dim,
+        rescued_value,
+        reason,
+    )
     return True
 
 
@@ -898,6 +888,7 @@ def _build_partial_labels(call1_cleaned, reason):
     }
     labels["confidence"] = dict(call1_cleaned.get("confidence", {}))
     labels["unmapped"] = list(call1_cleaned.get("unmapped", []))
+    labels["canonicalized"] = list(call1_cleaned.get("canonicalized", []))
     labels["partial"] = True
     labels["partial_stage"] = "call1"
     labels["partial_reason"] = reason
@@ -912,6 +903,7 @@ def validate_tags(result, call_name="call1"):
     cleaned = dict(result)
     rescued = {}
     pending_unmapped = []
+    canonicalized = []
 
     dims = (["intent", "language", "domain", "task", "difficulty"] if call_name == "call1"
             else ["concept", "agentic", "constraint", "context"])
@@ -935,7 +927,7 @@ def validate_tags(result, call_name="call1"):
                 raw_val = str(raw_val)
             val = raw_val if (not raw_val or raw_val in pool) else TAG_ALIASES.get(raw_val, raw_val)
             if val and val not in pool:
-                if not _try_rescue_unmapped_value(val, dim, rescued, dims):
+                if not _try_rescue_unmapped_value(val, dim, rescued, dims, canonicalized=canonicalized):
                     issues.append(f"{dim}: '{val}' not in pool")
                     pending_unmapped.append({"dimension": dim, "value": val})
                 cleaned[dim] = ""
@@ -943,13 +935,13 @@ def validate_tags(result, call_name="call1"):
                 cleaned[dim] = val
         else:
             raw = result[dim] if isinstance(result[dim], list) else [result[dim]]
-            resolved = _resolve_aliases(dim, raw)
+            resolved = _resolve_aliases(dim, raw, canonicalized=canonicalized)
             valid = []
             for v in resolved:
                 if v in pool:
                     valid.append(v)
                 else:
-                    if not _try_rescue_unmapped_value(v, dim, rescued, dims):
+                    if not _try_rescue_unmapped_value(v, dim, rescued, dims, canonicalized=canonicalized):
                         issues.append(f"{dim}: '{v}' not in pool")
                         pending_unmapped.append({"dimension": dim, "value": v})
             cleaned[dim] = valid
@@ -964,8 +956,24 @@ def validate_tags(result, call_name="call1"):
             )
             if same_dim_hit:
                 _queue_rescued_tag(rescued, dim, same_dim_hit)
+                if same_dim_hit != value:
+                    _append_canonicalization(
+                        canonicalized,
+                        dim,
+                        value,
+                        dim,
+                        same_dim_hit,
+                        "raw_unmapped_alias",
+                    )
                 continue
-        if _try_rescue_unmapped_value(value, dim if dim in TAG_POOLS else None, rescued, dims):
+        if _try_rescue_unmapped_value(
+            value,
+            dim if dim in TAG_POOLS else None,
+            rescued,
+            dims,
+            canonicalized=canonicalized,
+            reason="raw_unmapped_cross_dimension_rescue",
+        ):
             continue
         pending_unmapped.append(item)
 
@@ -989,6 +997,7 @@ def validate_tags(result, call_name="call1"):
 
     cleaned["confidence"] = _sanitize_confidence(result.get("confidence"), dims, issues)
     cleaned["unmapped"] = unmapped
+    cleaned["canonicalized"] = canonicalized
     return cleaned, issues
 
 
@@ -1026,6 +1035,24 @@ def find_low_confidence_dims(labels, threshold=CONFIDENCE_THRESHOLD):
     return low
 
 
+def _resolved_labeling_prompt_budget(config=None):
+    """Return effective prompt mode metadata for Pass 1 observability."""
+    compact = config.prompt_mode == "compact" if config else False
+    budget = config.max_conversation_chars if config else MAX_CONVERSATION_CHARS
+    if compact and config and config.max_conversation_chars == MAX_CONVERSATION_CHARS:
+        budget = COMPACT_CONVERSATION_CHARS
+    return compact, budget
+
+
+def _annotate_labeling_prompt_stats(stats, config=None):
+    compact, budget = _resolved_labeling_prompt_budget(config)
+    stats["prompt_mode"] = "compact" if compact else "full"
+    stats["compact_prompt"] = compact
+    stats["conversation_char_budget"] = budget
+    stats["fewshot_variant"] = "compact" if compact else "full"
+    return stats
+
+
 # ─────────────────────────────────────────────────────────
 # Per-sample pipeline (async)
 # ─────────────────────────────────────────────────────────
@@ -1036,14 +1063,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
     _max_retries_sample = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
     _max_retries = config.max_retries if config else MAX_RETRIES
     _conf_threshold = config.confidence_threshold if config else CONFIDENCE_THRESHOLD
-    _compact = config.prompt_mode == "compact" if config else False
+    _compact, _max_chars = _resolved_labeling_prompt_budget(config)
     start = time.time()
-
-    # Conversation truncation budget — compact mode uses smaller budget for firewall limits
-    _max_chars = config.max_conversation_chars if config else MAX_CONVERSATION_CHARS
-    if _compact and config and config.max_conversation_chars == MAX_CONVERSATION_CHARS:
-        from sft_label.config import COMPACT_CONVERSATION_CHARS
-        _max_chars = COMPACT_CONVERSATION_CHARS
 
     # Truncate oversized conversations before sending to LLM
     conversations = sample.get("conversations", [])
@@ -1209,6 +1230,21 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     **(call2_cleaned.get("confidence", {}) if isinstance(call2_cleaned.get("confidence"), dict) else {}),
                 }
                 labels["unmapped"] = call1_cleaned.get("unmapped", []) + call2_cleaned.get("unmapped", [])
+                labels["canonicalized"] = (
+                    list(call1_cleaned.get("canonicalized", []))
+                    + list(call2_cleaned.get("canonicalized", []))
+                )
+                for payload in (call1_cleaned, call2_cleaned):
+                    for d in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
+                        if d not in payload:
+                            continue
+                        if d in SINGLE_SELECT:
+                            if not labels.get(d) and payload.get(d):
+                                labels[d] = payload[d]
+                            continue
+                        for value in payload.get(d, []) or []:
+                            if value not in labels[d]:
+                                labels[d].append(value)
 
                 # Consistency
                 warnings = check_consistency(labels)
@@ -1311,12 +1347,17 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
             combo_counts[combo_key] = combo_counts.get(combo_key, 0) + 1
 
     all_unmapped = {}
+    canonicalization_counts = {}
     for idx, labels in enumerate(all_labels):
         if not is_usable_labels(labels) or idx in inherited_indices:
             continue
         for item in labels.get("unmapped", []):
             key = f"{item.get('dimension', '?')}:{item.get('value', '?')}" if isinstance(item, dict) else str(item)
             all_unmapped[key] = all_unmapped.get(key, 0) + 1
+        for event in labels.get("canonicalized", []):
+            if isinstance(event, dict):
+                key = canonicalization_stat_key(event)
+                canonicalization_counts[key] = canonicalization_counts.get(key, 0) + 1
 
     conf_stats = {}
     for dim in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
@@ -1359,6 +1400,9 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
         "consistency_warning_count": sum(1 for m in all_monitors if m["consistency_warnings"]),
         "unmapped_tags": dict(sorted(all_unmapped.items(), key=lambda x: -x[1])),
         "unmapped_unique_count": len(all_unmapped),
+        "canonicalization_counts": dict(sorted(canonicalization_counts.items(), key=lambda x: (-x[1], x[0]))),
+        "canonicalization_total_count": sum(canonicalization_counts.values()),
+        "canonicalization_unique_count": len(canonicalization_counts),
         "confidence_stats": conf_stats,
         "low_confidence_frequency": dict(sorted(
             {d: sum(1 for m in all_monitors for lc in m.get("low_confidence_dims", []) if lc["dim"] == d)
@@ -1451,6 +1495,7 @@ class FileCollector:
     sample_to_bundle: list | None = None
     dataset_output_path: Path | None = None
     run_failure_log_path: Path | None = None
+    config: PipelineConfig | None = None
     inline_output: bool = False
     label_count: int = 0    # actual LLM labels (sparse)
     inherit_map: dict = field(default_factory=dict)
@@ -1727,6 +1772,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     if sparse_inherited > 0:
         stats["sparse_labeled"] = collector.label_count
         stats["sparse_inherited"] = sparse_inherited
+    _annotate_labeling_prompt_stats(stats, collector.config)
 
     stats_path = output_dir / stats_file
     _write_json_atomic(stats_path, stats)
@@ -1820,10 +1866,12 @@ class StatsAccumulator:
         self.arbitrated = 0
         self.validation_issue_count = 0
         self.consistency_warning_count = 0
+        self.canonicalization_total_count = 0
 
         self.distributions = {dim: {} for dim in self.DIMS}
         self.combo_counts = {}
         self.unmapped = {}
+        self.canonicalization_counts = {}
         self.cross_matrix = {}
 
         # Confidence: sum/count/min/max per dim for running mean
@@ -1881,6 +1929,11 @@ class StatsAccumulator:
             for item in labels.get("unmapped", []):
                 key = f"{item.get('dimension', '?')}:{item.get('value', '?')}" if isinstance(item, dict) else str(item)
                 self.unmapped[key] = self.unmapped.get(key, 0) + 1
+            for event in labels.get("canonicalized", []):
+                if isinstance(event, dict):
+                    key = canonicalization_stat_key(event)
+                    self.canonicalization_counts[key] = self.canonicalization_counts.get(key, 0) + 1
+                    self.canonicalization_total_count += 1
             # Confidence
             conf = labels.get("confidence")
             if isinstance(conf, dict):
@@ -1946,6 +1999,9 @@ class StatsAccumulator:
             "consistency_warning_count": self.consistency_warning_count,
             "unmapped_tags": dict(sorted(self.unmapped.items(), key=lambda x: -x[1])),
             "unmapped_unique_count": len(self.unmapped),
+            "canonicalization_counts": dict(sorted(self.canonicalization_counts.items(), key=lambda x: (-x[1], x[0]))),
+            "canonicalization_total_count": self.canonicalization_total_count,
+            "canonicalization_unique_count": len(self.canonicalization_counts),
             "confidence_stats": conf_stats,
             "low_confidence_frequency": dict(sorted(self.low_conf_freq.items(), key=lambda x: -x[1])),
             "tag_distributions": sorted_dist,
@@ -2324,6 +2380,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     stats["chunk_size"] = chunk_size
     stats["chunks_processed"] = chunks_loaded
     stats.update(plan_totals)
+    _annotate_labeling_prompt_stats(stats, config)
 
     stats_path = output_dir / PASS1_STATS_FILE
     _write_json_atomic(stats_path, stats)
@@ -2571,6 +2628,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     if sparse_inherited > 0:
         stats["sparse_labeled"] = label_count
         stats["sparse_inherited"] = sparse_inherited
+    _annotate_labeling_prompt_stats(stats, config)
 
     stats_path = output_dir / stats_file
     _write_json_atomic(stats_path, stats)
@@ -2729,6 +2787,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             sample_to_bundle=sample_to_bundle,
             dataset_output_path=dataset_output_path,
             run_failure_log_path=run_failure_log_path,
+            config=config,
             inline_output=inline_jsonl,
             label_count=label_count,
             inherit_map=inherit_map,
@@ -2955,14 +3014,20 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
                           layout: InlineRunLayout | None = None,
                           mode: str = "refresh",
                           migrate_from: str | None = None,
-                          migration_stats: dict | None = None):
+                          migration_stats: dict | None = None,
+                          config: PipelineConfig | None = None):
     """Write global summary stats + dashboard for a batch run."""
     batch_elapsed = time.time() - batch_start
     summary = merge_stats(all_file_stats) if all_file_stats else {
         "total_samples": 0, "distribution_total_samples": 0,
         "success": 0, "failed": 0, "success_rate": 0,
         "total_llm_calls": 0, "total_tokens": 0, "arbitrated_count": 0,
-        "unmapped_unique_count": 0, "tag_distributions": {}, "unmapped_tags": {},
+        "unmapped_unique_count": 0,
+        "canonicalization_total_count": 0,
+        "canonicalization_unique_count": 0,
+        "tag_distributions": {},
+        "unmapped_tags": {},
+        "canonicalization_counts": {},
         "files_processed": 0,
     }
     summary["model"] = model
@@ -2991,6 +3056,7 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
         summary["planning_elapsed_seconds"] = workload_estimate.scan_elapsed_seconds
     if rate_limiter:
         summary["http_request_stats"] = rate_limiter.stats.to_dict()
+    _annotate_labeling_prompt_stats(summary, config)
 
     summary_path = _summary_path_for_run(run_dir, layout=layout)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3226,7 +3292,7 @@ async def run(
         _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start,
                               rate_limiter=rate_limiter, workload_estimate=workload_estimate,
                               layout=layout, mode=_mode, migrate_from=_migrate_from,
-                              migration_stats=migration_stats)
+                              migration_stats=migration_stats, config=config)
         summary_path = _summary_path_for_run(run_dir, layout=layout)
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -3351,7 +3417,7 @@ async def run(
                               rate_limiter=rate_limiter, workload_estimate=workload_estimate,
                               layout=layout, mode=mode,
                               migrate_from=str(migrate_from) if migrate_from else None,
-                              migration_stats=migration_stats)
+                              migration_stats=migration_stats, config=config)
         summary_path = _summary_path_for_run(run_dir, layout=layout)
         with open(summary_path, "r", encoding="utf-8") as f:
             return json.load(f)

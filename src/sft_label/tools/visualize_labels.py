@@ -42,7 +42,23 @@ def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_
 
 def compute_viz_data(samples, stats):
     """Compute all visualization data needed for Pass 1 dashboards."""
-    return build_pass1_viz(samples, stats)
+    payload = build_pass1_viz(samples, stats)
+    overview_fields = {
+        "prompt_mode": stats.get("prompt_mode", "full"),
+        "compact_prompt": bool(stats.get("compact_prompt")),
+        "conversation_char_budget": stats.get("conversation_char_budget"),
+        "fewshot_variant": stats.get("fewshot_variant"),
+    }
+
+    targets = [payload]
+    targets.extend((payload.get("modes") or {}).values())
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        overview = target.setdefault("overview", {})
+        for key, value in overview_fields.items():
+            overview[key] = value
+    return payload
 
 
 def _scope_summary(scope: dict) -> dict:

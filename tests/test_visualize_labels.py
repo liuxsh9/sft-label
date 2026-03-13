@@ -62,6 +62,24 @@ def test_compute_viz_data_includes_unmapped_examples():
     assert "WebGPU rendering support" in task_rows[0]["examples"][0]["query"]
 
 
+def test_compute_viz_data_exposes_prompt_mode_budget():
+    viz = compute_viz_data([], {
+        "total_samples": 0,
+        "tag_distributions": {},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "prompt_mode": "compact",
+        "compact_prompt": True,
+        "conversation_char_budget": 8000,
+        "fewshot_variant": "compact",
+    })
+
+    assert viz["overview"]["prompt_mode"] == "compact"
+    assert viz["overview"]["compact_prompt"] is True
+    assert viz["overview"]["conversation_char_budget"] == 8000
+    assert viz["overview"]["fewshot_variant"] == "compact"
+
+
 def test_generate_dashboard_renders_unmapped_section(tmp_path):
     samples = [
         _sample_with_unmapped(

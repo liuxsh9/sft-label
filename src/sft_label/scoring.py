@@ -34,7 +34,7 @@ from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY,
     MAX_RETRIES, SAMPLE_MAX_RETRIES, REQUEST_TIMEOUT,
     VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA, RARITY_SCORE_MODE,
-    VALUE_TRUNCATION_BUDGET,
+    VALUE_TRUNCATION_BUDGET, COMPACT_VALUE_TRUNCATION_BUDGET,
     KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     SELECTION_INTRA_WEIGHT, SELECTION_QUALITY_WEIGHT, SELECTION_RARITY_WEIGHT,
@@ -123,6 +123,23 @@ def _write_jsonl_atomic(path, records):
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     os.replace(tmp_path, path)
+
+
+def _resolved_scoring_prompt_budget(config=None):
+    """Return effective prompt mode metadata for Pass 2 observability."""
+    compact = config.prompt_mode == "compact" if config else False
+    budget = config.value_truncation_budget if config else VALUE_TRUNCATION_BUDGET
+    if compact and config and budget == VALUE_TRUNCATION_BUDGET:
+        budget = COMPACT_VALUE_TRUNCATION_BUDGET
+    return compact, budget
+
+
+def _annotate_scoring_prompt_stats(stats, config=None):
+    compact, budget = _resolved_scoring_prompt_budget(config)
+    stats["prompt_mode"] = "compact" if compact else "full"
+    stats["compact_prompt"] = compact
+    stats["value_truncation_budget"] = budget
+    return stats
 
 
 def _normalize_combo_counts(raw_counts):
@@ -1521,12 +1538,7 @@ async def score_one(http_client, sample, model, rarity_result,
         cot_text, _, _ = extract_cot_content(conversations)
 
     # Truncate for scoring
-    _compact = config.prompt_mode == "compact" if config else False
-    _budget = config.value_truncation_budget if config else None
-    # Compact mode: reduce budget to fit within firewall size limits
-    if _compact and config and _budget == VALUE_TRUNCATION_BUDGET:
-        from sft_label.config import COMPACT_VALUE_TRUNCATION_BUDGET
-        _budget = COMPACT_VALUE_TRUNCATION_BUDGET
+    _compact, _budget = _resolved_scoring_prompt_budget(config)
     truncated = truncate_for_scoring(
         conversations, thinking_mode, cot_text=cot_text,
         budget=_budget,
@@ -2162,6 +2174,9 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
             "planning_elapsed_seconds",
             "rarity_config",
             "http_request_stats",
+            "prompt_mode",
+            "compact_prompt",
+            "value_truncation_budget",
         ):
             if key in summary:
                 corrected_summary[key] = summary[key]
@@ -2682,6 +2697,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         "score_mode": rarity_mode,
     }
     stats["chunked"] = True
+    _annotate_scoring_prompt_stats(stats, config)
 
     stats_path = output_dir / PASS2_STATS_FILE
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
@@ -3224,6 +3240,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         "combo_mode": combo_mode,
         "score_mode": rarity_mode,
     }
+    _annotate_scoring_prompt_stats(stats, config)
 
     stats_path = output_dir / PASS2_STATS_FILE
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
@@ -3583,6 +3600,7 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
         "combo_mode": collector.combo_mode,
         "score_mode": resolve_rarity_mode(config),
     }
+    _annotate_scoring_prompt_stats(stats, config)
 
     stats_path = output_dir / PASS2_STATS_FILE
     stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
@@ -4084,6 +4102,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         }
         if rate_limiter:
             summary["http_request_stats"] = rate_limiter.stats.to_dict()
+        _annotate_scoring_prompt_stats(summary, config)
 
         summary_path = output_dir / PASS2_SUMMARY_STATS_FILE
         with open(summary_path, "w", encoding="utf-8") as f:

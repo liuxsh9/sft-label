@@ -28,7 +28,8 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
            complexity=5, quality=6, reasoning=5, rarity=4.0,
            inherited=False, flags=None, labels=None, thinking_mode=None,
            score_confidence=None,
-           source_file=None):
+           source_file=None,
+           conversations=None):
     """Build a minimal multi-turn slice sample."""
     s = {
         "id": f"{source_id}_t{turn_index}",
@@ -58,6 +59,8 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
         s["value"]["confidence"] = score_confidence
     if source_file:
         s["metadata"]["source_file"] = source_file
+    if conversations is not None:
+        s["conversations"] = conversations
     return s
 
 
@@ -340,6 +343,51 @@ class TestAggregateConversation:
         assert inherited["conv_rarity"] < observed["conv_rarity"]
         assert inherited["rarity_confidence"] < observed["rarity_confidence"]
         assert inherited["observed_turn_ratio"] < observed["observed_turn_ratio"]
+
+    def test_conversation_diagnostics_include_top_bottom_std_and_late_gain(self):
+        slices = [
+            _slice("diag", 1, 4, value_score=3.0, quality=4),
+            _slice("diag", 2, 4, value_score=5.0, quality=6),
+            _slice("diag", 3, 4, value_score=8.0, quality=7),
+            _slice("diag", 4, 4, value_score=9.0, quality=9),
+        ]
+        rec = aggregate_conversation("diag", slices)
+
+        assert rec["compression_gap"] == pytest.approx(2.75)
+        assert rec["late_turn_gain"] == pytest.approx(6.0)
+        assert rec["detail"]["turn_value_mean"] == pytest.approx(6.25)
+        assert rec["detail"]["turn_value_min"] == pytest.approx(3.0)
+        assert rec["detail"]["turn_value_max"] == pytest.approx(9.0)
+        assert rec["detail"]["top_k_mean"] == pytest.approx(6.25)
+        assert rec["detail"]["bottom_k_mean"] == pytest.approx((3.0 + 5.0 + 8.0) / 3, abs=0.01)
+        assert rec["detail"]["turn_value_std"] > 0
+        assert rec["detail"]["turn_quality_std"] > 0
+
+    def test_conversation_structure_signals_extract_tools_files_and_test_turns(self):
+        full_conversation = [
+            {"from": "human", "value": "Fix the repo and keep tests green."},
+            {"from": "gpt", "value": "I'll inspect the failing test first."},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest tests/test_api.py -q\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "FAILED tests/test_api.py::test_create\nservice.go: expected 1 got 0"},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"str_replace_editor\",\"arguments\":{\"path\":\"service.go\",\"old_str\":\"return 0\",\"new_str\":\"return int(id)\"}}</tool_call>"},
+            {"role": "tool", "name": "str_replace_editor", "content": "Updated service.go"},
+            {"role": "assistant", "content": "Patched service.go and tests/test_api.py should pass now."},
+        ]
+        slices = [
+            _slice("signals", 1, 2, conversations=full_conversation[:4]),
+            _slice("signals", 2, 2, conversations=full_conversation),
+        ]
+
+        rec = aggregate_conversation("signals", slices)
+
+        assert rec["tool_turn_ratio"] == pytest.approx(4 / 7, abs=0.01)
+        assert rec["unique_tool_count"] == 2
+        assert rec["unique_file_count"] >= 2
+        assert set(rec["detail"]["unique_tools"]) == {"execute_bash", "str_replace_editor"}
+        assert rec["detail"]["tool_turn_count"] == 4
+        assert rec["detail"]["test_related_turn_count"] >= 2
+        assert rec["detail"]["edit_related_turn_count"] >= 2
+        assert rec["detail"]["bash_execution_turn_count"] >= 2
 
 
 # ── TestComputeConvSelectionScores ──

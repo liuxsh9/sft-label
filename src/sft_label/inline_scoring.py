@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sft_label.conversation import aggregate_conversation, compute_conv_selection_scores
+from sft_label.conversation import (
+    aggregate_conversation,
+    build_conversation_key,
+    compute_conv_selection_scores,
+)
 from sft_label.inline_labels import (
     build_turn_id,
     compact_conversation_record,
@@ -307,8 +311,13 @@ def _scoring_monitor_summary(monitor: dict | None) -> dict | None:
 def _single_turn_conversation_update(sample: dict) -> dict:
     value = sample.get("value") or {}
     metadata = sample.get("metadata") or {}
+    source_id = metadata.get("source_id") or sample.get("id") or ""
+    source_file = metadata.get("source_file")
+    conversation_key = build_conversation_key(source_id, source_file)
     return {
-        "conversation_id": metadata.get("source_id") or sample.get("id") or "",
+        "conversation_id": source_id,
+        "conversation_key": conversation_key,
+        "source_file": source_file,
         "turn_count": 1,
         "conv_value": value.get("value_score"),
         "conv_selection": value.get("selection_score"),

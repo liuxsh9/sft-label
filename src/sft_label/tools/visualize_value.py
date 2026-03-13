@@ -51,7 +51,21 @@ def load_value_run(run_dir, scored_file="scored.json", stats_file=PASS2_STATS_FI
 
 def compute_value_viz_data(samples, stats, conv_records=None):
     """Transform Pass 2 data into dashboard JSON."""
-    return build_pass2_viz(samples, stats, conv_records)
+    payload = build_pass2_viz(samples, stats, conv_records)
+    overview_fields = {
+        "prompt_mode": stats.get("prompt_mode", "full"),
+        "compact_prompt": bool(stats.get("compact_prompt")),
+        "value_truncation_budget": stats.get("value_truncation_budget"),
+    }
+    targets = [payload]
+    targets.extend((payload.get("modes") or {}).values())
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        overview = target.setdefault("overview", {})
+        for key, value in overview_fields.items():
+            overview[key] = value
+    return payload
 
 
 def _load_conversation_scores(run_dir):
@@ -77,6 +91,26 @@ def _compute_conv_viz_data(conv_records):
     observed_ratios = [row["observed_turn_ratio"] for row in conv_records if row.get("observed_turn_ratio") is not None]
     rarity_confidences = [row["rarity_confidence"] for row in conv_records if row.get("rarity_confidence") is not None]
     inherited_ratios = [row["inherited_turn_ratio"] for row in conv_records if row.get("inherited_turn_ratio") is not None]
+    compression_gaps = [row["compression_gap"] for row in conv_records if row.get("compression_gap") is not None]
+    late_turn_gains = [row["late_turn_gain"] for row in conv_records if row.get("late_turn_gain") is not None]
+    tool_turn_ratios = [row["tool_turn_ratio"] for row in conv_records if row.get("tool_turn_ratio") is not None]
+    unique_tool_counts = [row["unique_tool_count"] for row in conv_records if row.get("unique_tool_count") is not None]
+    unique_file_counts = [row["unique_file_count"] for row in conv_records if row.get("unique_file_count") is not None]
+    turn_value_stds = [
+        (row.get("detail") or {}).get("turn_value_std")
+        for row in conv_records
+        if (row.get("detail") or {}).get("turn_value_std") is not None
+    ]
+    test_related_turns = [
+        (row.get("detail") or {}).get("test_related_turn_count")
+        for row in conv_records
+        if (row.get("detail") or {}).get("test_related_turn_count") is not None
+    ]
+    edit_related_turns = [
+        (row.get("detail") or {}).get("edit_related_turn_count")
+        for row in conv_records
+        if (row.get("detail") or {}).get("edit_related_turn_count") is not None
+    ]
 
     def _ratio_bands(rows):
         bands = {
@@ -107,6 +141,14 @@ def _compute_conv_viz_data(conv_records):
         "mean_observed_turn_ratio": sum(observed_ratios) / len(observed_ratios) if observed_ratios else 0,
         "mean_inherited_turn_ratio": sum(inherited_ratios) / len(inherited_ratios) if inherited_ratios else 0,
         "mean_rarity_confidence": sum(rarity_confidences) / len(rarity_confidences) if rarity_confidences else 0,
+        "mean_turn_value_std": sum(turn_value_stds) / len(turn_value_stds) if turn_value_stds else 0,
+        "mean_peak_minus_mean": sum(compression_gaps) / len(compression_gaps) if compression_gaps else 0,
+        "mean_late_turn_gain": sum(late_turn_gains) / len(late_turn_gains) if late_turn_gains else 0,
+        "mean_tool_turn_ratio": sum(tool_turn_ratios) / len(tool_turn_ratios) if tool_turn_ratios else 0,
+        "mean_unique_tool_count": sum(unique_tool_counts) / len(unique_tool_counts) if unique_tool_counts else 0,
+        "mean_unique_file_count": sum(unique_file_counts) / len(unique_file_counts) if unique_file_counts else 0,
+        "mean_test_related_turns": sum(test_related_turns) / len(test_related_turns) if test_related_turns else 0,
+        "mean_edit_related_turns": sum(edit_related_turns) / len(edit_related_turns) if edit_related_turns else 0,
         "low_observed_coverage_count": sum(1 for value in observed_ratios if value < 0.5),
         "low_rarity_confidence_count": sum(1 for value in rarity_confidences if value < 0.6),
     }

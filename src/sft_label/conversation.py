@@ -10,6 +10,7 @@ Runs after Pass 2 scoring. Pure computation — no LLM calls, no async.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -147,6 +148,240 @@ def _weighted_average(slices, weights, extract_fn):
     if total_w <= 0:
         return None
     return total_v / total_w
+
+
+def _mean(values):
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _std(values):
+    if not values:
+        return None
+    if len(values) == 1:
+        return 0.0
+    mu = _mean(values) or 0.0
+    return (sum((value - mu) ** 2 for value in values) / len(values)) ** 0.5
+
+
+def _top_k_mean(values, k):
+    if not values:
+        return None
+    top = sorted(values, reverse=True)[:max(1, min(k, len(values)))]
+    return _mean(top)
+
+
+def _bottom_k_mean(values, k):
+    if not values:
+        return None
+    bottom = sorted(values)[:max(1, min(k, len(values)))]
+    return _mean(bottom)
+
+
+def _round_or_none(value, digits=2):
+    if value is None:
+        return None
+    return round(value, digits)
+
+
+def _extract_turn_metrics(slices):
+    """Compute additive diagnostics for turn-level value compression."""
+    value_scores = []
+    quality_scores = []
+    for s in slices:
+        value = s.get("value") or {}
+        score = value.get("value_score")
+        if score is not None:
+            value_scores.append(score)
+        quality = (value.get("quality") or {}).get("overall")
+        if quality is not None:
+            quality_scores.append(quality)
+
+    if not value_scores:
+        return {}
+
+    value_mean = _mean(value_scores)
+    value_max = max(value_scores)
+    top_k_mean = _top_k_mean(value_scores, 5)
+    bottom_k_mean = _bottom_k_mean(value_scores, 3)
+
+    k = min(5, max(1, len(value_scores) // 4))
+    early_mean = _mean(value_scores[:k])
+    late_mean = _mean(value_scores[-k:])
+
+    return {
+        "turn_value_mean": value_mean,
+        "turn_value_min": min(value_scores),
+        "turn_value_max": value_max,
+        "turn_value_std": _std(value_scores),
+        "turn_quality_std": _std(quality_scores) if quality_scores else None,
+        "top_k_mean": top_k_mean,
+        "bottom_k_mean": bottom_k_mean,
+        "peak_minus_mean": (value_max - value_mean) if value_mean is not None else None,
+        "late_turn_gain": (
+            (late_mean - early_mean)
+            if early_mean is not None and late_mean is not None
+            else None
+        ),
+    }
+
+
+_TEST_TEXT_RE = re.compile(
+    r"\b("
+    r"pytest|unittest|go\s+test|cargo\s+test|npm\s+test|pnpm\s+test|yarn\s+test|"
+    r"vitest|jest|mocha|ctest|gradle\s+test|mvn\s+test|phpunit|rspec|tox|nosetests"
+    r"|test|tests|testing"
+    r")\b",
+    re.IGNORECASE,
+)
+_EDIT_TEXT_RE = re.compile(
+    r"("
+    r"apply_patch|str_replace_editor|write_file|cat\s+>\s+|tee\s+|patch\b|"
+    r"diff --git|\*\*\* Update File:|\*\*\* Add File:|\*\*\* Delete File:|"
+    r"sed\s+-i\b|perl\s+-pi\b|\bpatched?\b"
+    r")",
+    re.IGNORECASE,
+)
+_BASH_TOOL_NAMES = {
+    "bash", "execute_bash", "shell", "terminal", "command",
+    "run_shell_command", "run_command",
+}
+_PATH_RE = re.compile(r"(?<![\w.-])((?:\.{1,2}/|/)?(?:[\w.-]+/)+[\w.-]+)")
+_BASENAME_RE = re.compile(
+    r"(?<![/\w.-])([\w.-]+\.(?:py|pyi|js|jsx|ts|tsx|go|rs|java|kt|scala|rb|php|"
+    r"c|cc|cpp|h|hpp|cs|swift|m|mm|sql|ya?ml|json|toml|ini|cfg|conf|md|sh|zsh|"
+    r"bash|ps1|xml|html|css|gradle))(?![\w.-])",
+    re.IGNORECASE,
+)
+_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+def _normalize_role(turn):
+    role = str(turn.get("role") or turn.get("from") or "").strip().lower()
+    if role == "human":
+        return "user"
+    if role == "gpt":
+        return "assistant"
+    return role
+
+
+def _coerce_turn_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or item.get("value")
+                if text:
+                    parts.append(str(text))
+            elif item:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("content") or value.get("value") or "")
+    return str(value)
+
+
+def _extract_tool_names_from_text(text):
+    names = []
+    for match in _TOOL_CALL_RE.finditer(text or ""):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        name = payload.get("name")
+        if not name and isinstance(payload.get("function"), dict):
+            name = payload["function"].get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
+
+
+def _extract_file_refs(text):
+    refs = set()
+    for pattern in (_PATH_RE, _BASENAME_RE):
+        for match in pattern.finditer(text or ""):
+            candidate = str(match.group(1)).strip("`'\"()[]{}:;,")
+            if not candidate or candidate in {".", "..", "/"}:
+                continue
+            refs.add(candidate)
+    return refs
+
+
+def _extract_structure_signals(slices):
+    """Approximate deterministic structure metrics from the final full trajectory."""
+    if not slices:
+        return {}
+
+    full_conversation = []
+    for s in reversed(slices):
+        turns = s.get("conversations")
+        if isinstance(turns, list) and turns:
+            full_conversation = turns
+            break
+
+    if not full_conversation:
+        return {
+            "tool_turn_count": 0,
+            "tool_turn_ratio": 0.0,
+            "unique_tool_count": 0,
+            "unique_tools": [],
+            "unique_file_count": 0,
+            "test_related_turn_count": 0,
+            "edit_related_turn_count": 0,
+            "bash_execution_turn_count": 0,
+        }
+
+    tool_turn_count = 0
+    test_related_turn_count = 0
+    edit_related_turn_count = 0
+    bash_execution_turn_count = 0
+    unique_tools = set()
+    unique_files = set()
+
+    for turn in full_conversation:
+        if not isinstance(turn, dict):
+            continue
+        role = _normalize_role(turn)
+        text = _coerce_turn_text(
+            turn.get("value", turn.get("content"))
+        )
+        tool_name = str(turn.get("name") or turn.get("tool_name") or "").strip()
+        tool_names = set(_extract_tool_names_from_text(text))
+        if tool_name:
+            tool_names.add(tool_name)
+
+        is_tool_turn = (role == "tool") or bool(tool_names)
+        if is_tool_turn:
+            tool_turn_count += 1
+
+        unique_tools.update(name for name in tool_names if name)
+        unique_files.update(_extract_file_refs(text))
+
+        lower = text.lower()
+        if _TEST_TEXT_RE.search(lower):
+            test_related_turn_count += 1
+        if _EDIT_TEXT_RE.search(lower):
+            edit_related_turn_count += 1
+
+        if any(name.lower() in _BASH_TOOL_NAMES for name in tool_names) or text.lstrip().startswith("$ "):
+            bash_execution_turn_count += 1
+
+    turn_total = len(full_conversation) or 1
+    return {
+        "tool_turn_count": tool_turn_count,
+        "tool_turn_ratio": tool_turn_count / turn_total,
+        "unique_tool_count": len(unique_tools),
+        "unique_tools": sorted(unique_tools),
+        "unique_file_count": len(unique_files),
+        "test_related_turn_count": test_related_turn_count,
+        "edit_related_turn_count": edit_related_turn_count,
+        "bash_execution_turn_count": bash_execution_turn_count,
+    }
 
 
 # ─── Penalty computation ─────────────────────────────────
@@ -486,6 +721,8 @@ def aggregate_conversation(conversation_key, slices):
 
     # Turn count
     turn_count = len(slices)
+    turn_metrics = _extract_turn_metrics(slices)
+    structure_signals = _extract_structure_signals(slices)
 
     # Slice details
     slice_details = []
@@ -504,6 +741,8 @@ def aggregate_conversation(conversation_key, slices):
     observed_turn_ratio = rarity_detail.get("observed_turn_ratio")
     inherited_turn_ratio = rarity_detail.get("inherited_turn_ratio")
     rarity_confidence = rarity_detail.get("rarity_confidence")
+    compression_gap = turn_metrics.get("peak_minus_mean")
+    late_turn_gain = turn_metrics.get("late_turn_gain")
 
     return {
         "conversation_id": source_id,
@@ -517,6 +756,11 @@ def aggregate_conversation(conversation_key, slices):
         "observed_turn_ratio": round(observed_turn_ratio, 2) if observed_turn_ratio is not None else None,
         "inherited_turn_ratio": round(inherited_turn_ratio, 2) if inherited_turn_ratio is not None else None,
         "rarity_confidence": round(rarity_confidence, 2) if rarity_confidence is not None else None,
+        "compression_gap": _round_or_none(compression_gap),
+        "late_turn_gain": _round_or_none(late_turn_gain),
+        "tool_turn_ratio": _round_or_none(structure_signals.get("tool_turn_ratio")),
+        "unique_tool_count": structure_signals.get("unique_tool_count"),
+        "unique_file_count": structure_signals.get("unique_file_count"),
         "thinking_mode": thinking_mode,
         "merged_labels": merged_labels,
         "detail": {
@@ -534,6 +778,20 @@ def aggregate_conversation(conversation_key, slices):
             "rarity_peak": round(rarity_detail["rarity_peak"], 2) if "rarity_peak" in rarity_detail else None,
             "rarity_diversity_bonus": round(rarity_detail["rarity_diversity_bonus"], 3) if "rarity_diversity_bonus" in rarity_detail else None,
             "label_signature_count": rarity_detail.get("label_signature_count"),
+            "turn_value_mean": _round_or_none(turn_metrics.get("turn_value_mean")),
+            "turn_value_min": _round_or_none(turn_metrics.get("turn_value_min")),
+            "turn_value_max": _round_or_none(turn_metrics.get("turn_value_max")),
+            "turn_value_std": _round_or_none(turn_metrics.get("turn_value_std"), 3),
+            "turn_quality_std": _round_or_none(turn_metrics.get("turn_quality_std"), 3),
+            "top_k_mean": _round_or_none(turn_metrics.get("top_k_mean")),
+            "bottom_k_mean": _round_or_none(turn_metrics.get("bottom_k_mean")),
+            "peak_minus_mean": _round_or_none(turn_metrics.get("peak_minus_mean")),
+            "late_turn_gain": _round_or_none(turn_metrics.get("late_turn_gain")),
+            "tool_turn_count": structure_signals.get("tool_turn_count"),
+            "unique_tools": structure_signals.get("unique_tools"),
+            "test_related_turn_count": structure_signals.get("test_related_turn_count"),
+            "edit_related_turn_count": structure_signals.get("edit_related_turn_count"),
+            "bash_execution_turn_count": structure_signals.get("bash_execution_turn_count"),
             "conv_intra_class_rank": None,  # filled later
             "selection_confidence": None,  # filled later
         },

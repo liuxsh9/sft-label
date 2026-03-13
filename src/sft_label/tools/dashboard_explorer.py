@@ -69,7 +69,7 @@ def _flatten_tags(labels: dict) -> tuple[list[str], list[str]]:
     flat = []
     dims = []
     for key, value in labels.items():
-        if key in {"confidence", "unmapped", "inherited", "inherited_from", "partial", "partial_stage", "partial_reason"}:
+        if key in {"confidence", "canonicalized", "unmapped", "inherited", "inherited_from", "partial", "partial_stage", "partial_reason"}:
             continue
         if isinstance(value, list):
             for item in value:
@@ -245,7 +245,13 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict]) -> dict[
                     "observed_turn_ratio": conversation.get("observed_turn_ratio"),
                     "inherited_turn_ratio": conversation.get("inherited_turn_ratio"),
                     "rarity_confidence": conversation.get("rarity_confidence"),
+                    "compression_gap": conversation.get("compression_gap"),
+                    "late_turn_gain": conversation.get("late_turn_gain"),
+                    "tool_turn_ratio": conversation.get("tool_turn_ratio"),
+                    "unique_tool_count": conversation.get("unique_tool_count"),
+                    "unique_file_count": conversation.get("unique_file_count"),
                     "thinking_mode": conversation.get("thinking_mode"),
+                    "detail": conversation.get("detail") or {},
                 }
             detail_rows[doc_id] = detail_payload
             preview = _preview_payload(
@@ -268,6 +274,11 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict]) -> dict[
                         "observed_turn_ratio": conversation.get("observed_turn_ratio"),
                         "inherited_turn_ratio": conversation.get("inherited_turn_ratio"),
                         "rarity_confidence": conversation.get("rarity_confidence"),
+                        "compression_gap": conversation.get("compression_gap"),
+                        "late_turn_gain": conversation.get("late_turn_gain"),
+                        "tool_turn_ratio": conversation.get("tool_turn_ratio"),
+                        "unique_tool_count": conversation.get("unique_tool_count"),
+                        "unique_file_count": conversation.get("unique_file_count"),
                     }
                 )
             preview_rows.append(preview)

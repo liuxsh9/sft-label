@@ -167,8 +167,13 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
     conversation = updated_rows[0]["extra_info"]["unique_info"]["data_label"]["conversation"]
     assert conversation["conv_value"] is not None
     assert conversation["conv_selection"] is not None
+    assert conversation["conversation_key"].endswith("::conv-2")
+    assert conversation["source_file"].endswith("train.jsonl")
+    assert "compression_gap" in conversation
+    assert "tool_turn_ratio" in conversation
+    assert conversation["detail"]["top_k_mean"] is not None
+    assert "turn_value_std" in conversation["detail"]
     assert "merged_labels" not in conversation
-    assert "detail" not in conversation
     assert "slices" not in conversation
 
 
@@ -235,6 +240,9 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
     turns = updated_b[0]["extra_info"]["unique_info"]["data_label"]["turns"]
     assert turns[0]["value"]["selection_score"] is not None
     assert turns[1]["value"]["selection_score"] is not None
+    conversation = updated_b[0]["extra_info"]["unique_info"]["data_label"]["conversation"]
+    assert conversation["conversation_key"].endswith("::conv-b")
+    assert conversation["detail"]["turn_value_std"] is not None
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,11 @@
 
 from sft_label.validate import run_validation, ValidationReport
 from sft_label._resources import load_taxonomy_yaml, load_all_tag_yamls
-from sft_label.pipeline import validate_tags, TAG_ALIASES, CROSS_CATEGORY_CORRECTIONS, check_consistency
+from sft_label.pipeline import (
+    validate_tags,
+    check_consistency,
+    compute_stats,
+)
 from sft_label.prompts import TAG_POOLS
 
 
@@ -113,6 +117,21 @@ class TestAliasResolution:
         assert "testing-task" in cleaned["task"]
         assert len(issues) == 0
 
+    def test_task_alias_code_testing(self):
+        result = {"intent": "build", "language": ["python"],
+                  "domain": [], "task": ["code-testing"],
+                  "difficulty": "intermediate", "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["task"] == ["testing-task"]
+        assert cleaned["canonicalized"] == [{
+            "source_dimension": "task",
+            "source_value": "code-testing",
+            "target_dimension": "task",
+            "canonical_value": "testing-task",
+            "reason": "alias",
+        }]
+        assert len(issues) == 0
+
     def test_domain_alias_security_to_cybersecurity(self):
         result = {"intent": "build", "language": ["python"],
                   "domain": ["security"], "task": ["feature-implementation"],
@@ -221,6 +240,22 @@ class TestCrossDimensionRescue:
         assert cleaned["unmapped"] == []
         assert len(issues) == 0
 
+    def test_call2_rescues_refactoring_into_task(self):
+        result = {"concept": ["refactoring"], "agentic": [],
+                  "constraint": [], "context": "repository",
+                  "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call2")
+        assert cleaned["concept"] == []
+        assert cleaned["unmapped"] == []
+        assert cleaned["canonicalized"] == [{
+            "source_dimension": "concept",
+            "source_value": "refactoring",
+            "target_dimension": "task",
+            "canonical_value": "code-refactoring",
+            "reason": "cross_dimension_rescue",
+        }]
+        assert len(issues) == 0
+
     def test_raw_unmapped_string_rescues_into_current_dimension(self):
         result = {"concept": [], "agentic": [],
                   "constraint": [], "context": "repository",
@@ -264,3 +299,54 @@ class TestModifyConsistency:
                   "concept": [], "agentic": [], "constraint": [], "context": "single-file"}
         warnings = check_consistency(labels)
         assert not any("modify" in w.lower() for w in warnings)
+
+
+class TestCanonicalizationStats:
+    def test_compute_stats_counts_canonicalizations(self):
+        labels = [{
+            "intent": "modify",
+            "language": ["python"],
+            "domain": [],
+            "task": ["testing-task", "code-refactoring"],
+            "difficulty": "intermediate",
+            "concept": [],
+            "agentic": [],
+            "constraint": [],
+            "context": "repository",
+            "confidence": {},
+            "unmapped": [],
+            "canonicalized": [
+                {
+                    "source_dimension": "task",
+                    "source_value": "code-testing",
+                    "target_dimension": "task",
+                    "canonical_value": "testing-task",
+                    "reason": "alias",
+                },
+                {
+                    "source_dimension": "concept",
+                    "source_value": "refactoring",
+                    "target_dimension": "task",
+                    "canonical_value": "code-refactoring",
+                    "reason": "cross_dimension_rescue",
+                },
+            ],
+        }]
+        monitors = [{
+            "llm_calls": 2,
+            "total_prompt_tokens": 10,
+            "total_completion_tokens": 5,
+            "arbitrated": False,
+            "validation_issues": [],
+            "consistency_warnings": [],
+            "low_confidence_dims": [],
+        }]
+
+        stats = compute_stats(monitors, labels)
+
+        assert stats["canonicalization_total_count"] == 2
+        assert stats["canonicalization_unique_count"] == 2
+        assert stats["canonicalization_counts"] == {
+            "concept:refactoring->task:code-refactoring": 1,
+            "task:code-testing->task:testing-task": 1,
+        }

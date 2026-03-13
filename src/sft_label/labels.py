@@ -5,6 +5,7 @@ from __future__ import annotations
 
 LABEL_META_KEYS = {
     "confidence",
+    "canonicalized",
     "inherited",
     "inherited_from",
     "partial",

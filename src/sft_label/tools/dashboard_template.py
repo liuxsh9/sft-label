@@ -1961,6 +1961,8 @@ function renderPass1(pass1) {
   cards.push({label: t("success"), value: `${(((overview.success_rate || 0) * 100).toFixed(1))}%`});
   cards.push({label: t("tokens"), value: Number(overview.total_tokens || 0).toLocaleString()});
   cards.push({label: t("arbitrated"), value: `${(((overview.arbitrated_rate || 0) * 100).toFixed(1))}%`});
+  cards.push({label: "Prompt Mode", value: overview.prompt_mode || (overview.compact_prompt ? "compact" : "full")});
+  if (overview.conversation_char_budget) cards.push({label: "Budget", value: Number(overview.conversation_char_budget || 0).toLocaleString()});
   if (overview.unmapped_unique) cards.push({label: t("unmapped"), value: overview.unmapped_unique});
   if (overview.sparse_inherited) {
     cards.push({label: t("llm_labeled"), value: overview.sparse_labeled || 0});
@@ -2087,7 +2089,9 @@ function renderPass2(pass2) {
     {label: t("median_rarity"), value: fmt(overview.median_rarity, 1), className: scoreClass(overview.median_rarity)},
     {label: t("confidence"), value: fmt(overview.mean_confidence, 2)},
     {label: t("tokens"), value: Number(overview.total_tokens || 0).toLocaleString()},
+    {label: "Prompt Mode", value: overview.prompt_mode || (overview.compact_prompt ? "compact" : "full")},
   ];
+  if (overview.value_truncation_budget) cards.push({label: "Budget", value: Number(overview.value_truncation_budget || 0).toLocaleString()});
   sections.push(section(t("scoring_overview"), renderCards(cards), `${overview.total_scored || 0} ${aggregationUnitLabel(pass2, "samples")}`, true));
 
   const histograms = pass2View.histograms || {};
@@ -2246,6 +2250,11 @@ function renderConversations(conversation) {
     {label: t("conv_selection"), value: fmt(conversation.mean_conv_selection, 1), className: scoreClass(conversation.mean_conv_selection)},
     {label: t("peak_complexity"), value: fmt(conversation.mean_peak_complexity, 1), className: scoreClass(conversation.mean_peak_complexity)},
     {label: t("mean_turns"), value: fmt(conversation.mean_turns, 1)},
+    {label: "Compression Gap", value: fmt(conversation.mean_peak_minus_mean, 2)},
+    {label: "Late-turn Gain", value: fmt(conversation.mean_late_turn_gain, 2)},
+    {label: "Tool Turn Ratio", value: fmt((conversation.mean_tool_turn_ratio || 0) * 100, 0) + "%"},
+    {label: "Unique Tools", value: fmt(conversation.mean_unique_tool_count, 1)},
+    {label: "Unique Files", value: fmt(conversation.mean_unique_file_count, 1)},
     {label: t("observed_ratio"), value: fmt((conversation.mean_observed_turn_ratio || 0) * 100, 0) + "%", sub: t("convs_lt_50_observed", { count: fmtInt(conversation.low_observed_coverage_count || 0) })},
     {label: t("rarity_confidence"), value: fmt((conversation.mean_rarity_confidence || 0), 2), sub: t("convs_lt_060_rarity_conf", { count: fmtInt(conversation.low_rarity_confidence_count || 0) })},
   ];
@@ -2396,6 +2405,7 @@ function renderExplorerDrawer() {
     const value = detail.value || {};
     const flatTags = Object.entries(labels).flatMap(([key, val]) => {
       if (["confidence", "unmapped", "inherited", "inherited_from"].includes(key)) return [];
+      if (["confidence", "canonicalized", "unmapped", "inherited", "inherited_from"].includes(key)) return [];
       const label = dimensionLabel(key);
       if (Array.isArray(val)) return val.map((item) => `${label}:${item}`);
       return val ? [`${label}:${val}`] : [];
@@ -2413,6 +2423,13 @@ function renderExplorerDrawer() {
       [t("thinking"), value.thinking_mode || ((detail.metadata || {}).thinking_mode || "")],
       [t("turns"), (detail.conversation || {}).turn_count || (detail.metadata || {}).total_turns || (detail.conversations || []).length],
       [t("peak_cplx"), (detail.conversation || {}).peak_complexity],
+      ["Top-5 Mean", (((detail.conversation || {}).detail || {}).top_k_mean)],
+      ["Bottom-3 Mean", (((detail.conversation || {}).detail || {}).bottom_k_mean)],
+      ["Value Std", (((detail.conversation || {}).detail || {}).turn_value_std)],
+      ["Late Gain", (detail.conversation || {}).late_turn_gain],
+      ["Tool Ratio", (detail.conversation || {}).tool_turn_ratio],
+      ["Unique Tools", (detail.conversation || {}).unique_tool_count],
+      ["Unique Files", (detail.conversation || {}).unique_file_count],
     ].map(([label, raw]) => `<div class="kv"><div class="kv-label">${escapeHtml(label)}</div><div class="kv-value">${escapeHtml(raw === null || raw === undefined || raw === "" ? "-" : (typeof raw === "number" ? fmt(raw, label === t("confidence") ? 2 : 1) : raw))}</div></div>`).join("");
     body = `
       <div class="drawer-section"><div class="drawer-grid">${cards}</div></div>

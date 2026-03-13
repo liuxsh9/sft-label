@@ -135,6 +135,8 @@ Rules:
 - "asking for best practices" ≠ code-optimization (use code-explanation or configuration)
 - "write idiomatic code" ≠ code-optimization (use feature-implementation)
 - code-optimization requires EXPLICIT performance improvement intent (speed, memory, latency)
+- Repository repair / SWE-agent traces that inspect files, run tests, then patch code usually map to task:`code-exploration` + `bug-fixing` (+ `testing-task` when tests are written/updated or clearly part of the deliverable)
+- Normalize raw phrases to task tags: "refactoring" → `code-refactoring`; "test creation"/"code testing" → `testing-task`; "issue analysis" → `code-exploration`
 - **Cardinality norm**: Typically 1-3 tasks. More than 3 is rare and should have strong justification.
 
 ### Difficulty (single-select)
@@ -278,6 +280,8 @@ Rules:
 - Typically 1-3 tasks. More than 3 is rare.
 - "asking for best practices" ≠ code-optimization (use code-explanation)
 - code-optimization requires EXPLICIT performance improvement intent
+- Repo repair traces with file inspection + test runs usually map to `code-exploration` + `bug-fixing`; only add `testing-task` when tests are written/updated or clearly part of the deliverable
+- Normalize raw phrases to task tags: refactoring → `code-refactoring`; test creation/code testing → `testing-task`; issue analysis → `code-exploration`
 
 ### Difficulty (single-select)
 - `beginner`: Basic syntax/stdlib and one-step fixes
@@ -418,7 +422,26 @@ total_turns: 2
         "role": "assistant",
         "content": '{"intent":"modify","language":["javascript"],"domain":["web-backend"],"task":["code-refactoring"],"difficulty":"upper-intermediate","confidence":{"intent":0.97,"language":0.99,"domain":0.88,"task":0.95,"difficulty":0.85},"unmapped":[]}'
     },
-    # Example 7: Review (code quality feedback, no implementation)
+    # Example 7: SWE-style repo repair — exploration + bug fix + testing task
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"这个仓库里用户创建流程有回归，`pytest tests/test_users.py -q` 失败。请定位问题并修复，必要时一起更新测试。"},{"from":"gpt","value":"我先跑测试并查看相关文件。"},{"from":"tool","value":"$ pytest tests/test_users.py -q\\nFAILED tests/test_users.py::test_create_user_returns_id\\nE assert 0 == 1"},{"from":"gpt","value":"我继续检查 service 层实现。"},{"from":"tool","value":"$ sed -n '1,200p' app/services/user_service.py\\ndef create_user(repo, payload):\\n    result = repo.insert(payload)\\n    return 0 if result is None else result.id"},{"from":"gpt","value":"问题定位到了：插入成功但返回值分支写错了，导致新建用户总是返回 0。我会修复实现，并把测试断言保留为返回真实 id。\\n\\n```python\\ndef create_user(repo, payload):\\n    result = repo.insert(payload)\\n    if result is None:\\n        raise ValueError('insert failed')\\n    return result.id\\n```\\n\\n如果你的测试里还覆盖了失败分支，建议补一个 `repo.insert -> None` 的 case。"}]
+</conversation>
+
+<preprocessed_signals>
+detected_languages: ["python"]
+has_tool_roles: true
+tool_names: ["bash"]
+code_block_count: 1
+total_turns: 6
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent":"debug","language":["python"],"domain":[],"task":["code-exploration","bug-fixing","testing-task"],"difficulty":"upper-intermediate","confidence":{"intent":0.97,"language":0.99,"domain":0.72,"task":0.92,"difficulty":0.84},"unmapped":[]}'
+    },
+    # Example 8: Review (code quality feedback, no implementation)
     {
         "role": "user",
         "content": """<conversation>
@@ -542,6 +565,8 @@ Rules:
   - JS var/let/const scoping → do NOT tag `control-flow` or `functions` (basic syntax)
   - React useEffect / Vue watch → do NOT tag `functions` (framework API)
   - Bash for-loop script → do NOT tag `control-flow` (trivial shell scripting)
+  - "refactoring", "test creation", "issue analysis" are task labels from Call 1, not concept tags
+  - Repo repair trajectories often have concept=[] unless testing/concurrency/error-handling is a real technical focus
   - intent=debug, simple fix like wrong parameter → do NOT tag `debugging` (no debugging methodology demonstrated)
 
 ### Agentic (multi-select)
@@ -746,6 +771,8 @@ Rules:
   - Code defines/calls functions normally → NOT `functions` (basic program structure)
   - Agent reads files and applies fixes → NOT `debugging` (agentic behavior)
   - React useEffect / Vue watch → NOT `functions` (framework API)
+  - Task-like phrases such as "refactoring", "test creation", "issue analysis" belong to Call 1 task tags, NOT concept tags
+  - Repository repair trajectories often have concept=[] unless the response truly hinges on testing/concurrency/error-handling/etc.
 
 ### Agentic (multi-select)
 What tool actions and behavioral patterns does the AI agent USE in its response?
@@ -966,6 +993,28 @@ total_turns: 6
         # NOT planning: no upfront plan was listed before execution
         # NOT error-recovery: the test failure was pre-existing (reported by user), not a mid-task failure the agent encountered
         "content": '{"concept":["error-handling"],"agentic":["bash-execution","file-operations","multi-step-reasoning"],"constraint":[],"context":"single-file","confidence":{"concept":0.85,"agentic":0.88,"constraint":0.98,"context":0.90},"unmapped":[]}'
+    },
+    # Example 6: SWE-style repository repair — conservative concept, rich agentic
+    {
+        "role": "user",
+        "content": """<conversation>
+[{"from":"human","value":"仓库里的用户创建接口回归了，跑 `pytest tests/test_users.py -q` 会挂。请检查相关文件，修好实现，如果需要也一起更新测试。"},{"from":"gpt","value":"我先运行失败用例，再定位实现。"},{"from":"tool","value":"$ pytest tests/test_users.py -q\\nFAILED tests/test_users.py::test_create_user_returns_id\\nE assert 0 == 1"},{"from":"gpt","value":"我去看 service 层代码。"},{"from":"tool","value":"$ sed -n '1,120p' app/services/user_service.py\\ndef create_user(repo, payload):\\n    result = repo.insert(payload)\\n    return 0 if result is None else result.id"},{"from":"gpt","value":"已经定位到问题：成功插入时应该返回 `result.id`，失败时不能静默返回 0。修复如下，并保留测试断言验证真实 id。\\n\\n```python\\ndef create_user(repo, payload):\\n    result = repo.insert(payload)\\n    if result is None:\\n        raise ValueError('insert failed')\\n    return result.id\\n```"}]
+</conversation>
+
+<call1_result>
+{"intent":"debug","language":["python"],"domain":[],"task":["code-exploration","bug-fixing","testing-task"],"difficulty":"upper-intermediate"}
+</call1_result>
+
+<preprocessed_signals>
+has_tool_roles: true
+tool_names: ["bash"]
+code_block_count: 1
+total_turns: 6
+</preprocessed_signals>"""
+    },
+    {
+        "role": "assistant",
+        "content": '{"concept":[],"agentic":["bash-execution","file-operations","multi-step-reasoning"],"constraint":[],"context":"repository","confidence":{"concept":0.91,"agentic":0.91,"constraint":0.98,"context":0.87},"unmapped":[]}'
     },
 ]
 

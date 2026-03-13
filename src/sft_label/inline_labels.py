@@ -21,6 +21,59 @@ TURN_ID_ALGORITHM = "sha256"
 TURN_ID_VERSION = "v1"
 TURN_ID_HEX_LEN = 20
 
+_INLINE_CONVERSATION_KEYS = (
+    "conversation_id",
+    "conversation_key",
+    "source_file",
+    "turn_count",
+    "conv_value",
+    "conv_selection",
+    "peak_complexity",
+    "conv_rarity",
+    "observed_turn_ratio",
+    "inherited_turn_ratio",
+    "rarity_confidence",
+    "compression_gap",
+    "late_turn_gain",
+    "tool_turn_ratio",
+    "unique_tool_count",
+    "unique_file_count",
+    "thinking_mode",
+)
+
+_INLINE_CONVERSATION_DETAIL_KEYS = (
+    "q_base",
+    "penalty",
+    "quality_floor",
+    "negative_flags",
+    "pure_quality",
+    "score_confidence",
+    "observed_turns",
+    "inherited_turns",
+    "observed_weight_ratio",
+    "coverage_confidence",
+    "rarity_mean",
+    "rarity_peak",
+    "rarity_diversity_bonus",
+    "label_signature_count",
+    "conv_intra_class_rank",
+    "selection_confidence",
+    "turn_value_mean",
+    "turn_value_min",
+    "turn_value_max",
+    "turn_value_std",
+    "turn_quality_std",
+    "top_k_mean",
+    "bottom_k_mean",
+    "peak_minus_mean",
+    "late_turn_gain",
+    "tool_turn_count",
+    "unique_tools",
+    "test_related_turn_count",
+    "edit_related_turn_count",
+    "bash_execution_turn_count",
+)
+
 
 def _stable_json_dumps(value) -> str:
     """Serialize nested data deterministically for identity hashing."""
@@ -370,24 +423,26 @@ def compact_conversation_record(conversation_record: dict | None) -> dict:
         return {}
 
     compact = {}
-    for key in (
-        "conversation_id",
-        "turn_count",
-        "conv_value",
-        "conv_selection",
-        "peak_complexity",
-        "conv_rarity",
-        "observed_turn_ratio",
-        "inherited_turn_ratio",
-        "rarity_confidence",
-        "thinking_mode",
-    ):
+    for key in _INLINE_CONVERSATION_KEYS:
         value = conversation_record.get(key)
         if value is None:
             continue
-        if key in {"conversation_id", "thinking_mode"} and value == "":
+        if key in {"conversation_id", "conversation_key", "source_file", "thinking_mode"} and value == "":
             continue
         compact[key] = copy.deepcopy(value)
+
+    detail = conversation_record.get("detail")
+    if isinstance(detail, dict):
+        compact_detail = {}
+        for key in _INLINE_CONVERSATION_DETAIL_KEYS:
+            value = detail.get(key)
+            if value is None:
+                continue
+            if key == "unique_tools" and not value:
+                continue
+            compact_detail[key] = copy.deepcopy(value)
+        if compact_detail:
+            compact["detail"] = compact_detail
     return compact
 
 
@@ -442,6 +497,8 @@ def clear_pass2_state(data_label: dict, *, timestamp: str | None = None) -> dict
     conversation = data_label.get("conversation")
     if isinstance(conversation, dict):
         for key in (
+            "conversation_key",
+            "source_file",
             "conv_value",
             "conv_selection",
             "peak_complexity",
@@ -449,6 +506,11 @@ def clear_pass2_state(data_label: dict, *, timestamp: str | None = None) -> dict
             "observed_turn_ratio",
             "inherited_turn_ratio",
             "rarity_confidence",
+            "compression_gap",
+            "late_turn_gain",
+            "tool_turn_ratio",
+            "unique_tool_count",
+            "unique_file_count",
             "thinking_mode",
             "merged_labels",
             "detail",

@@ -43,6 +43,8 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
         "validation_issue_count": 0,
         "consistency_warning_count": 0,
         "unmapped_unique_count": 0,
+        "canonicalization_total_count": 0,
+        "canonicalization_unique_count": 0,
         "total_elapsed_seconds": 0,
         "sparse_labeled": 0,
         "sparse_inherited": 0,
@@ -57,6 +59,7 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
         "confidence_stats": {},
         "cross_matrix": {},
         "unmapped_tags": {},
+        "canonicalization_counts": {},
         "files_processed": len(all_file_stats),
     }
 
@@ -72,6 +75,7 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
             "arbitrated_count",
             "validation_issue_count",
             "consistency_warning_count",
+            "canonicalization_total_count",
             "sparse_labeled",
             "sparse_inherited",
             "distribution_total_samples",
@@ -95,6 +99,8 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
 
         for tag, count in st.get("unmapped_tags", {}).items():
             merged["unmapped_tags"][tag] = merged["unmapped_tags"].get(tag, 0) + count
+        for key, count in st.get("canonicalization_counts", {}).items():
+            merged["canonicalization_counts"][key] = merged["canonicalization_counts"].get(key, 0) + count
 
         for dim, stats in st.get("confidence_stats", {}).items():
             entry = merged["confidence_stats"].setdefault(
@@ -119,6 +125,8 @@ def merge_label_stats(all_file_stats: list[dict]) -> dict | None:
 
     merged["unmapped_tags"] = dict(sorted(merged["unmapped_tags"].items(), key=lambda item: -item[1]))
     merged["unmapped_unique_count"] = len(merged["unmapped_tags"])
+    merged["canonicalization_counts"] = dict(sorted(merged["canonicalization_counts"].items(), key=lambda item: (-item[1], item[0])))
+    merged["canonicalization_unique_count"] = len(merged["canonicalization_counts"])
 
     finalized_conf = {}
     for dim, entry in merged["confidence_stats"].items():

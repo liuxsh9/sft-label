@@ -9,6 +9,7 @@ import pytest
 from sft_label.inline_labels import (
     DATA_LABEL_SCHEMA_VERSION,
     build_data_label,
+    compact_conversation_record,
     compute_data_id,
     ensure_data_id,
     ensure_data_label,
@@ -136,6 +137,49 @@ class TestInlineDataLabel:
 
         with pytest.raises(TypeError):
             get_unique_info(row, create=True)
+
+    def test_compact_conversation_record_keeps_inline_diagnostics_but_not_heavy_fields(self):
+        compact = compact_conversation_record(
+            {
+                "conversation_id": "conv-1",
+                "conversation_key": "train.jsonl::conv-1",
+                "source_file": "train.jsonl",
+                "turn_count": 4,
+                "conv_value": 7.2,
+                "conv_selection": 6.8,
+                "peak_complexity": 8,
+                "conv_rarity": 6.1,
+                "observed_turn_ratio": 0.5,
+                "inherited_turn_ratio": 0.5,
+                "rarity_confidence": 0.7,
+                "compression_gap": 2.1,
+                "late_turn_gain": 1.4,
+                "tool_turn_ratio": 0.75,
+                "unique_tool_count": 3,
+                "unique_file_count": 5,
+                "thinking_mode": "fast",
+                "detail": {
+                    "top_k_mean": 8.4,
+                    "bottom_k_mean": 5.1,
+                    "turn_value_std": 1.23,
+                    "unique_tools": ["bash", "apply_patch"],
+                    "test_related_turn_count": 2,
+                    "edit_related_turn_count": 3,
+                    "bash_execution_turn_count": 2,
+                },
+                "merged_labels": {"task": ["bug-fixing"]},
+                "slices": [{"id": "x"}],
+            }
+        )
+
+        assert compact["conversation_key"] == "train.jsonl::conv-1"
+        assert compact["compression_gap"] == 2.1
+        assert compact["tool_turn_ratio"] == 0.75
+        assert compact["unique_tool_count"] == 3
+        assert compact["detail"]["top_k_mean"] == 8.4
+        assert compact["detail"]["unique_tools"] == ["bash", "apply_patch"]
+        assert "merged_labels" not in compact
+        assert "slices" not in compact
 
 
 class TestInlineRunLayout:
