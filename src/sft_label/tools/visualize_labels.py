@@ -6,7 +6,6 @@ import argparse
 import json
 import sys
 import webbrowser
-from collections import Counter
 from pathlib import Path
 
 from sft_label.artifacts import (
@@ -14,108 +13,12 @@ from sft_label.artifacts import (
     PASS1_SUMMARY_STATS_FILE,
     resolve_dashboard_output,
 )
-from sft_label.prompts import TAG_POOLS
 from sft_label.tools.dashboard_explorer import build_explorer_assets
 from sft_label.tools.dashboard_scopes import build_scope_tree
 from sft_label.tools.dashboard_template import render_dashboard_html
 
 
-DIMENSIONS = [
-    "intent",
-    "difficulty",
-    "language",
-    "domain",
-    "concept",
-    "task",
-    "agentic",
-    "constraint",
-    "context",
-]
-
-
-def _group_unmapped_counts(stats: dict) -> dict[str, list[dict]]:
-    """Group flattened stats unmapped tags by dimension."""
-    grouped: dict[str, list[dict]] = {}
-    counts_by_dim: dict[str, Counter] = {}
-    for key, count in (stats.get("unmapped_tags") or {}).items():
-        dim, value = str(key).split(":", 1) if ":" in str(key) else ("unknown", str(key))
-        counts_by_dim.setdefault(dim, Counter())[value] += int(count)
-
-    for dim, counter in counts_by_dim.items():
-        grouped[dim] = [
-            {"label": value, "count": count, "examples": []}
-            for value, count in counter.most_common()
-        ]
-    return grouped
-
-
-def _collect_unmapped_examples(
-    samples: list[dict],
-    *,
-    per_tag_limit: int = 2,
-) -> dict[tuple[str, str], list[dict]]:
-    """Collect a few sample ids/query previews for each unmapped tag."""
-    examples: dict[tuple[str, str], list[dict]] = {}
-    for sample in samples:
-        labels = sample.get("labels") or {}
-        unmapped = labels.get("unmapped") or []
-        if not unmapped:
-            continue
-
-        query = ""
-        for msg in sample.get("conversations", []):
-            if msg.get("from") == "human":
-                query = str(msg.get("value", "")).replace("\n", " ")[:120]
-                break
-
-        seen: set[tuple[str, str]] = set()
-        for item in unmapped:
-            if isinstance(item, dict):
-                dim = str(item.get("dimension", "unknown"))
-                value = str(item.get("value", "?"))
-            else:
-                dim = "unknown"
-                value = str(item)
-            key = (dim, value)
-            if key in seen:
-                continue
-            seen.add(key)
-            bucket = examples.setdefault(key, [])
-            if len(bucket) < per_tag_limit:
-                bucket.append({"id": str(sample.get("id", "?")), "query": query})
-    return examples
-
-
-def _build_unmapped_details(samples: list[dict], stats: dict) -> dict:
-    """Build dashboard-friendly unmapped tag detail payload."""
-    grouped = _group_unmapped_counts(stats)
-    example_map = _collect_unmapped_examples(samples)
-
-    ordered_dims = sorted(
-        grouped,
-        key=lambda dim: sum(item["count"] for item in grouped.get(dim, [])),
-        reverse=True,
-    )
-    by_dimension = {}
-    total_occurrences = 0
-    for dim in ordered_dims:
-        rows = []
-        for item in grouped.get(dim, []):
-            count = int(item.get("count", 0))
-            total_occurrences += count
-            rows.append(
-                {
-                    "label": item["label"],
-                    "count": count,
-                    "examples": example_map.get((dim, item["label"]), []),
-                }
-            )
-        by_dimension[dim] = rows
-
-    return {
-        "total_occurrences": total_occurrences,
-        "by_dimension": by_dimension,
-    }
+from sft_label.tools.dashboard_aggregation import build_pass1_viz, build_scope_summary, load_data_file
 
 
 def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_FILE):
@@ -139,75 +42,13 @@ def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_
 
 def compute_viz_data(samples, stats):
     """Compute all visualization data needed for Pass 1 dashboards."""
-    distributions = stats.get("tag_distributions", {})
-
-    conf_matrix = []
-    for sample in samples:
-        labels = sample.get("labels") or {}
-        conf = labels.get("confidence", {})
-        conf_matrix.append({
-            "id": sample.get("id", "?"),
-            "values": {dim: conf.get(dim, 0) for dim in DIMENSIONS},
-        })
-
-    coverage = {}
-    for dim in DIMENSIONS:
-        pool = set(TAG_POOLS.get(dim, []))
-        used = set(distributions.get(dim, {}).keys())
-        coverage[dim] = {
-            "pool_size": len(pool),
-            "used": len(used & pool),
-            "unused": sorted(pool - used),
-            "rate": len(used & pool) / len(pool) if pool else 0,
-        }
-
-    cross = Counter()
-    for sample in samples:
-        labels = sample.get("labels") or {}
-        cross[(labels.get("intent", "?"), labels.get("difficulty", "?"))] += 1
-
-    if not cross and stats.get("cross_matrix"):
-        for key, count in (stats.get("cross_matrix") or {}).items():
-            parts = key.split("|", 1)
-            if len(parts) == 2:
-                cross[(parts[0], parts[1])] = count
-
-    intents = sorted({key[0] for key in cross})
-    difficulty_order = ["beginner", "intermediate", "upper-intermediate", "advanced", "expert"]
-    cross_matrix = {
-        "rows": intents,
-        "cols": [dim for dim in difficulty_order if any(cross.get((intent, dim), 0) for intent in intents)],
-        "data": {f"{intent}|{diff}": cross.get((intent, diff), 0) for intent in intents for diff in difficulty_order},
-    }
-
-    return {
-        "total": stats.get("total_samples", len(samples)) or len(samples),
-        "input_file": stats.get("input_file") or stats.get("input_path", ""),
-        "distributions": distributions,
-        "unmapped_details": _build_unmapped_details(samples, stats),
-        "confidence_stats": stats.get("confidence_stats", {}),
-        "conf_matrix": conf_matrix,
-        "coverage": coverage,
-        "cross_matrix": cross_matrix,
-        "overview": {
-            "success_rate": stats.get("success_rate", 0),
-            "total_tokens": stats.get("total_tokens", 0),
-            "arbitrated_rate": stats.get("arbitrated_rate", 0),
-            "unmapped_unique": stats.get("unmapped_unique_count", 0),
-            "sparse_labeled": stats.get("sparse_labeled", 0),
-            "sparse_inherited": stats.get("sparse_inherited", 0),
-        },
-    }
+    return build_pass1_viz(samples, stats)
 
 
 def _scope_summary(scope: dict) -> dict:
-    pass1 = scope.get("pass1")
-    return {
-        "pass1_total": (pass1 or {}).get("total", 0),
-        "scored_total": 0,
-        "mean_value": None,
-        "file_count": len(scope.get("descendant_files", [])) if scope.get("kind") != "file" else 1,
-    }
+    summary_modes = build_scope_summary(scope)
+    scope["summary_modes"] = summary_modes
+    return summary_modes["sample"]
 
 
 def _dashboard_subtitle(run_dir: Path, root_label: str | None = None) -> str:
@@ -235,6 +76,7 @@ def _single_scope_payload(run_dir: Path, viz_data: dict, stats: dict) -> dict:
     scopes["global"]["summary"] = _scope_summary(scopes["global"])
     return {
         "title": "SFT Labeling Dashboard",
+        "title_key": "dashboard_title_labeling",
         "subtitle": _dashboard_subtitle(run_dir, label),
         "root_id": "global",
         "default_scope_id": "global",
@@ -253,8 +95,16 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     )
     scopes = {}
     explorer_sources = []
+    file_sample_cache = {
+        scope_id: load_data_file(raw_scope.get("pass1_data_path"))
+        for scope_id, raw_scope in tree["scopes"].items()
+        if raw_scope.get("kind") == "file"
+    }
     for scope_id, raw_scope in tree["scopes"].items():
-        pass1 = compute_viz_data([], raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
+        samples = []
+        for leaf_path in raw_scope.get("descendant_files", []):
+            samples.extend(file_sample_cache.get(f"file:{leaf_path}", []))
+        pass1 = compute_viz_data(samples, raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
         scopes[scope_id] = {
             "id": raw_scope["id"],
             "label": raw_scope["label"],
@@ -288,6 +138,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
 
     return {
         "title": "SFT Labeling Dashboard",
+        "title_key": "dashboard_title_labeling",
         "subtitle": _dashboard_subtitle(run_dir, scopes[tree["root_id"]]["label"]),
         "root_id": tree["root_id"],
         "default_scope_id": tree["root_id"],
@@ -320,13 +171,17 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
         if stats_file == PASS1_SUMMARY_STATS_FILE:
             payload, explorer_sources = _tree_payload(run_dir)
         else:
+            samples = []
             _, stats = load_run(run_dir, labeled_file=None, stats_file=stats_file)
-            payload = _single_scope_payload(run_dir, compute_viz_data([], stats), stats)
+            payload = None
             explorer_sources = []
             data_path = next(
                 (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / "labeled.json") if candidate.exists()),
                 None,
             )
+            if data_path is not None:
+                samples = load_data_file(data_path)
+            payload = _single_scope_payload(run_dir, compute_viz_data(samples, stats), stats)
             if data_path is not None:
                 explorer_sources.append(
                     {

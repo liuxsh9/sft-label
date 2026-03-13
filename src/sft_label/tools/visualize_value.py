@@ -15,6 +15,7 @@ from sft_label.artifacts import (
 from sft_label.tools.dashboard_explorer import build_explorer_assets
 from sft_label.tools.dashboard_scopes import build_scope_tree
 from sft_label.tools.dashboard_template import render_dashboard_html
+from sft_label.tools.dashboard_aggregation import build_pass2_viz, build_scope_summary, load_data_file
 from sft_label.tools.visualize_labels import _dashboard_subtitle, compute_viz_data, load_run
 
 
@@ -48,89 +49,9 @@ def load_value_run(run_dir, scored_file="scored.json", stats_file=PASS2_STATS_FI
     return samples, stats
 
 
-def compute_value_viz_data(samples, stats):
+def compute_value_viz_data(samples, stats, conv_records=None):
     """Transform Pass 2 data into dashboard JSON."""
-    total_scored = stats.get("total_scored", len([sample for sample in samples if sample.get("value")]))
-    total_failed = stats.get("total_failed", 0)
-    distributions = stats.get("score_distributions", {})
-
-    viz = {
-        "overview": {
-            "total_scored": total_scored,
-            "total_failed": total_failed,
-            "input_file": stats.get("input_file") or stats.get("input_path", ""),
-            "mean_value": distributions.get("value_score", {}).get("mean", 0),
-            "mean_complexity": distributions.get("complexity_overall", {}).get("mean", 0),
-            "mean_quality": distributions.get("quality_overall", {}).get("mean", 0),
-            "median_rarity": distributions.get("rarity_score", {}).get("p50", distributions.get("rarity_score", {}).get("mean", 0)),
-            "mean_confidence": distributions.get("confidence", {}).get("mean", 0),
-            "total_tokens": stats.get("total_tokens", 0),
-        },
-        "selection_thresholds": stats.get("selection_thresholds", {}),
-        "score_distributions": distributions,
-        "sub_score_means": stats.get("sub_score_means", {}),
-        "value_by_tag": stats.get("value_by_tag", {}),
-        "selection_by_tag": stats.get("selection_by_tag", {}),
-        "thinking_mode_stats": stats.get("thinking_mode_stats", {}),
-        "flag_counts": stats.get("flag_counts", {}),
-        "flag_value_impact": stats.get("flag_value_impact", {}),
-        "coverage_at_thresholds": stats.get("coverage_at_thresholds", {}),
-        "weights_used": stats.get("weights_used", {}),
-        "per_file_summary": stats.get("per_file_summary", []),
-    }
-
-    score_keys = [
-        "value_score",
-        "complexity_overall",
-        "quality_overall",
-        "reasoning_overall",
-        "rarity_score",
-        "selection_score",
-    ]
-    histograms = {}
-    if samples:
-        for key in score_keys:
-            bins = [0] * 10
-            for sample in samples:
-                value = sample.get("value", {})
-                if key == "value_score":
-                    score = value.get("value_score")
-                elif key == "rarity_score":
-                    score = (value.get("rarity") or {}).get("score")
-                elif key == "selection_score":
-                    score = value.get("selection_score")
-                else:
-                    dim, sub = key.rsplit("_", 1)
-                    score = (value.get(dim) or {}).get(sub)
-                if isinstance(score, (int, float)) and 1 <= score <= 10:
-                    bins[min(int(score) - 1, 9)] += 1
-            histograms[key] = bins
-    else:
-        histograms = stats.get("histograms", {})
-    viz["histograms"] = histograms
-
-    confidence_histogram = [0] * 10
-    if samples:
-        for sample in samples:
-            confidence = (sample.get("value") or {}).get("confidence")
-            if isinstance(confidence, (int, float)) and 0 <= confidence <= 1:
-                confidence_histogram[min(int(confidence * 10), 9)] += 1
-    else:
-        confidence_histogram = stats.get("confidence_histogram", confidence_histogram)
-    viz["confidence_histogram"] = confidence_histogram
-
-    selection_vs_value = {}
-    for sample in samples:
-        value = sample.get("value", {})
-        value_score = value.get("value_score")
-        selection_score = value.get("selection_score")
-        if isinstance(value_score, (int, float)) and isinstance(selection_score, (int, float)):
-            if 1 <= value_score <= 10 and 1 <= selection_score <= 10:
-                key = f"{max(1, min(int(value_score), 10))}|{max(1, min(int(selection_score), 10))}"
-                selection_vs_value[key] = selection_vs_value.get(key, 0) + 1
-    viz["selection_vs_value"] = selection_vs_value
-
-    return viz
+    return build_pass2_viz(samples, stats, conv_records)
 
 
 def _load_conversation_scores(run_dir):
@@ -222,25 +143,28 @@ def _load_pass1_viz(run_dir: Path, is_global: bool):
         if not stats_path.exists():
             return None
         samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)
+        if not samples:
+            data_path = next(
+                (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / "labeled.json") if candidate.exists()),
+                None,
+            )
+            if data_path is not None:
+                samples = load_data_file(data_path)
         return compute_viz_data(samples, stats)
     except Exception:
         return None
 
 
 def _scope_summary(scope: dict) -> dict:
-    pass1 = scope.get("pass1")
-    pass2 = scope.get("pass2")
-    return {
-        "pass1_total": (pass1 or {}).get("total", 0),
-        "scored_total": ((pass2 or {}).get("overview") or {}).get("total_scored", 0),
-        "mean_value": ((pass2 or {}).get("overview") or {}).get("mean_value"),
-        "file_count": len(scope.get("descendant_files", [])) if scope.get("kind") != "file" else 1,
-    }
+    summary_modes = build_scope_summary(scope)
+    scope["summary_modes"] = summary_modes
+    return summary_modes["sample"]
 
 
 def _single_scope_payload(run_dir: Path, pass2_viz: dict, stats: dict) -> dict:
     pass1_viz = _load_pass1_viz(run_dir, is_global=False)
-    conversation = _compute_conv_viz_data(_load_conversation_scores(run_dir))
+    conv_records = _load_conversation_scores(run_dir)
+    conversation = _compute_conv_viz_data(conv_records)
     label = Path(stats.get("input_file") or run_dir.name or "current").name
     scopes = {
         "global": {
@@ -259,6 +183,7 @@ def _single_scope_payload(run_dir: Path, pass2_viz: dict, stats: dict) -> dict:
     scopes["global"]["summary"] = _scope_summary(scopes["global"])
     return {
         "title": "SFT Labeling & Scoring Dashboard",
+        "title_key": "dashboard_title_scoring",
         "subtitle": _dashboard_subtitle(run_dir, label),
         "root_id": "global",
         "default_scope_id": "global",
@@ -277,9 +202,17 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     )
     scopes = {}
     explorer_sources = []
+    file_sample_cache = {
+        scope_id: load_data_file(raw_scope.get("pass2_data_path"))
+        for scope_id, raw_scope in tree["scopes"].items()
+        if raw_scope.get("kind") == "file"
+    }
     for scope_id, raw_scope in tree["scopes"].items():
-        pass1 = compute_viz_data([], raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
-        pass2 = compute_value_viz_data([], raw_scope["raw_pass2"]) if raw_scope.get("raw_pass2") else None
+        samples = []
+        for leaf_path in raw_scope.get("descendant_files", []):
+            samples.extend(file_sample_cache.get(f"file:{leaf_path}", []))
+        pass1 = compute_viz_data(samples, raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
+        pass2 = compute_value_viz_data(samples, raw_scope["raw_pass2"], raw_scope.get("raw_conversations", [])) if raw_scope.get("raw_pass2") else None
         conversation = _compute_conv_viz_data(raw_scope.get("raw_conversations", []))
         scopes[scope_id] = {
             "id": raw_scope["id"],
@@ -316,6 +249,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
 
     return {
         "title": "SFT Labeling & Scoring Dashboard",
+        "title_key": "dashboard_title_scoring",
         "subtitle": _dashboard_subtitle(run_dir, scopes[tree["root_id"]]["label"]),
         "root_id": tree["root_id"],
         "default_scope_id": tree["root_id"],
@@ -350,7 +284,7 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
         payload, explorer_sources = _tree_payload(run_dir)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
-        payload = _single_scope_payload(run_dir, compute_value_viz_data(samples, stats), stats)
+        payload = _single_scope_payload(run_dir, compute_value_viz_data(samples, stats, _load_conversation_scores(run_dir)), stats)
         explorer_sources = []
         data_path = run_dir / scored_file if scored_file else None
         conv_path = run_dir / "conversation_scores.json"

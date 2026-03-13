@@ -40,12 +40,11 @@ def test_render_dashboard_html_adds_count_bars_for_pass1_tag_distributions() -> 
     assert 'tagBarMode: "relative"' in html
     assert 'id="scope-toolbar-extra"' in html
     assert "Tag Bars" in html
-    assert "当前 section 内全部 tag 的计数做对数缩放" in html
-    assert '["hidden", "隐藏", "Hide tag bars"]' in html
-    assert '["relative", "归一化", "Scale by current panel max"]' in html
-    assert '["global-log", "全局对数", "Scale by section-wide log max"]' in html
+    assert "tag_bar_help" in html
+    assert 'agg_sample: "Sample"' in html
+    assert 'agg_conversation: "Conversation"' in html
     assert 'barMetricKey: "count"' in html
-    assert 'barMetricLabel: "Count"' in html
+    assert 'barMetricLabel || t("count")' in html
     assert "globalBarMax: globalTagCountMax" in html
     assert '"language": {"python": 12, "go": 4}' in html
 

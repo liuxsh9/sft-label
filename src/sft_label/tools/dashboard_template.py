@@ -87,6 +87,10 @@ body { min-height: 100vh; }
 .action-btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 999px; padding: 8px 12px; font: inherit; cursor: pointer; }
 .action-btn:hover { border-color: var(--accent); color: var(--accent); }
 .toolbar-inline-copy { color: var(--muted); font-size: 0.8rem; }
+.info-inline { position: relative; display: inline-flex; align-items: center; }
+.info-btn { width: 24px; height: 24px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,0.82); color: var(--accent); cursor: pointer; font: inherit; font-weight: 700; }
+.info-pop { position: absolute; top: calc(100% + 8px); right: 0; width: min(360px, 78vw); padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(223,216,199,0.95); background: #fffdf8; color: var(--text); box-shadow: var(--shadow); font-size: 0.8rem; line-height: 1.45; z-index: 12; display: none; }
+.info-inline.open .info-pop { display: block; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .card { background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%); border: 1px solid rgba(223,216,199,0.9); border-radius: 18px; padding: 14px; }
 .card-label { font-size: 0.76rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
@@ -207,8 +211,8 @@ body { min-height: 100vh; }
     <aside class="sidebar panel" id="sidebar">
       <div class="sidebar-header">
         <div class="sidebar-copy">
-          <h2>Scope Navigator</h2>
-          <div class="sidebar-sub">Global, folders, and files</div>
+          <h2 id="sidebar-title">Scope Navigator</h2>
+          <div class="sidebar-sub" id="sidebar-sub">Global, folders, and files</div>
         </div>
         <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-expanded="true" title="Collapse Navigator">&lt;</button>
       </div>
@@ -245,10 +249,12 @@ body { min-height: 100vh; }
 const DATA = __DATA_PLACEHOLDER__;
 const STATE = {
   currentId: DATA.default_scope_id || DATA.root_id,
+  locale: "en",
   filter: "all",
   query: "",
   expanded: new Set(DATA.initially_expanded || [DATA.root_id]),
   sidebarCollapsed: false,
+  aggregationMode: "sample",
   tagBarMode: "relative",
   fileRankingSort: { key: "mean_value", direction: "desc" },
   explorer: {
@@ -309,6 +315,448 @@ const EXPLORER_CACHE = {
   lastProgressRender: 0,
 };
 
+const I18N = {
+  en: {
+    dashboard_title_labeling: "SFT Labeling Dashboard",
+    dashboard_title_scoring: "SFT Labeling & Scoring Dashboard",
+    dashboard_title_generic: "Interactive Dashboard",
+    scope_navigator: "Scope Navigator",
+    scope_navigator_sub: "Global, folders, and files",
+    collapse_navigator: "Collapse Navigator",
+    expand_navigator: "Expand Navigator",
+    search_folders_files: "Search folders or files",
+    filter_all: "All",
+    filter_folders: "Folders",
+    filter_files: "Files",
+    up_one_level: "Up One Level",
+    back_to_global: "Back To Global",
+    global_overview: "Global overview",
+    scopes: "Scopes",
+    files: "Files",
+    labeled: "Labeled",
+    scored: "Scored",
+    mean_value: "Mean Value",
+    no_data: "No data",
+    no_dashboard_data: "No dashboard data for this scope.",
+    no_example_sample: "No example sample loaded for this scope.",
+    no_conversation_turns: "No conversation turns.",
+    no_tags: "No tags",
+    loading_sample: "Loading sample…",
+    loading_full_sample_payload: "Loading full sample payload…",
+    children: "Children",
+    name: "Name",
+    type: "Type",
+    direct_children: "{count} direct children",
+    items: "items",
+    samples: "samples",
+    units: "units",
+    aggregation: "Aggregation",
+    language: "Language",
+    languages: "Languages",
+    chinese: "中文",
+    english: "English",
+    language_toggle_help: "Switch dashboard language",
+    aggregation_help_title: "Aggregation mode",
+    aggregation_help_body: "Sample: every multi-turn slice contributes separately.\nConversation: multi-turn samples are merged into one unit; single-select tags use the last slice, multi-select tags use a union without duplicates.\n\nTokens, arbitration, and inherited slice counts remain process-level metrics and do not change with this toggle. Conversation Aggregation stays conversation-level in both modes.",
+    agg_sample: "Sample",
+    agg_conversation: "Conversation",
+    agg_sample_hint: "Count each multi-turn slice separately",
+    agg_conversation_hint: "Count each multi-turn conversation once after merging labels",
+    tag_bars: "Tag Bars",
+    hide: "Hide",
+    normalized: "Relative",
+    global_log: "Global Log",
+    hide_tag_bars: "Hide tag bars",
+    relative_hint: "Scale by current panel max",
+    global_log_hint: "Scale by section-wide log max",
+    tag_bar_help: "Relative scales by the current panel max; Global Log scales by the log of tag counts in the section.",
+    labeling_overview: "Labeling Overview",
+    units_label: "Units",
+    success: "Success",
+    tokens: "Tokens",
+    arbitrated: "Arbitrated",
+    unmapped: "Unmapped",
+    llm_labeled: "LLM Labeled",
+    inherited: "Inherited",
+    unmapped_tags: "Unmapped Tags",
+    top_10_per_dimension: "{count} occurrences · top 10 per dimension",
+    tag: "Tag",
+    count: "Count",
+    examples: "Examples",
+    tag_distributions: "Tag Distributions",
+    all_tags_sorted_frequency: "All tags, sorted by frequency",
+    confidence: "Confidence",
+    dimension: "Dimension",
+    mean: "Mean",
+    min: "Min",
+    max: "Max",
+    below_threshold: "Below Threshold",
+    intent_difficulty: "意图 × 难度",
+    pool_coverage: "Pool Coverage",
+    unused_tags: "{count} unused tags",
+    scoring_overview: "Scoring Overview",
+    failed: "Failed",
+    complexity: "Complexity",
+    quality: "Quality",
+    median_rarity: "Median Rarity",
+    score_distributions: "Score Distributions",
+    confidence_distribution: "Confidence Distribution",
+    llm_confidence: "LLM Confidence",
+    value_by_tag: "Value By Tag",
+    selection_by_tag: "Selection By Tag",
+    all_tags_sorted_score: "All tags, sorted by score",
+    analysis: "Analysis",
+    thinking_mode: "Thinking Mode",
+    mode: "Mode",
+    value: "Value",
+    selection: "Selection",
+    reasoning: "Reasoning",
+    flags: "Flags",
+    file_ranking: "File Ranking",
+    sorted_by: "{count} files · sorted by {column}",
+    configuration: "Configuration",
+    selection_thresholds: "Selection Thresholds",
+    band: "Band",
+    threshold: "Threshold",
+    action: "Action",
+    inspect_samples: "Inspect Samples",
+    coverage_at_thresholds: "Coverage At Thresholds",
+    value_min: "Value Min",
+    retained: "Retained",
+    sample_pct: "Sample %",
+    tag_coverage: "Tag Coverage",
+    inspect_retained: "Inspect Retained",
+    flag_impact: "Flag Impact",
+    value_score: "Value Score",
+    conversations: "Conversations",
+    conv_value: "Conv Value",
+    conv_selection: "Conv Selection",
+    peak_complexity: "Peak Complexity",
+    mean_turns: "Mean Turns",
+    observed_ratio: "Observed Ratio",
+    rarity_confidence: "Rarity Confidence",
+    convs_lt_50_observed: "{count} convs < 50% observed",
+    convs_lt_060_rarity_conf: "{count} convs < 0.60",
+    turn_distribution: "Turn Distribution",
+    turns_label: "{count} turns",
+    observed_turn_coverage: "Observed Turn Coverage",
+    conversation_aggregation: "Conversation Aggregation",
+    sample_id: "Sample Id",
+    quality_asc: "Quality Asc",
+    value_asc: "Value Asc",
+    confidence_asc: "Confidence Asc",
+    selection_desc: "Selection Desc",
+    conv_value_desc: "Conv Value Desc",
+    conv_selection_desc: "Conv Selection Desc",
+    turn_count_desc: "Turn Count Desc",
+    observed_ratio_asc: "Observed Ratio Asc",
+    observed_ratio_desc: "Observed Ratio Desc",
+    rarity_confidence_asc: "Rarity Confidence Asc",
+    rarity_confidence_desc: "Rarity Confidence Desc",
+    rarity_desc: "Rarity Desc",
+    run_query_or_choose_preset: "Run a query or choose a preset to load sample previews.",
+    sample: "Sample",
+    query: "Query",
+    response: "Response",
+    tags: "Tags",
+    observed: "Observed",
+    turns: "Turns",
+    source: "Source",
+    conv_sel: "Conv Sel",
+    conv_rarity: "Conv Rarity",
+    thinking: "Thinking",
+    peak_cplx: "Peak Cplx",
+    conversation: "Conversation",
+    json: "JSON",
+    conversation_preview: "Conversation Preview ({shown}/{total} turns)",
+    preview_limited: "Preview limited to first {limit} turns. {hidden} more turns stay in raw JSON.",
+    raw_json_preview: "Raw JSON Preview",
+    raw_json_preview_cap: "Raw JSON Preview ({cap} char cap)",
+    large_payload_truncated: "Large payload truncated in drawer to keep long multi-turn samples responsive.",
+    python_debug: "Python + Debug",
+    lowest_quality: "Lowest Quality",
+    lowest_value: "Lowest Value",
+    low_confidence: "Low Confidence",
+    has_flags: "Has Flags",
+    long_multiturn: "Long Multi-turn",
+    low_coverage: "Low Coverage",
+    low_rarity_conf: "Low Rarity Conf",
+    sample_explorer: "Sample Explorer",
+    explorer_summary: "Progressively scan preview shards, stream large files chunk-by-chunk, keep the best {limit} matches in memory, load full sample details only when you open a drawer, and click tags / bars / threshold rows anywhere above to drill into the matching slices.",
+    status_ready_scan: "Ready to scan {count} indexed previews in this scope.",
+    status_scanning: "Scanning {done}/{total} files · {rows} rows checked · {matches} matches",
+    status_done: "Done. Matched {matches} rows across {files} files.",
+    tags_comma: "Tags (comma)",
+    source_file: "Source File",
+    text_contains: "Text Contains",
+    flag: "Flag",
+    conv_sel_min: "Conv Sel ≥",
+    conv_sel_max: "Conv Sel ≤",
+    peak_cplx_min: "Peak Cplx ≥",
+    turns_min: "Turns ≥",
+    observed_ratio_min: "Observed Ratio ≥",
+    observed_ratio_max: "Observed Ratio ≤",
+    rarity_conf_min: "Rarity Conf ≥",
+    rarity_conf_max: "Rarity Conf ≤",
+    value_ge: "Value ≥",
+    value_le: "Value ≤",
+    quality_le: "Quality ≤",
+    selection_ge: "Selection ≥",
+    selection_le: "Selection ≤",
+    confidence_le: "Confidence ≤",
+    any: "Any",
+    sort: "Sort",
+    only_samples_with_flags: "Only samples with flags",
+    include_inherited_labels: "Include inherited labels",
+    run_query: "Run Query",
+    scanning: "Scanning…",
+    reset: "Reset",
+    current_scope_summary: "Current scope: {samples} indexed samples · {files} candidate files · showing top {limit} results sorted by {sort}",
+    matches_retained: "{matches} matches retained after scanning {rows} rows",
+    total: "Total",
+    dim_intent: "Intent",
+    dim_language: "Language",
+    dim_domain: "Domain",
+    dim_task: "Task",
+    dim_difficulty: "Difficulty",
+    dim_concept: "Concept",
+    dim_agentic: "Agentic",
+    dim_constraint: "Constraint",
+    dim_context: "Context",
+    scope_kind_global: "Global",
+    scope_kind_dir: "Folder",
+    scope_kind_file: "File",
+    thinking_fast: "Fast",
+    thinking_slow: "Slow",
+  },
+  zh: {
+    dashboard_title_labeling: "SFT 标注看板",
+    dashboard_title_scoring: "SFT 标注与评分看板",
+    dashboard_title_generic: "交互式看板",
+    scope_navigator: "范围导航",
+    scope_navigator_sub: "全局、目录与文件",
+    collapse_navigator: "收起导航",
+    expand_navigator: "展开导航",
+    search_folders_files: "搜索目录或文件",
+    filter_all: "全部",
+    filter_folders: "目录",
+    filter_files: "文件",
+    up_one_level: "返回上一级",
+    back_to_global: "返回全局",
+    global_overview: "全局视图",
+    scopes: "范围",
+    files: "文件",
+    labeled: "已标注",
+    scored: "已评分",
+    mean_value: "平均价值",
+    no_data: "暂无数据",
+    no_dashboard_data: "当前范围没有可展示的看板数据。",
+    no_example_sample: "当前范围没有加载示例样本。",
+    no_conversation_turns: "没有对话轮次。",
+    no_tags: "无标签",
+    loading_sample: "正在加载样本…",
+    loading_full_sample_payload: "正在加载完整样本内容…",
+    children: "子项",
+    name: "名称",
+    type: "类型",
+    direct_children: "共 {count} 个直接子项",
+    items: "条",
+    samples: "样本",
+    units: "单元",
+    aggregation: "统计口径",
+    language: "语言",
+    languages: "语言",
+    chinese: "中文",
+    english: "English",
+    language_toggle_help: "切换看板语言",
+    aggregation_help_title: "统计口径",
+    aggregation_help_body: "样本：多轮数据按切片分别统计。\n会话：多轮数据先聚合成一条；单选维度取最后一个切片，多选维度做并集去重。\n\nTokens、仲裁率、继承切片数等仍然反映处理过程，因此不会随切换而变化。会话聚合面板始终按会话统计。",
+    agg_sample: "样本",
+    agg_conversation: "会话",
+    agg_sample_hint: "多轮按切片分别计数",
+    agg_conversation_hint: "多轮先合并后按整段对话计数",
+    tag_bars: "标签条",
+    hide: "隐藏",
+    normalized: "归一化",
+    global_log: "全局对数",
+    hide_tag_bars: "隐藏标签条",
+    relative_hint: "按当前面板最大值缩放",
+    global_log_hint: "按当前分区的标签计数做对数缩放",
+    tag_bar_help: "归一化按当前面板最大值缩放；全局对数按当前 section 内标签计数的对数缩放。",
+    labeling_overview: "标注总览",
+    units_label: "单元数",
+    success: "成功率",
+    tokens: "Tokens",
+    arbitrated: "仲裁率",
+    unmapped: "未映射",
+    llm_labeled: "LLM 标注",
+    inherited: "继承",
+    unmapped_tags: "未映射标签",
+    top_10_per_dimension: "{count} 次出现 · 每个维度展示前 10 个",
+    tag: "标签",
+    count: "数量",
+    examples: "示例",
+    tag_distributions: "标签分布",
+    all_tags_sorted_frequency: "所有标签，按频次排序",
+    confidence: "置信度",
+    dimension: "维度",
+    mean: "平均",
+    min: "最小",
+    max: "最大",
+    below_threshold: "低于阈值",
+    intent_difficulty: "意图 × 难度",
+    pool_coverage: "标签池覆盖率",
+    unused_tags: "{count} 个未使用标签",
+    scoring_overview: "评分总览",
+    failed: "失败",
+    complexity: "复杂度",
+    quality: "质量",
+    median_rarity: "稀有度中位数",
+    score_distributions: "分数分布",
+    confidence_distribution: "置信度分布",
+    llm_confidence: "LLM 置信度",
+    value_by_tag: "按标签看价值",
+    selection_by_tag: "按标签看入选分",
+    all_tags_sorted_score: "所有标签，按分数排序",
+    analysis: "分析",
+    thinking_mode: "思考模式",
+    mode: "模式",
+    value: "价值",
+    selection: "入选分",
+    reasoning: "推理",
+    flags: "标记",
+    file_ranking: "文件排名",
+    sorted_by: "{count} 个文件 · 当前按 {column} 排序",
+    configuration: "配置",
+    selection_thresholds: "入选分阈值",
+    band: "区间",
+    threshold: "阈值",
+    action: "操作",
+    inspect_samples: "查看样本",
+    coverage_at_thresholds: "阈值覆盖率",
+    value_min: "价值下限",
+    retained: "保留数",
+    sample_pct: "样本占比",
+    tag_coverage: "标签覆盖率",
+    inspect_retained: "查看保留结果",
+    flag_impact: "标记影响",
+    value_score: "价值分",
+    conversations: "会话数",
+    conv_value: "会话价值",
+    conv_selection: "会话入选分",
+    peak_complexity: "峰值复杂度",
+    mean_turns: "平均轮次",
+    observed_ratio: "观测占比",
+    rarity_confidence: "稀有度置信度",
+    convs_lt_50_observed: "{count} 条会话 < 50%",
+    convs_lt_060_rarity_conf: "{count} 条会话 < 0.60",
+    turn_distribution: "轮次分布",
+    turns_label: "{count} 轮",
+    observed_turn_coverage: "已观测轮次覆盖",
+    conversation_aggregation: "会话聚合",
+    sample_id: "样本 ID",
+    quality_asc: "质量升序",
+    value_asc: "价值升序",
+    confidence_asc: "置信度升序",
+    selection_desc: "入选分降序",
+    conv_value_desc: "会话价值降序",
+    conv_selection_desc: "会话入选分降序",
+    turn_count_desc: "轮次降序",
+    observed_ratio_asc: "观测占比升序",
+    observed_ratio_desc: "观测占比降序",
+    rarity_confidence_asc: "稀有度置信度升序",
+    rarity_confidence_desc: "稀有度置信度降序",
+    rarity_desc: "稀有度降序",
+    run_query_or_choose_preset: "运行查询或选择预设，以加载样本预览。",
+    sample: "样本",
+    query: "问题",
+    response: "回答",
+    tags: "标签",
+    observed: "观测",
+    turns: "轮次",
+    source: "来源",
+    conv_sel: "会话入选分",
+    conv_rarity: "会话稀有度",
+    thinking: "思考",
+    peak_cplx: "峰值复杂度",
+    conversation: "对话",
+    json: "JSON",
+    conversation_preview: "对话预览（{shown}/{total} 轮）",
+    preview_limited: "预览仅展示前 {limit} 轮，其余 {hidden} 轮可在原始 JSON 中查看。",
+    raw_json_preview: "原始 JSON 预览",
+    raw_json_preview_cap: "原始 JSON 预览（最多 {cap} 字符）",
+    large_payload_truncated: "为保持长多轮样本的响应速度，抽屉中的大内容已截断。",
+    python_debug: "Python + 调试",
+    lowest_quality: "最低质量",
+    lowest_value: "最低价值",
+    low_confidence: "低置信度",
+    has_flags: "有标记",
+    long_multiturn: "长多轮",
+    low_coverage: "低覆盖",
+    low_rarity_conf: "低稀有度置信度",
+    sample_explorer: "样本浏览器",
+    explorer_summary: "渐进扫描预览分片，按 chunk 流式读取大文件，仅在内存中保留最匹配的 {limit} 条结果；打开抽屉时才加载完整样本；也可以点击上面的标签、柱状图和阈值行，继续向下钻取对应切片。",
+    status_ready_scan: "当前范围可扫描 {count} 条已索引预览。",
+    status_scanning: "正在扫描 {done}/{total} 个文件 · 已检查 {rows} 行 · 当前匹配 {matches} 条",
+    status_done: "完成：在 {files} 个文件中匹配到 {matches} 条记录。",
+    tags_comma: "标签（逗号分隔）",
+    source_file: "来源文件",
+    text_contains: "文本包含",
+    flag: "标记",
+    conv_sel_min: "会话入选分 ≥",
+    conv_sel_max: "会话入选分 ≤",
+    peak_cplx_min: "峰值复杂度 ≥",
+    turns_min: "轮次 ≥",
+    observed_ratio_min: "观测占比 ≥",
+    observed_ratio_max: "观测占比 ≤",
+    rarity_conf_min: "稀有度置信度 ≥",
+    rarity_conf_max: "稀有度置信度 ≤",
+    value_ge: "价值 ≥",
+    value_le: "价值 ≤",
+    quality_le: "质量 ≤",
+    selection_ge: "入选分 ≥",
+    selection_le: "入选分 ≤",
+    confidence_le: "置信度 ≤",
+    any: "任意",
+    sort: "排序",
+    only_samples_with_flags: "只看带标记的样本",
+    include_inherited_labels: "包含继承标签",
+    run_query: "运行查询",
+    scanning: "扫描中…",
+    reset: "重置",
+    current_scope_summary: "当前范围：{samples} 条已索引样本 · {files} 个候选文件 · 展示前 {limit} 条，排序方式：{sort}",
+    matches_retained: "扫描 {rows} 行后保留了 {matches} 条匹配结果",
+    total: "总计",
+    dim_intent: "意图",
+    dim_language: "语言",
+    dim_domain: "领域",
+    dim_task: "任务",
+    dim_difficulty: "难度",
+    dim_concept: "概念",
+    dim_agentic: "代理式",
+    dim_constraint: "约束",
+    dim_context: "上下文",
+    scope_kind_global: "全局",
+    scope_kind_dir: "目录",
+    scope_kind_file: "文件",
+    thinking_fast: "快思考",
+    thinking_slow: "慢思考",
+  },
+};
+
+function detectInitialLocale() {
+  try {
+    const saved = window.localStorage.getItem("dashboard.locale");
+    if (saved && ["en", "zh"].includes(saved)) return saved;
+  } catch (error) {
+    // Ignore storage failures.
+  }
+  const lang = String(window.navigator.language || "").toLowerCase();
+  return lang.startsWith("zh") ? "zh" : "en";
+}
+
+STATE.locale = detectInitialLocale();
+
 function loadSidebarPreference() {
   try {
     return window.localStorage.getItem("dashboard.sidebarCollapsed") === "1";
@@ -324,7 +772,7 @@ function applySidebarState() {
   shell.classList.toggle("sidebar-collapsed", collapsed);
   button.textContent = collapsed ? ">" : "<";
   button.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  button.setAttribute("title", collapsed ? "Expand Navigator" : "Collapse Navigator");
+  button.setAttribute("title", collapsed ? t("expand_navigator") : t("collapse_navigator"));
 }
 
 function toggleSidebar() {
@@ -335,6 +783,21 @@ function toggleSidebar() {
     // Ignore storage failures; sidebar toggle should still work.
   }
   applySidebarState();
+}
+
+function setLocale(locale) {
+  if (!["en", "zh"].includes(locale)) return;
+  STATE.locale = locale;
+  try {
+    window.localStorage.setItem("dashboard.locale", locale);
+  } catch (error) {
+    // Ignore storage failures.
+  }
+  persistDashboardState();
+  renderChromeText();
+  renderHero();
+  renderTree();
+  renderScope();
 }
 
 const DIM_COLORS = {
@@ -359,12 +822,12 @@ const HIST_COLORS = {
 };
 
 const HIST_LABELS = {
-  value_score: "Value Score",
-  complexity_overall: "Complexity",
-  quality_overall: "Quality",
-  reasoning_overall: "Reasoning",
-  rarity_score: "Rarity",
-  selection_score: "Selection",
+  value_score: "value_score",
+  complexity_overall: "complexity",
+  quality_overall: "quality",
+  reasoning_overall: "reasoning",
+  rarity_score: "median_rarity",
+  selection_score: "selection",
 };
 
 function escapeHtml(value) {
@@ -373,6 +836,66 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function t(key, vars = null) {
+  const table = I18N[STATE.locale] || I18N.en;
+  const fallback = I18N.en[key] ?? key;
+  const template = table[key] ?? fallback;
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_match, name) => String(vars[name] ?? ""));
+}
+
+function hasTranslation(key) {
+  return Object.prototype.hasOwnProperty.call(I18N.en, key) || Object.prototype.hasOwnProperty.call(I18N.zh, key);
+}
+
+function prettifyKey(value) {
+  return String(value || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function dimensionLabel(dim) {
+  const key = `dim_${dim}`;
+  return hasTranslation(key) ? t(key) : prettifyKey(dim);
+}
+
+function scopeKindLabel(kind) {
+  const key = `scope_kind_${kind}`;
+  return hasTranslation(key) ? t(key) : prettifyKey(kind);
+}
+
+function thinkingModeLabel(mode) {
+  const key = `thinking_${mode}`;
+  return hasTranslation(key) ? t(key) : String(mode || "");
+}
+
+function localizedUnitLabel(label) {
+  if (label === "samples") return t("samples");
+  if (label === "units") return t("units");
+  return label || t("items");
+}
+
+function renderChromeText() {
+  document.documentElement.lang = STATE.locale === "zh" ? "zh-CN" : "en";
+  const sidebarTitle = document.getElementById("sidebar-title");
+  const sidebarSub = document.getElementById("sidebar-sub");
+  const search = document.getElementById("scope-search");
+  const goParent = document.getElementById("go-parent");
+  const goGlobal = document.getElementById("go-global");
+  if (sidebarTitle) sidebarTitle.textContent = t("scope_navigator");
+  if (sidebarSub) sidebarSub.textContent = t("scope_navigator_sub");
+  if (search) search.placeholder = t("search_folders_files");
+  const allBtn = document.querySelector('[data-filter="all"]');
+  const dirBtn = document.querySelector('[data-filter="dir"]');
+  const fileBtn = document.querySelector('[data-filter="file"]');
+  if (allBtn) allBtn.textContent = t("filter_all");
+  if (dirBtn) dirBtn.textContent = t("filter_folders");
+  if (fileBtn) fileBtn.textContent = t("filter_files");
+  if (goParent) goParent.textContent = t("up_one_level");
+  if (goGlobal) goGlobal.textContent = t("back_to_global");
+  applySidebarState();
 }
 
 function scoreClass(value) {
@@ -459,7 +982,9 @@ function persistDashboardState() {
   try {
     const state = {
       scope: STATE.currentId,
+      locale: STATE.locale,
       tagBarMode: STATE.tagBarMode,
+      aggregationMode: STATE.aggregationMode,
       explorer: {
         sort: STATE.explorer.sort,
         query: STATE.explorer.queryModel,
@@ -483,8 +1008,14 @@ function restoreDashboardState() {
     if (payload.scope && DATA.scopes[payload.scope]) {
       STATE.currentId = payload.scope;
     }
+    if (payload.locale && ["en", "zh"].includes(payload.locale)) {
+      STATE.locale = payload.locale;
+    }
     if (payload.tagBarMode && ["hidden", "relative", "global-log"].includes(payload.tagBarMode)) {
       STATE.tagBarMode = payload.tagBarMode;
+    }
+    if (payload.aggregationMode && ["sample", "conversation"].includes(payload.aggregationMode)) {
+      STATE.aggregationMode = payload.aggregationMode;
     }
     if (payload.explorer && typeof payload.explorer === "object") {
       if (payload.explorer.sort) STATE.explorer.sort = payload.explorer.sort;
@@ -511,6 +1042,26 @@ function getScope(id) {
 
 function getCurrentScope() {
   return getScope(STATE.currentId) || getScope(DATA.root_id);
+}
+
+function scopeSummary(scope) {
+  const modes = (scope || {}).summary_modes || {};
+  return modes[STATE.aggregationMode] || (scope || {}).summary || {};
+}
+
+function aggregationPayload(bucket) {
+  if (!bucket) return null;
+  return (bucket.modes || {})[STATE.aggregationMode] || bucket;
+}
+
+function aggregationUnitLabel(bucket, fallback = "items") {
+  const payload = aggregationPayload(bucket) || {};
+  return localizedUnitLabel(payload.unit_label || fallback);
+}
+
+function aggregationInfoHtml() {
+  const body = escapeHtml(t("aggregation_help_body")).replaceAll("\n", "<br>");
+  return `<div class="info-inline" id="aggregation-info-wrap"><button class="info-btn" id="aggregation-info-btn" type="button" title="${escapeHtml(t("aggregation_help_title"))}">!</button><div class="info-pop" id="aggregation-info-pop"><strong>${escapeHtml(t("aggregation_help_title"))}</strong><br>${body}</div></div>`;
 }
 
 function resetExplorerView(resetQuery = false) {
@@ -635,13 +1186,13 @@ function renderTreeNode(id, depth = 0) {
 
   const isExpanded = STATE.expanded.has(id) || id === DATA.root_id;
   const hasChildren = (scope.children || []).length > 0;
-  const summary = scope.summary || {};
+  const summary = scopeSummary(scope);
   const valueMean = summary.mean_value;
   const badgeClass = `kind-badge kind-${scope.kind === "global" ? "global" : (scope.kind === "dir" ? "dir" : "file")}`;
   const metaBits = [];
-  if (summary.file_count) metaBits.push(`${summary.file_count} files`);
-  if (summary.scored_total) metaBits.push(`v ${fmt(summary.mean_value, 1)}`);
-  else if (summary.pass1_total) metaBits.push(`${summary.pass1_total} labeled`);
+  if (summary.file_count) metaBits.push(`${summary.file_count} ${t("files")}`);
+  if (summary.scored_total) metaBits.push(`${t("value")} ${fmt(summary.mean_value, 1)}`);
+  else if (summary.pass1_total) metaBits.push(`${summary.pass1_total} ${t("labeled")}`);
 
   let html = `<div class="tree-node ${isExpanded ? "expanded" : ""}">`;
   html += `<div class="tree-row ${STATE.currentId === id ? "active" : ""}" data-scope="${escapeHtml(id)}">`;
@@ -651,7 +1202,7 @@ function renderTreeNode(id, depth = 0) {
   } else {
     html += `<span class="tree-toggle"></span>`;
   }
-  html += `<span class="${badgeClass}">${scope.kind}</span>`;
+  html += `<span class="${badgeClass}">${escapeHtml(scopeKindLabel(scope.kind))}</span>`;
   html += `<span class="tree-label" title="${escapeHtml(scope.path || scope.label)}">${escapeHtml(scope.label)}</span>`;
   if (metaBits.length) {
     html += `<span class="tree-meta">${escapeHtml(metaBits.join(" · "))}</span>`;
@@ -697,18 +1248,19 @@ function renderTree() {
 }
 
 function renderHero() {
-  document.getElementById("hero-title").textContent = DATA.title || "Interactive Dashboard";
+  document.getElementById("hero-title").textContent = DATA.title_key ? t(DATA.title_key) : (DATA.title || t("dashboard_title_generic"));
   document.getElementById("hero-subtitle").textContent = DATA.subtitle || "";
+  document.title = DATA.title_key ? t(DATA.title_key) : (DATA.title || t("dashboard_title_generic"));
 
   const root = getScope(DATA.root_id);
-  const summary = (root && root.summary) || {};
+  const summary = root ? scopeSummary(root) : {};
   const heroStats = [
-    ["Scopes", Object.keys(DATA.scopes || {}).length],
-    ["Files", summary.file_count || 0],
+    [t("scopes"), Object.keys(DATA.scopes || {}).length],
+    [t("files"), summary.file_count || 0],
   ];
-  if (summary.pass1_total) heroStats.push(["Labeled", summary.pass1_total]);
-  if (summary.scored_total) heroStats.push(["Scored", summary.scored_total]);
-  if (summary.mean_value !== null && summary.mean_value !== undefined) heroStats.push(["Mean Value", fmt(summary.mean_value, 1)]);
+  if (summary.pass1_total) heroStats.push([t("labeled"), summary.pass1_total]);
+  if (summary.scored_total) heroStats.push([t("scored"), summary.scored_total]);
+  if (summary.mean_value !== null && summary.mean_value !== undefined) heroStats.push([t("mean_value"), fmt(summary.mean_value, 1)]);
   document.getElementById("hero-stats").innerHTML = heroStats
     .map(([label, value]) => `<div class="pill"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
     .join("");
@@ -758,7 +1310,7 @@ function renderCards(cards) {
 }
 
 function renderBarChart(items, color, maxValue = null, actionBuilder = null) {
-  if (!items || !items.length) return `<div class="empty">No data</div>`;
+  if (!items || !items.length) return `<div class="empty">${escapeHtml(t("no_data"))}</div>`;
   const ceiling = maxValue || Math.max(...items.map((item) => Number(item.value) || 0), 1);
   return items.map((item) => {
     const pct = ceiling > 0 ? ((Number(item.value) || 0) / ceiling) * 100 : 0;
@@ -783,7 +1335,7 @@ function renderHistogram(label, bins, color, stats, bucketActionBuilder = null) 
     return `<div class="${cls}"${patch} style="height:${height}%;background:${color}" title="${index + 1}: ${count}" ${role ? `role="${role}"` : ""}></div>`;
   }).join("");
   const labels = bins.map((_, index) => `<span>${index + 1}</span>`).join("");
-  const statLine = stats ? `<div class="note">mean=${fmt(stats.mean, 2)} · min=${fmt(stats.min, 1)} · max=${fmt(stats.max, 1)}</div>` : "";
+  const statLine = stats ? `<div class="note">${escapeHtml(t("mean"))}=${fmt(stats.mean, 2)} · ${escapeHtml(t("min"))}=${fmt(stats.min, 1)} · ${escapeHtml(t("max"))}=${fmt(stats.max, 1)}</div>` : "";
   return `<div class="mini-panel">
     <h4>${escapeHtml(label)}</h4>
     ${statLine}
@@ -793,11 +1345,11 @@ function renderHistogram(label, bins, color, stats, bucketActionBuilder = null) 
 }
 
 function renderRankingTable(items, metricLabel, valueRenderer, actionBuilder = null, options = null) {
-  if (!items || !items.length) return `<div class="empty">No data</div>`;
+  if (!items || !items.length) return `<div class="empty">${escapeHtml(t("no_data"))}</div>`;
   const rankOptions = options || {};
   const barMetricKey = rankOptions.barMetricKey || "";
   const barColor = rankOptions.barColor || "#2563eb";
-  const barMetricLabel = rankOptions.barMetricLabel || "Count";
+  const barMetricLabel = rankOptions.barMetricLabel || t("count");
   const globalBarMax = Number(rankOptions.globalBarMax) || 0;
   const barValues = barMetricKey
     ? items.map((item) => Number(item?.[barMetricKey]) || 0)
@@ -815,7 +1367,7 @@ function renderRankingTable(items, metricLabel, valueRenderer, actionBuilder = n
     <td class="metric-cell">${escapeHtml(valueRenderer(item))}</td>
   </tr>`).join("");
   return `<table class="data-table compact-table">
-    <thead><tr><th>#</th><th>Tag</th><th>${escapeHtml(metricLabel)}</th></tr></thead>
+    <thead><tr><th>#</th><th>${escapeHtml(t("tag"))}</th><th>${escapeHtml(metricLabel)}</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -836,7 +1388,7 @@ function renderRankingTagCell(item, actionBuilder, options = null) {
     pct = Math.max(6, pct);
   }
   const fill = metricKey && mode !== "hidden"
-    ? `<div class="rank-tag-bar" style="width:${pct.toFixed(1)}%;background:linear-gradient(90deg, ${hexToRgba(rankOptions.barColor, 0.18)} 0%, ${hexToRgba(rankOptions.barColor, 0.10)} 85%, ${hexToRgba(rankOptions.barColor, 0.04)} 100%);border:1px solid ${hexToRgba(rankOptions.barColor, 0.12)}" title="${escapeHtml(`${item.label} · ${rankOptions.barMetricLabel || "Count"}: ${rawMetric}`)}"></div>`
+    ? `<div class="rank-tag-bar" style="width:${pct.toFixed(1)}%;background:linear-gradient(90deg, ${hexToRgba(rankOptions.barColor, 0.18)} 0%, ${hexToRgba(rankOptions.barColor, 0.10)} 85%, ${hexToRgba(rankOptions.barColor, 0.04)} 100%);border:1px solid ${hexToRgba(rankOptions.barColor, 0.12)}" title="${escapeHtml(`${item.label} · ${rankOptions.barMetricLabel || t("count")}: ${rawMetric}`)}"></div>`
     : "";
   const labelHtml = actionBuilder
     ? `<button class="link-btn rank-tag-link" type="button" data-explorer-patch="${escapeAttrJson(actionBuilder(item))}" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`
@@ -845,12 +1397,12 @@ function renderRankingTagCell(item, actionBuilder, options = null) {
 }
 
 const FILE_RANKING_COLUMNS = {
-  file: {label: "File", defaultDirection: "asc"},
-  count: {label: "Count", defaultDirection: "desc"},
-  mean_value: {label: "Value", defaultDirection: "desc"},
-  mean_complexity: {label: "Complexity", defaultDirection: "desc"},
-  mean_quality: {label: "Quality", defaultDirection: "desc"},
-  mean_selection: {label: "Selection", defaultDirection: "desc"},
+  file: {labelKey: "source_file", defaultDirection: "asc"},
+  count: {labelKey: "count", defaultDirection: "desc"},
+  mean_value: {labelKey: "value", defaultDirection: "desc"},
+  mean_complexity: {labelKey: "complexity", defaultDirection: "desc"},
+  mean_quality: {labelKey: "quality", defaultDirection: "desc"},
+  mean_selection: {labelKey: "selection", defaultDirection: "desc"},
 };
 
 function fileRankingIndicator(key) {
@@ -862,7 +1414,7 @@ function renderFileRankingHeader(key) {
   const column = FILE_RANKING_COLUMNS[key];
   const active = STATE.fileRankingSort.key === key;
   return `<th><button class="th-sort-btn ${active ? "active" : ""}" data-file-sort="${escapeHtml(key)}" type="button">
-    <span>${escapeHtml(column.label)}</span>
+    <span>${escapeHtml(t(column.labelKey))}</span>
     <span class="sort-indicator">${fileRankingIndicator(key)}</span>
   </button></th>`;
 }
@@ -1244,7 +1796,7 @@ async function runExplorerQuery() {
 
   if (runId !== STATE.explorer.runId) return;
   STATE.explorer.busy = false;
-  STATE.explorer.status = `Done. Matched ${fmtInt(STATE.explorer.matched)} rows across ${scopeIds.length} files.`;
+  STATE.explorer.status = t("status_done", { matches: fmtInt(STATE.explorer.matched), files: fmtInt(scopeIds.length) });
   persistDashboardState();
   maybeRenderExplorerProgress(true);
 }
@@ -1310,16 +1862,16 @@ function closeExplorerDetail() {
 
 function renderDrawerTurns(conversations) {
   const turns = Array.isArray(conversations) ? conversations : [];
-  if (!turns.length) return `<div class="note">No conversation turns.</div>`;
+  if (!turns.length) return `<div class="note">${escapeHtml(t("no_conversation_turns"))}</div>`;
   const hiddenCount = Math.max(turns.length - EXPLORER_DRAWER_TURN_LIMIT, 0);
   const visibleTurns = turns.slice(0, EXPLORER_DRAWER_TURN_LIMIT).map((turn) => `<div class="conversation-turn">
       <div class="turn-role">${escapeHtml(turn.from || "unknown")}</div>
       <div class="turn-text">${escapeHtml(truncateMiddle(turn.value || "", EXPLORER_DRAWER_TEXT_LIMIT))}</div>
     </div>`).join("");
   return `<details class="drawer-collapse" ${turns.length <= EXPLORER_DRAWER_TURN_LIMIT ? "open" : ""}>
-      <summary>Conversation Preview (${fmtInt(Math.min(turns.length, EXPLORER_DRAWER_TURN_LIMIT))}/${fmtInt(turns.length)} turns)</summary>
+      <summary>${escapeHtml(t("conversation_preview", { shown: fmtInt(Math.min(turns.length, EXPLORER_DRAWER_TURN_LIMIT)), total: fmtInt(turns.length) }))}</summary>
       ${visibleTurns}
-      ${hiddenCount ? `<div class="note drawer-truncate-note">Preview limited to first ${fmtInt(EXPLORER_DRAWER_TURN_LIMIT)} turns. ${fmtInt(hiddenCount)} more turns stay in raw JSON.</div>` : ""}
+      ${hiddenCount ? `<div class="note drawer-truncate-note">${escapeHtml(t("preview_limited", { limit: fmtInt(EXPLORER_DRAWER_TURN_LIMIT), hidden: fmtInt(hiddenCount) }))}</div>` : ""}
     </details>`;
 }
 
@@ -1327,9 +1879,9 @@ function renderDrawerJson(detail) {
   const raw = JSON.stringify(detail, null, 2);
   const truncated = truncateMiddle(raw, EXPLORER_DRAWER_JSON_LIMIT);
   return `<details class="drawer-collapse">
-      <summary>Raw JSON Preview${raw.length > EXPLORER_DRAWER_JSON_LIMIT ? ` (${fmtInt(EXPLORER_DRAWER_JSON_LIMIT)} char cap)` : ""}</summary>
+      <summary>${escapeHtml(raw.length > EXPLORER_DRAWER_JSON_LIMIT ? t("raw_json_preview_cap", { cap: fmtInt(EXPLORER_DRAWER_JSON_LIMIT) }) : t("raw_json_preview"))}</summary>
       <div class="drawer-json">${escapeHtml(truncated)}</div>
-      ${raw.length > EXPLORER_DRAWER_JSON_LIMIT ? `<div class="note drawer-truncate-note">Large payload truncated in drawer to keep long multi-turn samples responsive.</div>` : ""}
+      ${raw.length > EXPLORER_DRAWER_JSON_LIMIT ? `<div class="note drawer-truncate-note">${escapeHtml(t("large_payload_truncated"))}</div>` : ""}
     </details>`;
 }
 
@@ -1344,14 +1896,14 @@ function renderChildren(scope) {
   if (!children.length) return "";
 
   const rows = children.map((child) => {
-    const summary = child.summary || {};
+    const summary = scopeSummary(child);
     const meanValue = summary.mean_value;
     const meanHtml = meanValue === null || meanValue === undefined
       ? "-"
       : `<span class="${scoreClass(meanValue)}">${fmt(meanValue, 1)}</span>`;
     return `<tr>
       <td><button class="link-btn" data-jump="${escapeHtml(child.id)}">${escapeHtml(child.label)}</button></td>
-      <td><span class="kind-badge kind-${child.kind === "global" ? "global" : (child.kind === "dir" ? "dir" : "file")}">${escapeHtml(child.kind)}</span></td>
+      <td><span class="kind-badge kind-${child.kind === "global" ? "global" : (child.kind === "dir" ? "dir" : "file")}">${escapeHtml(scopeKindLabel(child.kind))}</span></td>
       <td>${summary.file_count || 0}</td>
       <td>${summary.pass1_total || 0}</td>
       <td>${summary.scored_total || 0}</td>
@@ -1360,49 +1912,63 @@ function renderChildren(scope) {
   }).join("");
 
   return section(
-    "Children",
+    t("children"),
     `<table class="data-table">
-      <thead><tr><th>Name</th><th>Type</th><th>Files</th><th>Labeled</th><th>Scored</th><th>Mean Value</th></tr></thead>
+      <thead><tr><th>${escapeHtml(t("name"))}</th><th>${escapeHtml(t("type"))}</th><th>${escapeHtml(t("files"))}</th><th>${escapeHtml(t("labeled"))}</th><th>${escapeHtml(t("scored"))}</th><th>${escapeHtml(t("mean_value"))}</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`,
-    `${children.length} direct children`,
+    t("direct_children", { count: children.length }),
     true,
   );
 }
 
 function renderTagBarControlsInline(scope) {
   if (!scope || (!scope.pass1 && !scope.pass2)) return "";
-  const buttons = [
-    ["hidden", "隐藏", "Hide tag bars"],
-    ["relative", "归一化", "Scale by current panel max"],
-    ["global-log", "全局对数", "Scale by section-wide log max"],
+  const tagButtons = [
+    ["hidden", t("hide"), t("hide_tag_bars")],
+    ["relative", t("normalized"), t("relative_hint")],
+    ["global-log", t("global_log"), t("global_log_hint")],
   ].map(([value, label, hint]) => (
     `<button class="segmented-btn ${STATE.tagBarMode === value ? "active" : ""}" type="button" data-tag-bar-mode="${escapeHtml(value)}" title="${escapeHtml(hint)}">${escapeHtml(label)}</button>`
   )).join("");
-  return `<div class="toolbar-inline-copy" title="归一化按当前面板最大值缩放；全局对数按当前 section 内全部 tag 的计数做对数缩放。">Tag Bars</div><div class="segmented">${buttons}</div>`;
+  const aggButtons = [
+    ["sample", t("agg_sample"), t("agg_sample_hint")],
+    ["conversation", t("agg_conversation"), t("agg_conversation_hint")],
+  ].map(([value, label, hint]) => (
+    `<button class="segmented-btn ${STATE.aggregationMode === value ? "active" : ""}" type="button" data-aggregation-mode="${escapeHtml(value)}" title="${escapeHtml(hint)}">${escapeHtml(label)}</button>`
+  )).join("");
+  const localeButtons = [
+    ["zh", t("chinese")],
+    ["en", t("english")],
+  ].map(([value, label]) => (
+    `<button class="segmented-btn ${STATE.locale === value ? "active" : ""}" type="button" data-locale="${escapeHtml(value)}">${escapeHtml(label)}</button>`
+  )).join("");
+  return `<div class="toolbar-inline-copy" title="${escapeHtml(t("language_toggle_help"))}">${escapeHtml(t("language"))}</div><div class="segmented">${localeButtons}</div><div class="toolbar-inline-copy">${escapeHtml(t("aggregation"))}</div><div class="segmented">${aggButtons}</div>${aggregationInfoHtml()}<div class="toolbar-inline-copy" title="${escapeHtml(t("tag_bar_help"))}">${escapeHtml(t("tag_bars"))}</div><div class="segmented">${tagButtons}</div>`;
 }
 
 function renderPass1(pass1) {
   if (!pass1) return "";
+  const pass1View = aggregationPayload(pass1);
+  if (!pass1View) return "";
   const sections = [];
-  const globalTagCountMax = Object.values(pass1.distributions || {}).flatMap((dist) => (
+  const globalTagCountMax = Object.values(pass1View.distributions || {}).flatMap((dist) => (
     Object.values(dist || {}).map((value) => Number(value) || 0)
   )).reduce((maxValue, value) => Math.max(maxValue, value), 0);
 
   const cards = [];
-  const overview = pass1.overview || {};
-  cards.push({label: "Samples", value: pass1.total || 0});
-  cards.push({label: "Success", value: `${(((overview.success_rate || 0) * 100).toFixed(1))}%`});
-  cards.push({label: "Tokens", value: Number(overview.total_tokens || 0).toLocaleString()});
-  cards.push({label: "Arbitrated", value: `${(((overview.arbitrated_rate || 0) * 100).toFixed(1))}%`});
-  if (overview.unmapped_unique) cards.push({label: "Unmapped", value: overview.unmapped_unique});
+  const overview = pass1View.overview || {};
+  cards.push({label: STATE.aggregationMode === "conversation" ? t("units_label") : t("samples"), value: pass1View.total || 0});
+  cards.push({label: t("success"), value: `${(((overview.success_rate || 0) * 100).toFixed(1))}%`});
+  cards.push({label: t("tokens"), value: Number(overview.total_tokens || 0).toLocaleString()});
+  cards.push({label: t("arbitrated"), value: `${(((overview.arbitrated_rate || 0) * 100).toFixed(1))}%`});
+  if (overview.unmapped_unique) cards.push({label: t("unmapped"), value: overview.unmapped_unique});
   if (overview.sparse_inherited) {
-    cards.push({label: "LLM Labeled", value: overview.sparse_labeled || 0});
-    cards.push({label: "Inherited", value: overview.sparse_inherited || 0});
+    cards.push({label: t("llm_labeled"), value: overview.sparse_labeled || 0});
+    cards.push({label: t("inherited"), value: overview.sparse_inherited || 0});
   }
-  sections.push(section("Labeling Overview", renderCards(cards), `${pass1.total || 0} samples`, true));
+  sections.push(section(t("labeling_overview"), renderCards(cards), `${pass1View.total || 0} ${aggregationUnitLabel(pass1, "samples")}`, true));
 
-  const unmappedDetails = pass1.unmapped_details || {};
+  const unmappedDetails = pass1View.unmapped_details || {};
   const unmappedByDim = unmappedDetails.by_dimension || {};
   const unmappedPanels = Object.entries(unmappedByDim).map(([dim, rows]) => {
     const ranked = (rows || []).slice(0, 10).map((row) => ({
@@ -1414,7 +1980,7 @@ function renderPass1(pass1) {
     const htmlRows = ranked.map((row, index) => {
       const examples = row.examples.length
         ? row.examples.map((item) => `<div class="note">[${escapeHtml(item.id || "?")}] ${escapeHtml(item.query || "")}</div>`).join("")
-        : `<div class="note">No example sample loaded for this scope.</div>`;
+        : `<div class="note">${escapeHtml(t("no_example_sample"))}</div>`;
       return `<tr>
         <td class="rank-cell">${index + 1}</td>
         <td class="rank-tag-cell"><span class="rank-tag-text" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span></td>
@@ -1422,19 +1988,19 @@ function renderPass1(pass1) {
         <td>${examples}</td>
       </tr>`;
     }).join("");
-    return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>
+    return `<div class="mini-panel"><h4>${escapeHtml(dimensionLabel(dim))}</h4>
       <table class="data-table compact-table">
-        <thead><tr><th>#</th><th>Tag</th><th>Count</th><th>Examples</th></tr></thead>
+        <thead><tr><th>#</th><th>${escapeHtml(t("tag"))}</th><th>${escapeHtml(t("count"))}</th><th>${escapeHtml(t("examples"))}</th></tr></thead>
         <tbody>${htmlRows}</tbody>
       </table>
     </div>`;
   }).join("");
   if (unmappedPanels) {
-    const subtitle = `${fmtInt(unmappedDetails.total_occurrences || 0)} occurrences · top 10 per dimension`;
-    sections.push(section("Unmapped Tags", `<div class="grid">${unmappedPanels}</div>`, subtitle, false));
+    const subtitle = t("top_10_per_dimension", { count: fmtInt(unmappedDetails.total_occurrences || 0) });
+    sections.push(section(t("unmapped_tags"), `<div class="grid">${unmappedPanels}</div>`, subtitle, false));
   }
 
-  const distPanels = Object.entries(pass1.distributions || {}).map(([dim, dist]) => {
+  const distPanels = Object.entries(pass1View.distributions || {}).map(([dim, dist]) => {
     const total = Object.values(dist || {}).reduce((sum, value) => sum + value, 0);
     const entries = Object.entries(dist || {})
       .sort((a, b) => (b[1] || 0) - (a[1] || 0) || a[0].localeCompare(b[0]))
@@ -1443,22 +2009,22 @@ function renderPass1(pass1) {
         value,
         count: value,
       }));
-    return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>${renderRankingTable(entries, "Count", (entry) => (
+    return `<div class="mini-panel"><h4>${escapeHtml(dimensionLabel(dim))}</h4>${renderRankingTable(entries, t("count"), (entry) => (
       total > 0 ? `${entry.value} (${((entry.value / total) * 100).toFixed(1)}%)` : `${entry.value}`
     ), (entry) => explorerPatchForTag(dim, entry.label, "quality_asc"), {
       barMetricKey: "count",
-      barMetricLabel: "Count",
+      barMetricLabel: t("count"),
       barColor: DIM_COLORS[dim] || "#2563eb",
       globalBarMax: globalTagCountMax,
     })}</div>`;
   }).join("");
   if (distPanels) {
-    sections.push(section("Tag Distributions", `<div class="grid">${distPanels}</div>`, "All tags, sorted by frequency", true));
+    sections.push(section(t("tag_distributions"), `<div class="grid">${distPanels}</div>`, t("all_tags_sorted_frequency"), true));
   }
 
-  const confStats = Object.entries(pass1.confidence_stats || {}).map(([dim, stats]) => {
+  const confStats = Object.entries(pass1View.confidence_stats || {}).map(([dim, stats]) => {
     return `<tr>
-      <td>${escapeHtml(dim)}</td>
+      <td>${escapeHtml(dimensionLabel(dim))}</td>
       <td><span style="display:inline-block;padding:4px 8px;border-radius:999px;background:${confColor(stats.mean)}">${fmt(stats.mean, 3)}</span></td>
       <td>${fmt(stats.min, 2)}</td>
       <td>${fmt(stats.max, 2)}</td>
@@ -1466,12 +2032,12 @@ function renderPass1(pass1) {
     </tr>`;
   }).join("");
   if (confStats) {
-    sections.push(section("Confidence", `<table class="data-table"><thead><tr><th>Dimension</th><th>Mean</th><th>Min</th><th>Max</th><th>Below Threshold</th></tr></thead><tbody>${confStats}</tbody></table>`, "", false));
+    sections.push(section(t("confidence"), `<table class="data-table"><thead><tr><th>${escapeHtml(t("dimension"))}</th><th>${escapeHtml(t("mean"))}</th><th>${escapeHtml(t("min"))}</th><th>${escapeHtml(t("max"))}</th><th>${escapeHtml(t("below_threshold"))}</th></tr></thead><tbody>${confStats}</tbody></table>`, "", false));
   }
 
-  const cross = pass1.cross_matrix || {};
+  const cross = pass1View.cross_matrix || {};
   if ((cross.rows || []).length && (cross.cols || []).length) {
-    let html = `<table class="data-table"><thead><tr><th>Intent \\ Difficulty</th>${cross.cols.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}<th>Total</th></tr></thead><tbody>`;
+    let html = `<table class="data-table"><thead><tr><th>${escapeHtml(`${dimensionLabel("intent")} \\ ${dimensionLabel("difficulty")}`)}</th>${cross.cols.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}<th>${escapeHtml(t("total"))}</th></tr></thead><tbody>`;
     for (const row of cross.rows) {
       let total = 0;
       html += `<tr><td>${escapeHtml(row)}</td>`;
@@ -1483,24 +2049,24 @@ function renderPass1(pass1) {
       html += `<td>${total}</td></tr>`;
     }
     html += `</tbody></table>`;
-    sections.push(section("Intent × Difficulty", html, "", false));
+    sections.push(section(t("intent_difficulty"), html, "", false));
   }
 
-  const coverageItems = Object.entries(pass1.coverage || {}).map(([dim, item]) => {
+  const coverageItems = Object.entries(pass1View.coverage || {}).map(([dim, item]) => {
     if (!item.pool_size) return "";
     const pct = (item.rate || 0) * 100;
     const tags = item.unused && item.unused.length && item.unused.length <= 24
       ? `<div class="tags">${item.unused.map((tag) => `<button class="tag link-btn" type="button" data-explorer-patch="${escapeAttrJson(explorerPatchForTag(dim, tag, "quality_asc"))}">${escapeHtml(tag)}</button>`).join("")}</div>`
-      : `<div class="note">${item.unused?.length || 0} unused tags</div>`;
+      : `<div class="note">${escapeHtml(t("unused_tags", { count: item.unused?.length || 0 }))}</div>`;
     return `<div class="mini-panel">
-      <h4>${escapeHtml(dim)}</h4>
+      <h4>${escapeHtml(dimensionLabel(dim))}</h4>
       <div class="note">${item.used}/${item.pool_size} (${pct.toFixed(1)}%)</div>
-      ${renderBarChart([{label: dim, value: pct, display: `${pct.toFixed(1)}%`}], "#2563eb", 100)}
+      ${renderBarChart([{label: dimensionLabel(dim), value: pct, display: `${pct.toFixed(1)}%`}], "#2563eb", 100)}
       ${tags}
     </div>`;
   }).join("");
   if (coverageItems) {
-    sections.push(section("Pool Coverage", `<div class="grid">${coverageItems}</div>`, "", false));
+    sections.push(section(t("pool_coverage"), `<div class="grid">${coverageItems}</div>`, "", false));
   }
 
   return sections.join("");
@@ -1508,22 +2074,24 @@ function renderPass1(pass1) {
 
 function renderPass2(pass2) {
   if (!pass2) return "";
+  const pass2View = aggregationPayload(pass2);
+  if (!pass2View) return "";
   const sections = [];
-  const overview = pass2.overview || {};
+  const overview = pass2View.overview || {};
   const cards = [
-    {label: "Scored", value: overview.total_scored || 0},
-    {label: "Failed", value: overview.total_failed || 0},
-    {label: "Mean Value", value: fmt(overview.mean_value, 1), className: scoreClass(overview.mean_value)},
-    {label: "Complexity", value: fmt(overview.mean_complexity, 1), className: scoreClass(overview.mean_complexity)},
-    {label: "Quality", value: fmt(overview.mean_quality, 1), className: scoreClass(overview.mean_quality)},
-    {label: "Median Rarity", value: fmt(overview.median_rarity, 1), className: scoreClass(overview.median_rarity)},
-    {label: "Confidence", value: fmt(overview.mean_confidence, 2)},
-    {label: "Tokens", value: Number(overview.total_tokens || 0).toLocaleString()},
+    {label: t("scored"), value: overview.total_scored || 0},
+    {label: t("failed"), value: overview.total_failed || 0},
+    {label: t("mean_value"), value: fmt(overview.mean_value, 1), className: scoreClass(overview.mean_value)},
+    {label: t("complexity"), value: fmt(overview.mean_complexity, 1), className: scoreClass(overview.mean_complexity)},
+    {label: t("quality"), value: fmt(overview.mean_quality, 1), className: scoreClass(overview.mean_quality)},
+    {label: t("median_rarity"), value: fmt(overview.median_rarity, 1), className: scoreClass(overview.median_rarity)},
+    {label: t("confidence"), value: fmt(overview.mean_confidence, 2)},
+    {label: t("tokens"), value: Number(overview.total_tokens || 0).toLocaleString()},
   ];
-  sections.push(section("Scoring Overview", renderCards(cards), `${overview.total_scored || 0} scored`, true));
+  sections.push(section(t("scoring_overview"), renderCards(cards), `${overview.total_scored || 0} ${aggregationUnitLabel(pass2, "samples")}`, true));
 
-  const histograms = pass2.histograms || {};
-  const scoreDistributions = pass2.score_distributions || {};
+  const histograms = pass2View.histograms || {};
+  const scoreDistributions = pass2View.score_distributions || {};
   const histogramBlocks = Object.entries(histograms).map(([key, bins]) => {
     if (!Array.isArray(bins) || !bins.length) return "";
     let bucketAction = null;
@@ -1531,27 +2099,27 @@ function renderPass2(pass2) {
     if (key === "quality_overall") bucketAction = (bucket) => ({ maxQuality: String(bucket), sort: "quality_asc" });
     if (key === "selection_score") bucketAction = (bucket) => ({ minSelection: String(bucket), sort: "selection_desc" });
     if (key === "confidence") bucketAction = (bucket) => ({ maxConfidence: String((bucket / 10).toFixed(1)), sort: "confidence_asc" });
-    return renderHistogram(HIST_LABELS[key] || key, bins, HIST_COLORS[key] || "#2563eb", scoreDistributions[key], bucketAction);
+    return renderHistogram(t(HIST_LABELS[key] || key), bins, HIST_COLORS[key] || "#2563eb", scoreDistributions[key], bucketAction);
   }).join("");
   if (histogramBlocks) {
-    sections.push(section("Score Distributions", `<div class="grid">${histogramBlocks}</div>`, "", true));
+    sections.push(section(t("score_distributions"), `<div class="grid">${histogramBlocks}</div>`, "", true));
   }
 
-  if ((pass2.confidence_histogram || []).some((value) => value > 0)) {
-    const bins = pass2.confidence_histogram;
+  if ((pass2View.confidence_histogram || []).some((value) => value > 0)) {
+    const bins = pass2View.confidence_histogram;
     const max = Math.max(...bins, 1);
     const bars = bins.map((count, idx) => {
       const height = Math.max((count / max) * 100, 2);
       return `<div class="hist-bar" style="height:${height}%;background:#7c3aed" title="${(idx / 10).toFixed(1)}-${((idx + 1) / 10).toFixed(1)}: ${count}"></div>`;
     }).join("");
     const labels = bins.map((_, idx) => `<span>${(idx / 10).toFixed(1)}</span>`).join("");
-    sections.push(section("Confidence Distribution", `<div class="mini-panel"><h4>LLM Confidence</h4><div class="hist-row">${bars}</div><div class="hist-labels">${labels}</div></div>`, "", false));
+    sections.push(section(t("confidence_distribution"), `<div class="mini-panel"><h4>${escapeHtml(t("llm_confidence"))}</h4><div class="hist-row">${bars}</div><div class="hist-labels">${labels}</div></div>`, "", false));
   }
 
   const byTagSections = [];
   for (const [title, bucket] of [
-    ["Value By Tag", pass2.value_by_tag || {}],
-    ["Selection By Tag", pass2.selection_by_tag || {}],
+    [t("value_by_tag"), pass2View.value_by_tag || {}],
+    [t("selection_by_tag"), pass2View.selection_by_tag || {}],
   ]) {
     const globalTagCountMax = Object.values(bucket).flatMap((dist) => (
       Object.values(dist || {}).map((info) => Number(info?.n) || 0)
@@ -1564,32 +2132,33 @@ function renderPass2(pass2) {
           mean: info.mean,
           n: info.n || 0,
         }));
-      return `<div class="mini-panel"><h4>${escapeHtml(dim)}</h4>${renderRankingTable(items, "Score", (item) => `${fmt(item.mean, 2)} (n=${item.n})`, (item) => explorerPatchForTag(dim, item.label, title === "Selection By Tag" ? "selection_desc" : "quality_asc"), {
+      const metricLabel = title === t("selection_by_tag") ? t("selection") : t("value");
+      return `<div class="mini-panel"><h4>${escapeHtml(dimensionLabel(dim))}</h4>${renderRankingTable(items, metricLabel, (item) => `${fmt(item.mean, 2)} (n=${item.n})`, (item) => explorerPatchForTag(dim, item.label, title === t("selection_by_tag") ? "selection_desc" : "quality_asc"), {
         barMetricKey: "n",
-        barMetricLabel: "Count",
+        barMetricLabel: t("count"),
         barColor: DIM_COLORS[dim] || "#2563eb",
         globalBarMax: globalTagCountMax,
       })}</div>`;
     }).join("");
     if (panels) {
-      byTagSections.push(section(title, `<div class="grid">${panels}</div>`, "All tags, sorted by score", false));
+      byTagSections.push(section(title, `<div class="grid">${panels}</div>`, t("all_tags_sorted_score"), false));
     }
   }
   sections.push(byTagSections.join(""));
 
-  const thinkingMode = pass2.thinking_mode_stats || {};
-  const flags = pass2.flag_counts || {};
+  const thinkingMode = pass2View.thinking_mode_stats || {};
+  const flags = pass2View.flag_counts || {};
   if (Object.keys(thinkingMode).length || Object.keys(flags).length) {
     let html = `<div class="grid">`;
     if (Object.keys(thinkingMode).length) {
       const rows = Object.entries(thinkingMode).map(([mode, stats]) => `<tr>
-        <td>${escapeHtml(mode)}</td>
+        <td>${escapeHtml(thinkingModeLabel(mode))}</td>
         <td>${stats.count || 0}</td>
         <td>${fmt(stats.mean_value, 1)}</td>
         <td>${fmt(stats.mean_quality, 1)}</td>
         <td>${fmt(stats.mean_reasoning, 1)}</td>
       </tr>`).join("");
-      html += `<div class="mini-panel"><h4>Thinking Mode</h4><table class="data-table"><thead><tr><th>Mode</th><th>Count</th><th>Value</th><th>Quality</th><th>Reasoning</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      html += `<div class="mini-panel"><h4>${escapeHtml(t("thinking_mode"))}</h4><table class="data-table"><thead><tr><th>${escapeHtml(t("mode"))}</th><th>${escapeHtml(t("count"))}</th><th>${escapeHtml(t("value"))}</th><th>${escapeHtml(t("quality"))}</th><th>${escapeHtml(t("reasoning"))}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
     if (Object.keys(flags).length) {
       const items = Object.entries(flags).slice(0, 18).map(([label, value]) => ({
@@ -1597,13 +2166,13 @@ function renderPass2(pass2) {
         value,
         display: `${value}`,
       }));
-      html += `<div class="mini-panel"><h4>Flags</h4>${renderBarChart(items, "#dc2626", null, (item) => ({ flagQuery: item.label, hasFlags: true, sort: "quality_asc" }))}</div>`;
+      html += `<div class="mini-panel"><h4>${escapeHtml(t("flags"))}</h4>${renderBarChart(items, "#dc2626", null, (item) => ({ flagQuery: item.label, hasFlags: true, sort: "quality_asc" }))}</div>`;
     }
     html += `</div>`;
-    sections.push(section("Analysis", html, "", true));
+    sections.push(section(t("analysis"), html, "", true));
   }
 
-  const perFile = pass2.per_file_summary || [];
+  const perFile = pass2View.per_file_summary || [];
   if (perFile.length > 1) {
     const sortColumn = FILE_RANKING_COLUMNS[STATE.fileRankingSort.key] || FILE_RANKING_COLUMNS.mean_value;
     const rows = sortPerFileSummary(perFile)
@@ -1616,54 +2185,54 @@ function renderPass2(pass2) {
         <td>${fmt(row.mean_selection, 1)}</td>
       </tr>`).join("");
     sections.push(section(
-      "File Ranking",
+      t("file_ranking"),
       `<table class="data-table"><thead><tr>${
         ["file", "count", "mean_value", "mean_complexity", "mean_quality", "mean_selection"]
           .map(renderFileRankingHeader)
           .join("")
       }</tr></thead><tbody>${rows}</tbody></table>`,
-      `${perFile.length} files · sorted by ${sortColumn.label}`,
+      t("sorted_by", { count: perFile.length, column: t(sortColumn.labelKey) }),
       true,
     ));
   }
 
-  const weights = pass2.weights_used || {};
+  const weights = pass2View.weights_used || {};
   if (Object.keys(weights).length) {
     const formula = Object.entries(weights).map(([key, value]) => `${value}×${key}`).join(" + ");
-    sections.push(section("Configuration", `<div class="note">${escapeHtml(formula)}</div>`, "", false));
+    sections.push(section(t("configuration"), `<div class="note">${escapeHtml(formula)}</div>`, "", false));
   }
 
-  const thresholds = pass2.selection_thresholds || {};
+  const thresholds = pass2View.selection_thresholds || {};
   if (Object.keys(thresholds).length) {
     const rows = Object.entries(thresholds).map(([label, info]) => `<tr>
       <td>${escapeHtml(label)}</td>
       <td>${fmt(info.threshold, 1)}</td>
       <td>${info.count || 0}</td>
-      <td><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ minSelection: String(info.threshold), sort: "selection_desc" })}">Inspect Samples</button></td>
+      <td><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ minSelection: String(info.threshold), sort: "selection_desc" })}">${escapeHtml(t("inspect_samples"))}</button></td>
     </tr>`).join("");
-    sections.push(section("Selection Thresholds", `<table class="data-table"><thead><tr><th>Band</th><th>Threshold</th><th>Count</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table>`, "", false));
+    sections.push(section(t("selection_thresholds"), `<table class="data-table"><thead><tr><th>${escapeHtml(t("band"))}</th><th>${escapeHtml(t("threshold"))}</th><th>${escapeHtml(t("count"))}</th><th>${escapeHtml(t("action"))}</th></tr></thead><tbody>${rows}</tbody></table>`, "", false));
   }
 
-  const coverage = pass2.coverage_at_thresholds || {};
+  const coverage = pass2View.coverage_at_thresholds || {};
   if (Object.keys(coverage).length) {
     const rows = Object.entries(coverage).map(([threshold, info]) => `<tr>
       <td>${escapeHtml(threshold)}</td>
       <td>${info.retained || 0}</td>
       <td>${fmt((info.pct || 0) * 100, 1)}%</td>
       <td>${fmt((info.coverage || 0) * 100, 1)}%</td>
-      <td><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ minValue: threshold, sort: "value_asc" })}">Inspect Retained</button></td>
+      <td><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ minValue: threshold, sort: "value_asc" })}">${escapeHtml(t("inspect_retained"))}</button></td>
     </tr>`).join("");
-    sections.push(section("Coverage At Thresholds", `<table class="data-table"><thead><tr><th>Value Min</th><th>Retained</th><th>Sample %</th><th>Tag Coverage</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table>`, "", false));
+    sections.push(section(t("coverage_at_thresholds"), `<table class="data-table"><thead><tr><th>${escapeHtml(t("value_min"))}</th><th>${escapeHtml(t("retained"))}</th><th>${escapeHtml(t("sample_pct"))}</th><th>${escapeHtml(t("tag_coverage"))}</th><th>${escapeHtml(t("action"))}</th></tr></thead><tbody>${rows}</tbody></table>`, "", false));
   }
 
-  const flagImpact = pass2.flag_value_impact || {};
+  const flagImpact = pass2View.flag_value_impact || {};
   if (Object.keys(flagImpact).length) {
     const rows = Object.entries(flagImpact).sort((a, b) => (a[1].mean_value || 0) - (b[1].mean_value || 0)).map(([flag, info]) => `<tr>
       <td><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ flagQuery: flag, hasFlags: true, sort: "quality_asc" })}">${escapeHtml(flag)}</button></td>
       <td>${fmt(info.mean_value, 2)}</td>
       <td>${info.count || 0}</td>
     </tr>`).join("");
-    sections.push(section("Flag Impact", `<table class="data-table"><thead><tr><th>Flag</th><th>Mean Value</th><th>Count</th></tr></thead><tbody>${rows}</tbody></table>`, "", false));
+    sections.push(section(t("flag_impact"), `<table class="data-table"><thead><tr><th>${escapeHtml(t("flag"))}</th><th>${escapeHtml(t("mean_value"))}</th><th>${escapeHtml(t("count"))}</th></tr></thead><tbody>${rows}</tbody></table>`, "", false));
   }
 
   return sections.join("");
@@ -1672,39 +2241,39 @@ function renderPass2(pass2) {
 function renderConversations(conversation) {
   if (!conversation) return "";
   const cards = [
-    {label: "Conversations", value: conversation.total || 0},
-    {label: "Conv Value", value: fmt(conversation.mean_conv_value, 1), className: scoreClass(conversation.mean_conv_value)},
-    {label: "Conv Selection", value: fmt(conversation.mean_conv_selection, 1), className: scoreClass(conversation.mean_conv_selection)},
-    {label: "Peak Complexity", value: fmt(conversation.mean_peak_complexity, 1), className: scoreClass(conversation.mean_peak_complexity)},
-    {label: "Mean Turns", value: fmt(conversation.mean_turns, 1)},
-    {label: "Observed Ratio", value: fmt((conversation.mean_observed_turn_ratio || 0) * 100, 0) + "%", sub: `${fmtInt(conversation.low_observed_coverage_count || 0)} convs < 50% observed`},
-    {label: "Rarity Confidence", value: fmt((conversation.mean_rarity_confidence || 0), 2), sub: `${fmtInt(conversation.low_rarity_confidence_count || 0)} convs < 0.60`},
+    {label: t("conversations"), value: conversation.total || 0},
+    {label: t("conv_value"), value: fmt(conversation.mean_conv_value, 1), className: scoreClass(conversation.mean_conv_value)},
+    {label: t("conv_selection"), value: fmt(conversation.mean_conv_selection, 1), className: scoreClass(conversation.mean_conv_selection)},
+    {label: t("peak_complexity"), value: fmt(conversation.mean_peak_complexity, 1), className: scoreClass(conversation.mean_peak_complexity)},
+    {label: t("mean_turns"), value: fmt(conversation.mean_turns, 1)},
+    {label: t("observed_ratio"), value: fmt((conversation.mean_observed_turn_ratio || 0) * 100, 0) + "%", sub: t("convs_lt_50_observed", { count: fmtInt(conversation.low_observed_coverage_count || 0) })},
+    {label: t("rarity_confidence"), value: fmt((conversation.mean_rarity_confidence || 0), 2), sub: t("convs_lt_060_rarity_conf", { count: fmtInt(conversation.low_rarity_confidence_count || 0) })},
   ];
 
   let body = renderCards(cards);
   const histBlocks = [];
   for (const [label, bins, color] of [
-    ["Conv Value", conversation.conv_value_hist, "#2563eb"],
-    ["Conv Selection", conversation.conv_selection_hist, "#be185d"],
-    ["Peak Complexity", conversation.peak_complexity_hist, "#c2410c"],
+    [t("conv_value"), conversation.conv_value_hist, "#2563eb"],
+    [t("conv_selection"), conversation.conv_selection_hist, "#be185d"],
+    [t("peak_complexity"), conversation.peak_complexity_hist, "#c2410c"],
   ]) {
     if (Array.isArray(bins) && bins.some((value) => value > 0)) {
       let bucketAction = null;
-      if (label === "Conv Value") bucketAction = (bucket) => ({ convValueMin: String(bucket), sort: "conv_value_desc" });
-      if (label === "Conv Selection") bucketAction = (bucket) => ({ convSelectionMin: String(bucket), sort: "conv_selection_desc" });
-      if (label === "Peak Complexity") bucketAction = (bucket) => ({ peakComplexityMin: String(bucket), sort: "conv_value_desc" });
+      if (label === t("conv_value")) bucketAction = (bucket) => ({ convValueMin: String(bucket), sort: "conv_value_desc" });
+      if (label === t("conv_selection")) bucketAction = (bucket) => ({ convSelectionMin: String(bucket), sort: "conv_selection_desc" });
+      if (label === t("peak_complexity")) bucketAction = (bucket) => ({ peakComplexityMin: String(bucket), sort: "conv_value_desc" });
       histBlocks.push(renderHistogram(label, bins, color, null, bucketAction));
     }
   }
   const turnDist = conversation.turn_distribution || {};
   if (Object.keys(turnDist).length) {
     const items = Object.entries(turnDist).map(([turns, count]) => ({
-      label: `${turns} turns`,
+      label: t("turns_label", { count: turns }),
       value: count,
       display: `${count}`,
       turns: Number(turns),
     }));
-    histBlocks.push(`<div class="mini-panel"><h4>Turn Distribution</h4>${renderBarChart(items, "#0f766e", null, (item) => ({ turnCountMin: String(item.turns), sort: "turn_count_desc" }))}</div>`);
+    histBlocks.push(`<div class="mini-panel"><h4>${escapeHtml(t("turn_distribution"))}</h4>${renderBarChart(items, "#0f766e", null, (item) => ({ turnCountMin: String(item.turns), sort: "turn_count_desc" }))}</div>`);
   }
   const observedBands = conversation.observed_turn_ratio_bands || {};
   if (Object.keys(observedBands).length) {
@@ -1714,7 +2283,7 @@ function renderConversations(conversation) {
       display: `${count}`,
       threshold: [0.0, 0.25, 0.5, 0.75][index] ?? 0.0,
     }));
-    histBlocks.push(`<div class="mini-panel"><h4>Observed Turn Coverage</h4>${renderBarChart(items, "#0f766e", null, (item) => ({ observedTurnRatioMin: String(item.threshold), sort: "observed_turn_ratio_desc" }))}</div>`);
+    histBlocks.push(`<div class="mini-panel"><h4>${escapeHtml(t("observed_turn_coverage"))}</h4>${renderBarChart(items, "#0f766e", null, (item) => ({ observedTurnRatioMin: String(item.threshold), sort: "observed_turn_ratio_desc" }))}</div>`);
   }
   const rarityBands = conversation.rarity_confidence_bands || {};
   if (Object.keys(rarityBands).length) {
@@ -1724,32 +2293,32 @@ function renderConversations(conversation) {
       display: `${count}`,
       threshold: [0.0, 0.25, 0.5, 0.75][index] ?? 0.0,
     }));
-    histBlocks.push(`<div class="mini-panel"><h4>Rarity Confidence</h4>${renderBarChart(items, "#7c3aed", null, (item) => ({ rarityConfidenceMin: String(item.threshold), sort: "rarity_confidence_desc" }))}</div>`);
+    histBlocks.push(`<div class="mini-panel"><h4>${escapeHtml(t("rarity_confidence"))}</h4>${renderBarChart(items, "#7c3aed", null, (item) => ({ rarityConfidenceMin: String(item.threshold), sort: "rarity_confidence_desc" }))}</div>`);
   }
   if (histBlocks.length) {
     body += `<div class="grid" style="margin-top:14px">${histBlocks.join("")}</div>`;
   }
-  return section("Conversation Aggregation", body, "", false);
+  return section(t("conversation_aggregation"), body, "", false);
 }
 
 function explorerSortOptions(includeScores = true) {
   const options = [
-    ["sample_id_asc", "Sample Id"],
+    ["sample_id_asc", t("sample_id")],
   ];
   if (includeScores) {
     options.unshift(
-      ["quality_asc", "Quality Asc"],
-      ["value_asc", "Value Asc"],
-      ["confidence_asc", "Confidence Asc"],
-      ["selection_desc", "Selection Desc"],
-      ["conv_value_desc", "Conv Value Desc"],
-      ["conv_selection_desc", "Conv Selection Desc"],
-      ["turn_count_desc", "Turn Count Desc"],
-      ["observed_turn_ratio_asc", "Observed Ratio Asc"],
-      ["observed_turn_ratio_desc", "Observed Ratio Desc"],
-      ["rarity_confidence_asc", "Rarity Confidence Asc"],
-      ["rarity_confidence_desc", "Rarity Confidence Desc"],
-      ["rarity_desc", "Rarity Desc"],
+      ["quality_asc", t("quality_asc")],
+      ["value_asc", t("value_asc")],
+      ["confidence_asc", t("confidence_asc")],
+      ["selection_desc", t("selection_desc")],
+      ["conv_value_desc", t("conv_value_desc")],
+      ["conv_selection_desc", t("conv_selection_desc")],
+      ["turn_count_desc", t("turn_count_desc")],
+      ["observed_turn_ratio_asc", t("observed_ratio_asc")],
+      ["observed_turn_ratio_desc", t("observed_ratio_desc")],
+      ["rarity_confidence_asc", t("rarity_confidence_asc")],
+      ["rarity_confidence_desc", t("rarity_confidence_desc")],
+      ["rarity_desc", t("rarity_desc")],
     );
   }
   return options;
@@ -1787,7 +2356,7 @@ function explorerQueryHasFilters(query) {
 
 function renderExplorerResults(rows) {
   if (!rows.length) {
-    return `<div class="empty">Run a query or choose a preset to load sample previews.</div>`;
+    return `<div class="empty">${escapeHtml(t("run_query_or_choose_preset"))}</div>`;
   }
   const body = rows.map((row) => {
     const tags = (row.flat_tags || []).slice(0, 6).map((tag) => `<span class="preview-tag">${escapeHtml(tag)}</span>`).join("");
@@ -1807,7 +2376,7 @@ function renderExplorerResults(rows) {
     </tr>`;
   }).join("");
   return `<div class="result-table-wrap"><table class="data-table">
-    <thead><tr><th>Sample</th><th>Query</th><th>Response</th><th>Tags</th><th>Value</th><th>Quality</th><th>Selection</th><th>Conv Value</th><th>Observed</th><th>Rarity Conf</th><th>Turns</th><th>Source</th></tr></thead>
+    <thead><tr><th>${escapeHtml(t("sample"))}</th><th>${escapeHtml(t("query"))}</th><th>${escapeHtml(t("response"))}</th><th>${escapeHtml(t("tags"))}</th><th>${escapeHtml(t("value"))}</th><th>${escapeHtml(t("quality"))}</th><th>${escapeHtml(t("selection"))}</th><th>${escapeHtml(t("conv_value"))}</th><th>${escapeHtml(t("observed"))}</th><th>${escapeHtml(t("rarity_confidence"))}</th><th>${escapeHtml(t("turns"))}</th><th>${escapeHtml(t("source"))}</th></tr></thead>
     <tbody>${body}</tbody>
   </table></div>`;
 }
@@ -1817,38 +2386,39 @@ function renderExplorerDrawer() {
   const detail = STATE.explorer.detailData;
   const loading = STATE.explorer.detailLoading;
   const header = loading
-    ? `<div class="drawer-title">Loading sample…</div>`
+    ? `<div class="drawer-title">${escapeHtml(t("loading_sample"))}</div>`
     : `<div><div class="drawer-title">${escapeHtml((detail && detail.id) || STATE.explorer.detailDocId)}</div>
         <div class="drawer-sub">${escapeHtml((((detail || {}).metadata || {}).source_file) || STATE.explorer.detailScopeId || "")}</div></div>`;
 
-  let body = `<div class="drawer-section"><div class="note">${loading ? "Loading full sample payload…" : escapeHtml((DATA.explorer || {}).detail_limit_notice || "")}</div></div>`;
+  let body = `<div class="drawer-section"><div class="note">${loading ? escapeHtml(t("loading_full_sample_payload")) : escapeHtml((DATA.explorer || {}).detail_limit_notice || "")}</div></div>`;
   if (detail && !loading) {
     const labels = detail.labels || {};
     const value = detail.value || {};
     const flatTags = Object.entries(labels).flatMap(([key, val]) => {
       if (["confidence", "unmapped", "inherited", "inherited_from"].includes(key)) return [];
-      if (Array.isArray(val)) return val.map((item) => `${key}:${item}`);
-      return val ? [`${key}:${val}`] : [];
+      const label = dimensionLabel(key);
+      if (Array.isArray(val)) return val.map((item) => `${label}:${item}`);
+      return val ? [`${label}:${val}`] : [];
     });
     const cards = [
-      ["Value", value.value_score],
-      ["Quality", (value.quality || {}).overall],
-      ["Selection", value.selection_score],
-      ["Conv Value", (detail.conversation || {}).conv_value],
-      ["Conv Sel", (detail.conversation || {}).conv_selection],
-      ["Conv Rarity", (detail.conversation || {}).conv_rarity],
-      ["Observed", (detail.conversation || {}).observed_turn_ratio],
-      ["Rarity Conf", (detail.conversation || {}).rarity_confidence],
-      ["Confidence", value.confidence],
-      ["Thinking", value.thinking_mode || ((detail.metadata || {}).thinking_mode || "")],
-      ["Turns", (detail.conversation || {}).turn_count || (detail.metadata || {}).total_turns || (detail.conversations || []).length],
-      ["Peak Cplx", (detail.conversation || {}).peak_complexity],
-    ].map(([label, raw]) => `<div class="kv"><div class="kv-label">${escapeHtml(label)}</div><div class="kv-value">${escapeHtml(raw === null || raw === undefined || raw === "" ? "-" : (typeof raw === "number" ? fmt(raw, label === "Confidence" ? 2 : 1) : raw))}</div></div>`).join("");
+      [t("value"), value.value_score],
+      [t("quality"), (value.quality || {}).overall],
+      [t("selection"), value.selection_score],
+      [t("conv_value"), (detail.conversation || {}).conv_value],
+      [t("conv_sel"), (detail.conversation || {}).conv_selection],
+      [t("conv_rarity"), (detail.conversation || {}).conv_rarity],
+      [t("observed"), (detail.conversation || {}).observed_turn_ratio],
+      [t("rarity_confidence"), (detail.conversation || {}).rarity_confidence],
+      [t("confidence"), value.confidence],
+      [t("thinking"), value.thinking_mode || ((detail.metadata || {}).thinking_mode || "")],
+      [t("turns"), (detail.conversation || {}).turn_count || (detail.metadata || {}).total_turns || (detail.conversations || []).length],
+      [t("peak_cplx"), (detail.conversation || {}).peak_complexity],
+    ].map(([label, raw]) => `<div class="kv"><div class="kv-label">${escapeHtml(label)}</div><div class="kv-value">${escapeHtml(raw === null || raw === undefined || raw === "" ? "-" : (typeof raw === "number" ? fmt(raw, label === t("confidence") ? 2 : 1) : raw))}</div></div>`).join("");
     body = `
       <div class="drawer-section"><div class="drawer-grid">${cards}</div></div>
-      <div class="drawer-section"><h4>Tags</h4><div class="tags">${flatTags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") || `<span class="note">No tags</span>`}</div></div>
-      <div class="drawer-section"><h4>Conversation</h4>${renderDrawerTurns(detail.conversations || [])}</div>
-      <div class="drawer-section"><h4>JSON</h4>${renderDrawerJson(detail)}</div>
+      <div class="drawer-section"><h4>${escapeHtml(t("tags"))}</h4><div class="tags">${flatTags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") || `<span class="note">${escapeHtml(t("no_tags"))}</span>`}</div></div>
+      <div class="drawer-section"><h4>${escapeHtml(t("conversation"))}</h4>${renderDrawerTurns(detail.conversations || [])}</div>
+      <div class="drawer-section"><h4>${escapeHtml(t("json"))}</h4>${renderDrawerJson(detail)}</div>
     `;
   }
 
@@ -1876,72 +2446,72 @@ function renderExplorer(scope) {
     `<option value="${escapeHtml(value)}" ${STATE.explorer.sort === value ? "selected" : ""}>${escapeHtml(label)}</option>`
   )).join("");
   const presets = [
-    { id: "python-debug", label: "Python + Debug", query: { tagQuery: "python, debug", sort: supportsScores ? "quality_asc" : "sample_id_asc" } },
+    { id: "python-debug", label: t("python_debug"), query: { tagQuery: "python, debug", sort: supportsScores ? "quality_asc" : "sample_id_asc" } },
   ];
   if (supportsScores) {
     presets.unshift(
-      { id: "quality", label: "Lowest Quality", query: { sort: "quality_asc" } },
-      { id: "value", label: "Lowest Value", query: { sort: "value_asc" } },
-      { id: "confidence", label: "Low Confidence", query: { sort: "confidence_asc" } },
+      { id: "quality", label: t("lowest_quality"), query: { sort: "quality_asc" } },
+      { id: "value", label: t("lowest_value"), query: { sort: "value_asc" } },
+      { id: "confidence", label: t("low_confidence"), query: { sort: "confidence_asc" } },
     );
     presets.push(
-      { id: "flags", label: "Has Flags", query: { hasFlags: true, sort: "quality_asc" } },
-      { id: "long-multiturn", label: "Long Multi-turn", query: { turnCountMin: "8", sort: "turn_count_desc" } },
-      { id: "low-coverage", label: "Low Coverage", query: { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" } },
-      { id: "low-rarity-confidence", label: "Low Rarity Conf", query: { rarityConfidenceMax: "0.60", sort: "rarity_confidence_asc" } },
+      { id: "flags", label: t("has_flags"), query: { hasFlags: true, sort: "quality_asc" } },
+      { id: "long-multiturn", label: t("long_multiturn"), query: { turnCountMin: "8", sort: "turn_count_desc" } },
+      { id: "low-coverage", label: t("low_coverage"), query: { observedTurnRatioMax: "0.50", sort: "observed_turn_ratio_asc" } },
+      { id: "low-rarity-confidence", label: t("low_rarity_conf"), query: { rarityConfidenceMax: "0.60", sort: "rarity_confidence_asc" } },
     );
   }
   const status = STATE.explorer.busy
-    ? `Scanning ${fmtInt(STATE.explorer.scopeDone)}/${fmtInt(STATE.explorer.scopeTotal)} files · ${fmtInt(STATE.explorer.scanned)} rows checked · ${fmtInt(STATE.explorer.matched)} matches`
-    : (STATE.explorer.status || `Ready to scan ${fmtInt(totalSamples)} indexed previews in this scope.`);
+    ? t("status_scanning", { done: fmtInt(STATE.explorer.scopeDone), total: fmtInt(STATE.explorer.scopeTotal), rows: fmtInt(STATE.explorer.scanned), matches: fmtInt(STATE.explorer.matched) })
+    : (STATE.explorer.status || t("status_ready_scan", { count: fmtInt(totalSamples) }));
 
   return section(
-    "Sample Explorer",
+    t("sample_explorer"),
     `<div class="explorer-toolbar">
       <div>
-        <div class="explorer-summary">Progressively scan preview shards, stream large files chunk-by-chunk, keep the best ${fmtInt(STATE.explorer.limit)} matches in memory, load full sample details only when you open a drawer, and click tags / bars / threshold rows anywhere above to drill into the matching slices.</div>
+        <div class="explorer-summary">${escapeHtml(t("explorer_summary", { limit: fmtInt(STATE.explorer.limit) }))}</div>
         <div class="preset-row">${presets.map((preset) => `<button class="preset-btn" type="button" data-explorer-preset="${escapeHtml(preset.id)}">${escapeHtml(preset.label)}</button>`).join("")}</div>
       </div>
       <div class="result-count">${escapeHtml(status)}</div>
     </div>
     <div class="explorer-form">
-      <div class="field"><label>Tags (comma)</label><input id="explorer-tag-query" type="text" value="${escapeHtml(query.tagQuery)}" placeholder="python, debug"></div>
-      <div class="field"><label>Language</label><input id="explorer-language" type="text" value="${escapeHtml(query.language)}" placeholder="python"></div>
-      <div class="field"><label>Intent</label><input id="explorer-intent" type="text" value="${escapeHtml(query.intent)}" placeholder="debug"></div>
-      <div class="field"><label>Source File</label><input id="explorer-source-path" type="text" value="${escapeHtml(query.sourcePath)}" placeholder="multi_turn/coderforge"></div>
-      <div class="field"><label>Text Contains</label><input id="explorer-text-query" type="text" value="${escapeHtml(query.textQuery)}" placeholder="OOM"></div>
-      ${supportsScores ? `<div class="field"><label>Flag</label><input id="explorer-flag-query" type="text" value="${escapeHtml(query.flagQuery)}" placeholder="low-correctness"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Conv Value ≥</label><input id="explorer-conv-value-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convValueMin)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Conv Sel ≥</label><input id="explorer-conv-selection-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMin)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Conv Sel ≤</label><input id="explorer-conv-selection-max" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMax)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Peak Cplx ≥</label><input id="explorer-peak-complexity-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.peakComplexityMin)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Turns ≥</label><input id="explorer-turn-count-min" type="number" min="1" step="1" value="${escapeHtml(query.turnCountMin)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Observed Ratio ≥</label><input id="explorer-observed-turn-ratio-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMin)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Observed Ratio ≤</label><input id="explorer-observed-turn-ratio-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMax)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Rarity Conf ≥</label><input id="explorer-rarity-confidence-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMin)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Rarity Conf ≤</label><input id="explorer-rarity-confidence-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMax)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Value ≥</label><input id="explorer-min-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minValue)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Value ≤</label><input id="explorer-max-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxValue)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Quality ≤</label><input id="explorer-max-quality" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxQuality)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Selection ≥</label><input id="explorer-min-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minSelection)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Selection ≤</label><input id="explorer-max-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxSelection)}"></div>` : ""}
-      ${supportsScores ? `<div class="field"><label>Confidence ≤</label><input id="explorer-max-confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(query.maxConfidence)}"></div>` : ""}
-      <div class="field"><label>Thinking Mode</label><select id="explorer-thinking-mode"><option value="">Any</option><option value="fast" ${query.thinkingMode === "fast" ? "selected" : ""}>fast</option><option value="slow" ${query.thinkingMode === "slow" ? "selected" : ""}>slow</option></select></div>
-      <div class="field"><label>Sort</label><select id="explorer-sort">${sortOptions}</select></div>
-      ${supportsScores ? `<div class="field-check"><input id="explorer-has-flags" type="checkbox" ${query.hasFlags ? "checked" : ""}><label for="explorer-has-flags">Only samples with flags</label></div>` : ""}
-      <div class="field-check"><input id="explorer-include-inherited" type="checkbox" ${query.includeInherited ? "checked" : ""}><label for="explorer-include-inherited">Include inherited labels</label></div>
+      <div class="field"><label>${escapeHtml(t("tags_comma"))}</label><input id="explorer-tag-query" type="text" value="${escapeHtml(query.tagQuery)}" placeholder="python, debug"></div>
+      <div class="field"><label>${escapeHtml(t("language"))}</label><input id="explorer-language" type="text" value="${escapeHtml(query.language)}" placeholder="python"></div>
+      <div class="field"><label>${escapeHtml(dimensionLabel("intent"))}</label><input id="explorer-intent" type="text" value="${escapeHtml(query.intent)}" placeholder="debug"></div>
+      <div class="field"><label>${escapeHtml(t("source_file"))}</label><input id="explorer-source-path" type="text" value="${escapeHtml(query.sourcePath)}" placeholder="multi_turn/coderforge"></div>
+      <div class="field"><label>${escapeHtml(t("text_contains"))}</label><input id="explorer-text-query" type="text" value="${escapeHtml(query.textQuery)}" placeholder="OOM"></div>
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("flag"))}</label><input id="explorer-flag-query" type="text" value="${escapeHtml(query.flagQuery)}" placeholder="low-correctness"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("conv_value"))} ≥</label><input id="explorer-conv-value-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convValueMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("conv_sel_min"))}</label><input id="explorer-conv-selection-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("conv_sel_max"))}</label><input id="explorer-conv-selection-max" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.convSelectionMax)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("peak_cplx_min"))}</label><input id="explorer-peak-complexity-min" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.peakComplexityMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("turns_min"))}</label><input id="explorer-turn-count-min" type="number" min="1" step="1" value="${escapeHtml(query.turnCountMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("observed_ratio_min"))}</label><input id="explorer-observed-turn-ratio-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("observed_ratio_max"))}</label><input id="explorer-observed-turn-ratio-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.observedTurnRatioMax)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("rarity_conf_min"))}</label><input id="explorer-rarity-confidence-min" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMin)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("rarity_conf_max"))}</label><input id="explorer-rarity-confidence-max" type="number" min="0" max="1" step="0.05" value="${escapeHtml(query.rarityConfidenceMax)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("value_ge"))}</label><input id="explorer-min-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minValue)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("value_le"))}</label><input id="explorer-max-value" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxValue)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("quality_le"))}</label><input id="explorer-max-quality" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxQuality)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("selection_ge"))}</label><input id="explorer-min-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.minSelection)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("selection_le"))}</label><input id="explorer-max-selection" type="number" min="1" max="10" step="0.1" value="${escapeHtml(query.maxSelection)}"></div>` : ""}
+      ${supportsScores ? `<div class="field"><label>${escapeHtml(t("confidence_le"))}</label><input id="explorer-max-confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(query.maxConfidence)}"></div>` : ""}
+      <div class="field"><label>${escapeHtml(t("thinking_mode"))}</label><select id="explorer-thinking-mode"><option value="">${escapeHtml(t("any"))}</option><option value="fast" ${query.thinkingMode === "fast" ? "selected" : ""}>${escapeHtml(thinkingModeLabel("fast"))}</option><option value="slow" ${query.thinkingMode === "slow" ? "selected" : ""}>${escapeHtml(thinkingModeLabel("slow"))}</option></select></div>
+      <div class="field"><label>${escapeHtml(t("sort"))}</label><select id="explorer-sort">${sortOptions}</select></div>
+      ${supportsScores ? `<div class="field-check"><input id="explorer-has-flags" type="checkbox" ${query.hasFlags ? "checked" : ""}><label for="explorer-has-flags">${escapeHtml(t("only_samples_with_flags"))}</label></div>` : ""}
+      <div class="field-check"><input id="explorer-include-inherited" type="checkbox" ${query.includeInherited ? "checked" : ""}><label for="explorer-include-inherited">${escapeHtml(t("include_inherited_labels"))}</label></div>
     </div>
     <div class="explorer-actions">
-      <button class="action-btn" type="button" id="explorer-run">${STATE.explorer.busy ? "Scanning…" : "Run Query"}</button>
-      <button class="action-btn" type="button" id="explorer-reset">Reset</button>
+      <button class="action-btn" type="button" id="explorer-run">${STATE.explorer.busy ? escapeHtml(t("scanning")) : escapeHtml(t("run_query"))}</button>
+      <button class="action-btn" type="button" id="explorer-reset">${escapeHtml(t("reset"))}</button>
     </div>
     <div class="result-meta">
-      <div class="result-count">Current scope: ${fmtInt(totalSamples)} indexed samples · ${fmtInt(candidateFileCount)} candidate files · showing top ${fmtInt(STATE.explorer.limit)} results sorted by ${escapeHtml((availableSorts.find(([value]) => value === STATE.explorer.sort) || ["", STATE.explorer.sort])[1])}</div>
-      <div class="result-count">${fmtInt(STATE.explorer.matched)} matches retained after scanning ${fmtInt(STATE.explorer.scanned)} rows</div>
+      <div class="result-count">${escapeHtml(t("current_scope_summary", { samples: fmtInt(totalSamples), files: fmtInt(candidateFileCount), limit: fmtInt(STATE.explorer.limit), sort: (availableSorts.find(([value]) => value === STATE.explorer.sort) || ["", STATE.explorer.sort])[1] }))}</div>
+      <div class="result-count">${escapeHtml(t("matches_retained", { matches: fmtInt(STATE.explorer.matched), rows: fmtInt(STATE.explorer.scanned) }))}</div>
     </div>
     ${renderExplorerResults(STATE.explorer.results)}
     ${renderExplorerDrawer()}`,
-    `${fmtInt(totalSamples)} indexed samples`,
+    `${fmtInt(totalSamples)} ${escapeHtml(t("samples"))}`,
     true,
   );
 }
@@ -1954,7 +2524,7 @@ function renderScopeContent(scope) {
   chunks.push(renderExplorer(scope));
   chunks.push(renderConversations(scope.conversation));
   const html = chunks.filter(Boolean).join("");
-  return html || `<div class="empty">No dashboard data for this scope.</div>`;
+  return html || `<div class="empty">${escapeHtml(t("no_dashboard_data"))}</div>`;
 }
 
 function renderScope() {
@@ -1962,7 +2532,7 @@ function renderScope() {
   if (!scope) return;
 
   document.getElementById("scope-title").textContent = scope.label;
-  document.getElementById("scope-path").textContent = scope.path || "Global overview";
+  document.getElementById("scope-path").textContent = scope.path || t("global_overview");
   document.getElementById("scope-toolbar-extra").innerHTML = renderTagBarControlsInline(scope);
   renderBreadcrumbs(scope);
   document.getElementById("scope-content").innerHTML = renderScopeContent(scope);
@@ -1980,6 +2550,27 @@ function renderScope() {
       renderScope();
     });
   });
+  document.querySelectorAll("[data-aggregation-mode]").forEach((node) => {
+    node.addEventListener("click", () => {
+      STATE.aggregationMode = node.getAttribute("data-aggregation-mode") || "sample";
+      persistDashboardState();
+      renderHero();
+      renderTree();
+      renderScope();
+    });
+  });
+  document.querySelectorAll("[data-locale]").forEach((node) => {
+    node.addEventListener("click", () => {
+      setLocale(node.getAttribute("data-locale") || "en");
+    });
+  });
+  const aggregationInfoBtn = document.getElementById("aggregation-info-btn");
+  if (aggregationInfoBtn) {
+    aggregationInfoBtn.addEventListener("click", () => {
+      const wrap = document.getElementById("aggregation-info-wrap");
+      if (wrap) wrap.classList.toggle("open");
+    });
+  }
   const explorerRun = document.getElementById("explorer-run");
   if (explorerRun) {
     explorerRun.addEventListener("click", async () => {
@@ -2061,6 +2652,7 @@ function renderScope() {
 }
 
 function render() {
+  renderChromeText();
   renderHero();
   renderTree();
   renderScope();
