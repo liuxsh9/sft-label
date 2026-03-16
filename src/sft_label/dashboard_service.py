@@ -311,8 +311,8 @@ def dashboard_service_status(service: DashboardServiceConfig) -> dict[str, Any]:
         raw_status = str(pm2_env.get("status") or "unknown")
         pid = info.get("pid") or (info.get("monit") or {}).get("pid")
         reachable = _http_reachable(service) if raw_status == "online" else False
-        state = "running" if raw_status == "online" and reachable else (
-            "starting" if raw_status in {"online", "launching"} else raw_status
+        state = "running" if raw_status == "online" else (
+            "starting" if raw_status == "launching" else raw_status
         )
         return {
             "name": service.name,

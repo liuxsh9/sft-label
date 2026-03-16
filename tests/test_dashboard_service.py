@@ -9,6 +9,7 @@ import pytest
 
 from sft_label.dashboard_service import (
     _http_reachable,
+    dashboard_service_status,
     DashboardServiceConfig,
     DashboardServiceStore,
     default_dashboard_service_config_path,
@@ -325,3 +326,35 @@ def test_pm2_lifecycle_helpers_use_pm2_commands(monkeypatch, tmp_path):
     status = stop_dashboard_service(service)
     assert status["state"] == "stopped"
     assert any(cmd[:2] == ["pm2", "stop"] for cmd in calls)
+
+
+def test_pm2_online_status_is_running_even_if_probe_fails(monkeypatch, tmp_path):
+    class _Completed:
+        def __init__(self, stdout=""):
+            self.stdout = stdout
+            self.returncode = 0
+
+    def _fake_run(cmd, check=False, capture_output=False, text=False):
+        if cmd[:2] == ["pm2", "jlist"]:
+            return _Completed(stdout=json.dumps([{
+                "name": "sft-label-dashboard-prod",
+                "pid": 654,
+                "pm2_env": {"status": "online"},
+            }]))
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr("sft_label.dashboard_service.subprocess.run", _fake_run)
+    monkeypatch.setattr("sft_label.dashboard_service._http_reachable", lambda service, timeout=0.5: False)
+
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        service_type="pm2",
+        pm2_name="sft-label-dashboard-prod",
+        config_path=tmp_path / "dashboard_services.json",
+    )
+
+    status = dashboard_service_status(service)
+
+    assert status["state"] == "running"
+    assert status["reachable"] is False
