@@ -11,13 +11,24 @@ Covers:
 
 import json
 import math
+import os
 import re
+import asyncio
+import shutil
 from pathlib import Path
+
+import pytest
 
 from sft_label.artifacts import (
     PASS2_STATS_FILE,
     PASS2_DASHBOARD_FILE,
     dashboard_relpath,
+)
+from sft_label.config import PipelineConfig
+from sft_label.conversation import (
+    _compute_penalty,
+    _compute_pure_quality_from_slice,
+    aggregate_conversation,
 )
 from sft_label.preprocessing import (
     detect_thinking_mode,
@@ -37,8 +48,11 @@ from sft_label.scoring import (
     load_tag_stats_context,
     _infer_selection_features,
     _infer_domain_backfill,
+    compute_selection_scores,
+    compute_selection_scores_from_summaries,
 )
 from sft_label.prompts_value import SCORING_SYSTEM_COMPACT, build_scoring_messages
+from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
 
 
 def _bootstrap_from_html(html: str) -> dict:
@@ -49,7 +63,6 @@ def _bootstrap_from_html(html: str) -> dict:
     )
     assert match is not None
     return json.loads(match.group(1))
-from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -1122,12 +1135,6 @@ class TestSmokeTestFixtures:
 # 8.5  Resume support
 # ─────────────────────────────────────────────────────────
 
-import os
-import asyncio
-import tempfile
-import shutil
-import pytest
-
 
 class TestResumeScoringFile:
     """Test resume support for _run_scoring_file."""
@@ -1328,7 +1335,7 @@ class TestResumeScoringFile:
         """Partially scored.jsonl should let resume skip those samples."""
         from sft_label.scoring import _run_scoring_file
         from sft_label.config import PipelineConfig
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
 
         # Create labeled.json with 3 samples
         samples = [
@@ -1368,7 +1375,6 @@ class TestResumeScoringFile:
 
         # Mock score_one to track which samples are scored
         scored_ids = []
-        original_score_one = None
 
         async def mock_score_one(http_client, sample, model, rarity_result,
                                   sample_idx, total, sem, config=None, rate_limiter=None):
@@ -1576,10 +1582,6 @@ class TestResumeScoringFile:
 # ─────────────────────────────────────────────────────────
 # 8.6  Selection Scores
 # ─────────────────────────────────────────────────────────
-
-from sft_label.scoring import compute_selection_scores
-from sft_label.scoring import compute_selection_scores_from_summaries
-from sft_label.config import PipelineConfig
 
 
 class TestComputeSelectionScores:
@@ -2009,12 +2011,6 @@ class TestPromptBudgetRegression:
 # ─────────────────────────────────────────────────────────
 # 8.7  Conversation aggregation
 # ─────────────────────────────────────────────────────────
-
-from sft_label.conversation import (
-    _compute_pure_quality_from_slice,
-    _compute_penalty,
-    aggregate_conversation,
-)
 
 
 class TestConversationAggregation:

@@ -16,7 +16,6 @@ Usage:
 import json
 from pathlib import Path
 from datetime import datetime
-from collections import Counter
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 REPORT_FILE = DATA_DIR / "model_comparison_report.md"

@@ -1361,9 +1361,9 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
 
     conf_stats = {}
     for dim in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
-        scores = [l["confidence"][dim] for idx, l in enumerate(all_labels)
-                  if is_usable_labels(l) and idx not in inherited_indices
-                  and "confidence" in l and isinstance(l["confidence"].get(dim), (int, float))]
+        scores = [labels["confidence"][dim] for idx, labels in enumerate(all_labels)
+                  if is_usable_labels(labels) and idx not in inherited_indices
+                  and "confidence" in labels and isinstance(labels["confidence"].get(dim), (int, float))]
         if scores:
             conf_stats[dim] = {
                 "mean": round(sum(scores) / len(scores), 3),
@@ -1688,7 +1688,6 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     all_monitors = collector.monitors
     output_dir = collector.output_dir
     prefix = collector.prefix
-    total = collector.total
 
     resolved_labels = apply_inherited_labels(samples, all_labels, collector.inherit_map)
     all_labels[:] = resolved_labels
@@ -1737,8 +1736,8 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     # Inherited samples have no monitor — they are not failures
     inherited_indices = set(collector.inherit_map.keys())
     failed_indices = [
-        i for i, l in enumerate(all_labels)
-        if (l is None or is_partial_labels(l)) and i not in inherited_indices
+        i for i, labels in enumerate(all_labels)
+        if (labels is None or is_partial_labels(labels)) and i not in inherited_indices
     ]
 
     # Append to global failure log at run_dir root
@@ -1785,8 +1784,8 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     except Exception:
         pass
 
-    success = stats["success"]
-    total_tokens = stats["total_tokens"]
+    stats["success"]
+    stats["total_tokens"]
 
     # Print failure details — collapsed single-line summary
     failed_count = len(failed_indices)
@@ -2230,7 +2229,6 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
             sparse_inherited = len(inherit_map)
 
             chunk_idx = chunks_loaded
-            chunks_loaded_val = chunks_loaded
             chunks_loaded_display = chunks_loaded + 1
 
             collector = ChunkCollector(
@@ -2589,8 +2587,8 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     # Inherited samples have no monitor — they are not failures
     inherited_indices = set(inherit_map.keys())
     failed_indices = [
-        i for i, l in enumerate(all_labels)
-        if (l is None or is_partial_labels(l)) and i not in inherited_indices
+        i for i, labels in enumerate(all_labels)
+        if (labels is None or is_partial_labels(labels)) and i not in inherited_indices
     ]
     if failed_indices:
         with open(output_dir / failed_samples_file, "w", encoding="utf-8") as f:
@@ -2731,7 +2729,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     # --- Load a file into a FileCollector and submit its tasks ---
     def load_and_submit(file_entry, pending_futures):
         orig_idx, abs_path, rel_path = file_entry
-        rel_str = str(rel_path)
+        str(rel_path)
         inline_jsonl = layout is not None and str(abs_path).endswith(".jsonl")
         file_out_dir = layout.file_artifact_dir(abs_path) if inline_jsonl else (run_dir / rel_path.with_suffix(""))
         dataset_output_path = layout.mirrored_dataset_path(abs_path) if inline_jsonl else None
@@ -2989,12 +2987,12 @@ def print_summary(stats, run_dir, is_batch=False):
         err_str = f" — errors: {', '.join(err_parts)}" if err_parts else ""
         print(f"HTTP:        {ok}/{t} ({rate}%){err_str}")
 
-    print(f"\nConfidence (mean):")
+    print("\nConfidence (mean):")
     for dim, cs in stats.get("confidence_stats", {}).items():
         bar = "█" * int(cs["mean"] * 20)
         print(f"  {dim:15s} {cs['mean']:.3f} {bar}")
 
-    print(f"\nTop distributions:")
+    print("\nTop distributions:")
     for dim in ["intent", "difficulty", "domain", "concept"]:
         dist = stats.get("tag_distributions", {}).get(dim, {})
         top5 = list(dist.items())[:5]
@@ -3002,7 +3000,7 @@ def print_summary(stats, run_dir, is_batch=False):
         print(f"  {dim:15s} {top_str}")
 
     if stats.get("unmapped_tags"):
-        print(f"\nUnmapped tags (top 10):")
+        print("\nUnmapped tags (top 10):")
         for tag, count in list(stats["unmapped_tags"].items())[:10]:
             print(f"  {tag}: {count}")
 

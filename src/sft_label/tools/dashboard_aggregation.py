@@ -253,7 +253,7 @@ def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
         return []
 
     groups = group_by_conversation(samples)
-    grouped_keys = set(groups)
+    set(groups)
     units = []
 
     for sample in samples:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
 from sft_label.tools.dashboard_aggregation import infer_scope_turn_kind

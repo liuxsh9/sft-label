@@ -31,12 +31,9 @@ from rich.progress import (
 )
 
 from sft_label.config import (
-    LITELLM_BASE, LITELLM_KEY,
-    MAX_RETRIES, SAMPLE_MAX_RETRIES, REQUEST_TIMEOUT,
-    VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA, RARITY_SCORE_MODE,
+    SAMPLE_MAX_RETRIES, VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA, RARITY_SCORE_MODE,
     VALUE_TRUNCATION_BUDGET, COMPACT_VALUE_TRUNCATION_BUDGET,
-    KNOWN_FLAGS, KNOWN_FLAGS_POSITIVE, KNOWN_FLAGS_NEGATIVE,
-    CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
+    KNOWN_FLAGS, CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     SELECTION_INTRA_WEIGHT, SELECTION_QUALITY_WEIGHT, SELECTION_RARITY_WEIGHT,
     SELECTION_MIN_GROUP_SIZE, SELECTION_SMOOTHING_PRIOR,
     ENABLE_VALUE_STABILITY, ENABLE_SELECTION_STABILITY, ENABLE_DOMAIN_BACKFILL,
@@ -69,8 +66,6 @@ from sft_label.inline_scoring import (
     discover_inline_jsonl_files,
     infer_inline_scoring_target,
     load_inline_scoring_file,
-    scoreable_samples_from_bundle,
-    stream_inline_rows_with_scoring,
     update_inline_row_with_scored_samples,
     write_inline_labeled_cache,
 )
@@ -978,8 +973,8 @@ def _infer_selection_features(*, sample=None, summary=None, config=None):
     trajectory = view.get("trajectory", "") or ""
     response = view.get("response", "") or ""
     combined = "\n".join(part for part in (request, trajectory, response) if part)
-    response_lower = response.lower()
-    combined_lower = combined.lower()
+    response.lower()
+    combined.lower()
 
     turn_index = metadata.get("turn_index")
     total_turns = metadata.get("total_turns") or summary.get("total_turns")
@@ -2913,7 +2908,7 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
         ("rarity_score", "Rarity"),
         ("selection_score", "Selection"),
     ]
-    print(f"\nScore distributions (mean ± std):")
+    print("\nScore distributions (mean ± std):")
     for key, label in dims:
         d = dists.get(key, {})
         mean = d.get("mean", 0)
@@ -2927,7 +2922,7 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
     slow = ts.get("slow", {})
     fast = ts.get("fast", {})
     if slow.get("count", 0) > 0 or fast.get("count", 0) > 0:
-        print(f"\nThinking modes:")
+        print("\nThinking modes:")
         if slow.get("count", 0) > 0:
             print(f"  slow:  {slow['count']:4d}  val={slow.get('mean_value', 0):.2f}  "
                   f"qual={slow.get('mean_quality', 0):.2f}  "
@@ -2958,7 +2953,7 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
     # Per-file summary in batch mode
     per_file = stats.get("per_file_summary", [])
     if is_batch and per_file:
-        print(f"\nPer-file scores:")
+        print("\nPer-file scores:")
         for pf in per_file:
             print(f"  {pf.get('file', '?'):30s}  n={pf.get('count', 0):4d}  "
                   f"val={pf.get('mean_value', 0):.2f}  "
@@ -3531,7 +3526,6 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
     all_values = collector.values
     all_monitors = collector.monitors
     output_dir = collector.output_dir
-    total = collector.total
 
     # Attach value to samples
     for i, s in enumerate(samples):

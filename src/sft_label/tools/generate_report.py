@@ -69,7 +69,7 @@ def format_example(sample, idx):
     """Format one labeled example as markdown."""
     labels = sample.get("labels", {})
     convs = sample.get("conversations", [])
-    meta = sample.get("metadata", {})
+    sample.get("metadata", {})
     monitor = sample.get("labeling_monitor", {})
 
     # Get first human message as query preview
@@ -84,8 +84,8 @@ def format_example(sample, idx):
         "",
         f"> **Query**: {query}{'...' if len(query) >= 200 else ''}",
         "",
-        f"| Dimension | Labels |",
-        f"|-----------|--------|",
+        "| Dimension | Labels |",
+        "|-----------|--------|",
     ]
 
     for dim in ["intent", "language", "domain", "concept", "task", "constraint", "agentic", "context", "difficulty"]:
@@ -121,8 +121,8 @@ def generate_report(samples, stats):
     # Overview
     lines.append("## 1. Overview")
     lines.append("")
-    lines.append(f"| Metric | Value |")
-    lines.append(f"|--------|-------|")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
     lines.append(f"| Total samples | {stats['total_samples']} |")
     lines.append(f"| Success rate | {stats['success_rate']*100:.1f}% ({stats['success']}/{stats['total_samples']}) |")
     lines.append(f"| Avg LLM calls/sample | {stats['avg_calls_per_sample']:.1f} |")

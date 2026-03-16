@@ -5,7 +5,7 @@ All production settings extracted here for easy tuning.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ─── LLM API ────────────────────────────────────────────
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://localhost:4000/v1")

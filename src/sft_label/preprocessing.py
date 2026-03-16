@@ -20,7 +20,6 @@ Signals extracted:
 """
 
 import re
-import json
 
 from sft_label.config import (
     MAX_CONVERSATION_CHARS, TRUNCATION_HEAD_RATIO,
@@ -514,7 +513,7 @@ def truncate_conversations_for_labeling(conversations, max_total_chars=None,
     # 4. Assemble: first_human + [omission marker] + kept middle turns + last_gpt
     result = [first_turn]
 
-    kept_indices = {i for i, _ in tail_turns}
+    {i for i, _ in tail_turns}
     # Count omitted turns between first_human and the earliest kept middle turn
     omitted = len(middle_indices) - len(tail_turns)
     if omitted > 0:
@@ -1105,7 +1104,7 @@ def extract_tool_signals(conversations):
 def detect_behavioral_patterns(conversations):
     """Detect agentic behavioral patterns from conversation structure."""
     patterns = set()
-    turns = len(conversations)
+    len(conversations)
     gpt_turns = [t for t in conversations if t.get("from") == "gpt"]
     tool_turns = [t for t in conversations if t.get("from") == "tool"]
 

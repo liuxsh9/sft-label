@@ -228,7 +228,7 @@ def recompute_stats_from_labeled(samples):
 
     # Count sparse stats
     n_inherited = len(inherit_map)
-    n_labeled = sum(1 for l in all_labels if l is not None) - n_inherited
+    n_labeled = sum(1 for labels in all_labels if labels is not None) - n_inherited
     stats["sparse_labeled"] = n_labeled
     stats["sparse_inherited"] = n_inherited
 
@@ -330,7 +330,7 @@ def _materialize_inline_recompute_artifacts(target, pass_num):
 
 def _run_recompute_inline(target, pass_num="both", workers=1):
     """Run recompute over an inline mirrored dataset via rebuildable caches."""
-    selected = _materialize_inline_recompute_artifacts(target, pass_num)
+    _materialize_inline_recompute_artifacts(target, pass_num)
 
     if target.target_path.is_file():
         artifact_input = target.layout.file_artifact_dir(target.target_path)

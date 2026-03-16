@@ -610,7 +610,7 @@ def build_scoring_messages(truncated, thinking_mode, labels,
     # Build meta block
     meta_parts = [
         f"thinking_mode: {thinking_mode}",
-        f"current_turn_centered: true",
+        "current_turn_centered: true",
         f"original_prior_context_chars: {truncated.get('original_prior_context_chars', 0)}",
         f"original_cot_chars: {truncated.get('original_cot_chars', 0)}",
         f"original_trajectory_chars: {truncated.get('original_trajectory_chars', 0)}",

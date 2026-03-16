@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 import pytest
-from pathlib import Path
 
 from sft_label.conversation import (
     build_conversation_key,
     group_by_conversation,
     _position_weight,
     _effective_weights,
-    _weighted_average,
     _compute_penalty,
     _merge_labels,
-    _compute_pure_quality_from_slice,
     aggregate_conversation,
     compute_conv_selection_scores,
     aggregate_conversations,

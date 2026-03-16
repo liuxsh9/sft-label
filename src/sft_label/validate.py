@@ -64,7 +64,7 @@ class ValidationReport:
             print("\n✓ No warnings")
 
         if self.stats:
-            print(f"\n📊 STATISTICS:")
+            print("\n📊 STATISTICS:")
             for key, value in self.stats.items():
                 print(f"  {key}: {value}")
 

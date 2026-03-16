@@ -13,7 +13,6 @@ from sft_label.preprocessing import (
     detect_framework_languages,
     count_code_blocks,
     extract_tool_signals,
-    detect_behavioral_patterns,
     preprocess,
     format_signals_for_prompt,
     generate_sparse_schedule,
@@ -684,6 +683,6 @@ class TestSparseSamplingSignalDetection:
         # normally be inherited should be force-labeled instead
         # At minimum, more slices should be labeled than the default schedule
         labeled_after_change = [i for i in range(10, 15) if i in label_indices]
-        inherited_after_change = [i for i in range(10, 15) if i in inherit_map]
+        [i for i in range(10, 15) if i in inherit_map]
         # The force-labeling should increase labeled count vs pure schedule
         assert len(labeled_after_change) > 0
