@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import json
+import socket
+from pathlib import Path
+from urllib.request import urlopen
+
+import pytest
+
+from sft_label.dashboard_service import (
+    DashboardServiceConfig,
+    DashboardServiceStore,
+    default_dashboard_service_config_path,
+    find_published_run,
+    init_dashboard_service,
+    list_published_runs,
+    load_dashboard_service_store,
+    publish_run_dashboards,
+    restart_dashboard_service,
+    save_dashboard_service_store,
+    set_default_dashboard_service,
+    start_dashboard_service,
+    stop_dashboard_service,
+    sync_dashboard_service_runtime_assets,
+)
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _write_dashboard_bundle(root: Path, filename: str, title: str = "Demo") -> Path:
+    dashboards_dir = root / "meta_label_data" / "dashboards"
+    dashboards_dir.mkdir(parents=True, exist_ok=True)
+    html_path = dashboards_dir / filename
+    data_dir = dashboards_dir / f"{html_path.stem}.data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(
+        """<!DOCTYPE html>
+<html>
+<head>
+  <title>Demo</title>
+  <link rel=\"stylesheet\" href=\"_dashboard_static/v1/dashboard.css\">
+</head>
+<body>
+<script id=\"dashboard-bootstrap\" type=\"application/json\">{\"staticBaseUrl\": \"_dashboard_static/v1\", \"manifestUrl\": \"demo.data/manifest.json\"}</script>
+<script src=\"_dashboard_static/v1/dashboard.js\"></script>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    (data_dir / "manifest.json").write_text(json.dumps({"title": title}), encoding="utf-8")
+    return html_path
+
+
+def test_dashboard_service_config_roundtrip(tmp_path, monkeypatch):
+    config_path = tmp_path / "dashboard_services.json"
+    monkeypatch.setenv("SFT_LABEL_DASHBOARD_SERVICE_CONFIG", str(config_path))
+
+    assert default_dashboard_service_config_path() == config_path
+
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=8765,
+        service_type="pm2",
+        public_base_url="https://dash.example.com/base",
+        pm2_name="sft-label-dashboard-prod",
+        config_path=config_path,
+    )
+    assert service.name == "default"
+
+    store = load_dashboard_service_store(config_path)
+    assert store.default_service == "default"
+    assert store.services["default"].web_root == str((tmp_path / "web").resolve())
+    assert store.services["default"].service_type == "pm2"
+    assert store.services["default"].public_base_url == "https://dash.example.com/base"
+    assert store.services["default"].pm2_name == "sft-label-dashboard-prod"
+
+    service_copy = DashboardServiceConfig.from_dict(service.to_dict())
+    assert service_copy == service
+
+    store.services["backup"] = DashboardServiceConfig(
+        name="backup",
+        web_root=str((tmp_path / "backup-web").resolve()),
+        host="0.0.0.0",
+        port=9000,
+        service_type="builtin",
+    )
+    save_dashboard_service_store(store, config_path)
+
+    reloaded = load_dashboard_service_store(config_path)
+    assert reloaded == DashboardServiceStore.from_dict(json.loads(config_path.read_text(encoding="utf-8")))
+    assert sorted(reloaded.services) == ["backup", "default"]
+
+
+def test_load_dashboard_service_store_treats_empty_file_as_empty_store(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    config_path.write_text("", encoding="utf-8")
+
+    store = load_dashboard_service_store(config_path)
+
+    assert store.default_service is None
+    assert store.services == {}
+
+
+def test_set_default_dashboard_service_updates_store(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    init_dashboard_service(name="a", web_root=tmp_path / "a", config_path=config_path)
+    init_dashboard_service(name="b", web_root=tmp_path / "b", config_path=config_path, set_default=False)
+
+    set_default_dashboard_service("b", config_path=config_path)
+    store = load_dashboard_service_store(config_path)
+
+    assert store.default_service == "b"
+
+
+@pytest.mark.parametrize("command", [start_dashboard_service, restart_dashboard_service])
+def test_dashboard_service_lifecycle_helpers(tmp_path, command):
+    port = _free_port()
+    config_path = tmp_path / "dashboard_services.json"
+    web_root = tmp_path / "web"
+    (web_root / "index.html").parent.mkdir(parents=True, exist_ok=True)
+    (web_root / "index.html").write_text("ok", encoding="utf-8")
+
+    service = init_dashboard_service(
+        name="default",
+        web_root=web_root,
+        host="127.0.0.1",
+        port=port,
+        config_path=config_path,
+    )
+
+    status = command(service)
+    assert status["state"] == "running"
+    assert status["reachable"] is True
+    body = urlopen(service.base_url(), timeout=2).read().decode("utf-8")
+    assert "ok" in body
+
+    stopped = stop_dashboard_service(service)
+    assert stopped["state"] == "stopped"
+
+
+def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    port = _free_port()
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=port,
+        public_base_url="https://dash.example.com",
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    score_html = _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+
+    assets_dir = sync_dashboard_service_runtime_assets(service)
+    assert (assets_dir / "dashboard.js").exists()
+    assert (assets_dir / "dashboard.css").exists()
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+    run_id = published["run_id"]
+    published_root = Path(service.web_root) / "runs" / run_id
+
+    assert (published_root / label_html.name).exists()
+    assert (published_root / score_html.name).exists()
+    assert (published_root / f"{label_html.stem}.data" / "manifest.json").exists()
+    assert (published_root / f"{score_html.stem}.data" / "manifest.json").exists()
+    assert (Path(service.web_root) / "assets" / "v1" / "dashboard.js").exists()
+    assert published["dashboards"]["labeling"]["url"] == f"https://dash.example.com/runs/{run_id}/{label_html.name}"
+    assert published["dashboards"]["scoring"]["url"] == f"https://dash.example.com/runs/{run_id}/{score_html.name}"
+
+    html = (published_root / label_html.name).read_text(encoding="utf-8")
+    assert "../../assets/v1/dashboard.css" in html
+    assert "_dashboard_static/v1" not in html
+
+    store = load_dashboard_service_store(config_path)
+    runs = list_published_runs(store.services["default"])
+    assert [item["run_id"] for item in runs] == [run_id]
+    found = find_published_run(store.services["default"], run_id=run_id)
+    assert found is not None
+    assert found["source_run_dir"] == str(run_dir.resolve())
+
+
+def test_publish_registry_can_reuse_run_id_by_source_path(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "same_name_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    first = publish_run_dashboards(service, run_dir, config_path=config_path)
+    second = publish_run_dashboards(service, run_dir, config_path=config_path)
+    assert second["run_id"] == first["run_id"]
+
+    other_root = tmp_path / "nested" / "same_name_run"
+    _write_dashboard_bundle(other_root, "dashboard_labeling_demo.html")
+    third = publish_run_dashboards(service, other_root, config_path=config_path)
+    assert third["run_id"] != first["run_id"]
+
+    store = load_dashboard_service_store(config_path)
+    assert len(list_published_runs(store.services["default"])) == 2
+
+
+def test_publish_prefers_global_scoring_dashboard_for_primary_url(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    global_html = _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_code__part1.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo_sidebar_b.html")
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert published["dashboards"]["scoring"]["filename"] == global_html.name
+
+
+def test_pm2_lifecycle_helpers_use_pm2_commands(monkeypatch, tmp_path):
+    calls = []
+    state = {"status": "stopped"}
+
+    class _Completed:
+        def __init__(self, stdout=""):
+            self.stdout = stdout
+            self.returncode = 0
+
+    def _fake_run(cmd, check=False, capture_output=False, text=False):
+        calls.append(cmd)
+        if cmd[:2] == ["pm2", "jlist"]:
+            if state["status"] == "running":
+                return _Completed(stdout=json.dumps([{
+                    "name": "sft-label-dashboard-prod",
+                    "pid": 321,
+                    "pm2_env": {"status": "online"},
+                }]))
+            return _Completed(stdout="[]")
+        if cmd[:2] == ["pm2", "start"]:
+            state["status"] = "running"
+            return _Completed(stdout="started")
+        if cmd[:2] == ["pm2", "restart"]:
+            state["status"] = "running"
+            return _Completed(stdout="restarted")
+        if cmd[:2] == ["pm2", "stop"]:
+            state["status"] = "stopped"
+            return _Completed(stdout="stopped")
+        if cmd[:2] == ["pm2", "save"]:
+            return _Completed(stdout="saved")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr("sft_label.dashboard_service.subprocess.run", _fake_run)
+    monkeypatch.setattr("sft_label.dashboard_service._http_reachable", lambda service, timeout=0.5: True)
+
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        service_type="pm2",
+        pm2_name="sft-label-dashboard-prod",
+        config_path=tmp_path / "dashboard_services.json",
+    )
+
+    status = start_dashboard_service(service)
+    assert status["state"] == "running"
+    assert any(cmd[:2] == ["pm2", "start"] for cmd in calls)
+    assert any(cmd[:2] == ["pm2", "save"] for cmd in calls)
+
+    ecosystem_path = Path(service.web_root) / ".sft-label" / "pm2.config.json"
+    assert ecosystem_path.exists()
+
+    calls.clear()
+    status = restart_dashboard_service(service)
+    assert status["state"] == "running"
+    assert any(cmd[:2] == ["pm2", "restart"] for cmd in calls)
+
+    calls.clear()
+    status = stop_dashboard_service(service)
+    assert status["state"] == "stopped"
+    assert any(cmd[:2] == ["pm2", "stop"] for cmd in calls)

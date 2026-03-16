@@ -13,7 +13,7 @@ from sft_label.artifacts import (
     resolve_dashboard_output,
 )
 from sft_label.tools.dashboard_scopes import build_scope_tree
-from sft_label.tools.dashboard_aggregation import build_pass2_viz, build_scope_summary, load_data_file
+from sft_label.tools.dashboard_aggregation import build_pass2_viz, build_scope_summary, infer_scope_turn_kind, load_data_file
 from sft_label.tools.visualize_labels import (
     _dashboard_subtitle,
     _write_dashboard_bundle,
@@ -206,7 +206,7 @@ def _scope_summary(scope: dict) -> dict:
     return summary_modes["sample"]
 
 
-def _single_scope_payload(run_dir: Path, pass2_viz: dict, stats: dict) -> dict:
+def _single_scope_payload(run_dir: Path, samples: list[dict], pass2_viz: dict, stats: dict) -> dict:
     pass1_viz = _load_pass1_viz(run_dir, is_global=False)
     conv_records = _load_conversation_scores(run_dir)
     conversation = _compute_conv_viz_data(conv_records)
@@ -223,6 +223,7 @@ def _single_scope_payload(run_dir: Path, pass2_viz: dict, stats: dict) -> dict:
             "pass1": pass1_viz,
             "pass2": pass2_viz,
             "conversation": conversation,
+            "turn_kind": infer_scope_turn_kind(samples),
         }
     }
     scopes["global"]["summary"] = _scope_summary(scopes["global"])
@@ -270,6 +271,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             "pass1": pass1,
             "pass2": pass2,
             "conversation": conversation,
+            "turn_kind": infer_scope_turn_kind(samples),
         }
         scopes[scope_id]["summary"] = _scope_summary(scopes[scope_id])
         if raw_scope.get("kind") == "file" and raw_scope.get("pass2_data_path"):
@@ -317,7 +319,7 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
         payload, explorer_sources = _tree_payload(run_dir)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
-        payload = _single_scope_payload(run_dir, compute_value_viz_data(samples, stats, _load_conversation_scores(run_dir)), stats)
+        payload = _single_scope_payload(run_dir, samples, compute_value_viz_data(samples, stats, _load_conversation_scores(run_dir)), stats)
         explorer_sources = []
         data_path = run_dir / scored_file if scored_file else None
         conv_path = run_dir / "conversation_scores.json"

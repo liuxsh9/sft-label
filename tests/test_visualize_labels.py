@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
+from sft_label.tools.dashboard_aggregation import infer_scope_turn_kind
 from sft_label.tools.visualize_labels import compute_viz_data, generate_dashboard
 
 
@@ -122,6 +123,9 @@ def test_generate_dashboard_renders_unmapped_section(tmp_path):
     detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
 
     assert bootstrap["manifestUrl"] == "dashboard_labeling.data/manifest.json"
+    assert bootstrap["manifestScriptUrl"] == "dashboard_labeling.data/manifest.js"
+    assert (data_dir / "manifest.js").exists()
+    assert (data_dir / "scopes" / "global.js").exists()
     assert manifest["scopes"]["global"]["summary"]["pass1_total"] == 1
     assert detail["pass1"]["modes"]["sample"]["unmapped_details"]["by_dimension"]["task"][0]["label"] == "gpu-porting"
     assert detail["pass1"]["modes"]["sample"]["unmapped_details"]["by_dimension"]["task"][0]["examples"][0]["id"] == "sample-1"
@@ -322,3 +326,45 @@ def test_generate_dashboard_reuses_shared_static_base_url_across_runs(tmp_path, 
     assert all("/static/sft-label-dashboard/v1/dashboard.js" in html for html in htmls)
     assert all("/static/sft-label-dashboard/v1/dashboard.css" in html for html in htmls)
     assert not any((path.parent / "_dashboard_static").exists() for path in run_outputs)
+
+
+def test_generated_dashboard_uses_sidebar_runtime_assets_for_compact_meta(tmp_path):
+    stats = {
+        "total_samples": 1,
+        "input_file": "labeled.json",
+        "success_rate": 1.0,
+        "total_tokens": 1,
+        "arbitrated_rate": 0.0,
+        "unmapped_unique_count": 0,
+        "tag_distributions": {"task": {"feature-implementation": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+    sample = _sample_with_unmapped("sample-1", "Add logging.", [])
+    (tmp_path / "labeled.json").write_text(json.dumps([sample]), encoding="utf-8")
+    (tmp_path / PASS1_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+
+    out = generate_dashboard(tmp_path)
+    css = (out.parent / "_dashboard_static" / "v1" / "dashboard.css").read_text(encoding="utf-8")
+    js = (out.parent / "_dashboard_static" / "v1" / "dashboard.js").read_text(encoding="utf-8")
+
+    assert '.tree-kind-dot {' in css
+    assert '.tree-sub {' in css
+    assert 'N ${fmtInt' in js
+    assert '${escapeHtml(scopeKindLabel(scope.kind))}</span>' not in js
+
+
+def test_infer_scope_turn_kind_distinguishes_single_multi_and_mixed():
+    assert infer_scope_turn_kind([
+        {"metadata": {}},
+        {"metadata": {"source_id": None}},
+    ]) == "single"
+    assert infer_scope_turn_kind([
+        {"metadata": {"source_id": "conv-1"}},
+        {"metadata": {"source_id": "conv-2"}},
+    ]) == "multi"
+    assert infer_scope_turn_kind([
+        {"metadata": {}},
+        {"metadata": {"source_id": "conv-1"}},
+    ]) == "mixed"

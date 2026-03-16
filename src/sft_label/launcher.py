@@ -9,6 +9,7 @@ import select
 import shlex
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from sft_label.config import (
@@ -191,6 +192,12 @@ WORKFLOWS = [
         label="优化历史文件布局 / Optimize legacy layout",
         description="统一旧版命名并可选清理 legacy 别名 / Normalize old naming and optionally prune legacy aliases",
         group="维护 / Maintenance",
+    ),
+    Workflow(
+        key="dashboard-service",
+        label="看板服务维护 / Dashboard service maintenance",
+        description="管理 dashboard 静态服务、默认服务与已发布 runs / Manage dashboard services, defaults, and published runs",
+        group="服务 / Service",
     ),
 ]
 
@@ -574,6 +581,8 @@ def build_launch_plan(
                 return _build_analyze_unmapped_plan(input_fn, output_fn)
             if wf.key == "optimize-layout":
                 return _build_optimize_layout_plan(input_fn, output_fn)
+            if wf.key == "dashboard-service":
+                return _build_dashboard_service_plan(input_fn, output_fn)
             raise ValueError(f"Unknown workflow key: {wf.key}")
         except BackRequested:
             if input_fn is interactive_input:
@@ -1602,6 +1611,84 @@ def _build_export_review_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchP
     )
     if fmt:
         argv.extend(["--format", fmt])
+
+    argv.extend(_ask_extra_flags(input_fn))
+    return LaunchPlan(argv=argv)
+
+
+def _build_dashboard_service_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+    argv = ["dashboard-service"]
+
+    _section(output_fn, "服务操作 / Service actions")
+    action = _ask_choice(
+        input_fn,
+        output_fn,
+        "选择 dashboard 服务操作 / Choose a dashboard service action",
+        [
+            ("init", "初始化服务 / Init service", "创建或更新静态服务配置 / Create or update service config"),
+            ("status", "检查状态 / Check status", "查看服务状态 / Inspect service health"),
+            ("start", "启动服务 / Start service", "启动静态服务 / Start the static server"),
+            ("restart", "重启服务 / Restart service", "重启静态服务 / Restart the static server"),
+            ("stop", "停止服务 / Stop service", "停止静态服务 / Stop the static server"),
+            ("list", "列出服务 / List services", "查看全部 dashboard 服务 / Show all configured services"),
+            ("runs", "查看已发布 runs / List published runs", "查看某个服务已发布的结果 / Show published runs for a service"),
+            ("register-run", "发布已有 run / Publish existing run", "将已有 run 注册到静态服务 / Publish an existing run directory"),
+            ("set-default", "设置默认服务 / Set default service", "切换默认 dashboard 服务 / Change the default service"),
+        ],
+        default_index=2,
+    )
+    argv.append(action)
+
+    if action == "init":
+        name = _ask_text(input_fn, "服务名称 / Service name", required=False, default="default")
+        argv.extend(["--name", name])
+        default_root = str((Path.home() / "sft-label-dashboard").resolve())
+        web_root = _ask_text(
+            input_fn,
+            "静态目录 / Shared web root",
+            required=False,
+            default=default_root,
+        )
+        argv.extend(["--web-root", web_root])
+        host = _ask_text(input_fn, "监听地址 / Host", required=False, default="127.0.0.1")
+        if host != "127.0.0.1":
+            argv.extend(["--host", host])
+        port = _ask_int(input_fn, "端口 / Port", default=8765)
+        if port != 8765:
+            argv.extend(["--port", str(port)])
+        service_type = _ask_choice(
+            input_fn,
+            output_fn,
+            "服务后端 / Service backend",
+            [
+                ("pm2", "pm2（默认） / pm2 (default)", "生产推荐，支持守护/重启 / Production-ready with daemon management"),
+                ("builtin", "builtin", "内置 http.server，适合本地调试 / Built-in http.server for local debugging"),
+            ],
+            default_index=1,
+        )
+        if service_type != "pm2":
+            argv.extend(["--service-type", service_type])
+        public_base_url = _ask_optional_text(
+            input_fn,
+            "对外访问 URL（可选） / Public base URL (optional)",
+        )
+        if public_base_url:
+            argv.extend(["--public-base-url", public_base_url])
+        if service_type == "pm2":
+            pm2_name = _ask_optional_text(
+                input_fn,
+                "PM2 进程名（可选） / PM2 process name (optional)",
+            )
+            if pm2_name:
+                argv.extend(["--pm2-name", pm2_name])
+    elif action in {"status", "start", "restart", "stop", "runs", "register-run"}:
+        name = _ask_optional_text(input_fn, "服务名称（可选） / Service name (optional)")
+        if name:
+            argv.extend(["--name", name])
+        if action == "register-run":
+            argv.extend(["--run-dir", _ask_required_text(input_fn, "已有 run 目录 / Existing run directory")])
+    elif action == "set-default":
+        argv.extend(["--name", _ask_required_text(input_fn, "默认服务名称 / Default service name")])
 
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)

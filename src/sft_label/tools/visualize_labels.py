@@ -26,6 +26,7 @@ from sft_label.tools.dashboard_aggregation import (
     build_pass1_viz,
     build_scope_detail_payload,
     build_scope_summary,
+    infer_scope_turn_kind,
     load_data_file,
 )
 
@@ -84,7 +85,7 @@ def _dashboard_subtitle(run_dir: Path, root_label: str | None = None) -> str:
     return str(run_dir)
 
 
-def _single_scope_payload(run_dir: Path, viz_data: dict, stats: dict) -> dict:
+def _single_scope_payload(run_dir: Path, samples: list[dict], viz_data: dict, stats: dict) -> dict:
     label = Path(stats.get("input_file") or run_dir.name or "current").name
     scopes = {
         "global": {
@@ -96,6 +97,7 @@ def _single_scope_payload(run_dir: Path, viz_data: dict, stats: dict) -> dict:
             "children": [],
             "descendant_files": [stats.get("input_file") or label],
             "pass1": viz_data,
+                "turn_kind": infer_scope_turn_kind(samples),
         }
     }
     scopes["global"]["summary"] = _scope_summary(scopes["global"])
@@ -139,6 +141,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             "children": raw_scope["children"],
             "descendant_files": raw_scope["descendant_files"],
             "pass1": pass1,
+            "turn_kind": infer_scope_turn_kind(samples),
         }
         scopes[scope_id]["summary"] = _scope_summary(scopes[scope_id])
         data_path = raw_scope.get("pass1_data_path")
@@ -190,6 +193,11 @@ def _scope_detail_filename(scope_id: str) -> str:
     return f"{safe}.json"
 
 
+def _scope_detail_script_filename(scope_id: str) -> str:
+    safe = "".join(ch if ch.isalnum() else "_" for ch in scope_id).strip("_") or "scope"
+    return f"{safe}.js"
+
+
 def _write_dashboard_bundle(
     output_path: Path,
     payload: dict,
@@ -207,6 +215,7 @@ def _write_dashboard_bundle(
     _attach_explorer_payload(payload, build_explorer_assets(output_path, explorer_sources, assets_dir=explorer_dir))
     for scope_id, scope in payload.get("scopes", {}).items():
         scope["detail_path"] = f"{data_dir.name}/scopes/{_scope_detail_filename(scope_id)}"
+        scope["detail_script_path"] = f"{data_dir.name}/scopes/{_scope_detail_script_filename(scope_id)}"
 
     manifest = build_dashboard_manifest(
         title=payload.get("title", "Interactive Dashboard"),
@@ -219,11 +228,18 @@ def _write_dashboard_bundle(
         explorer=payload.get("explorer"),
     )
     (data_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (data_dir / "manifest.js").write_text(
+        "window.__SFT_DASHBOARD_DATA__ = window.__SFT_DASHBOARD_DATA__ || {manifest:null, scopes:{}};\n"
+        f"window.__SFT_DASHBOARD_DATA__.manifest = {json.dumps(manifest, ensure_ascii=False)};\n",
+        encoding="utf-8",
+    )
 
     for scope_id, scope in payload.get("scopes", {}).items():
         detail = build_scope_detail_payload(scope)
-        (scopes_dir / _scope_detail_filename(scope_id)).write_text(
-            json.dumps(detail, ensure_ascii=False),
+        (scopes_dir / _scope_detail_filename(scope_id)).write_text(json.dumps(detail, ensure_ascii=False), encoding="utf-8")
+        (scopes_dir / _scope_detail_script_filename(scope_id)).write_text(
+            "window.__SFT_DASHBOARD_DATA__ = window.__SFT_DASHBOARD_DATA__ || {manifest:null, scopes:{}};\n"
+            f"window.__SFT_DASHBOARD_DATA__.scopes[{json.dumps(scope_id, ensure_ascii=False)}] = {json.dumps(detail, ensure_ascii=False)};\n",
             encoding="utf-8",
         )
 
@@ -231,6 +247,7 @@ def _write_dashboard_bundle(
     bootstrap = {
         "dashboardType": dashboard_type,
         "manifestUrl": f"{data_dir.name}/manifest.json",
+        "manifestScriptUrl": f"{data_dir.name}/manifest.js",
         "staticBaseUrl": static_base,
         "defaultScopeId": payload["default_scope_id"],
         "rootId": payload["root_id"],
@@ -263,7 +280,7 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
             )
             if data_path is not None:
                 samples = load_data_file(data_path)
-            payload = _single_scope_payload(run_dir, compute_viz_data(samples, stats), stats)
+            payload = _single_scope_payload(run_dir, samples, compute_viz_data(samples, stats), stats)
             if data_path is not None:
                 explorer_sources.append(
                     {
@@ -274,7 +291,7 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                 )
     else:
         samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)
-        payload = _single_scope_payload(run_dir, compute_viz_data(samples, stats), stats)
+        payload = _single_scope_payload(run_dir, samples, compute_viz_data(samples, stats), stats)
         explorer_sources = []
         data_path = next(
             (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / labeled_file) if candidate.exists()),

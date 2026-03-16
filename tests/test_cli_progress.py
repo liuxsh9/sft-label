@@ -108,3 +108,121 @@ def test_semantic_progress_printer_shows_progress_without_spam(capsys):
     assert any("[semantic:start]" in line for line in lines)
     embed_lines = [line for line in lines if "[semantic:embed]" in line]
     assert len(embed_lines) == 2
+
+
+
+def test_dashboard_service_parser_supports_init_and_register_run():
+    parser = build_parser()
+
+    args = parser.parse_args([
+        "dashboard-service",
+        "init",
+        "--name",
+        "prod",
+        "--web-root",
+        "/srv/sft-label-dashboard",
+        "--port",
+        "9000",
+    ])
+    assert args.command == "dashboard-service"
+    assert args.dashboard_service_action == "init"
+    assert args.name == "prod"
+    assert args.web_root == "/srv/sft-label-dashboard"
+    assert args.port == 9000
+
+    args = parser.parse_args([
+        "dashboard-service",
+        "set-default",
+        "--name",
+        "prod",
+    ])
+    assert args.dashboard_service_action == "set-default"
+    assert args.name == "prod"
+
+    args = parser.parse_args([
+        "dashboard-service",
+        "runs",
+        "--name",
+        "prod",
+    ])
+    assert args.dashboard_service_action == "runs"
+    assert args.name == "prod"
+
+    args = parser.parse_args([
+        "dashboard-service",
+        "register-run",
+        "--name",
+        "prod",
+        "--run-dir",
+        "/tmp/run-1",
+    ])
+    assert args.command == "dashboard-service"
+    assert args.dashboard_service_action == "register-run"
+    assert args.run_dir == "/tmp/run-1"
+
+
+def test_dispatch_dashboard_service_register_run(monkeypatch, capsys, tmp_path):
+    calls = {}
+
+    def _fake_load(_config_path=None):
+        from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+        service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+        return DashboardServiceStore(default_service="default", services={"default": service})
+
+    def _fake_publish(service, run_dir, *, config_path=None):
+        calls["service"] = service.name
+        calls["run_dir"] = run_dir
+        calls["config_path"] = config_path
+        return {
+            "run_id": "run-1",
+            "dashboards": {
+                "labeling": {"url": "http://127.0.0.1:8765/runs/run-1/dashboard_labeling.html"}
+            },
+        }
+
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", _fake_load, raising=False)
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+
+    parser = build_parser()
+    args = parser.parse_args(["dashboard-service", "register-run", "--run-dir", str(tmp_path / "run")])
+    from sft_label.cli import dispatch_command
+    result = dispatch_command(args, parser=parser)
+
+    assert result["run_id"] == "run-1"
+    assert calls["service"] == "default"
+    assert calls["run_dir"] == str(tmp_path / "run")
+    assert "dashboard_labeling.html" in capsys.readouterr().out
+
+
+def test_dispatch_dashboard_service_set_default_and_runs(monkeypatch, capsys, tmp_path):
+    calls = {"default": None}
+
+    def _fake_load(_config_path=None):
+        from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+        service = DashboardServiceConfig(
+            name="prod",
+            web_root=str(tmp_path / "web"),
+            host="127.0.0.1",
+            port=8765,
+            published_runs=[{"run_id": "run-a", "dashboards": {"labeling": {"url": "https://dash/runs/run-a/dashboard.html"}}}],
+        )
+        return DashboardServiceStore(default_service="prod", services={"prod": service})
+
+    def _fake_set_default(name, config_path=None):
+        calls["default"] = name
+
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", _fake_load, raising=False)
+    monkeypatch.setattr("sft_label.cli.set_default_dashboard_service", _fake_set_default, raising=False)
+
+    parser = build_parser()
+    from sft_label.cli import dispatch_command
+
+    args = parser.parse_args(["dashboard-service", "set-default", "--name", "prod"])
+    result = dispatch_command(args, parser=parser)
+    assert result["default_service"] == "prod"
+    assert calls["default"] == "prod"
+
+    args = parser.parse_args(["dashboard-service", "runs", "--name", "prod"])
+    result = dispatch_command(args, parser=parser)
+    assert result[0]["run_id"] == "run-a"
+    assert "run-a" in capsys.readouterr().out

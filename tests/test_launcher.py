@@ -10,7 +10,7 @@ from sft_label.launcher import (
     set_language,
     sanitize_prompt_input,
 )
-from sft_label.cli import build_parser
+from sft_label.cli import build_parser, cmd_start
 
 
 class StubIO:
@@ -164,6 +164,58 @@ def test_build_semantic_plan_api_provider_supports_env_override():
     }
 
 
+def test_build_dashboard_service_init_plan():
+    io = StubIO(
+        [
+            "15",                    # workflow: dashboard maintenance
+            "1",                     # action: init
+            "",                      # name -> default
+            "/srv/sft-label-dashboard",  # web root
+            "",                      # host default
+            "",                      # port default
+            "",                      # service-type default pm2
+            "https://dash.example.com",  # public base url
+            "sft-label-dashboard-prod",  # pm2 name
+            "",                      # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "dashboard-service",
+        "init",
+        "--name",
+        "default",
+        "--web-root",
+        "/srv/sft-label-dashboard",
+        "--public-base-url",
+        "https://dash.example.com",
+        "--pm2-name",
+        "sft-label-dashboard-prod",
+    ]
+
+
+def test_build_dashboard_service_runs_plan():
+    io = StubIO(
+        [
+            "15",     # workflow: dashboard maintenance
+            "7",      # action: runs
+            "prod",   # service name
+            "",       # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "dashboard-service",
+        "runs",
+        "--name",
+        "prod",
+    ]
+
+
 def test_build_launch_plan_can_cancel():
     io = StubIO(["0"])
     assert build_launch_plan(input_fn=io.input, output_fn=io.output) is None
@@ -255,6 +307,8 @@ def test_all_workflows_generate_parseable_argv():
         13: ["run_dir/", "out.jsonl", "", ""],
         # 14. export-review
         14: ["labeled.json", "review.csv", "", "", ""],
+        # 15. dashboard-service maintenance
+        15: ["2", "", ""],  # action=status, name default, extra flags
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -412,7 +466,7 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
     io = StubIO(["0"])
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
     assert plan is None
-    assert any("请选择任务编号 [0-14, 默认 1]：" in str(item) for item in io.outputs)
+    assert any("请选择任务编号 [0-15, 默认 1]：" in str(item) for item in io.outputs)
     assert not any("Select workflow number" in str(item) for item in io.outputs)
 
 
@@ -535,3 +589,88 @@ def test_build_recompute_plan_can_set_workers():
         "--workers",
         "4",
     ]
+
+
+
+def test_cmd_start_can_auto_publish_dashboard(monkeypatch, capsys, tmp_path):
+    from sft_label.launcher import LaunchPlan
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]))
+
+    answers = iter(["", "y", ""])  # confirm, auto-publish yes, restart=no(default)
+    monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()}, raising=False)
+
+    published = {
+        "run_id": "demo_run",
+        "dashboards": {
+            "labeling": {"url": "http://127.0.0.1:8765/runs/demo_run/dashboard_labeling_demo.html"},
+            "scoring": {"url": "http://127.0.0.1:8765/runs/demo_run/dashboard_scoring_demo.html"},
+        },
+    }
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", lambda svc, run_dir, config_path=None: published, raising=False)
+    monkeypatch.setattr("sft_label.cli.dispatch_command", lambda args, parser: {"run_dir": str(run_dir)}, raising=False)
+
+    args = parser.parse_args(["start"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert "dashboard_labeling_demo.html" in out
+    assert "dashboard_scoring_demo.html" in out
+
+
+def test_cmd_start_can_choose_named_dashboard_service(monkeypatch, capsys, tmp_path):
+    from sft_label.launcher import LaunchPlan
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]))
+
+    answers = iter(["", "y", "2", ""])  # confirm, auto publish, choose 2nd service, don't restart
+    monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
+
+    service_a = DashboardServiceConfig(name="a", web_root=str(tmp_path / "a"), host="127.0.0.1", port=8765)
+    service_b = DashboardServiceConfig(
+        name="b",
+        web_root=str(tmp_path / "b"),
+        host="127.0.0.1",
+        port=9000,
+        public_base_url="https://dash.example.com",
+        service_type="pm2",
+    )
+    store = DashboardServiceStore(default_service="a", services={"a": service_a, "b": service_b})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()}, raising=False)
+
+    published_calls = {}
+
+    def _fake_publish(service, run_dir, config_path=None):
+        published_calls["service"] = service.name
+        return {
+            "run_id": "demo_run",
+            "dashboards": {
+                "labeling": {"url": "https://dash.example.com/runs/demo_run/dashboard_labeling_demo.html"},
+            },
+        }
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr("sft_label.cli.dispatch_command", lambda args, parser: {"run_dir": str(run_dir)}, raising=False)
+
+    args = parser.parse_args(["start"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert published_calls["service"] == "b"
+    assert "https://dash.example.com/runs/demo_run/dashboard_labeling_demo.html" in out

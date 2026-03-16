@@ -668,6 +668,7 @@ def _compute_pass2_from_units(units: list[dict], stats: dict, *, mode_id: str, u
             "total_failed": stats.get("total_failed", 0),
             "input_file": stats.get("input_file") or stats.get("input_path", ""),
             "mean_value": distributions.get("value_score", {}).get("mean", 0),
+            "mean_selection": distributions.get("selection_score", {}).get("mean", 0),
             "mean_complexity": distributions.get("complexity_overall", {}).get("mean", 0),
             "mean_quality": distributions.get("quality_overall", {}).get("mean", 0),
             "median_rarity": distributions.get("rarity_score", {}).get("p50", distributions.get("rarity_score", {}).get("mean", 0)),
@@ -748,6 +749,26 @@ def build_pass2_viz(samples: list[dict], stats: dict, conv_records: list[dict] |
     return payload
 
 
+def infer_scope_turn_kind(samples: list[dict]) -> str | None:
+    if not samples:
+        return None
+    has_single = False
+    has_multi = False
+    for sample in samples:
+        source_id = ((sample or {}).get("metadata") or {}).get("source_id")
+        if source_id in (None, ""):
+            has_single = True
+        else:
+            has_multi = True
+        if has_single and has_multi:
+            return "mixed"
+    if has_multi:
+        return "multi"
+    if has_single:
+        return "single"
+    return None
+
+
 def build_scope_summary(scope: dict) -> dict:
     pass1 = scope.get("pass1") or {}
     pass2 = scope.get("pass2") or {}
@@ -755,18 +776,23 @@ def build_scope_summary(scope: dict) -> dict:
     sample_pass2 = (pass2.get("modes") or {}).get("sample", pass2)
     conv_pass1 = (pass1.get("modes") or {}).get("conversation", sample_pass1)
     conv_pass2 = (pass2.get("modes") or {}).get("conversation", sample_pass2)
+    turn_kind = scope.get("turn_kind")
     return {
         "sample": {
             "pass1_total": (sample_pass1 or {}).get("total", 0),
             "scored_total": ((sample_pass2 or {}).get("overview") or {}).get("total_scored", 0),
             "mean_value": ((sample_pass2 or {}).get("overview") or {}).get("mean_value"),
+            "mean_selection": ((sample_pass2 or {}).get("overview") or {}).get("mean_selection"),
             "file_count": len(scope.get("descendant_files", [])) if scope.get("kind") != "file" else 1,
+            "turn_kind": turn_kind,
         },
         "conversation": {
             "pass1_total": (conv_pass1 or {}).get("total", 0),
             "scored_total": ((conv_pass2 or {}).get("overview") or {}).get("total_scored", 0),
             "mean_value": ((conv_pass2 or {}).get("overview") or {}).get("mean_value"),
+            "mean_selection": ((conv_pass2 or {}).get("overview") or {}).get("mean_selection"),
             "file_count": len(scope.get("descendant_files", [])) if scope.get("kind") != "file" else 1,
+            "turn_kind": turn_kind,
         },
     }
 
@@ -848,6 +874,7 @@ def build_dashboard_manifest(
             "summary": _round_numbers(scope.get("summary") or {}),
             "summary_modes": _round_numbers(scope.get("summary_modes") or {}),
             "detail_path": scope.get("detail_path"),
+            "detail_script_path": scope.get("detail_script_path"),
             "has_pass1": bool(scope.get("pass1")),
             "has_pass2": bool(scope.get("pass2")),
             "has_conversation": bool(scope.get("conversation")),

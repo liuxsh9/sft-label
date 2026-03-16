@@ -28,6 +28,18 @@ import time
 import random
 from pathlib import Path
 
+from sft_label.dashboard_service import (
+    dashboard_service_status,
+    init_dashboard_service,
+    load_dashboard_service_store,
+    list_published_runs,
+    publish_run_dashboards,
+    restart_dashboard_service,
+    set_default_dashboard_service,
+    start_dashboard_service,
+    stop_dashboard_service,
+)
+
 
 def _start_msg(lang: str, zh: str, en: str) -> str:
     return en if lang == "en" else zh
@@ -53,6 +65,204 @@ def _format_start_env_lines(env_overrides: dict[str, str]) -> list[str]:
         shown = _mask_secret(value) if _is_sensitive_env_key(key) else value
         lines.append(f"  {key}={shown}")
     return lines
+
+
+def _dashboard_start_msg(lang: str, zh: str, en: str) -> str:
+    return en if lang == "en" else zh
+
+
+def _resolve_dashboard_service(store, name: str | None = None):
+    service_name = name or getattr(store, "default_service", None)
+    if not service_name and getattr(store, "services", None):
+        service_name = next(iter(store.services))
+    if not service_name or service_name not in store.services:
+        raise ValueError("No dashboard service configured. Run `sft-label dashboard-service init` first.")
+    return store.services[service_name]
+
+
+def _choose_dashboard_service(store, lang: str, input_fn):
+    services = sorted(store.services.items())
+    if not services:
+        raise ValueError("No dashboard service configured. Run `sft-label dashboard-service init` first.")
+    if len(services) == 1:
+        return services[0][1]
+
+    print(_dashboard_start_msg(lang, "请选择 dashboard 服务：", "Choose a dashboard service:"))
+    default_name = getattr(store, "default_service", None)
+    for idx, (name, service) in enumerate(services, start=1):
+        marker = " (default)" if name == default_name else ""
+        public_url = service.share_base_url()
+        print(f"  {idx}. {name} | {service.service_type} | {public_url}{marker}")
+
+    while True:
+        raw = _dashboard_service_prompt(
+            lang,
+            input_fn,
+            f"输入序号（默认 {next((i for i, (name, _) in enumerate(services, start=1) if name == default_name), 1)}）：",
+            f"Enter number [default {next((i for i, (name, _) in enumerate(services, start=1) if name == default_name), 1)}]: ",
+        ).strip()
+        if not raw:
+            raw = str(next((i for i, (name, _) in enumerate(services, start=1) if name == default_name), 1))
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(services):
+                return services[index - 1][1]
+        print(_dashboard_start_msg(lang, "输入无效，请重新选择。", "Invalid selection, please try again."))
+
+
+def _dashboard_service_prompt(
+    lang: str,
+    input_fn,
+    prompt_zh: str,
+    prompt_en: str,
+) -> str:
+    return input_fn(_dashboard_start_msg(lang, prompt_zh, prompt_en))
+
+
+def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
+    if launched_args.command not in {"run", "score", "regenerate-dashboard"}:
+        return None
+
+    raw = _dashboard_service_prompt(
+        lang,
+        input_fn,
+        "任务完成后自动发布 dashboard 到静态服务？ [y/N]: ",
+        "Auto-publish dashboards to the static service after completion? [y/N]: ",
+    ).strip().lower()
+    if raw not in ("y", "yes"):
+        return None
+
+    store = load_dashboard_service_store()
+    if not store.services:
+        print(_dashboard_start_msg(
+            lang,
+            "当前没有已配置的 dashboard 静态服务，开始初始化默认服务。",
+            "No dashboard service is configured yet. Initializing a default service.",
+        ))
+        default_root = str((Path.home() / "sft-label-dashboard").resolve())
+        name = (
+            _dashboard_service_prompt(
+                lang,
+                input_fn,
+                "服务名称（默认 default）：",
+                "Service name [default default]: ",
+            ).strip()
+            or "default"
+        )
+        web_root = (
+            _dashboard_service_prompt(
+                lang,
+                input_fn,
+                f"静态目录（默认 {default_root}）：",
+                f"Web root [{default_root}]: ",
+            ).strip()
+            or default_root
+        )
+        host = (
+            _dashboard_service_prompt(
+                lang,
+                input_fn,
+                "监听地址（默认 127.0.0.1）：",
+                "Host [127.0.0.1]: ",
+            ).strip()
+            or "127.0.0.1"
+        )
+        port_raw = (
+            _dashboard_service_prompt(
+                lang,
+                input_fn,
+                "端口（默认 8765）：",
+                "Port [8765]: ",
+            ).strip()
+            or "8765"
+        )
+        public_base_url = (
+            _dashboard_service_prompt(
+                lang,
+                input_fn,
+                f"对外访问 URL（可选，默认 http://{host}:{port_raw}）：",
+                f"Public base URL (optional) [default http://{host}:{port_raw}]: ",
+            ).strip()
+            or None
+        )
+        pm2_name = (
+            _dashboard_service_prompt(
+                lang,
+                input_fn,
+                f"PM2 进程名（可选，默认 sft-label-dashboard-{name}）：",
+                f"PM2 process name (optional) [default sft-label-dashboard-{name}]: ",
+            ).strip()
+            or None
+        )
+        service = init_dashboard_service(
+            name=name,
+            web_root=web_root,
+            host=host,
+            port=int(port_raw),
+            service_type="pm2",
+            public_base_url=public_base_url,
+            pm2_name=pm2_name,
+        )
+    else:
+        service = _choose_dashboard_service(store, lang, input_fn)
+
+    status = dashboard_service_status(service)
+    public_url = status.get("public_url") or service.share_base_url()
+    print(
+        _dashboard_start_msg(
+            lang,
+            f"Dashboard 服务：{service.name} | {service.service_type} | {status['state']} | {public_url}",
+            f"Dashboard service: {service.name} | {service.service_type} | {status['state']} | {public_url}",
+        )
+    )
+    if status["state"] == "running":
+        restart = _dashboard_service_prompt(
+            lang,
+            input_fn,
+            "服务已运行，是否重启后再执行？ [y/N]: ",
+            "Service is already running. Restart before executing? [y/N]: ",
+        ).strip().lower()
+        if restart in ("y", "yes"):
+            status = restart_dashboard_service(service)
+    else:
+        start_now = _dashboard_service_prompt(
+            lang,
+            input_fn,
+            "服务未运行，是否现在启动？ [Y/n]: ",
+            "Service is not running. Start it now? [Y/n]: ",
+        ).strip().lower()
+        if start_now not in ("n", "no"):
+            status = start_dashboard_service(service)
+    public_url = status.get("public_url") or service.share_base_url()
+    print(
+        _dashboard_start_msg(
+            lang,
+            f"Dashboard 服务状态：{status['state']} | {public_url}",
+            f"Dashboard service status: {status['state']} | {public_url}",
+        )
+    )
+    return service
+
+
+def _extract_dashboard_publish_run_dir(launched_args, result):
+    if isinstance(result, dict):
+        run_dir = result.get("run_dir")
+        if run_dir:
+            return run_dir
+    if launched_args.command == "regenerate-dashboard":
+        return launched_args.input
+    return None
+
+
+def _print_published_dashboard_urls(published, lang: str):
+    dashboards = (published or {}).get("dashboards") or {}
+    if not dashboards:
+        return
+    print(_dashboard_start_msg(lang, "\nDashboard 访问地址：", "\nDashboard URLs:"))
+    for key in sorted(dashboards):
+        url = dashboards[key].get("url")
+        if url:
+            print(f"  [{key}] {url}")
 
 
 def _apply_runtime_overrides(config, args):
@@ -322,12 +532,13 @@ def cmd_run(args):
         sys.exit(1)
 
     # Continuous mode: run Pass 2 scoring after Pass 1
+    score_summary = None
     if getattr(args, "score", False) and stats:
         run_dir = stats.get("run_dir")
         if run_dir:
             print("\n── Pass 2: Value Scoring ──\n")
             from sft_label.scoring import run_scoring
-            asyncio.run(run_scoring(
+            score_summary = asyncio.run(run_scoring(
                 input_path=run_dir,
                 output_dir=run_dir,
                 tag_stats_path=getattr(args, "tag_stats", None),
@@ -337,6 +548,7 @@ def cmd_run(args):
             ))
 
     # Optional semantic clustering pass (trajectory-level)
+    semantic_summary = None
     if getattr(args, "semantic_cluster", False) and stats:
         run_dir = stats.get("run_dir")
         if run_dir:
@@ -358,6 +570,20 @@ def cmd_run(args):
                 print(f"Error: {e}")
                 sys.exit(1)
             print(format_semantic_summary(sc_stats))
+            semantic_summary = sc_stats
+
+    run_dir = None
+    if isinstance(stats, dict):
+        run_dir = stats.get("run_dir")
+    if not run_dir and isinstance(score_summary, dict):
+        run_dir = score_summary.get("run_dir")
+    return {
+        "command": "run",
+        "run_dir": run_dir,
+        "stats": stats,
+        "score_summary": score_summary,
+        "semantic_summary": semantic_summary,
+    }
 
 
 def cmd_validate(args):
@@ -406,7 +632,7 @@ def cmd_score(args):
     if args.model:
         config.scoring_model = args.model
     try:
-        asyncio.run(run_scoring(
+        summary = asyncio.run(run_scoring(
             input_path=args.input,
             tag_stats_path=getattr(args, "tag_stats", None),
             limit=args.limit,
@@ -416,6 +642,7 @@ def cmd_score(args):
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         sys.exit(1)
+    return summary
 
 
 def cmd_filter(args):
@@ -634,6 +861,11 @@ def cmd_regenerate_dashboard(args):
               "contains stats files.")
         sys.exit(1)
     print(f"\nDone. Generated {len(generated)} dashboard(s).")
+    return {
+        "command": "regenerate-dashboard",
+        "run_dir": args.input,
+        "generated": generated,
+    }
 
 
 def cmd_export_semantic(args):
@@ -673,6 +905,111 @@ def cmd_optimize_layout(args):
     print(format_optimize_layout_summary(summary))
     if not getattr(args, "apply", False):
         print("\nDry-run only. Re-run with --apply to execute changes.")
+
+
+def cmd_dashboard_service(args):
+    """Manage dashboard static services and published runs."""
+    action = getattr(args, "dashboard_service_action", None)
+    if not action:
+        print("Error: dashboard-service action is required")
+        sys.exit(1)
+
+    if action == "init":
+        service = init_dashboard_service(
+            name=args.name,
+            web_root=args.web_root,
+            host=args.host,
+            port=args.port,
+            service_type=args.service_type,
+            public_base_url=args.public_base_url,
+            pm2_name=args.pm2_name,
+        )
+        print(f"Initialized dashboard service '{service.name}'")
+        print(f"  root: {service.web_root}")
+        print(f"  url:  {service.base_url()}")
+        print(f"  public: {service.share_base_url()}")
+        print(f"  type: {service.service_type}")
+        return {"service": service}
+
+    store = load_dashboard_service_store()
+    if action == "list":
+        if not store.services:
+            print("No dashboard services configured.")
+            return []
+        rows = []
+        for name, service in sorted(store.services.items()):
+            marker = "*" if name == store.default_service else " "
+            status = dashboard_service_status(service)
+            run_count = len(list_published_runs(service))
+            print(
+                f"{marker} {name} | {service.service_type} | {status['state']} | {status['public_url']} | "
+                f"runs={run_count} | root={service.web_root}"
+            )
+            rows.append({
+                "name": name,
+                "service_type": service.service_type,
+                "state": status["state"],
+                "url": status["public_url"],
+                "run_count": run_count,
+                "web_root": service.web_root,
+            })
+        return rows
+
+    if action == "set-default":
+        updated = set_default_dashboard_service(args.name)
+        default_name = updated.default_service if updated is not None else args.name
+        print(f"Default dashboard service: {default_name}")
+        return {"default_service": default_name}
+
+    try:
+        service = _resolve_dashboard_service(store, getattr(args, "name", None))
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if action == "status":
+        status = dashboard_service_status(service)
+        print(
+            f"{service.name} | {service.service_type} | {status['state']} | {status['public_url']} | root={service.web_root}"
+        )
+        return status
+    if action == "start":
+        status = start_dashboard_service(service)
+        print(f"{service.name} | {service.service_type} | {status['state']} | {status['public_url']}")
+        return status
+    if action == "restart":
+        status = restart_dashboard_service(service)
+        print(f"{service.name} | {service.service_type} | {status['state']} | {status['public_url']}")
+        return status
+    if action == "stop":
+        status = stop_dashboard_service(service)
+        print(f"{service.name} | {service.service_type} | {status['state']} | {status['public_url']}")
+        return status
+    if action == "runs":
+        runs = list_published_runs(service)
+        if not runs:
+            print(f"No published runs for service '{service.name}'.")
+            return []
+        for item in runs:
+            dash = item.get("dashboards") or {}
+            primary = (
+                dash.get("scoring", {}).get("url")
+                or dash.get("labeling", {}).get("url")
+                or "-"
+            )
+            print(f"{item.get('run_id')} | {item.get('published_at', '-')} | {primary}")
+        return runs
+    if action == "register-run":
+        published = publish_run_dashboards(service, args.run_dir)
+        print(f"Published run: {published['run_id']}")
+        for key in sorted((published.get("dashboards") or {}).keys()):
+            url = published["dashboards"][key].get("url")
+            if url:
+                print(f"  [{key}] {url}")
+        return published
+
+    print(f"Error: unsupported dashboard-service action: {action}")
+    sys.exit(1)
 
 
 def cmd_start(args, parser):
@@ -744,7 +1081,32 @@ def cmd_start(args, parser):
         print(_start_msg(lang, "交互启动器不能再次启动自身。", "Interactive launcher cannot launch itself."))
         return
 
-    dispatch_command(launched_args, parser=parser)
+    dashboard_service = _prepare_dashboard_service_for_start(
+        launched_args,
+        lang,
+        interactive_input,
+    )
+    result = dispatch_command(launched_args, parser=parser)
+    if dashboard_service is not None:
+        run_dir = _extract_dashboard_publish_run_dir(launched_args, result)
+        if run_dir:
+            try:
+                published = publish_run_dashboards(dashboard_service, run_dir)
+            except (FileNotFoundError, ValueError) as e:
+                print(_start_msg(
+                    lang,
+                    f"Dashboard 自动发布失败：{e}",
+                    f"Dashboard auto-publish failed: {e}",
+                ))
+            else:
+                _print_published_dashboard_urls(published, lang)
+        else:
+            print(_start_msg(
+                lang,
+                "本次任务未返回可发布的 run 目录，跳过 dashboard 发布。",
+                "No publishable run directory was returned; skipped dashboard publishing.",
+            ))
+    return result
 
 
 def build_parser():
@@ -769,6 +1131,67 @@ def build_parser():
                               help="Language for interactive prompts (default: zh)")
     start_parser.add_argument("--en", action="store_true",
                               help=argparse.SUPPRESS)
+
+    # --- dashboard-service ---
+    dashboard_parser = subparsers.add_parser(
+        "dashboard-service",
+        help="Manage shared dashboard static services and published runs",
+        description="Initialize/list/start/restart/stop shared dashboard static services, "
+                    "and publish run dashboards into stable URLs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    dashboard_subparsers = dashboard_parser.add_subparsers(
+        dest="dashboard_service_action",
+        help="Dashboard service actions",
+    )
+
+    dashboard_init = dashboard_subparsers.add_parser("init", help="Initialize or update a dashboard service")
+    dashboard_init.add_argument("--name", type=str, default="default",
+                                help="Service name (default: default)")
+    dashboard_init.add_argument("--web-root", type=str, required=True,
+                                help="Shared web root for published dashboards")
+    dashboard_init.add_argument("--host", type=str, default="127.0.0.1",
+                                help="Host to bind (default: 127.0.0.1)")
+    dashboard_init.add_argument("--port", type=int, default=8765,
+                                help="Port to bind (default: 8765)")
+    dashboard_init.add_argument("--service-type", choices=["builtin", "pm2"], default="pm2",
+                                help="Service backend type (default: pm2)")
+    dashboard_init.add_argument("--public-base-url", type=str, default=None,
+                                help="Public share URL base, e.g. https://dash.example.com")
+    dashboard_init.add_argument("--pm2-name", type=str, default=None,
+                                help="PM2 process name override")
+
+    dashboard_subparsers.add_parser("list", help="List configured dashboard services")
+
+    dashboard_status = dashboard_subparsers.add_parser("status", help="Show dashboard service status")
+    dashboard_status.add_argument("--name", type=str, default=None,
+                                  help="Service name (default: configured default)")
+
+    dashboard_start = dashboard_subparsers.add_parser("start", help="Start dashboard static service")
+    dashboard_start.add_argument("--name", type=str, default=None,
+                                 help="Service name (default: configured default)")
+
+    dashboard_restart = dashboard_subparsers.add_parser("restart", help="Restart dashboard static service")
+    dashboard_restart.add_argument("--name", type=str, default=None,
+                                   help="Service name (default: configured default)")
+
+    dashboard_stop = dashboard_subparsers.add_parser("stop", help="Stop dashboard static service")
+    dashboard_stop.add_argument("--name", type=str, default=None,
+                                help="Service name (default: configured default)")
+
+    dashboard_runs = dashboard_subparsers.add_parser("runs", help="List published runs for a service")
+    dashboard_runs.add_argument("--name", type=str, default=None,
+                                help="Service name (default: configured default)")
+
+    dashboard_default = dashboard_subparsers.add_parser("set-default", help="Set the default dashboard service")
+    dashboard_default.add_argument("--name", type=str, required=True,
+                                   help="Service name to mark as default")
+
+    dashboard_register = dashboard_subparsers.add_parser("register-run", help="Publish an existing run directory")
+    dashboard_register.add_argument("--name", type=str, default=None,
+                                    help="Service name (default: configured default)")
+    dashboard_register.add_argument("--run-dir", type=str, required=True,
+                                    help="Absolute or relative run directory to publish")
 
     # --- run ---
     run_parser = subparsers.add_parser(
@@ -1112,31 +1535,33 @@ def build_parser():
 def dispatch_command(args, parser):
     """Dispatch parsed args to command handlers."""
     if args.command == "start":
-        cmd_start(args, parser)
+        return cmd_start(args, parser)
+    elif args.command == "dashboard-service":
+        return cmd_dashboard_service(args)
     elif args.command == "run":
-        cmd_run(args)
+        return cmd_run(args)
     elif args.command == "validate":
-        cmd_validate(args)
+        return cmd_validate(args)
     elif args.command == "score":
-        cmd_score(args)
+        return cmd_score(args)
     elif args.command == "semantic-cluster":
-        cmd_semantic_cluster(args)
+        return cmd_semantic_cluster(args)
     elif args.command == "export-semantic":
-        cmd_export_semantic(args)
+        return cmd_export_semantic(args)
     elif args.command == "optimize-layout":
-        cmd_optimize_layout(args)
+        return cmd_optimize_layout(args)
     elif args.command == "filter":
-        cmd_filter(args)
+        return cmd_filter(args)
     elif args.command == "analyze-unmapped":
-        cmd_analyze_unmapped(args)
+        return cmd_analyze_unmapped(args)
     elif args.command == "export-review":
-        cmd_export_review(args)
+        return cmd_export_review(args)
     elif args.command == "recompute-stats":
-        cmd_recompute_stats(args)
+        return cmd_recompute_stats(args)
     elif args.command == "refresh-rarity":
-        cmd_refresh_rarity(args)
+        return cmd_refresh_rarity(args)
     elif args.command == "regenerate-dashboard":
-        cmd_regenerate_dashboard(args)
+        return cmd_regenerate_dashboard(args)
 
 
 def main(argv=None):

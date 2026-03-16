@@ -1,4 +1,5 @@
 (async function () {
+window.__SFT_DASHBOARD_DATA__ = window.__SFT_DASHBOARD_DATA__ || { manifest: null, scopes: {} };
 const BOOTSTRAP = (() => {
   const node = document.getElementById("dashboard-bootstrap");
   if (!node) return {};
@@ -9,6 +10,22 @@ const BOOTSTRAP = (() => {
     return {};
   }
 })();
+
+const EXPLORER_PREVIEW_CACHE_LIMIT = 6;
+const EXPLORER_DETAIL_CACHE_LIMIT = 18;
+const EXPLORER_PROGRESS_RENDER_MS = 120;
+const EXPLORER_DRAWER_TURN_LIMIT = 12;
+const EXPLORER_DRAWER_TEXT_LIMIT = 1600;
+const EXPLORER_DRAWER_JSON_LIMIT = 24000;
+const EXPLORER_CACHE = {
+  scripts: new Map(),
+  previews: new Map(),
+  details: new Map(),
+  previewAssets: new Map(),
+  detailAssets: new Map(),
+  lastProgressRender: 0,
+};
+const SCOPE_DETAIL_CACHE = new Map();
 
 function resolveDashboardUrl(path) {
   return new URL(String(path || ""), window.location.href).toString();
@@ -22,7 +39,28 @@ async function fetchDashboardJson(path) {
   return await response.json();
 }
 
+function dashboardDataRegistry() {
+  return window.__SFT_DASHBOARD_DATA__ || { manifest: null, scopes: {} };
+}
+
+async function ensureDashboardScriptLoaded(path) {
+  if (!path) return;
+  return await ensureExplorerScriptLoaded(resolveDashboardUrl(path));
+}
+
 async function loadDashboardManifest() {
+  if (BOOTSTRAP.manifestScriptUrl) {
+    await ensureDashboardScriptLoaded(BOOTSTRAP.manifestScriptUrl);
+    const manifest = dashboardDataRegistry().manifest;
+    if (manifest) {
+      if (!manifest.root_id && BOOTSTRAP.rootId) manifest.root_id = BOOTSTRAP.rootId;
+      if (!manifest.default_scope_id && BOOTSTRAP.defaultScopeId) manifest.default_scope_id = BOOTSTRAP.defaultScopeId;
+      if (!Array.isArray(manifest.initially_expanded)) {
+        manifest.initially_expanded = [manifest.root_id].filter(Boolean);
+      }
+      return manifest;
+    }
+  }
   const manifest = await fetchDashboardJson(BOOTSTRAP.manifestUrl);
   if (!manifest.root_id && BOOTSTRAP.rootId) manifest.root_id = BOOTSTRAP.rootId;
   if (!manifest.default_scope_id && BOOTSTRAP.defaultScopeId) manifest.default_scope_id = BOOTSTRAP.defaultScopeId;
@@ -86,21 +124,6 @@ const STATE = {
     },
   },
 };
-const EXPLORER_PREVIEW_CACHE_LIMIT = 6;
-const EXPLORER_DETAIL_CACHE_LIMIT = 18;
-const EXPLORER_PROGRESS_RENDER_MS = 120;
-const EXPLORER_DRAWER_TURN_LIMIT = 12;
-const EXPLORER_DRAWER_TEXT_LIMIT = 1600;
-const EXPLORER_DRAWER_JSON_LIMIT = 24000;
-const EXPLORER_CACHE = {
-  scripts: new Map(),
-  previews: new Map(),
-  details: new Map(),
-  previewAssets: new Map(),
-  detailAssets: new Map(),
-  lastProgressRender: 0,
-};
-const SCOPE_DETAIL_CACHE = new Map();
 
 const I18N = {
   en: {
@@ -169,6 +192,9 @@ const I18N = {
     top_10_per_dimension: "{count} occurrences · top 10 per dimension",
     tag: "Tag",
     count: "Count",
+    turn_kind_single: "1T",
+    turn_kind_multi: "MT",
+    turn_kind_mixed: "Mix",
     examples: "Examples",
     tag_distributions: "Tag Distributions",
     all_tags_sorted_frequency: "All tags, sorted by frequency",
@@ -178,7 +204,7 @@ const I18N = {
     min: "Min",
     max: "Max",
     below_threshold: "Below Threshold",
-    intent_difficulty: "意图 × 难度",
+    intent_difficulty: "Intent × Difficulty",
     pool_coverage: "Pool Coverage",
     unused_tags: "{count} unused tags",
     scoring_overview: "Scoring Overview",
@@ -382,6 +408,9 @@ const I18N = {
     top_10_per_dimension: "{count} 次出现 · 每个维度展示前 10 个",
     tag: "标签",
     count: "数量",
+    turn_kind_single: "单",
+    turn_kind_multi: "多",
+    turn_kind_mixed: "混",
     examples: "示例",
     tag_distributions: "标签分布",
     all_tags_sorted_frequency: "所有标签，按频次排序",
@@ -653,6 +682,11 @@ function scopeKindLabel(kind) {
   return hasTranslation(key) ? t(key) : prettifyKey(kind);
 }
 
+function turnKindLabel(kind) {
+  const key = `turn_kind_${kind}`;
+  return hasTranslation(key) ? t(key) : String(kind || "");
+}
+
 function thinkingModeLabel(mode) {
   const key = `thinking_${mode}`;
   return hasTranslation(key) ? t(key) : String(mode || "");
@@ -836,7 +870,14 @@ async function ensureScopeDetail(id) {
   }
 
   const promise = (async () => {
-    const detail = await fetchDashboardJson(scope.detail_path);
+    let detail = null;
+    if (scope.detail_script_path) {
+      await ensureDashboardScriptLoaded(scope.detail_script_path);
+      detail = dashboardDataRegistry().scopes[id] || null;
+    }
+    if (!detail) {
+      detail = await fetchDashboardJson(scope.detail_path);
+    }
     if (detail && typeof detail === "object") {
       Object.assign(scope, detail);
     }
@@ -955,6 +996,20 @@ function scopeHasPass2Data(scope) {
   });
 }
 
+function compactTreeMeta(summary) {
+  const bits = [];
+  if (summary.turn_kind) bits.push(turnKindLabel(summary.turn_kind));
+  const sampleCount = Number(summary.scored_total || summary.pass1_total || 0);
+  if (sampleCount) bits.push(`N ${fmtInt(sampleCount)}`);
+  if (summary.mean_value !== null && summary.mean_value !== undefined) {
+    bits.push(`V ${fmt(summary.mean_value, 1)}`);
+  }
+  if (summary.mean_selection !== null && summary.mean_selection !== undefined) {
+    bits.push(`S ${fmt(summary.mean_selection, 1)}`);
+  }
+  return bits;
+}
+
 function toggleExpanded(id) {
   if (STATE.expanded.has(id)) STATE.expanded.delete(id);
   else STATE.expanded.add(id);
@@ -1002,26 +1057,26 @@ function renderTreeNode(id, depth = 0) {
   const isExpanded = STATE.expanded.has(id) || id === DATA.root_id;
   const hasChildren = (scope.children || []).length > 0;
   const summary = scopeSummary(scope);
-  const valueMean = summary.mean_value;
-  const badgeClass = `kind-badge kind-${scope.kind === "global" ? "global" : (scope.kind === "dir" ? "dir" : "file")}`;
-  const metaBits = [];
-  if (summary.file_count) metaBits.push(`${summary.file_count} ${t("files")}`);
-  if (summary.scored_total) metaBits.push(`${t("value")} ${fmt(summary.mean_value, 1)}`);
-  else if (summary.pass1_total) metaBits.push(`${summary.pass1_total} ${t("labeled")}`);
+  const kindClass = `kind-${scope.kind === "global" ? "global" : (scope.kind === "dir" ? "dir" : "file")}`;
+  const metaBits = compactTreeMeta(summary);
 
   let html = `<div class="tree-node ${isExpanded ? "expanded" : ""}">`;
   html += `<div class="tree-row ${STATE.currentId === id ? "active" : ""}" data-scope="${escapeHtml(id)}">`;
-  html += `<span class="tree-indent" style="margin-left:${depth * 10}px"></span>`;
+  html += `<span class="tree-indent" style="margin-left:${depth * 6}px"></span>`;
   if (hasChildren) {
     html += `<span class="tree-toggle" data-toggle="${escapeHtml(id)}">${isExpanded ? "▾" : "▸"}</span>`;
   } else {
     html += `<span class="tree-toggle"></span>`;
   }
-  html += `<span class="${badgeClass}">${escapeHtml(scopeKindLabel(scope.kind))}</span>`;
+  html += `<div class="tree-content">`;
+  html += `<div class="tree-main">`;
+  html += `<span class="tree-kind-dot ${kindClass}" title="${escapeHtml(scopeKindLabel(scope.kind))}"></span>`;
   html += `<span class="tree-label" title="${escapeHtml(scope.path || scope.label)}">${escapeHtml(scope.label)}</span>`;
+  html += `</div>`;
   if (metaBits.length) {
-    html += `<span class="tree-meta">${escapeHtml(metaBits.join(" · "))}</span>`;
+    html += `<div class="tree-sub">${metaBits.map((bit) => `<span class="tree-meta-pill">${escapeHtml(bit)}</span>`).join("")}</div>`;
   }
+  html += `</div>`;
   html += `</div>`;
   if (hasChildren) {
     html += `<div class="tree-children">`;

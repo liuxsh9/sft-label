@@ -123,10 +123,13 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
 
     assert dashboard_path.exists()
     assert bootstrap["manifestUrl"] == "dashboard_scoring.data/manifest.json"
+    assert bootstrap["manifestScriptUrl"] == "dashboard_scoring.data/manifest.js"
     assert "dashboard.js" in html
     assert "const DATA =" not in html
     explorer_dir = data_dir / "explorer"
     assert explorer_dir.exists()
+    assert (data_dir / "manifest.js").exists()
+    assert (data_dir / "scopes" / "global.js").exists()
     assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
     assert any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
     assert manifest["scopes"]["global"]["explorer"]["sample_count"] == 2
