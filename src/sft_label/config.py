@@ -180,6 +180,16 @@ CONV_RARITY_MEAN_WEIGHT = 0.75            # weighted mean rarity remains the mai
 CONV_RARITY_PEAK_WEIGHT = 0.25            # preserve one genuinely rare turn without max-pooling
 CONV_RARITY_DIVERSITY_BONUS = 0.4         # reward conversations that traverse distinct label states
 CONV_COVERAGE_CONFIDENCE_FLOOR = 0.35     # all-inherited conversations shrink high scores toward neutral
+ENABLE_CONVERSATION_V2 = True             # emit shadow v2 conv metrics for long/tool-heavy trajectories
+CONV_V2_TURN_THRESHOLD = 8                # conversations at/above this turn count are eligible for v2 calibration
+CONV_V2_TOOL_THRESHOLD = 2                # or when they use at least this many distinct tools
+CONV_V2_TOP_K = 5                         # top-k turns dominate conv_turn_signal
+CONV_V2_BOTTOM_K = 3                      # bottom-k turns keep tail-risk visible
+CONV_V2_HIGH_VALUE_THRESHOLD = 7.0        # high-value turn ratio threshold
+CONV_V2_LOW_QUALITY_THRESHOLD = 5.0       # low-quality turn ratio threshold
+CONV_V2_VALUE_UPLIFT_CAP = 1.5            # guardrail: v2 should not overshoot v1 too aggressively
+CONV_V2_SELECTION_UPLIFT_CAP = 2.0        # guardrail for selection v2 uplift
+CONV_V2_DOWNSIDE_CAP = 0.5                # guardrail: v2 should not drop far below v1
 
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)
@@ -269,6 +279,16 @@ class PipelineConfig:
     enable_domain_backfill: bool = ENABLE_DOMAIN_BACKFILL
     enable_rationale: bool = ENABLE_RATIONALE
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
+    enable_conversation_v2: bool = ENABLE_CONVERSATION_V2
+    conversation_v2_turn_threshold: int = CONV_V2_TURN_THRESHOLD
+    conversation_v2_tool_threshold: int = CONV_V2_TOOL_THRESHOLD
+    conversation_v2_top_k: int = CONV_V2_TOP_K
+    conversation_v2_bottom_k: int = CONV_V2_BOTTOM_K
+    conversation_v2_high_value_threshold: float = CONV_V2_HIGH_VALUE_THRESHOLD
+    conversation_v2_low_quality_threshold: float = CONV_V2_LOW_QUALITY_THRESHOLD
+    conversation_v2_value_uplift_cap: float = CONV_V2_VALUE_UPLIFT_CAP
+    conversation_v2_selection_uplift_cap: float = CONV_V2_SELECTION_UPLIFT_CAP
+    conversation_v2_downside_cap: float = CONV_V2_DOWNSIDE_CAP
 
     # Trajectory SemHash + ANN Clustering
     semantic_long_turn_threshold: int = SEMANTIC_LONG_TURN_THRESHOLD

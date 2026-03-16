@@ -922,6 +922,42 @@ class TestConversationFilter:
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 0
 
+    def test_conv_value_v2_min(self, tmp_path):
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        conv_records = [
+            {
+                "conversation_id": "c1",
+                "conv_value": 6.0,
+                "conv_value_v2": 7.6,
+                "conv_selection": 5.0,
+                "conv_selection_v2": 6.8,
+                "peak_complexity": 5,
+                "trajectory_structure_score": 6.5,
+            },
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_v2_min=7.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 2
+
+    def test_trajectory_structure_min(self, tmp_path):
+        samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
+        conv_records = [
+            {
+                "conversation_id": "c1",
+                "conv_value": 8.0,
+                "conv_selection": 8.0,
+                "conv_value_v2": 8.2,
+                "conv_selection_v2": 8.4,
+                "peak_complexity": 7,
+                "trajectory_structure_score": 4.2,
+            },
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(trajectory_structure_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+
     def test_peak_complexity_min(self, tmp_path):
         samples = [_mt_sample("c1", 1, 2), _mt_sample("c1", 2, 2)]
         conv_records = [

@@ -43,7 +43,10 @@ class FilterConfig:
     # Conversation-level criteria (multi-turn only)
     conv_value_min: float | None = None     # min conversation-level value
     conv_selection_min: float | None = None  # min conversation-level selection
+    conv_value_v2_min: float | None = None   # min conversation-level value (v2 shadow metric)
+    conv_selection_v2_min: float | None = None  # min conversation-level selection (v2 shadow metric)
     peak_complexity_min: float | None = None # min peak complexity across turns
+    trajectory_structure_min: float | None = None  # min deterministic trajectory structure score
     rarity_confidence_min: float | None = None  # min conversation rarity confidence
     observed_turn_ratio_min: float | None = None  # min directly-labeled turn coverage
     # Turn count criteria (multi-turn only)
@@ -263,9 +266,21 @@ def _matches_conv_criteria(conv_record, config):
         cs = conv_record.get("conv_selection")
         if cs is None or cs < config.conv_selection_min:
             return False
+    if config.conv_value_v2_min is not None:
+        cv2 = conv_record.get("conv_value_v2")
+        if cv2 is None or cv2 < config.conv_value_v2_min:
+            return False
+    if config.conv_selection_v2_min is not None:
+        cs2 = conv_record.get("conv_selection_v2")
+        if cs2 is None or cs2 < config.conv_selection_v2_min:
+            return False
     if config.peak_complexity_min is not None:
         pc = conv_record.get("peak_complexity")
         if pc is None or pc < config.peak_complexity_min:
+            return False
+    if config.trajectory_structure_min is not None:
+        ts = conv_record.get("trajectory_structure_score")
+        if ts is None or ts < config.trajectory_structure_min:
             return False
     if config.rarity_confidence_min is not None:
         rc = conv_record.get("rarity_confidence")
@@ -291,7 +306,10 @@ def _has_conv_criteria(config):
     return any([
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
+        config.conv_value_v2_min is not None,
+        config.conv_selection_v2_min is not None,
         config.peak_complexity_min is not None,
+        config.trajectory_structure_min is not None,
         config.rarity_confidence_min is not None,
         config.observed_turn_ratio_min is not None,
         config.turn_count_min is not None,
@@ -686,8 +704,14 @@ def _build_suffix(config):
         parts.append(f"cv{config.conv_value_min:g}")
     if config.conv_selection_min is not None:
         parts.append(f"cs{config.conv_selection_min:g}")
+    if config.conv_value_v2_min is not None:
+        parts.append(f"cv2{config.conv_value_v2_min:g}")
+    if config.conv_selection_v2_min is not None:
+        parts.append(f"cs2{config.conv_selection_v2_min:g}")
     if config.peak_complexity_min is not None:
         parts.append(f"pc{config.peak_complexity_min:g}")
+    if config.trajectory_structure_min is not None:
+        parts.append(f"ts{config.trajectory_structure_min:g}")
     if config.rarity_confidence_min is not None:
         parts.append(f"rc{config.rarity_confidence_min:g}")
     if config.observed_turn_ratio_min is not None:
@@ -724,8 +748,14 @@ def _build_filter_desc(config):
         criteria.append(f"conv_value >= {config.conv_value_min:g}")
     if config.conv_selection_min is not None:
         criteria.append(f"conv_selection >= {config.conv_selection_min:g}")
+    if config.conv_value_v2_min is not None:
+        criteria.append(f"conv_value_v2 >= {config.conv_value_v2_min:g}")
+    if config.conv_selection_v2_min is not None:
+        criteria.append(f"conv_selection_v2 >= {config.conv_selection_v2_min:g}")
     if config.peak_complexity_min is not None:
         criteria.append(f"peak_complexity >= {config.peak_complexity_min:g}")
+    if config.trajectory_structure_min is not None:
+        criteria.append(f"trajectory_structure_score >= {config.trajectory_structure_min:g}")
     if config.rarity_confidence_min is not None:
         criteria.append(f"rarity_confidence >= {config.rarity_confidence_min:g}")
     if config.observed_turn_ratio_min is not None:

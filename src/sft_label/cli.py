@@ -436,7 +436,10 @@ def cmd_filter(args):
         verify_source=args.verify_source,
         conv_value_min=args.conv_value_min,
         conv_selection_min=args.conv_selection_min,
+        conv_value_v2_min=args.conv_value_v2_min,
+        conv_selection_v2_min=args.conv_selection_v2_min,
         peak_complexity_min=args.peak_complexity_min,
+        trajectory_structure_min=args.trajectory_structure_min,
         rarity_confidence_min=args.rarity_confidence_min,
         observed_turn_ratio_min=args.observed_turn_ratio_min,
         turn_count_min=args.turn_count_min,
@@ -461,7 +464,10 @@ def cmd_filter(args):
         config.verify_source,
         config.conv_value_min is not None,
         config.conv_selection_min is not None,
+        config.conv_value_v2_min is not None,
+        config.conv_selection_v2_min is not None,
         config.peak_complexity_min is not None,
+        config.trajectory_structure_min is not None,
         config.rarity_confidence_min is not None,
         config.observed_turn_ratio_min is not None,
         config.turn_count_min is not None,
@@ -1052,8 +1058,14 @@ def build_parser():
                                 help="Min conversation-level value score (multi-turn)")
     filter_parser.add_argument("--conv-selection-min", type=float, default=None,
                                 help="Min conversation-level selection score (multi-turn)")
+    filter_parser.add_argument("--conv-value-v2-min", type=float, default=None,
+                                help="Min conversation-level value_v2 score (multi-turn trajectory calibration)")
+    filter_parser.add_argument("--conv-selection-v2-min", type=float, default=None,
+                                help="Min conversation-level selection_v2 score (multi-turn trajectory calibration)")
     filter_parser.add_argument("--peak-complexity-min", type=float, default=None,
                                 help="Min peak complexity across turns (multi-turn)")
+    filter_parser.add_argument("--trajectory-structure-min", type=float, default=None,
+                                help="Min deterministic trajectory structure score (multi-turn)")
     filter_parser.add_argument("--rarity-confidence-min", type=float, default=None,
                                 help="Min conversation rarity confidence (multi-turn)")
     filter_parser.add_argument("--observed-turn-ratio-min", type=float, default=None,

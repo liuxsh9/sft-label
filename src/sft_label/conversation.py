@@ -31,6 +31,16 @@ from sft_label.config import (
     SELECTION_MIN_GROUP_SIZE,
     SELECTION_SMOOTHING_PRIOR,
     KNOWN_FLAGS_NEGATIVE,
+    ENABLE_CONVERSATION_V2,
+    CONV_V2_TURN_THRESHOLD,
+    CONV_V2_TOOL_THRESHOLD,
+    CONV_V2_TOP_K,
+    CONV_V2_BOTTOM_K,
+    CONV_V2_HIGH_VALUE_THRESHOLD,
+    CONV_V2_LOW_QUALITY_THRESHOLD,
+    CONV_V2_VALUE_UPLIFT_CAP,
+    CONV_V2_SELECTION_UPLIFT_CAP,
+    CONV_V2_DOWNSIDE_CAP,
 )
 from sft_label.labels import LABEL_META_KEYS
 from sft_label.score_confidence import apply_score_confidence, score_confidence
@@ -165,6 +175,16 @@ def _std(values):
     return (sum((value - mu) ** 2 for value in values) / len(values)) ** 0.5
 
 
+def _median(values):
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def _top_k_mean(values, k):
     if not values:
         return None
@@ -183,6 +203,20 @@ def _round_or_none(value, digits=2):
     if value is None:
         return None
     return round(value, digits)
+
+
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def _scale_01_to_10(value):
+    return 1.0 + 9.0 * _clamp(value, 0.0, 1.0)
+
+
+def _apply_v2_guardrail(candidate, baseline, uplift_cap, downside_cap):
+    lower = max(1.0, baseline - downside_cap)
+    upper = min(10.0, baseline + uplift_cap)
+    return _clamp(candidate, lower, upper)
 
 
 def _extract_turn_metrics(slices):
@@ -214,6 +248,7 @@ def _extract_turn_metrics(slices):
         "turn_value_mean": value_mean,
         "turn_value_min": min(value_scores),
         "turn_value_max": value_max,
+        "turn_value_median": _median(value_scores),
         "turn_value_std": _std(value_scores),
         "turn_quality_std": _std(quality_scores) if quality_scores else None,
         "top_k_mean": top_k_mean,
@@ -224,6 +259,64 @@ def _extract_turn_metrics(slices):
             if early_mean is not None and late_mean is not None
             else None
         ),
+    }
+
+
+def _compute_conv_turn_signal(slices):
+    """Compress per-turn values into a trajectory-friendly signal.
+
+    Top turns dominate, but bottom turns still add mild downside pressure.
+    """
+    value_scores = []
+    quality_scores = []
+    for s in slices:
+        value = s.get("value") or {}
+        score = value.get("value_score")
+        if score is not None:
+            value_scores.append(score)
+        quality = (value.get("quality") or {}).get("overall")
+        if quality is not None:
+            quality_scores.append(quality)
+
+    if not value_scores:
+        return None, {}
+
+    top_k_mean = _top_k_mean(value_scores, CONV_V2_TOP_K)
+    bottom_k_mean = _bottom_k_mean(value_scores, CONV_V2_BOTTOM_K)
+    median_score = _median(value_scores)
+
+    raw_signal = (
+        0.70 * (top_k_mean or median_score or 5.5)
+        + 0.20 * (median_score or top_k_mean or 5.5)
+        + 0.10 * (bottom_k_mean or median_score or 5.5)
+    )
+
+    low_quality_ratio = 0.0
+    if quality_scores:
+        low_quality_ratio = (
+            sum(1 for q in quality_scores if q < CONV_V2_LOW_QUALITY_THRESHOLD)
+            / len(quality_scores)
+        )
+
+    if low_quality_ratio <= 0.15:
+        tail_penalty = 1.0
+    elif low_quality_ratio <= 0.30:
+        tail_penalty = 0.95
+    else:
+        tail_penalty = 0.90
+
+    high_value_ratio = (
+        sum(1 for score in value_scores if score >= CONV_V2_HIGH_VALUE_THRESHOLD)
+        / len(value_scores)
+    )
+    signal = raw_signal * tail_penalty
+    return signal, {
+        "conv_turn_signal_raw": raw_signal,
+        "conv_turn_signal": signal,
+        "conv_turn_signal_tail_penalty": tail_penalty,
+        "high_value_turn_ratio": high_value_ratio,
+        "low_quality_turn_ratio": low_quality_ratio,
+        "turn_value_median": median_score,
     }
 
 
@@ -334,14 +427,20 @@ def _extract_structure_signals(slices):
             "test_related_turn_count": 0,
             "edit_related_turn_count": 0,
             "bash_execution_turn_count": 0,
+            "assistant_turn_count": 0,
+            "final_turn_role": "",
+            "final_turn_text": "",
         }
 
     tool_turn_count = 0
     test_related_turn_count = 0
     edit_related_turn_count = 0
     bash_execution_turn_count = 0
+    assistant_turn_count = 0
     unique_tools = set()
     unique_files = set()
+    final_turn_role = ""
+    final_turn_text = ""
 
     for turn in full_conversation:
         if not isinstance(turn, dict):
@@ -350,6 +449,8 @@ def _extract_structure_signals(slices):
         text = _coerce_turn_text(
             turn.get("value", turn.get("content"))
         )
+        final_turn_role = role
+        final_turn_text = text
         tool_name = str(turn.get("name") or turn.get("tool_name") or "").strip()
         tool_names = set(_extract_tool_names_from_text(text))
         if tool_name:
@@ -358,6 +459,8 @@ def _extract_structure_signals(slices):
         is_tool_turn = (role == "tool") or bool(tool_names)
         if is_tool_turn:
             tool_turn_count += 1
+        if role == "assistant":
+            assistant_turn_count += 1
 
         unique_tools.update(name for name in tool_names if name)
         unique_files.update(_extract_file_refs(text))
@@ -381,6 +484,124 @@ def _extract_structure_signals(slices):
         "test_related_turn_count": test_related_turn_count,
         "edit_related_turn_count": edit_related_turn_count,
         "bash_execution_turn_count": bash_execution_turn_count,
+        "assistant_turn_count": assistant_turn_count,
+        "final_turn_role": final_turn_role,
+        "final_turn_text": final_turn_text,
+    }
+
+
+def _compute_trajectory_structure_score(
+    slices,
+    merged_labels,
+    structure_signals,
+    turn_metrics,
+    turn_signal_detail,
+):
+    """Estimate conversation-level trajectory quality without extra LLM calls."""
+    turn_count = len(slices) or 1
+    unique_tool_count = structure_signals.get("unique_tool_count", 0) or 0
+    tool_turn_ratio = structure_signals.get("tool_turn_ratio", 0.0) or 0.0
+    unique_file_count = structure_signals.get("unique_file_count", 0) or 0
+    test_related_turn_count = structure_signals.get("test_related_turn_count", 0) or 0
+    edit_related_turn_count = structure_signals.get("edit_related_turn_count", 0) or 0
+    final_turn_text = structure_signals.get("final_turn_text", "") or ""
+
+    high_value_turn_ratio = turn_signal_detail.get("high_value_turn_ratio", 0.0) or 0.0
+    low_quality_turn_ratio = turn_signal_detail.get("low_quality_turn_ratio", 0.0) or 0.0
+    late_turn_gain = max(0.0, turn_metrics.get("late_turn_gain") or 0.0)
+    peak_minus_mean = max(0.0, turn_metrics.get("peak_minus_mean") or 0.0)
+    final_quality = ((slices[-1].get("value") or {}).get("quality") or {}).get("overall")
+    final_value = (slices[-1].get("value") or {}).get("value_score")
+
+    edit_ratio = min(1.0, edit_related_turn_count / max(turn_count, 1))
+    test_ratio = min(1.0, test_related_turn_count / max(turn_count, 1))
+    file_ratio = min(1.0, unique_file_count / 4.0)
+    tool_diversity = min(1.0, unique_tool_count / 3.0)
+    late_gain_norm = min(1.0, late_turn_gain / 2.5)
+    compression_norm = min(1.0, peak_minus_mean / 2.5)
+    final_quality_norm = min(1.0, (final_quality or final_value or 5.5) / 10.0)
+    oversaturation = _clamp((tool_turn_ratio - 0.70) / 0.30, 0.0, 1.0)
+    evidence_density = min(1.0, 0.45 * edit_ratio + 0.35 * test_ratio + 0.20 * file_ratio)
+    final_lower = final_turn_text.lower()
+    resolution_keywords = (
+        "fixed", "resolved", "pass", "passed", "green", "success",
+        "completed", "done", "implemented", "updated",
+    )
+    resolution_hint = 1.0 if any(token in final_lower for token in resolution_keywords) else 0.0
+
+    progress_raw = _clamp(
+        0.40 * high_value_turn_ratio
+        + 0.25 * late_gain_norm
+        + 0.20 * edit_ratio
+        + 0.15 * compression_norm,
+        0.0,
+        1.0,
+    )
+
+    if low_quality_turn_ratio <= 0.10:
+        recovery_raw = _clamp(0.65 + 0.20 * test_ratio + 0.15 * edit_ratio, 0.0, 1.0)
+    else:
+        recovery_raw = _clamp(
+            0.35 * late_gain_norm + 0.35 * test_ratio + 0.30 * edit_ratio,
+            0.0,
+            1.0,
+        )
+
+    if unique_tool_count <= 0:
+        tool_effectiveness_raw = _clamp(0.45 + 0.35 * evidence_density + 0.20 * (1.0 - oversaturation), 0.0, 1.0)
+    else:
+        tool_effectiveness_raw = _clamp(
+            0.45 * tool_diversity + 0.30 * evidence_density + 0.25 * (1.0 - oversaturation),
+            0.0,
+            1.0,
+        )
+
+    resolution_raw = _clamp(
+        0.45 * final_quality_norm
+        + 0.25 * evidence_density
+        + 0.15 * late_gain_norm
+        + 0.15 * resolution_hint,
+        0.0,
+        1.0,
+    )
+
+    non_redundancy_raw = _clamp(
+        0.45 * high_value_turn_ratio
+        + 0.35 * (1.0 - low_quality_turn_ratio)
+        + 0.20 * (1.0 - oversaturation),
+        0.0,
+        1.0,
+    )
+
+    progress_score = _scale_01_to_10(progress_raw)
+    recovery_score = _scale_01_to_10(recovery_raw)
+    tool_effectiveness_score = _scale_01_to_10(tool_effectiveness_raw)
+    resolution_score = _scale_01_to_10(resolution_raw)
+    non_redundancy_score = _scale_01_to_10(non_redundancy_raw)
+
+    trajectory_structure_score = (
+        0.25 * progress_score
+        + 0.20 * recovery_score
+        + 0.20 * tool_effectiveness_score
+        + 0.20 * resolution_score
+        + 0.15 * non_redundancy_score
+    )
+
+    trajectory_v2_enabled = (
+        ENABLE_CONVERSATION_V2 and (
+            turn_count >= CONV_V2_TURN_THRESHOLD
+            or unique_tool_count >= CONV_V2_TOOL_THRESHOLD
+            or bool((merged_labels or {}).get("agentic"))
+        )
+    )
+
+    return trajectory_structure_score, {
+        "trajectory_v2_enabled": trajectory_v2_enabled,
+        "progress_score": progress_score,
+        "recovery_score": recovery_score,
+        "tool_effectiveness_score": tool_effectiveness_score,
+        "resolution_score": resolution_score,
+        "non_redundancy_score": non_redundancy_score,
     }
 
 
@@ -657,12 +878,12 @@ def aggregate_conversation(conversation_key, slices):
 
     weights = _effective_weights(slices)
 
-    # Weighted average of value_score → q_base
-    q_base = _weighted_average(
+    # Weighted average of value_score → q_base_v1
+    q_base_v1 = _weighted_average(
         slices, weights,
         lambda s: (s.get("value") or {}).get("value_score")
     )
-    if q_base is None:
+    if q_base_v1 is None:
         return None
 
     # Max-pooling blend: prevent a single bad early turn from
@@ -672,8 +893,9 @@ def aggregate_conversation(conversation_key, slices):
         for s in slices
     ]
     valid_values = [v for v in valid_values if v is not None]
+    q_base = q_base_v1
     if valid_values:
-        q_base = 0.7 * q_base + 0.3 * max(valid_values)
+        q_base = 0.7 * q_base_v1 + 0.3 * max(valid_values)
 
     # Penalty
     penalty, quality_floor, neg_flags = _compute_penalty(slices)
@@ -723,6 +945,29 @@ def aggregate_conversation(conversation_key, slices):
     turn_count = len(slices)
     turn_metrics = _extract_turn_metrics(slices)
     structure_signals = _extract_structure_signals(slices)
+    conv_turn_signal, turn_signal_detail = _compute_conv_turn_signal(slices)
+    trajectory_structure_score, structure_detail = _compute_trajectory_structure_score(
+        slices,
+        merged_labels,
+        structure_signals,
+        turn_metrics,
+        turn_signal_detail,
+    )
+    trajectory_v2_enabled = bool(structure_detail.get("trajectory_v2_enabled"))
+
+    if trajectory_v2_enabled and conv_turn_signal is not None:
+        rarity_term = conv_rarity if conv_rarity is not None else conv_value
+        conv_value_v2_raw = 0.80 * conv_turn_signal + 0.20 * rarity_term
+        conv_value_v2 = apply_score_confidence(conv_value_v2_raw, score_conf)
+        conv_value_v2 = max(conv_value, conv_value_v2)
+        conv_value_v2 = _apply_v2_guardrail(
+            max(1.0, min(10.0, conv_value_v2)),
+            conv_value,
+            CONV_V2_VALUE_UPLIFT_CAP,
+            CONV_V2_DOWNSIDE_CAP,
+        )
+    else:
+        conv_value_v2 = conv_value
 
     # Slice details
     slice_details = []
@@ -750,9 +995,12 @@ def aggregate_conversation(conversation_key, slices):
         "source_file": source_file,
         "turn_count": turn_count,
         "conv_value": round(conv_value, 2),
+        "conv_value_v2": round(conv_value_v2, 2),
         "conv_selection": None,  # filled by compute_conv_selection_scores
+        "conv_selection_v2": None,  # filled by compute_conv_selection_scores
         "peak_complexity": peak_complexity,
         "conv_rarity": round(conv_rarity, 2) if conv_rarity is not None else None,
+        "trajectory_structure_score": round(trajectory_structure_score, 2),
         "observed_turn_ratio": round(observed_turn_ratio, 2) if observed_turn_ratio is not None else None,
         "inherited_turn_ratio": round(inherited_turn_ratio, 2) if inherited_turn_ratio is not None else None,
         "rarity_confidence": round(rarity_confidence, 2) if rarity_confidence is not None else None,
@@ -765,6 +1013,7 @@ def aggregate_conversation(conversation_key, slices):
         "merged_labels": merged_labels,
         "detail": {
             "q_base": round(q_base, 2),
+            "q_base_v1": round(q_base_v1, 2),
             "penalty": round(penalty, 3),
             "quality_floor": quality_floor,
             "negative_flags": neg_flags,
@@ -781,19 +1030,32 @@ def aggregate_conversation(conversation_key, slices):
             "turn_value_mean": _round_or_none(turn_metrics.get("turn_value_mean")),
             "turn_value_min": _round_or_none(turn_metrics.get("turn_value_min")),
             "turn_value_max": _round_or_none(turn_metrics.get("turn_value_max")),
+            "turn_value_median": _round_or_none(turn_metrics.get("turn_value_median")),
             "turn_value_std": _round_or_none(turn_metrics.get("turn_value_std"), 3),
             "turn_quality_std": _round_or_none(turn_metrics.get("turn_quality_std"), 3),
             "top_k_mean": _round_or_none(turn_metrics.get("top_k_mean")),
             "bottom_k_mean": _round_or_none(turn_metrics.get("bottom_k_mean")),
             "peak_minus_mean": _round_or_none(turn_metrics.get("peak_minus_mean")),
             "late_turn_gain": _round_or_none(turn_metrics.get("late_turn_gain")),
+            "conv_turn_signal_raw": _round_or_none(turn_signal_detail.get("conv_turn_signal_raw")),
+            "conv_turn_signal": _round_or_none(turn_signal_detail.get("conv_turn_signal")),
+            "conv_turn_signal_tail_penalty": _round_or_none(turn_signal_detail.get("conv_turn_signal_tail_penalty"), 3),
+            "high_value_turn_ratio": _round_or_none(turn_signal_detail.get("high_value_turn_ratio"), 3),
+            "low_quality_turn_ratio": _round_or_none(turn_signal_detail.get("low_quality_turn_ratio"), 3),
             "tool_turn_count": structure_signals.get("tool_turn_count"),
             "unique_tools": structure_signals.get("unique_tools"),
             "test_related_turn_count": structure_signals.get("test_related_turn_count"),
             "edit_related_turn_count": structure_signals.get("edit_related_turn_count"),
             "bash_execution_turn_count": structure_signals.get("bash_execution_turn_count"),
+            "trajectory_v2_enabled": trajectory_v2_enabled,
+            "progress_score": _round_or_none(structure_detail.get("progress_score")),
+            "recovery_score": _round_or_none(structure_detail.get("recovery_score")),
+            "tool_effectiveness_score": _round_or_none(structure_detail.get("tool_effectiveness_score")),
+            "resolution_score": _round_or_none(structure_detail.get("resolution_score")),
+            "non_redundancy_score": _round_or_none(structure_detail.get("non_redundancy_score")),
             "conv_intra_class_rank": None,  # filled later
             "selection_confidence": None,  # filled later
+            "conv_value_v2_delta": _round_or_none(conv_value_v2 - conv_value),
         },
         "slices": slice_details,
     }
@@ -908,8 +1170,29 @@ def compute_conv_selection_scores(records):
         conv_selection = apply_score_confidence(conv_selection, selection_conf)
         conv_selection = max(1.0, min(10.0, conv_selection))
         rec["conv_selection"] = round(conv_selection, 2)
+        structure_score = rec.get("trajectory_structure_score")
+        trajectory_v2_enabled = bool((rec.get("detail") or {}).get("trajectory_v2_enabled"))
+        if trajectory_v2_enabled and structure_score is not None:
+            rarity_term = rarity if rarity is not None else pq_scaled
+            conv_selection_v2 = (
+                0.40 * intra_rank_scaled
+                + 0.25 * rarity_term
+                + 0.35 * structure_score
+            )
+            conv_selection_v2 = apply_score_confidence(conv_selection_v2, selection_conf)
+            conv_selection_v2 = max(conv_selection, conv_selection_v2)
+            conv_selection_v2 = _apply_v2_guardrail(
+                max(1.0, min(10.0, conv_selection_v2)),
+                conv_selection,
+                CONV_V2_SELECTION_UPLIFT_CAP,
+                CONV_V2_DOWNSIDE_CAP,
+            )
+        else:
+            conv_selection_v2 = conv_selection
+        rec["conv_selection_v2"] = round(conv_selection_v2, 2)
         rec["detail"]["conv_intra_class_rank"] = round(intra_rank_scaled, 2)
         rec["detail"]["selection_confidence"] = round(selection_conf, 2)
+        rec["detail"]["conv_selection_v2_delta"] = _round_or_none(conv_selection_v2 - conv_selection)
 
 
 # ─── Top-level entry points ─────────────────────────────

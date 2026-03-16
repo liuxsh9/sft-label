@@ -255,6 +255,7 @@ class TestAggregateConversation:
         assert rec["conversation_id"] == "c1"
         assert rec["turn_count"] == 3
         assert rec["conv_value"] > 0
+        assert rec["conv_value_v2"] == rec["conv_value"]
         assert rec["peak_complexity"] == 9
         assert len(rec["slices"]) == 3
 
@@ -358,10 +359,14 @@ class TestAggregateConversation:
         assert rec["detail"]["turn_value_mean"] == pytest.approx(6.25)
         assert rec["detail"]["turn_value_min"] == pytest.approx(3.0)
         assert rec["detail"]["turn_value_max"] == pytest.approx(9.0)
+        assert rec["detail"]["turn_value_median"] == pytest.approx(6.5)
         assert rec["detail"]["top_k_mean"] == pytest.approx(6.25)
         assert rec["detail"]["bottom_k_mean"] == pytest.approx((3.0 + 5.0 + 8.0) / 3, abs=0.01)
         assert rec["detail"]["turn_value_std"] > 0
         assert rec["detail"]["turn_quality_std"] > 0
+        assert rec["detail"]["conv_turn_signal_raw"] >= rec["detail"]["bottom_k_mean"]
+        assert rec["detail"]["conv_turn_signal"] <= rec["detail"]["conv_turn_signal_raw"]
+        assert rec["trajectory_structure_score"] is not None
 
     def test_conversation_structure_signals_extract_tools_files_and_test_turns(self):
         full_conversation = [
@@ -388,6 +393,40 @@ class TestAggregateConversation:
         assert rec["detail"]["test_related_turn_count"] >= 2
         assert rec["detail"]["edit_related_turn_count"] >= 2
         assert rec["detail"]["bash_execution_turn_count"] >= 2
+
+    def test_long_tool_heavy_trajectory_emits_v2_calibration(self):
+        full_conversation = [
+            {"from": "human", "value": "Please investigate the failing integration tests and fix the issue."},
+            {"from": "gpt", "value": "I'll inspect the failing tests."},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest tests/test_api.py -q\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "FAILED tests/test_api.py::test_create"},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"str_replace_editor\",\"arguments\":{\"path\":\"service.py\",\"old_str\":\"return 0\",\"new_str\":\"return 1\"}}</tool_call>"},
+            {"role": "tool", "name": "str_replace_editor", "content": "Updated service.py"},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest tests/test_api.py -q\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "PASSED tests/test_api.py::test_create"},
+            {"role": "assistant", "content": "Fixed service.py and tests are now green."},
+        ]
+        slices = [
+            _slice("traj", idx + 1, 8, value_score=score, quality=quality, conversations=full_conversation,
+                   labels={"intent": "debug", "difficulty": "advanced", "language": ["python"], "agentic": ["tool-use"]})
+            for idx, (score, quality) in enumerate([
+                (4.2, 4.0),
+                (4.8, 5.0),
+                (5.5, 5.0),
+                (6.2, 6.0),
+                (6.8, 7.0),
+                (7.4, 8.0),
+                (8.2, 8.0),
+                (8.5, 9.0),
+            ])
+        ]
+
+        rec = aggregate_conversation("traj", slices)
+
+        assert rec["detail"]["trajectory_v2_enabled"] is True
+        assert rec["conv_value_v2"] >= rec["conv_value"]
+        assert rec["trajectory_structure_score"] >= 5.0
+        assert rec["detail"]["conv_turn_signal"] >= rec["detail"]["turn_value_mean"]
 
 
 # ── TestComputeConvSelectionScores ──
@@ -440,6 +479,40 @@ class TestComputeConvSelectionScores:
         compute_conv_selection_scores(records)
         assert inherited[0]["conv_selection"] < observed[0]["conv_selection"]
         assert inherited[0]["detail"]["selection_confidence"] < observed[0]["detail"]["selection_confidence"]
+        assert inherited[0]["conv_selection_v2"] <= observed[0]["conv_selection_v2"]
+
+    def test_selection_v2_tracks_structure_for_long_trajectories(self):
+        records = []
+        for idx, values in enumerate((
+            [(4.0, 4.0), (5.0, 5.0), (5.5, 5.0), (6.0, 6.0), (6.5, 6.0), (7.0, 7.0), (7.8, 8.0), (8.2, 9.0)],
+            [(5.5, 6.0), (5.7, 6.0), (5.9, 6.0), (6.0, 6.0), (6.1, 6.0), (6.2, 6.0), (6.3, 6.0), (6.4, 6.0)],
+        )):
+            full_conversation = [
+                {"from": "human", "value": "Fix the failing build."},
+                {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest -q\"}}</tool_call>"},
+                {"role": "tool", "name": "execute_bash", "content": "output"},
+                {"role": "assistant", "content": "<tool_call>{\"name\":\"str_replace_editor\",\"arguments\":{\"path\":\"main.py\",\"old_str\":\"0\",\"new_str\":\"1\"}}</tool_call>"},
+                {"role": "tool", "name": "str_replace_editor", "content": "updated"},
+                {"role": "assistant", "content": "Fixed the issue and tests are green." if idx == 0 else "I explored several ideas."},
+            ]
+            slices = [
+                _slice(
+                    f"sel{idx}",
+                    turn_idx + 1,
+                    8,
+                    value_score=score,
+                    quality=quality,
+                    rarity=6.0,
+                    conversations=full_conversation,
+                    labels={"intent": "debug", "difficulty": "advanced", "language": ["python"], "agentic": ["tool-use"]},
+                )
+                for turn_idx, (score, quality) in enumerate(values)
+            ]
+            records.append(aggregate_conversation(f"sel{idx}", slices))
+
+        compute_conv_selection_scores(records)
+        assert records[0]["conv_selection_v2"] >= records[0]["conv_selection"]
+        assert records[0]["conv_selection_v2"] > records[1]["conv_selection_v2"]
 
 
 # ── TestAggregateConversations ──
