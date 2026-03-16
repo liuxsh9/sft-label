@@ -220,8 +220,14 @@ def _read_pid(service: DashboardServiceConfig) -> int | None:
 
 
 def _http_reachable(service: DashboardServiceConfig, timeout: float = 0.5) -> bool:
+    probe_host = service.host
+    if probe_host == "0.0.0.0":
+        probe_host = "127.0.0.1"
+    elif probe_host in {"::", "[::]"}:
+        probe_host = "::1"
+    probe_url = f"http://{probe_host}:{service.port}"
     try:
-        with urlopen(service.base_url(), timeout=timeout) as resp:
+        with urlopen(probe_url, timeout=timeout) as resp:
             return int(getattr(resp, "status", 200)) < 500
     except (URLError, OSError, TimeoutError):
         return False

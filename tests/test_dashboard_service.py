@@ -8,6 +8,7 @@ from urllib.request import urlopen
 import pytest
 
 from sft_label.dashboard_service import (
+    _http_reachable,
     DashboardServiceConfig,
     DashboardServiceStore,
     default_dashboard_service_config_path,
@@ -117,6 +118,36 @@ def test_set_default_dashboard_service_updates_store(tmp_path):
     store = load_dashboard_service_store(config_path)
 
     assert store.default_service == "b"
+
+
+def test_http_reachable_uses_loopback_probe_for_wildcard_host(monkeypatch):
+    seen = {}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_urlopen(url, timeout=0.5):
+        seen["url"] = url
+        seen["timeout"] = timeout
+        return _Resp()
+
+    monkeypatch.setattr("sft_label.dashboard_service.urlopen", _fake_urlopen)
+
+    service = DashboardServiceConfig(
+        name="default",
+        web_root="/tmp/demo",
+        host="0.0.0.0",
+        port=8765,
+    )
+
+    assert _http_reachable(service) is True
+    assert seen["url"] == "http://127.0.0.1:8765"
 
 
 @pytest.mark.parametrize("command", [start_dashboard_service, restart_dashboard_service])
