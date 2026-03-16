@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import webbrowser
 from pathlib import Path
@@ -11,14 +12,22 @@ from pathlib import Path
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
     PASS1_SUMMARY_STATS_FILE,
+    dashboard_data_dirname,
     resolve_dashboard_output,
+    runtime_static_base_url,
 )
 from sft_label.tools.dashboard_explorer import build_explorer_assets
 from sft_label.tools.dashboard_scopes import build_scope_tree
-from sft_label.tools.dashboard_template import render_dashboard_html
+from sft_label.tools.dashboard_template import ensure_dashboard_runtime_assets, render_dashboard_html
 
 
-from sft_label.tools.dashboard_aggregation import build_pass1_viz, build_scope_summary, load_data_file
+from sft_label.tools.dashboard_aggregation import (
+    build_dashboard_manifest,
+    build_pass1_viz,
+    build_scope_detail_payload,
+    build_scope_summary,
+    load_data_file,
+)
 
 
 def load_run(run_dir: Path, labeled_file="labeled.json", stats_file=PASS1_STATS_FILE):
@@ -176,8 +185,65 @@ def _attach_explorer_payload(payload: dict, explorer_meta: dict[str, dict]) -> N
     }
 
 
+def _scope_detail_filename(scope_id: str) -> str:
+    safe = "".join(ch if ch.isalnum() else "_" for ch in scope_id).strip("_") or "scope"
+    return f"{safe}.json"
+
+
+def _write_dashboard_bundle(
+    output_path: Path,
+    payload: dict,
+    explorer_sources: list[dict],
+    *,
+    dashboard_type: str,
+    static_base_url: str | None = None,
+) -> None:
+    data_dir = output_path.with_name(dashboard_data_dirname(output_path.name))
+    scopes_dir = data_dir / "scopes"
+    explorer_dir = data_dir / "explorer"
+    shutil.rmtree(data_dir, ignore_errors=True)
+    scopes_dir.mkdir(parents=True, exist_ok=True)
+
+    _attach_explorer_payload(payload, build_explorer_assets(output_path, explorer_sources, assets_dir=explorer_dir))
+    for scope_id, scope in payload.get("scopes", {}).items():
+        scope["detail_path"] = f"{data_dir.name}/scopes/{_scope_detail_filename(scope_id)}"
+
+    manifest = build_dashboard_manifest(
+        title=payload.get("title", "Interactive Dashboard"),
+        title_key=payload.get("title_key", "dashboard_title_generic"),
+        subtitle=payload.get("subtitle", ""),
+        root_id=payload["root_id"],
+        default_scope_id=payload["default_scope_id"],
+        initially_expanded=payload.get("initially_expanded", []),
+        scopes=payload.get("scopes", {}),
+        explorer=payload.get("explorer"),
+    )
+    (data_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    for scope_id, scope in payload.get("scopes", {}).items():
+        detail = build_scope_detail_payload(scope)
+        (scopes_dir / _scope_detail_filename(scope_id)).write_text(
+            json.dumps(detail, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    static_base = ensure_dashboard_runtime_assets(output_path, static_base_url=static_base_url or runtime_static_base_url())
+    bootstrap = {
+        "dashboardType": dashboard_type,
+        "manifestUrl": f"{data_dir.name}/manifest.json",
+        "staticBaseUrl": static_base,
+        "defaultScopeId": payload["default_scope_id"],
+        "rootId": payload["root_id"],
+    }
+    output_path.write_text(
+        render_dashboard_html({"title": payload.get("title", "Interactive Dashboard"), "bootstrap": bootstrap}),
+        encoding="utf-8",
+    )
+
+
 def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
-                       stats_file=PASS1_STATS_FILE, output_file="dashboard_labeling.html") -> Path:
+                       stats_file=PASS1_STATS_FILE, output_file="dashboard_labeling.html",
+                       static_base_url: str | None = None) -> Path:
     """Generate an interactive Pass 1 dashboard."""
     run_dir = Path(run_dir)
     output_path = resolve_dashboard_output(run_dir, output_file)
@@ -223,9 +289,13 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                 }
             )
 
-    _attach_explorer_payload(payload, build_explorer_assets(output_path, explorer_sources))
-
-    output_path.write_text(render_dashboard_html(payload), encoding="utf-8")
+    _write_dashboard_bundle(
+        output_path,
+        payload,
+        explorer_sources,
+        dashboard_type="labeling",
+        static_base_url=static_base_url,
+    )
     return output_path
 
 

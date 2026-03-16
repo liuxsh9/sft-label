@@ -769,3 +769,98 @@ def build_scope_summary(scope: dict) -> dict:
             "file_count": len(scope.get("descendant_files", [])) if scope.get("kind") != "file" else 1,
         },
     }
+
+
+def _round_numbers(value, digits: int = 4):
+    if isinstance(value, float):
+        return round(value, digits)
+    if isinstance(value, list):
+        return [_round_numbers(item, digits=digits) for item in value]
+    if isinstance(value, dict):
+        return {key: _round_numbers(item, digits=digits) for key, item in value.items()}
+    return value
+
+
+def _trim_unmapped_examples(mode: dict, example_limit: int = 1) -> dict:
+    if not isinstance(mode, dict):
+        return mode
+    details = (mode.get("unmapped_details") or {}).get("by_dimension") or {}
+    for rows in details.values():
+        for row in rows or []:
+            examples = row.get("examples")
+            if isinstance(examples, list):
+                row["examples"] = examples[:example_limit]
+    return mode
+
+
+def _export_dashboard_bucket(bucket: dict | None) -> dict | None:
+    if not bucket:
+        return None
+    exported_modes = {}
+    for mode_name, mode_payload in (bucket.get("modes") or {}).items():
+        if not isinstance(mode_payload, dict):
+            continue
+        cleaned = {
+            key: value
+            for key, value in mode_payload.items()
+            if key != "conf_matrix"
+        }
+        exported_modes[mode_name] = _round_numbers(_trim_unmapped_examples(cleaned))
+    return {"modes": exported_modes} if exported_modes else None
+
+
+def build_scope_detail_payload(scope: dict) -> dict:
+    payload = {
+        "id": scope.get("id"),
+        "label": scope.get("label"),
+        "kind": scope.get("kind"),
+        "path": scope.get("path"),
+        "summary": _round_numbers(scope.get("summary") or {}),
+        "summary_modes": _round_numbers(scope.get("summary_modes") or {}),
+        "pass1": _export_dashboard_bucket(scope.get("pass1")),
+        "pass2": _export_dashboard_bucket(scope.get("pass2")),
+        "conversation": _round_numbers(scope.get("conversation")) if scope.get("conversation") else None,
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def build_dashboard_manifest(
+    *,
+    title: str,
+    title_key: str,
+    subtitle: str,
+    root_id: str,
+    default_scope_id: str,
+    initially_expanded: list[str],
+    scopes: dict[str, dict],
+    explorer: dict | None = None,
+) -> dict:
+    manifest_scopes = {}
+    for scope_id, scope in scopes.items():
+        manifest_scopes[scope_id] = {
+            "id": scope.get("id"),
+            "label": scope.get("label"),
+            "kind": scope.get("kind"),
+            "path": scope.get("path"),
+            "parent_id": scope.get("parent_id"),
+            "children": scope.get("children") or [],
+            "descendant_files": scope.get("descendant_files") or [],
+            "summary": _round_numbers(scope.get("summary") or {}),
+            "summary_modes": _round_numbers(scope.get("summary_modes") or {}),
+            "detail_path": scope.get("detail_path"),
+            "has_pass1": bool(scope.get("pass1")),
+            "has_pass2": bool(scope.get("pass2")),
+            "has_conversation": bool(scope.get("conversation")),
+        }
+        if scope.get("explorer"):
+            manifest_scopes[scope_id]["explorer"] = _round_numbers(scope["explorer"])
+    return {
+        "title": title,
+        "title_key": title_key,
+        "subtitle": subtitle,
+        "root_id": root_id,
+        "default_scope_id": default_scope_id,
+        "initially_expanded": initially_expanded,
+        "scopes": manifest_scopes,
+        "explorer": _round_numbers(explorer) if explorer else None,
+    }

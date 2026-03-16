@@ -171,15 +171,15 @@ def _chunk_relpath(scope_slug: str, kind: str, chunk_index: int) -> str:
     return f"{kind}_{scope_slug}_{chunk_index:04d}.js"
 
 
-def build_explorer_assets(output_path: Path, scope_sources: list[dict]) -> dict[str, dict]:
+def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_dir: Path | None = None) -> dict[str, dict]:
     """Write sidecar JS assets for the sample explorer.
 
     Returns explorer metadata keyed by scope id.
     """
 
     output_path = Path(output_path)
-    assets_dir = output_path.with_suffix("")
-    assets_dir = assets_dir.with_name(f"{assets_dir.name}.assets")
+    output_dir = output_path.parent
+    assets_dir = Path(assets_dir) if assets_dir is not None else output_path.with_suffix("").with_name(f"{output_path.stem}.assets")
     shutil.rmtree(assets_dir, ignore_errors=True)
     assets_dir.mkdir(parents=True, exist_ok=True)
 
@@ -327,7 +327,7 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict]) -> dict[
 
         scope_metadata[scope_id] = {
             "sample_count": sample_count,
-            "assets_dir": assets_dir.name,
+            "assets_dir": str(assets_dir.relative_to(output_dir)),
             "preview_chunks": preview_chunks,
             "detail_chunks": detail_chunks,
             "has_scores": bool(scope_source.get("has_scores")),

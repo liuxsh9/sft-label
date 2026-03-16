@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
 from sft_label.tools.visualize_labels import compute_viz_data, generate_dashboard
@@ -28,6 +29,16 @@ def _sample_with_unmapped(sample_id: str, query: str, unmapped: list[dict]) -> d
             "unmapped": unmapped,
         },
     }
+
+
+def _bootstrap_from_html(html: str) -> dict:
+    match = re.search(
+        r'<script id="dashboard-bootstrap" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
 
 
 def test_compute_viz_data_includes_unmapped_examples():
@@ -105,11 +116,15 @@ def test_generate_dashboard_renders_unmapped_section(tmp_path):
 
     out = generate_dashboard(tmp_path)
     html = out.read_text(encoding="utf-8")
+    bootstrap = _bootstrap_from_html(html)
+    data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
 
-    assert "Unmapped Tags" in html
-    assert "gpu-porting" in html
-    assert "sample-1" in html
-    assert "WebGPU rendering support" in html
+    assert bootstrap["manifestUrl"] == "dashboard_labeling.data/manifest.json"
+    assert manifest["scopes"]["global"]["summary"]["pass1_total"] == 1
+    assert detail["pass1"]["modes"]["sample"]["unmapped_details"]["by_dimension"]["task"][0]["label"] == "gpu-porting"
+    assert detail["pass1"]["modes"]["sample"]["unmapped_details"]["by_dimension"]["task"][0]["examples"][0]["id"] == "sample-1"
 
 
 def test_generate_dashboard_tree_payload_keeps_unmapped_counts(tmp_path):
@@ -129,10 +144,14 @@ def test_generate_dashboard_tree_payload_keeps_unmapped_counts(tmp_path):
 
     out = generate_dashboard(tmp_path, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
     html = out.read_text(encoding="utf-8")
+    _bootstrap_from_html(html)
+    data_dir = out.with_name(f"{out.stem}.data")
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
 
-    assert "Unmapped Tags" in html
-    assert "gpu-porting" in html
-    assert "No example sample loaded for this scope." in html
+    rows = detail["pass1"]["modes"]["sample"]["unmapped_details"]["by_dimension"]["task"]
+    assert rows[0]["label"] == "gpu-porting"
+    assert rows[0]["count"] == 2
+    assert rows[0]["examples"] == []
 
 
 def test_generate_dashboard_stats_only_single_scope_uses_stats_and_explorer_assets(tmp_path):
@@ -158,21 +177,24 @@ def test_generate_dashboard_stats_only_single_scope_uses_stats_and_explorer_asse
 
     out = generate_dashboard(tmp_path, labeled_file=None, stats_file=PASS1_STATS_FILE)
     html = out.read_text(encoding="utf-8")
-    assets_dir = out.with_suffix("").with_name(f"{out.stem}.assets")
+    bootstrap = _bootstrap_from_html(html)
+    data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+    explorer_dir = data_dir / "explorer"
 
-    assert assets_dir.exists()
-    assert any(path.name.startswith("preview_") for path in assets_dir.iterdir())
-    assert any(path.name.startswith("detail_") for path in assets_dir.iterdir())
-
-    match = re.search(r"const DATA = (.*?);\nconst STATE", html, re.S)
-    assert match is not None
-    payload = json.loads(match.group(1))
-    assert payload["scopes"]["global"]["summary"]["pass1_total"] == 1
-    assert payload["scopes"]["global"]["pass1"]["unmapped_details"]["total_occurrences"] == 1
-    assert payload["explorer"]["enabled"] is True
-    assert payload["scopes"]["global"]["explorer"]["sample_count"] == 1
-    assert payload["scopes"]["global"].get("pass2") is None
-    assert 'scopeHasPass2Data(scope)' in html
+    assert bootstrap["manifestUrl"] == "dashboard_labeling.data/manifest.json"
+    assert "dashboard.js" in html
+    assert "const DATA =" not in html
+    assert explorer_dir.exists()
+    assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
+    assert any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
+    assert manifest["scopes"]["global"]["summary"]["pass1_total"] == 1
+    assert manifest["explorer"]["enabled"] is True
+    assert manifest["scopes"]["global"]["explorer"]["sample_count"] == 1
+    assert detail["pass1"]["modes"]["sample"]["unmapped_details"]["total_occurrences"] == 1
+    assert detail["pass1"]["modes"]["sample"].get("conf_matrix") is None
+    assert detail.get("pass2") is None
 
 
 def test_compute_viz_data_conversation_mode_merges_multiturn_tags():
@@ -266,8 +288,37 @@ def test_generate_dashboard_renders_aggregation_toggle(tmp_path):
     out = generate_dashboard(tmp_path)
     html = out.read_text(encoding="utf-8")
 
-    assert 'aggregationMode: "sample"' in html
-    assert 'data-aggregation-mode' in html
-    assert 'language_toggle_help' in html
-    assert 'dashboard.locale' in html
-    assert 'Aggregation mode' in html
+    assert 'dashboard-bootstrap' in html
+    assert 'dashboard.js' in html
+    assert 'dashboard.css' in html
+    assert 'dashboard.locale' not in html
+
+
+def test_generate_dashboard_reuses_shared_static_base_url_across_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("SFT_LABEL_DASHBOARD_STATIC_BASE_URL", "/static/sft-label-dashboard/v1")
+    stats = {
+        "total_samples": 1,
+        "input_file": "labeled.json",
+        "success_rate": 1.0,
+        "total_tokens": 1,
+        "arbitrated_rate": 0.0,
+        "unmapped_unique_count": 0,
+        "tag_distributions": {"task": {"feature-implementation": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+    sample = _sample_with_unmapped("sample-1", "Add logging.", [])
+
+    run_outputs = []
+    for run_name in ("run_a", "run_b"):
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        (run_dir / "labeled.json").write_text(json.dumps([sample]), encoding="utf-8")
+        (run_dir / PASS1_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+        run_outputs.append(generate_dashboard(run_dir))
+
+    htmls = [path.read_text(encoding="utf-8") for path in run_outputs]
+    assert all("/static/sft-label-dashboard/v1/dashboard.js" in html for html in htmls)
+    assert all("/static/sft-label-dashboard/v1/dashboard.css" in html for html in htmls)
+    assert not any((path.parent / "_dashboard_static").exists() for path in run_outputs)

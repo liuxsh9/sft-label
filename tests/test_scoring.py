@@ -11,6 +11,7 @@ Covers:
 
 import json
 import math
+import re
 from pathlib import Path
 
 from sft_label.artifacts import (
@@ -38,6 +39,16 @@ from sft_label.scoring import (
     _infer_domain_backfill,
 )
 from sft_label.prompts_value import SCORING_SYSTEM_COMPACT, build_scoring_messages
+
+
+def _bootstrap_from_html(html: str) -> dict:
+    match = re.search(
+        r'<script id="dashboard-bootstrap" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
 from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
 
 
@@ -2185,11 +2196,21 @@ class TestIntegrationScoring:
         assert "thinking_mode_stats" in stats_out
         assert "weights_used" in stats_out
 
-        # Verify dashboard is valid HTML
-        html = (tmp_path / dashboard_relpath(PASS2_DASHBOARD_FILE)).read_text(encoding="utf-8")
+        # Verify dashboard is valid HTML and uses the new sidecar contract
+        dashboard_path = tmp_path / dashboard_relpath(PASS2_DASHBOARD_FILE)
+        html = dashboard_path.read_text(encoding="utf-8")
+        bootstrap = _bootstrap_from_html(html)
+        data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
+        manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+        detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
         assert "<!DOCTYPE html>" in html
         assert "SFT Labeling & Scoring Dashboard" in html
         assert "Scope Navigator" in html
+        assert bootstrap["manifestUrl"] == "dashboard_scoring.data/manifest.json"
+        assert "dashboard.js" in html
+        assert "const DATA =" not in html
+        assert manifest["scopes"]["global"]["summary"]["scored_total"] > 0
+        assert detail["pass2"]["modes"]["sample"]["overview"]["total_scored"] > 0
 
         # Verify stats return value
         assert result is not None

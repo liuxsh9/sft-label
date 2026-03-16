@@ -6,12 +6,16 @@ legacy aliases for backward compatibility.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Iterable
 
 # Shared output directory for runtime-generated dashboards
 DASHBOARDS_DIRNAME = "dashboards"
+DASHBOARD_RUNTIME_DIRNAME = "_dashboard_static"
+DASHBOARD_RUNTIME_VERSION = "v1"
+DASHBOARD_STATIC_BASE_URL_ENV = "SFT_LABEL_DASHBOARD_STATIC_BASE_URL"
 
 # Pass 1 (labeling)
 PASS1_STATS_FILE = "stats_labeling.json"
@@ -65,6 +69,19 @@ def pass2_global_dashboard_legacy_filename(input_name: str) -> str:
 def dashboard_relpath(filename: str) -> Path:
     """Return the relative runtime location for a dashboard HTML file."""
     return Path(DASHBOARDS_DIRNAME) / filename
+
+
+def dashboard_data_dirname(filename: str | Path) -> str:
+    """Return the sidecar data directory name for a dashboard HTML file."""
+    name = Path(filename).name
+    stem = Path(name).stem
+    return f"{stem}.data"
+
+
+def runtime_static_base_url() -> str | None:
+    """Return the configured shared static dashboard asset base URL, if any."""
+    value = os.getenv(DASHBOARD_STATIC_BASE_URL_ENV, "").strip()
+    return value or None
 
 
 def resolve_dashboard_output(base_dir: Path | str, output_file: str | Path) -> Path:

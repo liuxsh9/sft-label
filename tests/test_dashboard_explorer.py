@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from sft_label.artifacts import PASS2_STATS_FILE, PASS2_SUMMARY_STATS_FILE
@@ -18,6 +19,16 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
         encoding="utf-8",
     )
+
+
+def _bootstrap_from_html(html: str) -> dict:
+    match = re.search(
+        r'<script id="dashboard-bootstrap" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
 
 
 def _scored_sample(
@@ -105,42 +116,24 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
 
     dashboard_path = generate_value_dashboard(tmp_path, scored_file="scored.jsonl")
     html = dashboard_path.read_text(encoding="utf-8")
+    bootstrap = _bootstrap_from_html(html)
+    data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
 
     assert dashboard_path.exists()
-    assert "Sample Explorer" in html
-    assets_dir = dashboard_path.with_suffix("").with_name(f"{dashboard_path.stem}.assets")
-    assert assets_dir.exists()
-    assert any(path.name.startswith("preview_") for path in assets_dir.iterdir())
-    assert any(path.name.startswith("detail_") for path in assets_dir.iterdir())
-    assert '"sample_count": 2' in html
-    assert "Selection Thresholds" in html
-    assert "Coverage At Thresholds" in html
-    assert "Flag Impact" in html
-    assert 'data-explorer-patch=' in html
-    assert 'id="explorer-min-value"' in html
-    assert 'id="explorer-flag-query"' in html
-    assert 'id="explorer-conv-value-min"' in html
-    assert 'id="explorer-turn-count-min"' in html
-    assert 'id="explorer-conv-selection-max"' in html
-    assert 'id="explorer-observed-turn-ratio-min"' in html
-    assert 'id="explorer-observed-turn-ratio-max"' in html
-    assert 'id="explorer-rarity-confidence-min"' in html
-    assert 'id="explorer-rarity-confidence-max"' in html
-    assert 'id="explorer-source-path"' in html
-    assert 'id="explorer-max-selection"' in html
-    assert 'candidate files' in html
-    assert "stream large files chunk-by-chunk" in html
-    assert "Preview limited to first" in html
-    assert "Raw JSON Preview" in html
-    assert "Observed Turn Coverage" in html
-    assert "Rarity Confidence" in html
-    assert "Low Coverage" in html
-    assert "Low Rarity Conf" in html
-    assert "EXPLORER_PREVIEW_CACHE_LIMIT = 6" in html
-    assert "EXPLORER_DETAIL_CACHE_LIMIT = 18" in html
-    assert "restoreDashboardState();" in html
-    assert 'window.addEventListener("hashchange"' in html
-    preview_asset = next(path for path in assets_dir.iterdir() if path.name.startswith("preview_"))
+    assert bootstrap["manifestUrl"] == "dashboard_scoring.data/manifest.json"
+    assert "dashboard.js" in html
+    assert "const DATA =" not in html
+    explorer_dir = data_dir / "explorer"
+    assert explorer_dir.exists()
+    assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
+    assert any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
+    assert manifest["scopes"]["global"]["explorer"]["sample_count"] == 2
+    assert detail["pass2"]["modes"]["sample"]["selection_thresholds"]["top_25pct"]["count"] == 1
+    assert detail["pass2"]["modes"]["sample"]["coverage_at_thresholds"]["5.0"]["retained"] == 1
+    assert detail["pass2"]["modes"]["sample"]["flag_value_impact"]["low-correctness"]["count"] == 1
+    preview_asset = next(path for path in explorer_dir.iterdir() if path.name.startswith("preview_"))
     preview_text = preview_asset.read_text(encoding="utf-8")
     assert '"conv_value": 6.8' in preview_text
     assert '"turn_count": 4' in preview_text
@@ -210,12 +203,15 @@ def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Pa
 
     dashboard_path = generate_value_dashboard(meta_root, scored_file=None, stats_file=PASS2_SUMMARY_STATS_FILE)
     html = dashboard_path.read_text(encoding="utf-8")
+    _bootstrap_from_html(html)
+    data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((data_dir / "scopes" / "file_code_sample_jsonl.json").read_text(encoding="utf-8"))
 
     assert dashboard_path.exists()
-    assert "file:code/sample.jsonl" in html
-    assert '"explorer"' in html
-    assert "Conv Value" in html
-    assert "Observed Turn Coverage" in html
-    assert "Source File" in html
-    assets_dir = dashboard_path.with_suffix("").with_name(f"{dashboard_path.stem}.assets")
-    assert any(path.name.startswith("preview_") for path in assets_dir.iterdir())
+    assert "dashboard_scoring.data/manifest.json" in html
+    assert "file:code/sample.jsonl" in json.dumps(manifest, ensure_ascii=False)
+    assert manifest["scopes"]["file:code/sample.jsonl"]["explorer"]["has_scores"] is True
+    assert detail["conversation"]["mean_conv_value"] == 6.5
+    explorer_dir = data_dir / "explorer"
+    assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())

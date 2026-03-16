@@ -12,11 +12,14 @@ from sft_label.artifacts import (
     PASS2_SUMMARY_STATS_FILE,
     resolve_dashboard_output,
 )
-from sft_label.tools.dashboard_explorer import build_explorer_assets
 from sft_label.tools.dashboard_scopes import build_scope_tree
-from sft_label.tools.dashboard_template import render_dashboard_html
 from sft_label.tools.dashboard_aggregation import build_pass2_viz, build_scope_summary, load_data_file
-from sft_label.tools.visualize_labels import _dashboard_subtitle, compute_viz_data, load_run
+from sft_label.tools.visualize_labels import (
+    _dashboard_subtitle,
+    _write_dashboard_bundle,
+    compute_viz_data,
+    load_run,
+)
 
 
 def load_value_run(run_dir, scored_file="scored.json", stats_file=PASS2_STATS_FILE):
@@ -300,23 +303,11 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     }, explorer_sources
 
 
-def _attach_explorer_payload(payload: dict, explorer_meta: dict[str, dict]) -> None:
-    if not explorer_meta:
-        return
-    for scope_id, meta in explorer_meta.items():
-        if scope_id in payload.get("scopes", {}):
-            payload["scopes"][scope_id]["explorer"] = meta
-    payload["explorer"] = {
-        "enabled": True,
-        "result_limit": 200,
-        "detail_limit_notice": "Explorer scans preview shards progressively and loads full details on demand.",
-    }
-
-
 def generate_value_dashboard(run_dir, scored_file="scored.json",
                              stats_file=PASS2_STATS_FILE,
                              output_file="dashboard_scoring.html",
-                             quiet=False):
+                             quiet=False,
+                             static_base_url: str | None = None):
     """Generate an interactive Pass 2 dashboard."""
     run_dir = Path(run_dir)
     output_path = resolve_dashboard_output(run_dir, output_file)
@@ -341,9 +332,13 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
                 }
             )
 
-    _attach_explorer_payload(payload, build_explorer_assets(output_path, explorer_sources))
-
-    output_path.write_text(render_dashboard_html(payload), encoding="utf-8")
+    _write_dashboard_bundle(
+        output_path,
+        payload,
+        explorer_sources,
+        dashboard_type="scoring",
+        static_base_url=static_base_url,
+    )
     if not quiet:
         print(f"  Dashboard: {output_path}")
     return output_path
