@@ -429,6 +429,45 @@ def _histogram_bins(values: list[float]) -> list[int]:
     return bins
 
 
+def _stats_only_pass2_mode(stats: dict, *, mode_id: str, unit_label: str, per_file_summary: list[dict] | None = None) -> dict:
+    score_distributions = {
+        key: value
+        for key, value in (stats.get("score_distributions") or {}).items()
+        if isinstance(value, dict)
+    }
+    rarity_distribution = score_distributions.get("rarity_score") or {}
+    return {
+        "overview": {
+            "total_scored": stats.get("total_scored", 0),
+            "total_failed": stats.get("total_failed", 0),
+            "input_file": stats.get("input_file") or stats.get("input_path", ""),
+            "mean_value": (score_distributions.get("value_score") or {}).get("mean", 0),
+            "mean_selection": (score_distributions.get("selection_score") or {}).get("mean", 0),
+            "mean_complexity": (score_distributions.get("complexity_overall") or {}).get("mean", 0),
+            "mean_quality": (score_distributions.get("quality_overall") or {}).get("mean", 0),
+            "median_rarity": rarity_distribution.get("p50", rarity_distribution.get("mean", 0)),
+            "mean_confidence": (score_distributions.get("confidence") or {}).get("mean", 0),
+            "total_tokens": stats.get("total_tokens", 0),
+        },
+        "selection_thresholds": stats.get("selection_thresholds", {}),
+        "score_distributions": score_distributions,
+        "sub_score_means": stats.get("sub_score_means", {}),
+        "value_by_tag": stats.get("value_by_tag", {}),
+        "selection_by_tag": stats.get("selection_by_tag", {}),
+        "thinking_mode_stats": stats.get("thinking_mode_stats", {}),
+        "flag_counts": stats.get("flag_counts", {}),
+        "flag_value_impact": stats.get("flag_value_impact", {}),
+        "coverage_at_thresholds": stats.get("coverage_at_thresholds", {}),
+        "weights_used": stats.get("weights_used", {}),
+        "per_file_summary": per_file_summary or stats.get("per_file_summary", []),
+        "histograms": stats.get("histograms", {}),
+        "confidence_histogram": stats.get("confidence_histogram", [0] * 10),
+        "selection_vs_value": stats.get("selection_vs_value", {}),
+        "unit_label": unit_label,
+        "mode_id": mode_id,
+    }
+
+
 def _sample_pass2_unit(sample: dict) -> dict | None:
     value = sample.get("value") or {}
     if not value:
@@ -534,6 +573,13 @@ def _compute_pass2_from_units(units: list[dict], stats: dict, *, mode_id: str, u
             "unit_label": unit_label,
             "mode_id": mode_id,
         }
+    if not units:
+        return _stats_only_pass2_mode(
+            stats,
+            mode_id=mode_id,
+            unit_label=unit_label,
+            per_file_summary=per_file_summary,
+        )
 
     def extract(field: str) -> list[float]:
         return [unit[field] for unit in units if isinstance(unit.get(field), (int, float))]
