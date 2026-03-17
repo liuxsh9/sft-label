@@ -39,6 +39,7 @@ from sft_label.dashboard_service import (
     start_dashboard_service,
     stop_dashboard_service,
 )
+from sft_label.progress_heartbeat import run_with_heartbeat
 
 
 def _start_msg(lang: str, zh: str, en: str) -> str:
@@ -421,6 +422,7 @@ def _estimate_end_to_end_llm_calls(args, config):
     from sft_label.inline_rows import iter_row_sample_bundles_from_jsonl
     from sft_label.inline_migration import load_inline_migration_index
     from sft_label.inline_scoring import infer_inline_scoring_target
+    from sft_label.scoring import ScoringDirectoryWorkloadEstimate
 
     inline_target = infer_inline_scoring_target(input_path)
     if inline_target is not None and input_path.is_dir() and input_path == inline_target.layout.run_root:
@@ -450,6 +452,14 @@ def _estimate_end_to_end_llm_calls(args, config):
         pass1_calls = est.initial_estimated_llm_calls
         pass1_labeled = est.total_labeled_samples
         pass2_samples = est.total_samples
+        pass1_workload_estimate = est
+        pass2_workload_estimate = ScoringDirectoryWorkloadEstimate(
+            files_planned=est.files_planned,
+            total_samples=est.total_samples,
+            baseline_total_llm_calls=est.total_samples,
+            initial_estimated_llm_calls=_estimate_pass2_calls(est.total_samples, config.sample_max_retries),
+            scan_elapsed_seconds=est.scan_elapsed_seconds,
+        )
     else:
         sparse_kw = dict(
             full_label_count=config.sparse_full_label_count,
@@ -484,6 +494,8 @@ def _estimate_end_to_end_llm_calls(args, config):
         baseline = pass1_labeled * 2
         calls_per_sample = 2.2 if not args.no_arbitration else 2.0
         pass1_calls = max(int(round(pass1_labeled * calls_per_sample)), baseline)
+        pass1_workload_estimate = None
+        pass2_workload_estimate = None
 
     pass2_calls = _estimate_pass2_calls(pass2_samples, config.sample_max_retries)
     return {
@@ -492,6 +504,8 @@ def _estimate_end_to_end_llm_calls(args, config):
         "pass1_est_calls": pass1_calls,
         "pass2_est_calls": pass2_calls,
         "total_est_calls": pass1_calls + pass2_calls,
+        "pass1_workload_estimate": pass1_workload_estimate,
+        "pass2_workload_estimate": pass2_workload_estimate,
     }
 
 
@@ -527,10 +541,17 @@ def cmd_run(args):
 
     llm_progress_cb = None
     global_tracker = None
+    precomputed_workload_estimate = None
+    precomputed_scoring_workload_estimate = None
     if getattr(args, "score", False):
-        plan = _estimate_end_to_end_llm_calls(args, config)
+        plan = run_with_heartbeat(
+            "Estimating workload",
+            lambda: _estimate_end_to_end_llm_calls(args, config),
+        )
         if plan:
             global_tracker = _CombinedLLMProgressTracker(plan["total_est_calls"])
+            precomputed_workload_estimate = plan.get("pass1_workload_estimate")
+            precomputed_scoring_workload_estimate = plan.get("pass2_workload_estimate")
             print(
                 "Run plan | "
                 f"llm~{plan['total_est_calls']} = "
@@ -550,6 +571,7 @@ def cmd_run(args):
             mode=args.mode,
             migrate_from=args.migrate_from,
             llm_progress_cb=llm_progress_cb,
+            precomputed_workload_estimate=precomputed_workload_estimate,
         ))
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -569,6 +591,7 @@ def cmd_run(args):
                 config=config,
                 resume=args.mode in {"incremental", "migrate"},
                 llm_progress_cb=llm_progress_cb,
+                precomputed_workload_estimate=precomputed_scoring_workload_estimate,
             ))
 
     # Optional semantic clustering pass (trajectory-level)
@@ -1103,7 +1126,10 @@ def cmd_start(args, parser):
         run_dir = _extract_dashboard_publish_run_dir(launched_args, result)
         if run_dir:
             try:
-                published = publish_run_dashboards(dashboard_service, run_dir)
+                published = run_with_heartbeat(
+                    _start_msg(lang, "正在发布 dashboards", "Publishing dashboards"),
+                    lambda: publish_run_dashboards(dashboard_service, run_dir),
+                )
             except (FileNotFoundError, ValueError) as e:
                 print(_start_msg(
                     lang,

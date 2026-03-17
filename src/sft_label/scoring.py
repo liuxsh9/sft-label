@@ -53,6 +53,7 @@ from sft_label.pipeline import (
     format_progress_info,
     parse_run_progress,
 )
+from sft_label.progress_heartbeat import run_with_heartbeat
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
     PASS1_SUMMARY_STATS_FILE,
@@ -2216,7 +2217,8 @@ def _create_progress():
 
 
 async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
-                      limit=0, config=None, resume=False, llm_progress_cb=None):
+                      limit=0, config=None, resume=False, llm_progress_cb=None,
+                      precomputed_workload_estimate=None):
     """Run value scoring (Pass 2) on pre-labeled data.
 
     Args:
@@ -2259,6 +2261,7 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
             input_path, output_dir, tag_stats_path, limit, config,
             resume=resume,
             llm_progress_cb=llm_progress_cb,
+            precomputed_workload_estimate=precomputed_workload_estimate,
         )
     else:
         return await _run_scoring_file(
@@ -2703,9 +2706,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     # Conversation-level aggregation (re-read scored.jsonl for chunked mode)
     try:
-        from sft_label.conversation import aggregate_conversations, write_conversation_scores
-        scored_path = output_dir / "scored.jsonl"
-        if scored_path.exists():
+        def _aggregate_chunked_conversations():
+            from sft_label.conversation import aggregate_conversations, write_conversation_scores
+
+            scored_path = output_dir / "scored.jsonl"
+            if not scored_path.exists():
+                return None
+
             conv_samples = []
             with open(scored_path, encoding="utf-8") as f:
                 for line in f:
@@ -2716,15 +2723,24 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if conv_records:
                 write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
             del conv_samples
+            return conv_records
+
+        run_with_heartbeat("Aggregating conversation scores", _aggregate_chunked_conversations)
     except Exception as e:
         print(f"  Warning: conversation aggregation failed: {e}")
 
     # Dashboard
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
-        generate_value_dashboard(output_dir, scored_file="scored.jsonl",
-                                 stats_file=PASS2_STATS_FILE,
-                                 output_file=PASS2_DASHBOARD_FILE)
+        run_with_heartbeat(
+            "Generating scoring dashboard",
+            lambda: generate_value_dashboard(
+                output_dir,
+                scored_file="scored.jsonl",
+                stats_file=PASS2_STATS_FILE,
+                output_file=PASS2_DASHBOARD_FILE,
+            ),
+        )
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
@@ -3246,19 +3262,30 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     # Conversation-level aggregation
     try:
-        from sft_label.conversation import aggregate_conversations, write_conversation_scores
-        conv_records = aggregate_conversations(samples)
-        if conv_records:
-            write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+        def _aggregate_conversations_in_memory():
+            from sft_label.conversation import aggregate_conversations, write_conversation_scores
+
+            conv_records = aggregate_conversations(samples)
+            if conv_records:
+                write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+            return conv_records
+
+        run_with_heartbeat("Aggregating conversation scores", _aggregate_conversations_in_memory)
     except Exception as e:
         print(f"  Warning: conversation aggregation failed: {e}")
 
     # Dashboard
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
-        generate_value_dashboard(output_dir, scored_file="scored.json",
-                                 stats_file=PASS2_STATS_FILE,
-                                 output_file=PASS2_DASHBOARD_FILE)
+        run_with_heartbeat(
+            "Generating scoring dashboard",
+            lambda: generate_value_dashboard(
+                output_dir,
+                scored_file="scored.json",
+                stats_file=PASS2_STATS_FILE,
+                output_file=PASS2_DASHBOARD_FILE,
+            ),
+        )
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
@@ -3632,7 +3659,8 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
 
 
 async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, config,
-                                 resume=False, llm_progress_cb=None):
+                                 resume=False, llm_progress_cb=None,
+                                 precomputed_workload_estimate=None):
     """Score all labeled files in a directory with cross-file parallelism.
 
     Uses watermark-based file loading (same pattern as Pass 1's
@@ -3668,11 +3696,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     rarity_mode = resolve_rarity_mode(config)
 
     print(f"Found {len(labeled_files)} labeled files in {input_dir}")
-    workload_estimate = estimate_scoring_directory_workload(
-        labeled_files,
-        limit=limit,
-        config=config,
-    )
+    workload_estimate = precomputed_workload_estimate
+    if workload_estimate is None:
+        workload_estimate = run_with_heartbeat(
+            "Estimating Pass 2 workload",
+            lambda: estimate_scoring_directory_workload(
+                labeled_files,
+                limit=limit,
+                config=config,
+            ),
+        )
     print(
         "  Plan | "
         f"{workload_estimate.files_planned} files, "

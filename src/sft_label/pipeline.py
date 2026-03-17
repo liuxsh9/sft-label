@@ -57,6 +57,7 @@ from sft_label.inline_rows import (
     iter_row_sample_bundles_from_jsonl,
 )
 from sft_label.inline_scoring import infer_inline_scoring_target
+from sft_label.progress_heartbeat import run_with_heartbeat
 from sft_label.run_layout import InlineRunLayout, resolve_run_root
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
@@ -3070,10 +3071,16 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
             layout.dashboard_path(global_dashboard) if layout is not None
             else (run_dir / global_dashboard)
         )
-        generate_dashboard(dashboard_source, labeled_file=None,
-                           stats_file=PASS1_SUMMARY_STATS_FILE,
-                           output_file=str(dashboard_output))
-        print(f"\nGlobal dashboard generated: {dashboard_output}")
+        generated_output = run_with_heartbeat(
+            "Generating labeling dashboard",
+            lambda: generate_dashboard(
+                dashboard_source,
+                labeled_file=None,
+                stats_file=PASS1_SUMMARY_STATS_FILE,
+                output_file=str(dashboard_output),
+            ),
+        )
+        print(f"\nGlobal dashboard generated: {generated_output}")
     except Exception as e:
         print(f"\nGlobal dashboard generation skipped: {e}")
 
@@ -3106,6 +3113,7 @@ async def run(
     mode: str = "refresh",
     migrate_from: str | Path | None = None,
     llm_progress_cb=None,
+    precomputed_workload_estimate=None,
 ) -> dict:
     """Library entry point for the labeling pipeline.
 
@@ -3352,16 +3360,21 @@ async def run(
                 "created_at": datetime.now().isoformat(),
             },
         )
-        workload_estimate = estimate_directory_workload(
-            dir_files,
-            limit=limit,
-            shuffle=shuffle,
-            config=config,
-            completed_set=None,
-            enable_arbitration=enable_arbitration,
-            mode=mode,
-            migration_index=migration_index,
-        )
+        workload_estimate = precomputed_workload_estimate
+        if workload_estimate is None:
+            workload_estimate = run_with_heartbeat(
+                "Estimating Pass 1 workload",
+                lambda: estimate_directory_workload(
+                    dir_files,
+                    limit=limit,
+                    shuffle=shuffle,
+                    config=config,
+                    completed_set=None,
+                    enable_arbitration=enable_arbitration,
+                    mode=mode,
+                    migration_index=migration_index,
+                ),
+            )
         print(
             "  Plan | "
             f"{workload_estimate.files_planned} files, "

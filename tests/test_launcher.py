@@ -708,3 +708,41 @@ def test_cmd_start_dashboard_service_maintenance_can_continue_in_same_session(mo
     out = capsys.readouterr().out
     assert "dashboard-service status" in out
     assert "dashboard-service runs" in out
+
+
+def test_cmd_start_wraps_auto_publish_with_heartbeat(monkeypatch, tmp_path):
+    from sft_label.launcher import LaunchPlan
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]))
+
+    answers = iter(["", "y", ""])  # confirm, auto-publish yes, restart=no(default)
+    monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()}, raising=False)
+    monkeypatch.setattr("sft_label.cli.dispatch_command", lambda args, parser: {"run_dir": str(run_dir)}, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.publish_run_dashboards",
+        lambda svc, run_dir, config_path=None: {"run_id": "demo_run", "dashboards": {}},
+        raising=False,
+    )
+
+    wrapped_messages = []
+
+    def _fake_heartbeat(message, fn, **kwargs):
+        wrapped_messages.append(message)
+        return fn()
+
+    monkeypatch.setattr("sft_label.cli.run_with_heartbeat", _fake_heartbeat, raising=False)
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    assert any("Publishing dashboards" in message for message in wrapped_messages)

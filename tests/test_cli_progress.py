@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from sft_label.cli import (
     cmd_run,
 )
 from sft_label.config import PipelineConfig
+from sft_label.progress_heartbeat import HeartbeatFrames, run_with_heartbeat
 
 
 def _write_input(path: Path, n: int):
@@ -64,6 +66,26 @@ def test_combined_llm_progress_tracker_updates():
     assert "p2=0" in summary
 
 
+def test_heartbeat_frames_cycle_from_one_to_six_and_reset():
+    frames = HeartbeatFrames()
+    observed = [frames.next_suffix() for _ in range(8)]
+    assert observed == [".", "..", "...", "....", ".....", "......", ".", ".."]
+
+
+def test_run_with_heartbeat_emits_stage_and_completes(capsys):
+    result = run_with_heartbeat(
+        "Estimating workload",
+        lambda: time.sleep(0.08) or "done",
+        interval=0.01,
+    )
+
+    assert result == "done"
+    out = capsys.readouterr().out
+    assert "Estimating workload." in out
+    assert "Estimating workload......" in out
+    assert out.endswith("\n")
+
+
 def test_cmd_run_semantic_cluster_failure_exits_cleanly(monkeypatch, capsys):
     async def _fake_run(*args, **kwargs):
         return {"run_dir": "/tmp/fake-run"}
@@ -95,6 +117,48 @@ def test_cmd_run_recompute_rejects_score(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cmd_run(args)
     assert exc.value.code == 1
+
+
+def test_cmd_run_wraps_estimation_and_reuses_precomputed_estimates(monkeypatch):
+    captured = {}
+
+    async def _fake_run(*args, **kwargs):
+        captured["pipeline_workload"] = kwargs.get("precomputed_workload_estimate")
+        return {"run_dir": "/tmp/fake-run"}
+
+    async def _fake_score(*args, **kwargs):
+        captured["scoring_workload"] = kwargs.get("precomputed_workload_estimate")
+        return {"run_dir": "/tmp/fake-run"}
+
+    estimate_plan = {
+        "pass1_labeled_samples": 4,
+        "pass2_samples": 7,
+        "pass1_est_calls": 9,
+        "pass2_est_calls": 8,
+        "total_est_calls": 17,
+        "pass1_workload_estimate": object(),
+        "pass2_workload_estimate": object(),
+    }
+
+    heartbeat_labels = []
+
+    def _fake_heartbeat(message, fn, **kwargs):
+        heartbeat_labels.append(message)
+        return fn()
+
+    monkeypatch.setattr("sft_label.cli._estimate_end_to_end_llm_calls", lambda *a, **k: estimate_plan)
+    monkeypatch.setattr("sft_label.cli.run_with_heartbeat", _fake_heartbeat)
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+    monkeypatch.setitem(sys.modules, "sft_label.scoring", SimpleNamespace(run_scoring=_fake_score))
+
+    parser = build_parser()
+    args = parser.parse_args(["run", "--input", "input.json", "--score"])
+    result = cmd_run(args)
+
+    assert result["run_dir"] == "/tmp/fake-run"
+    assert captured["pipeline_workload"] is estimate_plan["pass1_workload_estimate"]
+    assert captured["scoring_workload"] is estimate_plan["pass2_workload_estimate"]
+    assert any("Estimating workload" in label for label in heartbeat_labels)
 
 
 def test_semantic_progress_printer_shows_progress_without_spam(capsys):
