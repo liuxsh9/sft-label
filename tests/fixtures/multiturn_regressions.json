@@ -1,0 +1,43 @@
+[
+  {
+    "id": "mt-system-preserve",
+    "metadata": {
+      "source_file": "synthetic/multiturn_regressions.json"
+    },
+    "conversations": [
+      {"from": "system", "value": "You are a careful debugging assistant."},
+      {"from": "human", "value": "Investigate the failing import."},
+      {"from": "gpt", "value": "I'll inspect the traceback."},
+      {"from": "tool", "value": "$ pytest -q tests/test_imports.py"},
+      {"from": "gpt", "value": "The error is in utils.py."},
+      {"from": "human", "value": "Patch it and explain."},
+      {"from": "gpt", "value": "Here is the patch and explanation."}
+    ]
+  },
+  {
+    "id": "mt-same-request-trajectory",
+    "conversations": [
+      {"from": "human", "value": "Fix the parser bug."},
+      {"from": "gpt", "value": "Investigating the parser."},
+      {"from": "tool", "value": "grep output: parser.py line 42"},
+      {"from": "human", "value": "Fix the parser bug."},
+      {"from": "gpt", "value": "Running targeted tests."},
+      {"from": "tool", "value": "tests output: all green"},
+      {"from": "gpt", "value": "Applied patch to parser.py."}
+    ]
+  },
+  {
+    "id": "mt-agentic-medium",
+    "conversations": [
+      {"from": "system", "value": "You are a repo assistant."},
+      {"from": "human", "value": "Optimize the query in reports.py."},
+      {"from": "gpt", "value": "I'll inspect the query path."},
+      {"from": "tool", "value": "$ grep -n \"SELECT\" reports.py"},
+      {"from": "gpt", "value": "The report joins can use an index."},
+      {"from": "human", "value": "Add the index and show the migration."},
+      {"from": "gpt", "value": "Creating the migration now."},
+      {"from": "tool", "value": "$ alembic revision -m \"add report index\""},
+      {"from": "gpt", "value": "Migration added; here's the SQL."}
+    ]
+  }
+]

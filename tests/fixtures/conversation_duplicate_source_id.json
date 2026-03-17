@@ -1,0 +1,46 @@
+[
+  {
+    "id": "dup-source_t1",
+    "metadata": {
+      "source_id": "dup-source",
+      "turn_index": 1,
+      "total_turns": 2,
+      "source_file": "runs/a/scored.json"
+    },
+    "labels": {"intent": "build"},
+    "value": {"value_score": 6.5}
+  },
+  {
+    "id": "dup-source_t2",
+    "metadata": {
+      "source_id": "dup-source",
+      "turn_index": 2,
+      "total_turns": 2,
+      "source_file": "runs/a/scored.json"
+    },
+    "labels": {"intent": "build"},
+    "value": {"value_score": 6.7}
+  },
+  {
+    "id": "dup-source_t1_b",
+    "metadata": {
+      "source_id": "dup-source",
+      "turn_index": 1,
+      "total_turns": 2,
+      "source_file": "runs/b/scored.json"
+    },
+    "labels": {"intent": "build"},
+    "value": {"value_score": 7.1}
+  },
+  {
+    "id": "dup-source_t2_b",
+    "metadata": {
+      "source_id": "dup-source",
+      "turn_index": 2,
+      "total_turns": 2,
+      "source_file": "runs/b/scored.json"
+    },
+    "labels": {"intent": "build"},
+    "value": {"value_score": 7.2}
+  }
+]

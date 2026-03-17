@@ -26,6 +26,15 @@ from sft_label.preprocessing import (
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+def _load_multiturn_fixture(sample_id: str) -> dict:
+    fixture_path = FIXTURES_DIR / "multiturn_regressions.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    for sample in payload:
+        if sample.get("id") == sample_id:
+            return sample
+    raise KeyError(f"Missing multiturn fixture: {sample_id}")
+
+
 class TestFormatDetection:
     def test_sharegpt_format(self):
         sample = {"conversations": [{"from": "human", "value": "hi"}]}
@@ -260,6 +269,34 @@ class TestNormalizeAndSlice:
         assert meta.get("trajectory_turn_count") == 5
         assert meta.get("trajectory_tool_turn_count") == 3
         assert meta.get("trajectory_assistant_turn_count") == 1
+
+
+class TestMultiturnRegressionFixtures:
+    def test_turn_metadata_semantics(self):
+        sample = _load_multiturn_fixture("mt-system-preserve")
+        slices = normalize_and_slice(sample)
+        assert len(slices) == 3
+        for idx, item in enumerate(slices, start=1):
+            meta = item["metadata"]
+            assert meta["source_id"] == "mt-system-preserve"
+            assert meta["turn_index"] == idx
+            assert meta["total_turns"] == 3
+            assert meta["source_file"] == "synthetic/multiturn_regressions.json"
+
+    def test_system_turn_preserved_in_each_slice(self):
+        sample = _load_multiturn_fixture("mt-system-preserve")
+        slices = normalize_and_slice(sample)
+        for item in slices:
+            assert item["conversations"][0]["from"] == "system"
+            assert item["conversations"][0]["value"] == "You are a careful debugging assistant."
+
+    def test_medium_agentic_multiturn_fixture_retains_tool_signal(self):
+        sample = _load_multiturn_fixture("mt-agentic-medium")
+        tool_names, tags = extract_tool_signals(sample["conversations"])
+        assert "bash" in tool_names
+        assert "bash-execution" in tags
+        slices = normalize_and_slice(sample)
+        assert len(slices) == 4
 
 
 class TestLanguageDetection:

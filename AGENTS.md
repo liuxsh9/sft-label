@@ -21,7 +21,7 @@ uv run sft-label validate
 
 # E2E test with real open-source data (requires LITELLM_BASE and LITELLM_KEY env vars)
 uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score --limit 10  # quick smoke
-uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score              # full 2300 samples
+uv run sft-label run --input tests/fixtures/e2e_folder_test/ --score              # full 1083 samples
 
 # Run labeling pipeline (requires LITELLM_BASE and LITELLM_KEY env vars)
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json

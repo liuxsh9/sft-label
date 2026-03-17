@@ -72,6 +72,15 @@ def _load_selection_regression_fixture():
     return load_selection_regression_pack(FIXTURES_DIR / "nemotron_selection_regression.json")
 
 
+def _load_multiturn_fixture(sample_id: str) -> dict:
+    fixture_path = FIXTURES_DIR / "multiturn_regressions.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    for sample in payload:
+        if sample.get("id") == sample_id:
+            return sample
+    raise KeyError(f"Missing multiturn fixture: {sample_id}")
+
+
 # ─────────────────────────────────────────────────────────
 # 8.2  Thinking Mode Detection & COT Extraction
 # ─────────────────────────────────────────────────────────
@@ -337,6 +346,18 @@ class TestTruncateForScoring:
         assert result["instruction"] == "new request"
         assert "new tool result" in result["trajectory"]
         assert "old tool result" not in result["trajectory"]
+
+    def test_same_request_trajectory_prefers_latest_request(self):
+        sample = _load_multiturn_fixture("mt-same-request-trajectory")
+        convs = sample["conversations"]
+        result = truncate_for_scoring(convs, "fast", budget=10000)
+        assert result["instruction"] == "Fix the parser bug."
+        assert "Investigating the parser." in result["prior_context"]
+        assert "grep output: parser.py" in result["prior_context"]
+        assert "Running targeted tests." in result["trajectory"]
+        assert "tests output: all green" in result["trajectory"]
+        assert "Investigating the parser." not in result["trajectory"]
+        assert result["trajectory_turn_count"] == 2
 
     def test_budget_preserves_final_answer_alongside_large_tool_output(self):
         huge_tool = "tool-output-" * 1500

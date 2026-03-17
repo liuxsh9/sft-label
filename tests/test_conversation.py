@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import pytest
 
 from sft_label.conversation import (
@@ -18,6 +19,14 @@ from sft_label.conversation import (
     merge_conversation_record_batches,
     write_conversation_scores,
 )
+
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _load_collision_fixture() -> list[dict]:
+    fixture_path = FIXTURES_DIR / "conversation_duplicate_source_id.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
 # ── Helpers ──
@@ -107,17 +116,13 @@ class TestGroupByConversation:
         assert group_by_conversation([sample]) == {}
 
     def test_source_file_separates_duplicate_source_ids(self):
-        samples = [
-            _slice("dup", 1, 2, source_file="/tmp/a/scored.json"),
-            _slice("dup", 2, 2, source_file="/tmp/a/scored.json"),
-            _slice("dup", 1, 2, source_file="/tmp/b/scored.json"),
-            _slice("dup", 2, 2, source_file="/tmp/b/scored.json"),
-        ]
+        samples = _load_collision_fixture()
         groups = group_by_conversation(samples)
         assert set(groups) == {
-            build_conversation_key("dup", "/tmp/a/scored.json"),
-            build_conversation_key("dup", "/tmp/b/scored.json"),
+            build_conversation_key("dup-source", "runs/a/scored.json"),
+            build_conversation_key("dup-source", "runs/b/scored.json"),
         }
+        assert all(len(group) == 2 for group in groups.values())
 
     def test_conversation_uid_separates_duplicate_source_ids_in_same_file(self):
         samples = [
