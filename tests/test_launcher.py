@@ -746,3 +746,100 @@ def test_cmd_start_wraps_auto_publish_with_heartbeat(monkeypatch, tmp_path):
     cmd_start(args, parser)
 
     assert any("Publishing dashboards" in message for message in wrapped_messages)
+
+
+def test_cmd_start_auto_publish_bootstraps_lan_service_with_shareable_url(monkeypatch, capsys, tmp_path):
+    from sft_label.launcher import LaunchPlan
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]),
+    )
+
+    answers = iter([
+        "",   # confirm execution
+        "y",  # auto-publish yes
+        "",   # service name -> default
+        "",   # web root -> default
+        "2",  # exposure: LAN
+        "",   # port -> default
+        "",   # share URL -> accept guessed default
+        "",   # start service now -> default yes
+    ])
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "sft_label.cli.load_dashboard_service_store",
+        lambda config_path=None: DashboardServiceStore(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "sft_label.cli._guess_local_network_host",
+        lambda: "192.168.1.25",
+        raising=False,
+    )
+
+    init_calls = {}
+
+    def _fake_init_dashboard_service(**kwargs):
+        init_calls.update(kwargs)
+        return DashboardServiceConfig(
+            name=kwargs["name"],
+            web_root=str(kwargs["web_root"]),
+            host=kwargs["host"],
+            port=kwargs["port"],
+            service_type=kwargs["service_type"],
+            public_base_url=kwargs.get("public_base_url"),
+            pm2_name=kwargs.get("pm2_name"),
+        )
+
+    monkeypatch.setattr("sft_label.cli.init_dashboard_service", _fake_init_dashboard_service, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {
+            "state": "stopped",
+            "reachable": False,
+            "url": svc.base_url(),
+            "public_url": svc.share_base_url(),
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "sft_label.cli.start_dashboard_service",
+        lambda svc: {
+            "state": "running",
+            "reachable": True,
+            "url": svc.base_url(),
+            "public_url": svc.share_base_url(),
+        },
+        raising=False,
+    )
+    monkeypatch.setattr("sft_label.cli.dispatch_command", lambda args, parser: {"run_dir": str(run_dir)}, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.publish_run_dashboards",
+        lambda svc, run_dir, config_path=None: {
+            "run_id": "demo_run",
+            "dashboards": {
+                "labeling": {"url": "http://192.168.1.25:8765/runs/demo_run/dashboard_labeling_demo.html"},
+            },
+        },
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert init_calls["host"] == "0.0.0.0"
+    assert init_calls["public_base_url"] == "http://192.168.1.25:8765"
+    assert init_calls["service_type"] == "pm2"
+    assert "http://192.168.1.25:8765" in out

@@ -39,10 +39,15 @@ export LITELLM_BASE="http://localhost:4000/v1"
 export LITELLM_KEY="your-key"
 ```
 
-### 3. 优先使用交互启动器
+### 3. 从默认路径开始
 
 ```bash
 uv run sft-label start
+# 默认路径：
+# - 选择 “Pass 1 + Pass 2”
+# - 大多数问题保持默认
+# - 询问时开启 auto-publish
+# - 结束后直接拿到 dashboard URL
 ```
 
 如果你想先只看生成命令，不直接执行：
@@ -67,16 +72,36 @@ uv run sft-label run --input data.json --score
 uv run sft-label score --input labeled.json
 ```
 
-## `sft-label start` 是什么
+## 默认路径：`sft-label start`
 
-`uv run sft-label start` 是最推荐的新手入口。
+`uv run sft-label start` 是最推荐的默认入口。
 
-它会做四件事：
+```mermaid
+flowchart LR
+    A["start"] --> B["选择工作流"]
+    B --> C["大多保持默认"]
+    C --> D["运行"]
+    D --> E["自动发布"]
+    E --> F["输出 dashboard URL"]
+```
 
-1. **让你选择工作流**：标注、标注+打分、只打分、过滤、重算统计、重建 dashboard、dashboard 服务管理等。
+一般情况下：
+
+- 选择 **Pass 1 + Pass 2**
+- 大多数提示保持默认
+- auto-publish 回答 **yes**
+- 如果还没有 dashboard service，`start` 可以直接初始化、启动并输出稳定的 dashboard URL
+- 首次配置只需选一次访问方式：
+  - **local** → `127.0.0.1`
+  - **LAN** → `0.0.0.0`，供局域网访问
+  - **public** → `0.0.0.0`，再补上反向代理 / 对外访问 URL
+
+`start` 主要做四件事：
+
+1. **让你选择工作流**：默认推荐 Pass 1 + Pass 2，其次还有只跑 Pass 1、只打分、语义聚类、过滤、维护、导出、dashboard service 管理等。
 2. **只询问必要参数**：输入路径、可选输出路径、运行模式、prompt mode、并发等。
-3. **生成准确的 CLI 命令并展示摘要**，执行前你可以再次确认。
-4. **在任务结束后自动发布 dashboard**，如果你选择了已配置的 dashboard service。
+3. **生成准确的 CLI 命令并展示摘要**，执行前可以再确认一次。
+4. **在任务结束后输出 URL**：如果开启 auto-publish，会把 dashboard 发布到已配置服务并打印访问链接。
 
 常用参数：
 
@@ -85,6 +110,11 @@ uv run sft-label start --dry-run
 uv run sft-label start --lang en
 uv run sft-label start --lang zh
 ```
+
+两个 dashboard service 细节：
+
+- 如果默认 dashboard service 已经是 `running` 或 `starting`，`start` 会直接继续，不再要求你重启。
+- 如果你从 `sft-label start` 进入 dashboard service 维护，可以在同一会话里连续执行维护操作，不用退出重进。
 
 更详细说明见英文文档：[Interactive launcher guide](docs/guides/interactive-launcher.md)。
 

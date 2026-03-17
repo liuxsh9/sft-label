@@ -80,10 +80,12 @@ If you answer yes:
 - it picks an existing configured dashboard service, or helps initialize one if none exists
 - it can start or restart the service before the job runs
 - when the run finishes, it publishes the generated dashboard bundle and prints stable URLs
+- on first bootstrap, it asks for a concise exposure mode (`local`, `LAN`, or `public`) instead of raw host details first
 
 Important details:
 
 - the auto-bootstrap path initializes a **PM2-backed** default service
+- `LAN` / `public` use `0.0.0.0`; `public` is where you should provide a reverse-proxy or externally shared base URL
 - if you prefer the lightweight builtin server for local use, initialize it manually with `dashboard-service init --service-type builtin`
 
 ## When to stop using the launcher

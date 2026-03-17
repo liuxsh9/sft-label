@@ -40,10 +40,15 @@ export LITELLM_BASE="http://localhost:4000/v1"
 export LITELLM_KEY="your-key"
 ```
 
-### 3. Start with the interactive launcher
+### 3. Start with the default path
 
 ```bash
 uv run sft-label start
+# default path:
+# - choose "Pass 1 + Pass 2"
+# - keep most prompts at their defaults
+# - enable auto-publish when asked
+# - finish with dashboard URLs
 ```
 
 If you want to preview the command first:
@@ -68,20 +73,40 @@ uv run sft-label run --input data.json --score
 uv run sft-label score --input labeled.json
 ```
 
-## How `sft-label start` works
+## Default path: `sft-label start`
 
-`uv run sft-label start` is the recommended entry point for new users.
+`uv run sft-label start` is the recommended default entry point.
 
-It does four things:
+```mermaid
+flowchart LR
+    A["start"] --> B["Choose workflow"]
+    B --> C["Keep defaults"]
+    C --> D["Run"]
+    D --> E["Auto-publish"]
+    E --> F["Dashboard URLs"]
+```
 
-1. **Lets you choose a workflow**: by default the first recommended option is Pass 1 + Pass 2, followed by Pass 1 only, Pass 2 only, Pass 1 + Pass 2 + Pass 3, filtering, recompute, dashboard regeneration, dashboard service management, and more.
+In the common case:
+
+- choose **Pass 1 + Pass 2**
+- keep most prompts unchanged
+- answer **yes** to auto-publish
+- if no dashboard service exists yet, `start` can initialize one, start it, and print stable dashboard URLs
+- pick one dashboard exposure mode once:
+  - **local** → `127.0.0.1`
+  - **LAN** → `0.0.0.0` for same-network access
+  - **public** → `0.0.0.0` plus your reverse-proxy/public base URL
+
+What `start` does:
+
+1. **Lets you choose a workflow**: Pass 1 + Pass 2 is the default recommendation, followed by Pass 1 only, scoring only, semantic clustering, filtering, maintenance, export, and dashboard-service workflows.
 2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options.
 3. **Builds the exact CLI command for you** and shows a launch summary before execution.
-4. **Can auto-publish dashboards after the run** using your configured default dashboard service.
+4. **Can finish the run with URLs** by auto-publishing dashboards to your configured service.
 
 Two dashboard-service quality-of-life details:
 
-- If the default dashboard service is already `running` or `starting`, `start` will continue directly instead of prompting you to restart it.
+- If the default dashboard service is already `running` or `starting`, `start` continues directly instead of asking for a restart.
 - If you enter dashboard service maintenance from `sft-label start`, you can keep executing maintenance actions in the same session instead of exiting and re-entering the launcher.
 
 Useful flags:

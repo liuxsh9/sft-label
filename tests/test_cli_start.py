@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from sft_label.cli import (
     _apply_runtime_overrides,
+    _suggest_dashboard_share_base_url,
     _format_start_env_lines,
     _is_sensitive_env_key,
     _mask_secret,
@@ -25,6 +26,24 @@ def test_mask_secret_behavior():
     assert _mask_secret("") == "(empty)"
     assert _mask_secret("123456") == "******"
     assert _mask_secret("abcdefgh") == "ab***gh"
+
+
+def test_suggest_dashboard_share_base_url_uses_detected_lan_host(monkeypatch):
+    monkeypatch.setattr(
+        "sft_label.cli._guess_local_network_host",
+        lambda: "192.168.1.25",
+    )
+
+    assert _suggest_dashboard_share_base_url("local", 8765) is None
+    assert _suggest_dashboard_share_base_url("lan", 8765) == "http://192.168.1.25:8765"
+    assert _suggest_dashboard_share_base_url("public", 9000) == "http://192.168.1.25:9000"
+
+
+def test_suggest_dashboard_share_base_url_returns_none_without_guess(monkeypatch):
+    monkeypatch.setattr("sft_label.cli._guess_local_network_host", lambda: None)
+
+    assert _suggest_dashboard_share_base_url("lan", 8765) is None
+    assert _suggest_dashboard_share_base_url("public", 8765) is None
 
 
 def test_format_start_env_lines_masks_sensitive_values():

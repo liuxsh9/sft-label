@@ -23,6 +23,7 @@ Selected runtime knobs (concurrency/rps/timeout/retries) can be overridden via C
 import argparse
 import asyncio
 import os
+import socket
 import sys
 import time
 import random
@@ -90,6 +91,34 @@ def _dashboard_service_prompt(
     return input_fn(_dashboard_start_msg(lang, prompt_zh, prompt_en))
 
 
+def _guess_local_network_host() -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            host = str(sock.getsockname()[0] or "").strip()
+            if host and not host.startswith("127."):
+                return host
+    except OSError:
+        pass
+
+    try:
+        host = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+    except OSError:
+        return None
+    if host and not host.startswith("127."):
+        return host
+    return None
+
+
+def _suggest_dashboard_share_base_url(exposure: str, port: int) -> str | None:
+    if exposure not in {"lan", "public"}:
+        return None
+    host = _guess_local_network_host()
+    if not host:
+        return None
+    return f"http://{host}:{int(port)}"
+
+
 def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
     if launched_args.command not in {"run", "score", "regenerate-dashboard"}:
         return None
@@ -129,15 +158,24 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             ).strip()
             or default_root
         )
-        host = (
+        exposure_raw = (
             _dashboard_service_prompt(
                 lang,
                 input_fn,
-                "监听地址（默认 127.0.0.1）：",
-                "Host [127.0.0.1]: ",
+                "访问方式 [1=本机, 2=局域网, 3=公网/反代]（默认 2）：",
+                "Dashboard exposure [1=local, 2=LAN, 3=public/reverse-proxy] [default 2]: ",
             ).strip()
-            or "127.0.0.1"
+            or "2"
         )
+        if exposure_raw in {"1", "local"}:
+            exposure = "local"
+            host = "127.0.0.1"
+        elif exposure_raw in {"3", "public"}:
+            exposure = "public"
+            host = "0.0.0.0"
+        else:
+            exposure = "lan"
+            host = "0.0.0.0"
         port_raw = (
             _dashboard_service_prompt(
                 lang,
@@ -147,24 +185,26 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             ).strip()
             or "8765"
         )
-        public_base_url = (
-            _dashboard_service_prompt(
+        suggested_share_url = _suggest_dashboard_share_base_url(exposure, int(port_raw))
+        public_base_url = None
+        if exposure != "local":
+            prompt_suffix = (
+                f" {suggested_share_url}"
+                if suggested_share_url
+                else _dashboard_start_msg(lang, " 自动探测失败，可手填", " auto-detect unavailable; enter manually")
+            )
+            public_base_url_raw = _dashboard_service_prompt(
                 lang,
                 input_fn,
-                f"对外访问 URL（可选，默认 http://{host}:{port_raw}）：",
-                f"Public base URL (optional) [default http://{host}:{port_raw}]: ",
+                f"访问链接（回车使用默认；输入 - 表示不设置）。建议值：{prompt_suffix.strip()}：",
+                f"Share/Public URL (Enter to use default; '-' to skip). Suggested:{prompt_suffix}: ",
             ).strip()
-            or None
-        )
-        pm2_name = (
-            _dashboard_service_prompt(
-                lang,
-                input_fn,
-                f"PM2 进程名（可选，默认 sft-label-dashboard-{name}）：",
-                f"PM2 process name (optional) [default sft-label-dashboard-{name}]: ",
-            ).strip()
-            or None
-        )
+            if public_base_url_raw == "-":
+                public_base_url = None
+            elif public_base_url_raw:
+                public_base_url = public_base_url_raw
+            else:
+                public_base_url = suggested_share_url
         service = init_dashboard_service(
             name=name,
             web_root=web_root,
@@ -172,7 +212,6 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             port=int(port_raw),
             service_type="pm2",
             public_base_url=public_base_url,
-            pm2_name=pm2_name,
         )
     else:
         service = _resolve_dashboard_service(store)
