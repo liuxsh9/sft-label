@@ -92,6 +92,33 @@ class TestNormalizePangu:
         assert result["conversations"][0]["from"] == "human"
         assert result["conversations"][1]["from"] == "gpt"
 
+    def test_meta_prompt_injected_as_system_turn(self):
+        sample = {
+            "id": "sys-1",
+            "meta_prompt": "You are a careful assistant.",
+            "data": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+        }
+        result = normalize_pangu(sample)
+        assert result["metadata"]["system_prompt"] == "You are a careful assistant."
+        assert result["conversations"][0]["from"] == "system"
+        assert result["conversations"][0]["value"] == "You are a careful assistant."
+        assert result["conversations"][1]["from"] == "human"
+
+    def test_meta_prompt_preserved_in_metadata_for_roundtrip(self):
+        sample = {
+            "id": "sys-list",
+            "meta_prompt": ["Rule 1", "Rule 2"],
+            "data": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+        }
+        result = normalize_pangu(sample)
+        assert result["metadata"]["pangu_meta_prompt"] == ["Rule 1", "Rule 2"]
+
     def test_pseudo_multiturn(self):
         sample = {
             "id": "test-2",
@@ -138,6 +165,23 @@ class TestNormalizeAndSlice:
         assert meta1["slice_index"] == 1
         assert meta1["slice_position"] == 2
         assert meta1["slice_count"] == 2
+
+    def test_slices_preserve_leading_system_turns(self):
+        sample = {
+            "id": "sys-mt",
+            "meta_prompt": "Follow the system rules.",
+            "data": [
+                {"role": "user", "content": "Q1"},
+                {"role": "assistant", "content": "A1"},
+                {"role": "user", "content": "Q2"},
+                {"role": "assistant", "content": "A2"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 2
+        for sliced in result:
+            assert sliced["conversations"][0]["from"] == "system"
+            assert sliced["conversations"][0]["value"] == "Follow the system rules."
 
     def test_sharegpt_cot_metadata_preserved(self):
         """Single-turn ShareGPT with <think> should preserve thinking_mode and cot_text."""
@@ -407,6 +451,30 @@ class TestTruncation:
         assert "hint" in result[0]["value"]
         assert "patch" in result[1]["value"]
 
+    def test_truncation_preserves_leading_system_turns(self):
+        convs = [
+            {"from": "system", "value": "System rules here."},
+            {"from": "human", "value": "Q" * 6000},
+            {"from": "gpt", "value": "A" * 6000},
+            {"from": "human", "value": "Follow-up"},
+            {"from": "gpt", "value": "Response"},
+        ]
+        result, truncated = truncate_conversations_for_labeling(convs, max_total_chars=3000)
+        assert truncated
+        assert result[0]["from"] == "system"
+        assert "System rules here." in result[0]["value"]
+
+    def test_truncation_keeps_system_prefix_within_budget(self):
+        convs = [
+            {"from": "system", "value": "S" * 500},
+            {"from": "human", "value": "Q" * 500},
+            {"from": "gpt", "value": "A" * 500},
+        ]
+        result, truncated = truncate_conversations_for_labeling(convs, max_total_chars=200)
+        assert truncated
+        assert result[0]["from"] == "system"
+        assert sum(len(turn["value"]) for turn in result) <= 200
+
 
 class TestSanitizeTrainingMarkers:
     def test_strips_basic_tags(self):
@@ -585,6 +653,35 @@ class TestToPanguPseudoMultiturn:
         }
         result = to_pangu_pseudo_multiturn(sample)
         assert result["meta_prompt"] == "You are a helpful assistant"
+
+    def test_leading_system_turns_map_to_meta_prompt(self):
+        """Leading system turns should be concatenated into meta_prompt."""
+        sample = {
+            "conversations": [
+                {"from": "system", "value": "Rule 1"},
+                {"from": "system", "value": "Rule 2"},
+                {"from": "human", "value": "Hi"},
+                {"from": "gpt", "value": "Hello"},
+            ],
+            "metadata": {},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+        assert result["meta_prompt"] == "Rule 1\n\nRule 2"
+        assert "Rule 1" not in result["data"][0]["content"]
+        assert "Rule 2" not in result["data"][0]["content"]
+
+    def test_roundtrip_preserves_original_pangu_meta_prompt_shape(self):
+        original = {
+            "id": "sys-list-roundtrip",
+            "meta_prompt": ["Rule 1", "Rule 2"],
+            "data": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "[unused16][unused17]Hello"},
+            ],
+        }
+        normalized = normalize_pangu(original)
+        result = to_pangu_pseudo_multiturn(normalized)
+        assert result["meta_prompt"] == ["Rule 1", "Rule 2"]
 
     def test_tools_preserved(self):
         """Tool definitions from metadata → tools in output."""

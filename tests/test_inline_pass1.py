@@ -311,7 +311,9 @@ async def test_run_single_jsonl_chunked_preserves_original_row_order(tmp_path):
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
                              config=None, rate_limiter=None):
-        user_text = sample["conversations"][0]["value"]
+        user_text = next(
+            turn["value"] for turn in sample["conversations"] if turn["from"] == "human"
+        )
         if user_text == "slow-row":
             await asyncio.sleep(0.05)
         return sample_idx, _full_labels(user_text), _monitor()

@@ -77,6 +77,73 @@ PANGU_ROLE_MAP = {"user": "human", "assistant": "gpt", "tool": "tool"}
 CONVERSATION_UID_VERSION = "v1"
 
 
+def _meta_prompt_to_system_turns(meta_prompt):
+    """Convert Pangu meta_prompt into explicit leading system turns."""
+    if meta_prompt is None:
+        return []
+
+    if isinstance(meta_prompt, (list, tuple)):
+        items = meta_prompt
+    else:
+        items = [meta_prompt]
+
+    turns = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            turns.append({"from": "system", "value": text})
+    return turns
+
+
+def _system_turns_to_text(turns):
+    """Concatenate leading system turns into a Pangu-compatible meta_prompt string."""
+    parts = [turn.get("value", "").strip() for turn in turns if turn.get("value", "").strip()]
+    return "\n\n".join(parts)
+
+
+def _split_leading_system_turns(conversations):
+    """Split off consecutive leading system turns."""
+    idx = 0
+    while idx < len(conversations) and conversations[idx].get("from") == "system":
+        idx += 1
+    return conversations[:idx], conversations[idx:]
+
+
+def _truncate_turns_to_budget(turns, budget):
+    """Preserve turns in order, truncating the last kept turn if needed to fit budget."""
+    kept = []
+    remaining = budget
+    for turn in turns:
+        if remaining <= 0:
+            break
+        value = turn.get("value", "")
+        if len(value) <= remaining:
+            kept.append(dict(turn))
+            remaining -= len(value)
+            continue
+        if remaining < len(_TRUNCATION_MARKER) + 300:
+            truncated_value = value[:remaining]
+        else:
+            truncated_value = _truncate_text(value, remaining)
+        kept.append({**turn, "value": truncated_value})
+        remaining = 0
+        break
+    return kept, remaining
+
+
+def _resolve_pangu_meta_prompt(leading_system_turns, metadata):
+    """Choose export meta_prompt, preserving original Pangu shape when possible."""
+    raw_meta_prompt = metadata.get("pangu_meta_prompt")
+    if leading_system_turns:
+        system_text = _system_turns_to_text(leading_system_turns)
+        if raw_meta_prompt is not None and _system_turns_to_text(_meta_prompt_to_system_turns(raw_meta_prompt)) == system_text:
+            return raw_meta_prompt
+        return system_text
+    if raw_meta_prompt is not None:
+        return raw_meta_prompt
+    return metadata.get("system_prompt", "")
+
+
 def detect_format(sample):
     """Detect whether sample is ShareGPT or Pangu format."""
     if "conversations" in sample:
@@ -190,7 +257,7 @@ def normalize_pangu(sample):
     - Preserves raw COT text in metadata for Pass 2 scoring
     """
     data = sample.get("data", [])
-    conversations = []
+    conversations = _meta_prompt_to_system_turns(sample.get("meta_prompt"))
     is_pseudo_multiturn = False
     cot_parts = []
     assistant_cot_by_reply = []
@@ -224,10 +291,13 @@ def normalize_pangu(sample):
 
     # Preserve Pangu-specific info in metadata
     pangu_meta = {}
-    if sample.get("meta_prompt"):
-        pangu_meta["system_prompt"] = sample["meta_prompt"]
-    if sample.get("tools"):
-        pangu_meta["tool_definitions"] = sample["tools"]
+    if "meta_prompt" in sample:
+        pangu_meta["pangu_meta_prompt"] = sample.get("meta_prompt")
+        system_prompt = _system_turns_to_text(_meta_prompt_to_system_turns(sample.get("meta_prompt")))
+        if system_prompt:
+            pangu_meta["system_prompt"] = system_prompt
+    if "tools" in sample:
+        pangu_meta["tool_definitions"] = sample.get("tools", "")
     pangu_meta["is_pseudo_multiturn"] = is_pseudo_multiturn
     pangu_meta["original_format"] = "pangu"
     if is_pseudo_multiturn:
@@ -412,15 +482,17 @@ def to_pangu_pseudo_multiturn(sample):
     """
     conversations = sample.get("conversations", [])
     metadata = sample.get("metadata", {})
+    leading_system_turns, conversations = _split_leading_system_turns(conversations)
+    meta_prompt = _resolve_pangu_meta_prompt(leading_system_turns, metadata)
 
     if not conversations:
-        return {"data": [], "meta_prompt": "", "tools": ""}
+        return {"data": [], "meta_prompt": meta_prompt, "tools": metadata.get("tool_definitions", "")}
 
     # Pseudo-multiturn: use raw data directly if available
     if metadata.get("is_pseudo_multiturn") and metadata.get("raw_pangu_data"):
         return {
             "data": metadata["raw_pangu_data"],
-            "meta_prompt": metadata.get("system_prompt", ""),
+            "meta_prompt": meta_prompt,
             "tools": metadata.get("tool_definitions", ""),
         }
 
@@ -435,7 +507,7 @@ def to_pangu_pseudo_multiturn(sample):
         # No assistant reply — return as-is in Pangu format
         return {
             "data": [{"role": "user", "content": conversations[0].get("value", "")}],
-            "meta_prompt": metadata.get("system_prompt", ""),
+            "meta_prompt": meta_prompt,
             "tools": metadata.get("tool_definitions", ""),
         }
 
@@ -487,7 +559,7 @@ def to_pangu_pseudo_multiturn(sample):
             {"role": "user", "content": user_content},
             {"role": "assistant", "content": assistant_content},
         ],
-        "meta_prompt": metadata.get("system_prompt", ""),
+        "meta_prompt": meta_prompt,
         "tools": metadata.get("tool_definitions", ""),
     }
 
@@ -549,6 +621,20 @@ def truncate_conversations_for_labeling(conversations, max_total_chars=None,
     total_chars = sum(len(t.get("value", "")) for t in conversations)
     if total_chars <= max_total_chars:
         return conversations, False
+
+    leading_system_turns, remaining_conversations = _split_leading_system_turns(conversations)
+    if leading_system_turns:
+        kept_system_turns, remaining_budget = _truncate_turns_to_budget(leading_system_turns, max_total_chars)
+        if not remaining_conversations or remaining_budget <= 0:
+            return kept_system_turns, True
+        truncated_rest, _ = truncate_conversations_for_labeling(
+            remaining_conversations,
+            max_total_chars=remaining_budget,
+            head_ratio=head_ratio,
+            last_response_ratio=last_response_ratio,
+            per_turn_ratio=per_turn_ratio,
+        )
+        return kept_system_turns + truncated_rest, True
 
     n = len(conversations)
 
