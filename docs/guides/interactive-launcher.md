@@ -47,6 +47,7 @@ For `run`, it can guide you through:
 - prompt mode
 - sample limit
 - concurrency / RPS / timeout / retries
+- adaptive runtime / recovery sweep toggles
 - one-off environment overrides for `LITELLM_BASE` / `LITELLM_KEY`
 
 ## Useful flags

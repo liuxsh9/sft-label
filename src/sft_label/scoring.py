@@ -20,6 +20,8 @@ import time
 import asyncio
 import random
 import re
+import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -75,10 +77,281 @@ from sft_label.inline_scoring import (
 from sft_label.labels import is_partial_labels, is_usable_labels
 from sft_label.score_confidence import apply_score_confidence, score_confidence
 
+try:
+    from sft_label.llm_runtime import (
+        AdaptiveLLMRuntime,
+        OutcomeClass,
+        RequestOutcome,
+        classify_exception,
+        classify_http_result,
+    )
+except Exception:  # pragma: no cover - runtime module lands in parallel task
+    AdaptiveLLMRuntime = None
+    OutcomeClass = None
+    RequestOutcome = None
+    classify_exception = None
+    classify_http_result = None
+
 
 # ─────────────────────────────────────────────────────────
 # Rarity computation
 # ─────────────────────────────────────────────────────────
+
+
+def _cfg_bool(config, key, default):
+    if config is None:
+        return default
+    value = getattr(config, key, default)
+    if isinstance(value, bool):
+        return value
+    return default
+
+
+def _cfg_number(config, key, default):
+    if config is None:
+        return default
+    value = getattr(config, key, default)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return value
+    return default
+
+
+def _instantiate_runtime(config=None, *, concurrency=1) -> AdaptiveLLMRuntime | None:
+    """Construct the shared adaptive runtime (or return None when disabled/unavailable)."""
+    if AdaptiveLLMRuntime is None:
+        return None
+    if not _cfg_bool(config, "enable_adaptive_runtime", True):
+        return None
+    base_concurrency = max(int(concurrency), 1)
+    # rps_limit=0 means "unlimited" in the existing config; approximate it with a high ceiling
+    # so concurrency becomes the primary limiter.
+    base_rps = float(_cfg_number(config, "rps_limit", 0.0))
+    if base_rps <= 0:
+        base_rps = float(max(50, base_concurrency * 10))
+    return AdaptiveLLMRuntime(
+        base_concurrency=base_concurrency,
+        base_rps=base_rps,
+        min_concurrency=max(int(_cfg_number(config, "adaptive_min_concurrency", 1)), 1),
+        min_rps=float(_cfg_number(config, "adaptive_min_rps", 0.5)),
+        window_requests=int(_cfg_number(config, "adaptive_window_requests", 50)),
+        window_seconds=float(_cfg_number(config, "adaptive_window_seconds", 20.0)),
+        degrade_timeout_rate=float(_cfg_number(config, "adaptive_timeout_rate_degraded", 0.05)),
+        open_timeout_rate=float(_cfg_number(config, "adaptive_timeout_rate_open", 0.20)),
+        degrade_overload_rate=float(_cfg_number(config, "adaptive_overload_rate_degraded", 0.05)),
+        open_overload_rate=float(_cfg_number(config, "adaptive_overload_rate_open", 0.15)),
+        degrade_abnormal_rate=float(_cfg_number(config, "adaptive_abnormal_rate_degraded", 0.04)),
+        open_base_cooldown=float(_cfg_number(config, "adaptive_open_base_cooldown", 15.0)),
+        open_max_cooldown=float(_cfg_number(config, "adaptive_open_max_cooldown", 120.0)),
+        degrade_concurrency_factor=float(_cfg_number(config, "adaptive_degrade_concurrency_factor", 0.5)),
+        degrade_rps_factor=float(_cfg_number(config, "adaptive_degrade_rps_factor", 0.6)),
+        recovery_concurrency_step=int(_cfg_number(config, "adaptive_recovery_concurrency_step", 2)),
+        recovery_rps_step=float(_cfg_number(config, "adaptive_recovery_rps_step", 1.0)),
+    )
+
+
+@asynccontextmanager
+async def _runtime_permit(runtime, *, stage, sample_id):
+    """Acquire/release runtime permit across runtime implementations."""
+    permit = None
+    if runtime is not None and hasattr(runtime, "acquire"):
+        acquired = runtime.acquire(stage=stage, sample_id=sample_id)
+        permit = await acquired if inspect.isawaitable(acquired) else acquired
+    try:
+        yield permit
+    finally:
+        if permit is not None and hasattr(permit, "release"):
+            try:
+                released = permit.release()
+                if inspect.isawaitable(released):
+                    await released
+            except Exception:
+                pass
+        elif runtime is not None and hasattr(runtime, "release"):
+            try:
+                released = runtime.release(permit=permit)
+                if inspect.isawaitable(released):
+                    await released
+            except TypeError:
+                try:
+                    released = runtime.release()
+                    if inspect.isawaitable(released):
+                        await released
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+
+def _notify_runtime(runtime, outcome: RequestOutcome | None) -> None:
+    if runtime is None or outcome is None or not hasattr(runtime, "observe"):
+        return
+    try:
+        runtime.observe(outcome)
+    except Exception:
+        pass
+
+
+def _runtime_snapshot(runtime):
+    if runtime is None:
+        return None
+    snap = None
+    if hasattr(runtime, "snapshot"):
+        try:
+            snap = runtime.snapshot()
+        except Exception:
+            snap = None
+    elif hasattr(runtime, "to_dict"):
+        try:
+            snap = runtime.to_dict()
+        except Exception:
+            snap = None
+    if isinstance(snap, dict):
+        return snap
+    if snap is None:
+        return None
+    return {"value": str(snap)}
+
+
+_HTTP_STATUS_RE = re.compile(r"\bHTTP\s+(\d{3})\b")
+
+
+def _extract_http_status(raw: str | None, usage: dict | None) -> int | None:
+    usage = usage or {}
+    status = usage.get("status_code")
+    if isinstance(status, bool):
+        status = None
+    if isinstance(status, int):
+        return status
+    if isinstance(status, str):
+        try:
+            return int(status)
+        except ValueError:
+            pass
+    for text in (
+        usage.get("error") or "",
+        raw or "",
+    ):
+        match = _HTTP_STATUS_RE.search(text)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def _is_deployment_cooldown(raw: str | None, usage: dict | None) -> bool:
+    usage = usage or {}
+    blob = " ".join(
+        str(x or "") for x in (usage.get("error"), usage.get("error_response"), raw)
+    ).lower()
+    return "deployment cooldown" in blob or "no deployments available" in blob or "cooldown_list" in blob
+
+
+def _is_timeout_error(raw: str | None, usage: dict | None) -> bool:
+    usage = usage or {}
+    blob = f"{usage.get('error') or ''} {raw or ''}".lower()
+    return any(token in blob for token in ("timeout", "readtimeout", "connecttimeout", "timeouterror"))
+
+
+def _classify_pass2_attempt(
+    parsed,
+    raw,
+    usage,
+    score_result,
+    *,
+    latency_ms: float | None,
+) -> tuple[str, bool, RequestOutcome | None]:
+    """Classify Pass 2 attempt result for recovery sweep + runtime feedback."""
+    usage = usage or {}
+    status_code = _extract_http_status(raw, usage)
+    content_filtered = bool(usage.get("content_filtered"))
+    error_text = str(usage.get("error") or raw or "")
+    parse_error = bool(usage.get("parse_error"))
+
+    # Score schema/parse failures are treated as abnormal responses (health-relevant).
+    # NOTE: validate_score_response() always returns a dict, so callers should pass
+    # score_result=None for "malformed" / "insufficient usable scores" cases.
+    validation_error = parsed is not None and score_result is None
+
+    if classify_http_result is not None and status_code is not None:
+        outcome = classify_http_result(
+            status_code,
+            error_text=error_text,
+            parse_error=parse_error,
+            validation_error=validation_error,
+            content_filtered=content_filtered,
+            latency_ms=latency_ms,
+        )
+    else:
+        if parsed is None and parse_error and RequestOutcome is not None:
+            outcome = RequestOutcome(
+                classification=OutcomeClass.ABNORMAL_RESPONSE,
+                status_code=status_code or 200,
+                error=error_text,
+                latency_ms=latency_ms,
+            )
+        elif parsed is None and _is_timeout_error(raw, usage) and RequestOutcome is not None:
+            outcome = RequestOutcome(
+                classification=OutcomeClass.TIMEOUT,
+                status_code=status_code,
+                error=error_text,
+                latency_ms=latency_ms,
+            )
+        elif validation_error and RequestOutcome is not None:
+            outcome = RequestOutcome(
+                classification=OutcomeClass.ABNORMAL_RESPONSE,
+                status_code=status_code or 200,
+                error=error_text,
+                latency_ms=latency_ms,
+            )
+        elif parsed is None and RequestOutcome is not None:
+            outcome = RequestOutcome(
+                classification=OutcomeClass.TRANSIENT_ERROR,
+                status_code=status_code,
+                error=error_text,
+                latency_ms=latency_ms,
+            )
+        elif RequestOutcome is not None:
+            outcome = RequestOutcome(
+                classification=OutcomeClass.SUCCESS,
+                status_code=status_code or 200,
+                latency_ms=latency_ms,
+            )
+        else:
+            outcome = None
+
+    # Override: pipeline async_llm_call marks deployment cooldown as non-retryable, but it is infra-retryable.
+    if _is_deployment_cooldown(raw, usage) and outcome is not None:
+        if RequestOutcome is not None:
+            outcome = RequestOutcome(
+                classification=OutcomeClass.OVERLOAD,
+                status_code=outcome.status_code,
+                error=error_text,
+                latency_ms=latency_ms,
+                extra={"deployment_cooldown": True},
+            )
+
+    retryable_infra = bool(outcome.is_infra_failure) if outcome is not None else False
+    if content_filtered:
+        return "content_filtered", False, outcome
+    if outcome is not None and outcome.classification == OutcomeClass.AUTH_ERROR:
+        return "auth_error", False, outcome
+    if outcome is not None and outcome.is_success:
+        return "ok", False, outcome
+    if outcome is not None and retryable_infra:
+        if outcome.classification == OutcomeClass.ABNORMAL_RESPONSE:
+            return "abnormal_response", True, outcome
+        if outcome.classification == OutcomeClass.TIMEOUT:
+            return "timeout", True, outcome
+        if outcome.classification in (OutcomeClass.OVERLOAD, OutcomeClass.SERVER_ERROR):
+            return "overload", True, outcome
+        return "infra_retryable_error", True, outcome
+    if usage.get("non_retryable"):
+        return "non_retryable_error", False, outcome
+    return "unknown_error", True, outcome
 
 def _relative_file_label(path, root):
     """Render a stable file label relative to the batch input root."""
@@ -88,6 +361,293 @@ def _relative_file_label(path, root):
         return str(path.relative_to(root))
     except ValueError:
         return path.name
+
+
+def _should_recovery_retry(monitor: dict | None) -> bool:
+    if not monitor:
+        return False
+    if monitor.get("retryable_infra") is True:
+        return True
+    # Backward compatible: older monitors may not include retryable_infra yet.
+    error_class = str(monitor.get("error_class") or "").strip().lower()
+    return error_class in {
+        "infra_retryable_error",
+        "timeout",
+        "overload",
+        "abnormal_response",
+        "unknown_error",
+    }
+
+
+def _recovery_config(config: PipelineConfig) -> PipelineConfig:
+    sweep = copy.copy(config)
+    factor = float(getattr(config, "recovery_sweep_concurrency_factor", 0.25) or 0.25)
+    rps_factor = float(getattr(config, "recovery_sweep_rps_factor", 0.25) or 0.25)
+    sweep.scoring_concurrency = max(1, int(round(config.scoring_concurrency * factor)))
+    # rps_limit=0 means unlimited; clamp it during recovery to reduce pressure.
+    base_rps = float(getattr(config, "rps_limit", 0.0) or 0.0)
+    if base_rps > 0:
+        sweep.rps_limit = max(0.5, float(base_rps) * rps_factor)
+    else:
+        sweep.rps_limit = float(max(1, sweep.scoring_concurrency))
+    mult = float(getattr(config, "recovery_sweep_timeout_multiplier", 1.5) or 1.5)
+    try:
+        sweep.request_timeout = int(round(float(config.request_timeout) * mult))
+    except Exception:
+        pass
+    # Keep sample retries conservative in recovery passes.
+    try:
+        sweep.sample_max_retries = max(1, min(int(getattr(config, "sample_max_retries", SAMPLE_MAX_RETRIES)), 2))
+    except Exception:
+        pass
+    setattr(sweep, "_recovery_sweep", True)
+    return sweep
+
+
+async def _run_pass2_recovery_sweep_in_memory(
+    *,
+    http_client: httpx.AsyncClient,
+    samples: list,
+    rarity_results: list,
+    all_values: list,
+    all_monitors: list,
+    config: PipelineConfig,
+) -> dict:
+    """Retry infra-retryable failures before finalizing Pass 2 artifacts."""
+    if not getattr(config, "enable_stage_recovery_sweep", True):
+        return {"enabled": False, "attempted": 0, "recovered": 0}
+
+    failed_indices = [
+        i for i, v in enumerate(all_values)
+        if v is None and _should_recovery_retry(all_monitors[i] if i < len(all_monitors) else None)
+    ]
+    if not failed_indices:
+        return {"enabled": True, "attempted": 0, "recovered": 0}
+
+    max_passes = int(getattr(config, "recovery_sweep_max_passes", 1) or 1)
+    attempted = 0
+    recovered = 0
+
+    for _pass in range(max_passes):
+        if not failed_indices:
+            break
+
+        sweep_config = _recovery_config(config)
+        sweep_runtime = _instantiate_runtime(sweep_config, concurrency=sweep_config.scoring_concurrency)
+        setattr(sweep_config, "_adaptive_runtime", sweep_runtime)
+
+        sem = asyncio.Semaphore(sweep_config.scoring_concurrency)
+        rate_limiter = (
+            AsyncRateLimiter(sweep_config.rps_limit, warmup=sweep_config.rps_warmup)
+            if sweep_runtime is None and sweep_config.rps_limit > 0
+            else None
+        )
+
+        async def _retry_one(idx: int):
+            nonlocal attempted, recovered
+            attempted += 1
+            value, monitor = await score_one(
+                http_client,
+                samples[idx],
+                sweep_config.scoring_model,
+                rarity_results[idx],
+                idx,
+                len(samples),
+                sem,
+                config=sweep_config,
+                rate_limiter=rate_limiter,
+            )
+            if value:
+                all_values[idx] = value
+                recovered += 1
+            all_monitors[idx] = monitor
+
+        tasks = [asyncio.create_task(_retry_one(i)) for i in failed_indices]
+        for coro in asyncio.as_completed(tasks):
+            await coro
+
+        failed_indices = [
+            i for i in failed_indices
+            if all_values[i] is None and _should_recovery_retry(all_monitors[i] if i < len(all_monitors) else None)
+        ]
+
+    return {"enabled": True, "attempted": attempted, "recovered": recovered}
+
+
+def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Path):
+    """Rebuild summaries/monitors in scored.jsonl order after recovery sweep edits."""
+    summaries = []
+    monitors = []
+    with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm:
+        for line_s, line_m in zip(fs, fm):
+            sample = json.loads(line_s)
+            monitor = json.loads(line_m)
+            monitors.append(monitor)
+            if sample.get("value"):
+                summaries.append(_selection_summary_from_sample(sample))
+    return summaries, monitors
+
+
+async def _run_pass2_recovery_sweep_chunked(
+    *,
+    output_dir: Path,
+    raw_rarities: list,
+    config: PipelineConfig,
+) -> dict:
+    """Retry infra failures for chunked Pass 2 outputs and patch scored/monitor files."""
+    if not getattr(config, "enable_stage_recovery_sweep", True):
+        return {"enabled": False, "attempted": 0, "recovered": 0}
+
+    scored_path = Path(output_dir) / "scored.jsonl"
+    monitor_path = Path(output_dir) / "monitor_value.jsonl"
+    if not scored_path.exists() or not monitor_path.exists():
+        return {"enabled": True, "attempted": 0, "recovered": 0}
+
+    retry_items: list[tuple[int, dict]] = []
+    with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm:
+        for idx, (line_s, line_m) in enumerate(zip(fs, fm)):
+            sample = json.loads(line_s)
+            monitor = json.loads(line_m)
+            if sample.get("value") is not None:
+                continue
+            if idx >= len(raw_rarities):
+                continue
+            if not _should_recovery_retry(monitor):
+                continue
+            retry_items.append((idx, sample))
+
+    if not retry_items:
+        return {"enabled": True, "attempted": 0, "recovered": 0}
+
+    max_passes = int(getattr(config, "recovery_sweep_max_passes", 1) or 1)
+    attempted = 0
+    recovered = 0
+
+    # Only keep minimal sample payloads in memory during retries.
+    for _pass in range(max_passes):
+        if not retry_items:
+            break
+
+        sweep_config = _recovery_config(config)
+        sweep_runtime = _instantiate_runtime(sweep_config, concurrency=sweep_config.scoring_concurrency)
+        setattr(sweep_config, "_adaptive_runtime", sweep_runtime)
+
+        sem = asyncio.Semaphore(sweep_config.scoring_concurrency)
+        rate_limiter = (
+            AsyncRateLimiter(sweep_config.rps_limit, warmup=sweep_config.rps_warmup)
+            if sweep_runtime is None and sweep_config.rps_limit > 0
+            else None
+        )
+
+        recovered_map: dict[int, tuple[dict, dict]] = {}
+
+        async with httpx.AsyncClient(
+            proxy=None,
+            timeout=sweep_config.request_timeout,
+            limits=httpx.Limits(
+                max_connections=sweep_config.scoring_concurrency + 10,
+                max_keepalive_connections=sweep_config.scoring_concurrency,
+            ),
+        ) as client:
+
+            async def _retry_one(idx: int, sample: dict):
+                nonlocal attempted, recovered
+                attempted += 1
+                rarity = raw_rarities[idx] if idx < len(raw_rarities) else {"score": None}
+                value, monitor = await score_one(
+                    client,
+                    sample,
+                    sweep_config.scoring_model,
+                    rarity,
+                    idx,
+                    len(raw_rarities),
+                    sem,
+                    config=sweep_config,
+                    rate_limiter=rate_limiter,
+                )
+                if value:
+                    recovered += 1
+                    recovered_map[idx] = (value, monitor)
+                else:
+                    recovered_map[idx] = (None, monitor)
+
+            tasks = [asyncio.create_task(_retry_one(idx, sample)) for idx, sample in retry_items]
+            for coro in asyncio.as_completed(tasks):
+                await coro
+
+        # Patch scored.jsonl + monitor_value.jsonl (aligned line-for-line).
+        scored_tmp = scored_path.with_suffix(".tmp")
+        monitor_tmp = monitor_path.with_suffix(".tmp")
+        failed_tmp = (Path(output_dir) / "failed_value.jsonl.tmp")
+        failures_tmp = (Path(output_dir) / "score_failures.jsonl.tmp")
+        failures_written = 0
+        failed_written = 0
+
+        with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm, \
+             open(scored_tmp, "w", encoding="utf-8") as out_s, open(monitor_tmp, "w", encoding="utf-8") as out_m, \
+             open(failed_tmp, "w", encoding="utf-8") as out_failed, open(failures_tmp, "w", encoding="utf-8") as out_failures:
+            for idx, (line_s, line_m) in enumerate(zip(fs, fm)):
+                sample = json.loads(line_s)
+                monitor = json.loads(line_m)
+                if idx in recovered_map:
+                    value, new_monitor = recovered_map[idx]
+                    if value:
+                        sample["value"] = value
+                    monitor = new_monitor or monitor
+                # rewrite
+                out_s.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                out_m.write(json.dumps(monitor, ensure_ascii=False) + "\n")
+                if sample.get("value") is None:
+                    out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                    failed_written += 1
+                    record = {
+                        "sample_id": sample.get("id", f"sample-{idx}"),
+                        "status": monitor.get("status", "no_result") if isinstance(monitor, dict) else "no_result",
+                        "error": (monitor.get("error", "") if isinstance(monitor, dict) else ""),
+                        "error_response": (monitor.get("error_response", "")[:1000] if isinstance(monitor, dict) else ""),
+                        "attempts": (monitor.get("attempts", 0) if isinstance(monitor, dict) else 0),
+                        "error_class": (monitor.get("error_class") if isinstance(monitor, dict) else None),
+                        "retryable_infra": (monitor.get("retryable_infra") if isinstance(monitor, dict) else None),
+                        "http_status": (monitor.get("http_status") if isinstance(monitor, dict) else None),
+                        "runtime_state": (monitor.get("runtime_state") if isinstance(monitor, dict) else None),
+                    }
+                    out_failures.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    failures_written += 1
+
+        os.replace(scored_tmp, scored_path)
+        os.replace(monitor_tmp, monitor_path)
+
+        failed_path = Path(output_dir) / "failed_value.jsonl"
+        failures_path = Path(output_dir) / "score_failures.jsonl"
+        if failed_written > 0:
+            os.replace(failed_tmp, failed_path)
+        else:
+            try:
+                failed_tmp.unlink()
+            except OSError:
+                pass
+            if failed_path.exists():
+                failed_path.unlink()
+        if failures_written > 0:
+            os.replace(failures_tmp, failures_path)
+        else:
+            try:
+                failures_tmp.unlink()
+            except OSError:
+                pass
+            if failures_path.exists():
+                failures_path.unlink()
+
+        # Recompute retry set for next pass (based on patched monitors).
+        retry_items = []
+        with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm:
+            for idx, (line_s, line_m) in enumerate(zip(fs, fm)):
+                sample = json.loads(line_s)
+                monitor = json.loads(line_m)
+                if sample.get("value") is None and _should_recovery_retry(monitor):
+                    retry_items.append((idx, sample))
+
+    return {"enabled": True, "attempted": attempted, "recovered": recovered}
 
 
 def _coerce_positive_int(value):
@@ -1690,6 +2250,8 @@ async def score_one(http_client, sample, model, rarity_result,
 
     _max_retries = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
     _weights = config.value_weights if config and config.value_weights else VALUE_WEIGHTS
+    runtime = getattr(config, "_adaptive_runtime", None) if config is not None else None
+    request_quick_retries = getattr(config, "request_quick_retries", 1) if config is not None else 1
 
     sample_id = sample.get("id", f"sample-{sample_idx}")
     conversations = sample.get("conversations", [])
@@ -1777,23 +2339,52 @@ async def score_one(http_client, sample, model, rarity_result,
         compact=_compact,
     )
 
-    # LLM call with retry — retry OUTSIDE semaphore
+    # LLM call with retry — retry OUTSIDE admission gates so failed/retrying samples
+    # do not block other tasks from acquiring a slot.
     for attempt in range(_max_retries):
         if attempt > 0:
             # Backoff outside semaphore so slot is free for others
             base_wait = 2 ** attempt * 2
             await asyncio.sleep(base_wait + random.uniform(0, base_wait))
 
-        async with sem:
-            monitor["attempts"] = attempt + 1
-            parsed, raw, usage = await async_llm_call(
-                http_client, messages, model,
-                temperature=0.1, max_tokens=800, config=config,
-                rate_limiter=rate_limiter,
-            )
-            monitor["llm_calls"] += 1
-            monitor["prompt_tokens"] += usage.get("prompt_tokens", 0)
-            monitor["completion_tokens"] += usage.get("completion_tokens", 0)
+        permit = None
+        t0 = time.perf_counter()
+        if runtime is not None:
+            async with _runtime_permit(runtime, stage="pass2_score", sample_id=sample_id) as permit:
+                monitor["attempts"] = attempt + 1
+                parsed, raw, usage = await async_llm_call(
+                    http_client,
+                    messages,
+                    model,
+                    temperature=0.1,
+                    max_tokens=800,
+                    max_retries=max(int(request_quick_retries), 0),
+                    config=config,
+                    rate_limiter=None,
+                )
+        else:
+            async with sem:
+                monitor["attempts"] = attempt + 1
+                parsed, raw, usage = await async_llm_call(
+                    http_client,
+                    messages,
+                    model,
+                    temperature=0.1,
+                    max_tokens=800,
+                    max_retries=max(int(request_quick_retries), 0),
+                    config=config,
+                    rate_limiter=rate_limiter,
+                )
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        monitor["llm_calls"] += 1
+        monitor["prompt_tokens"] += (usage or {}).get("prompt_tokens", 0)
+        monitor["completion_tokens"] += (usage or {}).get("completion_tokens", 0)
+        monitor["last_latency_ms"] = round(latency_ms, 2)
+        if permit is not None and hasattr(permit, "queue_wait_ms"):
+            monitor["queue_wait_ms"] = round(float(getattr(permit, "queue_wait_ms", 0.0) or 0.0), 2)
+            monitor["runtime_state"] = getattr(permit, "state_at_acquire", None) or getattr(runtime, "state", None)
+        elif runtime is not None:
+            monitor["runtime_state"] = getattr(runtime, "state", None)
 
         if parsed is None:
             monitor["error"] = raw[:300] if raw else "null response"
@@ -1802,19 +2393,46 @@ async def score_one(http_client, sample, model, rarity_result,
             if raw and raw.lstrip().startswith(("```COT", "```cot", "```Cot",
                                                 "[COT]", "COT\n", "«cot»")):
                 monitor["error"] = f"cot_mimicry: {raw[:200]}"
-            if usage.get("non_retryable"):
+            error_class, retryable_infra, outcome = _classify_pass2_attempt(
+                parsed, raw, usage, None, latency_ms=latency_ms
+            )
+            monitor["error_class"] = error_class
+            monitor["retryable_infra"] = retryable_infra
+            if outcome is not None:
+                monitor["http_status"] = outcome.status_code
+            _notify_runtime(runtime, outcome)
+            if usage.get("non_retryable") and not retryable_infra:
                 break
             continue
 
         score_result, issues = validate_score_response(parsed)
         monitor["validation_issues"] = issues
 
-        if score_result is None:
-            monitor["error"] = "validation failed"
+        value_score = compute_value_score(score_result, rarity_result, _weights)
+        if value_score is None:
+            # Treat structurally invalid / unusable scoring outputs as abnormal infra failures
+            # so recovery sweeps can retry them. (validate_score_response returns a dict even
+            # when all scores are None.)
+            monitor["error"] = "abnormal_response: insufficient valid scores"
+            error_class, retryable_infra, outcome = _classify_pass2_attempt(
+                parsed, raw, usage, None, latency_ms=latency_ms
+            )
+            monitor["error_class"] = error_class
+            monitor["retryable_infra"] = retryable_infra
+            if outcome is not None:
+                monitor["http_status"] = outcome.status_code
+            _notify_runtime(runtime, outcome)
             continue
 
-        # Success
-        value_score = compute_value_score(score_result, rarity_result, _weights)
+        # Success (valid usable value_score)
+        error_class, retryable_infra, outcome = _classify_pass2_attempt(
+            parsed, raw, usage, score_result, latency_ms=latency_ms
+        )
+        monitor["error_class"] = error_class
+        monitor["retryable_infra"] = retryable_infra
+        if outcome is not None:
+            monitor["http_status"] = outcome.status_code
+        _notify_runtime(runtime, outcome)
         features = _infer_selection_features(
             sample=sample,
             summary={
@@ -2637,7 +3255,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
     print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
 
-    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
+    runtime = _instantiate_runtime(config, concurrency=config.scoring_concurrency)
+    setattr(config, "_adaptive_runtime", runtime)
+    rate_limiter = (
+        AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup)
+        if runtime is None and config.rps_limit > 0
+        else None
+    )
     sem = asyncio.Semaphore(config.scoring_concurrency)
     scored_count = 0
     failed_count = 0
@@ -2773,6 +3397,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             "error": (monitor.get("error", "") if monitor else "no monitor record"),
                             "error_response": (monitor.get("error_response", "")[:1000] if monitor else ""),
                             "attempts": (monitor.get("attempts", 0) if monitor else 0),
+                            "error_class": (monitor.get("error_class") if monitor else None),
+                            "retryable_infra": (monitor.get("retryable_infra") if monitor else None),
+                            "http_status": (monitor.get("http_status") if monitor else None),
+                            "runtime_state": (monitor.get("runtime_state") if monitor else None),
                         }
                         out_failures_log.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -2856,6 +3484,19 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     elapsed = time.time() - start_time
 
+    sweep = await _run_pass2_recovery_sweep_chunked(
+        output_dir=output_dir,
+        raw_rarities=raw_rarities,
+        config=config,
+    )
+    if sweep and sweep.get("recovered"):
+        # After patching scored/monitor files, rebuild summaries/monitors in file order
+        # so selection/stats align with the rewritten outputs.
+        score_summaries, all_monitors = _rebuild_chunked_summaries_and_monitors(
+            output_dir / "scored.jsonl",
+            output_dir / "monitor_value.jsonl",
+        )
+
     # Remove empty failed file
     failed_path = output_dir / "failed_value.jsonl"
     if failed_path.exists() and failed_path.stat().st_size == 0:
@@ -2902,6 +3543,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     stats["file"] = file_label or stats.get("file") or input_path.name
     if rate_limiter:
         stats["http_request_stats"] = rate_limiter.stats.to_dict()
+    if runtime is not None:
+        stats["adaptive_runtime"] = {
+            "enabled": True,
+            "final": _runtime_snapshot(runtime),
+        }
+    if sweep:
+        stats["recovery_sweep"] = sweep
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -3327,8 +3975,15 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         total_samples=total_stats_samples,
     )
 
+    runtime = _instantiate_runtime(config, concurrency=config.scoring_concurrency)
+    setattr(config, "_adaptive_runtime", runtime)
+
     # Run LLM scoring
-    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
+    rate_limiter = (
+        AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup)
+        if runtime is None and config.rps_limit > 0
+        else None
+    )
     sem = asyncio.Semaphore(config.scoring_concurrency)
     all_monitors = [None] * total
     all_values = [None] * total
@@ -3354,6 +4009,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     print(f"  Scoring {len(to_score)} samples (skipped {skipped_count} resumed) "
           f"| model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
 
+    sweep = None
     async with httpx.AsyncClient(
         proxy=None,
         timeout=config.request_timeout,
@@ -3401,6 +4057,15 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                     if run_info:
                         _info = f"{_info} • {run_info}"
                 progress.update(task, advance=1, info=_info)
+
+        sweep = await _run_pass2_recovery_sweep_in_memory(
+            http_client=client,
+            samples=samples,
+            rarity_results=rarity_results,
+            all_values=all_values,
+            all_monitors=all_monitors,
+            config=config,
+        )
 
     elapsed = time.time() - start_time
 
@@ -3453,6 +4118,10 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                     "error": (m.get("error", "") if m else "no monitor record"),
                     "error_response": (m.get("error_response", "")[:1000] if m else ""),
                     "attempts": (m.get("attempts", 0) if m else 0),
+                    "error_class": (m.get("error_class") if m else None),
+                    "retryable_infra": (m.get("retryable_infra") if m else None),
+                    "http_status": (m.get("http_status") if m else None),
+                    "runtime_state": (m.get("runtime_state") if m else None),
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -3464,6 +4133,13 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
     stats["file"] = file_label or stats.get("file") or input_path.name
     if rate_limiter:
         stats["http_request_stats"] = rate_limiter.stats.to_dict()
+    if runtime is not None:
+        stats["adaptive_runtime"] = {
+            "enabled": True,
+            "final": _runtime_snapshot(runtime),
+        }
+    if sweep:
+        stats["recovery_sweep"] = sweep
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
     stats["rarity_config"] = {
         "stats_ref": str(stats_source) if stats_source else None,
@@ -3864,6 +4540,10 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
                     "error": (m.get("error", "") if m else "no monitor record"),
                     "error_response": (m.get("error_response", "")[:1000] if m else ""),
                     "attempts": (m.get("attempts", 0) if m else 0),
+                    "error_class": (m.get("error_class") if m else None),
+                    "retryable_infra": (m.get("retryable_infra") if m else None),
+                    "http_status": (m.get("http_status") if m else None),
+                    "runtime_state": (m.get("runtime_state") if m else None),
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -3873,6 +4553,15 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
     stats["input_file"] = str(collector.labeled_path)
     stats["file"] = file_label or stats.get("file") or collector.labeled_path.name
     stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
+    runtime = getattr(config, "_adaptive_runtime", None)
+    if runtime is not None:
+        stats["adaptive_runtime"] = {
+            "enabled": True,
+            "final": _runtime_snapshot(runtime),
+        }
+    sweep = getattr(collector, "recovery_sweep", None)
+    if sweep:
+        stats["recovery_sweep"] = sweep
     stats["rarity_config"] = {
         "stats_ref": collector.stats_source,
         "total_samples_in_distribution": collector.total_stats_samples,
@@ -4101,7 +4790,13 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     concurrency = config.scoring_concurrency
     watermark = int(concurrency * config.dir_pipeline_watermark)
     max_active = config.dir_pipeline_max_files
-    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
+    runtime = _instantiate_runtime(config, concurrency=concurrency)
+    setattr(config, "_adaptive_runtime", runtime)
+    rate_limiter = (
+        AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup)
+        if runtime is None and config.rps_limit > 0
+        else None
+    )
     sem = asyncio.Semaphore(concurrency)
     pprint = print
 
@@ -4260,11 +4955,22 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     )
                     pprint = progress.console.print
 
-                    def flush_completed_collectors():
+                    async def flush_completed_collectors():
                         flushed = 0
                         for collector in collectors.values():
                             if collector.done < collector.total or collector.completed:
                                 continue
+                            sweep = await _run_pass2_recovery_sweep_in_memory(
+                                http_client=client,
+                                samples=collector.samples,
+                                rarity_results=collector.rarity_results,
+                                all_values=collector.values,
+                                all_monitors=collector.monitors,
+                                config=config,
+                            )
+                            setattr(collector, "recovery_sweep", sweep)
+                            collector.ok = sum(1 for v in collector.values if v)
+                            collector.fail = sum(1 for v in collector.values if v is None)
                             stats = _flush_scoring_file(
                                 collector,
                                 config,
@@ -4283,7 +4989,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     )
                     if resumed_loaded:
                         progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
-                    flush_completed_collectors()
+                    await flush_completed_collectors()
 
                     while pending_futures:
                         done, pending_futures = await asyncio.wait(
@@ -4345,12 +5051,12 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         )
                         if resumed_loaded:
                             progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
-                        flush_completed_collectors()
+                        await flush_completed_collectors()
 
                         active_names = [c.labeled_path.name for c in collectors.values()
                                         if not c.completed]
                         progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
-                    flush_completed_collectors()
+                    await flush_completed_collectors()
     finally:
         if temp_tag_stats_path and temp_tag_stats_path.exists():
             temp_tag_stats_path.unlink()
@@ -4389,6 +5095,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         }
         if rate_limiter:
             summary["http_request_stats"] = rate_limiter.stats.to_dict()
+        if runtime is not None:
+            summary["adaptive_runtime"] = {
+                "enabled": True,
+                "final": _runtime_snapshot(runtime),
+            }
         _annotate_scoring_prompt_stats(summary, config)
 
         summary_path = output_dir / PASS2_SUMMARY_STATS_FILE

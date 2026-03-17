@@ -350,6 +350,10 @@ def _apply_runtime_overrides(config, args):
         val = getattr(args, arg_name, None)
         if val is not None:
             setattr(config, attr, val)
+    if getattr(args, "adaptive_runtime", None) is not None:
+        config.enable_adaptive_runtime = bool(args.adaptive_runtime)
+    if getattr(args, "recovery_sweep", None) is not None:
+        config.enable_stage_recovery_sweep = bool(args.recovery_sweep)
 
 
 def _format_eta(seconds) -> str:
@@ -1324,6 +1328,12 @@ def build_parser():
                             help="Override per-request timeout seconds")
     run_parser.add_argument("--max-retries", type=int, default=None,
                             help="Override max retries per request")
+    run_parser.add_argument("--adaptive-runtime", action=argparse.BooleanOptionalAction,
+                            default=None,
+                            help="Enable adaptive LLM pressure control (default: on)")
+    run_parser.add_argument("--recovery-sweep", action=argparse.BooleanOptionalAction,
+                            default=None,
+                            help="Retry infra-failed samples once before finalizing each stage (default: on)")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
@@ -1367,6 +1377,12 @@ def build_parser():
                                help="Override per-request timeout seconds")
     score_parser.add_argument("--max-retries", type=int, default=None,
                                help="Override max retries per request")
+    score_parser.add_argument("--adaptive-runtime", action=argparse.BooleanOptionalAction,
+                               default=None,
+                               help="Enable adaptive LLM pressure control (default: on)")
+    score_parser.add_argument("--recovery-sweep", action=argparse.BooleanOptionalAction,
+                               default=None,
+                               help="Retry infra-failed samples once before finalizing scoring (default: on)")
 
     # --- semantic-cluster ---
     semantic_parser = subparsers.add_parser(

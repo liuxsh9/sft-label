@@ -40,6 +40,8 @@ def test_build_run_pass1_pass2_semantic_plan():
             "",           # --limit (default 0)
             "",           # shuffle (default no)
             "",           # arbitration (default yes)
+            "",           # adaptive runtime (default yes)
+            "",           # recovery sweep (default yes)
             "",           # prompt mode (full)
             "",           # model
             "",           # tag-stats
@@ -61,6 +63,37 @@ def test_build_run_pass1_pass2_semantic_plan():
     assert plan.env_overrides == {}
 
 
+def test_build_run_plan_can_disable_adaptive_runtime_and_recovery_sweep():
+    io = StubIO(
+        [
+            "2",          # workflow: run-pass1
+            "1",          # run mode: new
+            "data.json",  # --input
+            "",           # --output
+            "",           # inline mode (refresh)
+            "",           # --limit (default 0)
+            "",           # shuffle (default no)
+            "",           # arbitration (default yes)
+            "n",          # adaptive runtime (disable)
+            "n",          # recovery sweep (disable)
+            "",           # prompt mode (full)
+            "",           # model
+            "n",          # env override
+            "",           # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "run",
+        "--input",
+        "data.json",
+        "--no-adaptive-runtime",
+        "--no-recovery-sweep",
+    ]
+
+
 def test_build_score_plan_with_llm_env_override():
     io = StubIO(
         [
@@ -70,6 +103,8 @@ def test_build_score_plan_with_llm_env_override():
             "",                       # rarity mode (default absolute)
             "",                       # --limit
             "",                       # --resume
+            "",                       # adaptive runtime (default yes)
+            "",                       # recovery sweep (default yes)
             "",                       # prompt mode
             "",                       # model
             "y",                      # env override
@@ -280,13 +315,13 @@ def test_all_workflows_generate_parseable_argv():
     parser = build_parser()
     workflow_answers = {
         # 1. run-pass1-pass2
-        1: ["1", "data.json", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
+        1: ["1", "data.json", "", "", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
         # 2. run-pass1
-        2: ["1", "data.json", "", "", "", "", "", "", "", "n", ""],
+        2: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
         # 3. score
-        3: ["labeled.json", "", "", "", "", "", "", "n", ""],
+        3: ["labeled.json", "", "", "", "", "", "", "", "", "n", ""],
         # 4. run-pass1-pass2-semantic
-        4: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
+        4: ["1", "data.json", "", "", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
         # 5. semantic
         5: ["run_dir", "", "", "", "", "", ""],
         # 6. filter
@@ -331,6 +366,8 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
             "",             # rarity mode (default absolute)
             "",             # --limit
             "",             # --resume
+            "",             # adaptive runtime (default yes)
+            "",             # recovery sweep (default yes)
             "",             # prompt mode
             "",             # model
             "y",            # override env
@@ -357,6 +394,8 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
             "",           # --limit
             "",           # --shuffle
             "",           # --arbitration
+            "",           # adaptive runtime (default yes)
+            "",           # recovery sweep (default yes)
             "",           # --prompt mode
             "",           # --model
             "n",          # env override
@@ -383,6 +422,8 @@ def test_build_run_plan_can_set_migrate_mode():
             "",              # --limit
             "",              # --shuffle
             "",              # --arbitration
+            "",              # adaptive runtime (default yes)
+            "",              # recovery sweep (default yes)
             "",              # --prompt mode
             "",              # --model
             "n",             # env override
@@ -434,6 +475,8 @@ def test_build_run_resume_plan_skips_output_prompt():
             "",         # --limit
             "",         # --shuffle
             "",         # --arbitration
+            "",         # adaptive runtime (default yes)
+            "",         # recovery sweep (default yes)
             "",         # --prompt mode
             "",         # --model
             "n",        # env override
@@ -479,6 +522,8 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
             "",             # rarity mode (default absolute)
             "",             # --limit
             "",             # --resume
+            "",             # adaptive runtime (default yes)
+            "",             # recovery sweep (default yes)
             "",             # prompt mode
             "",             # model
             "n",            # env override
@@ -552,6 +597,8 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
             "2",            # rarity mode: percentile
             "",             # --limit
             "",             # --resume
+            "",             # adaptive runtime (default yes)
+            "",             # recovery sweep (default yes)
             "",             # prompt mode
             "",             # model
             "n",            # env override

@@ -737,7 +737,7 @@ def _build_run_plan(
         ),
         SwitchField(
             key="concurrency",
-            label="LLM 并发（阶段一/二共用） / Shared LLM concurrency (pass1/pass2)",
+            label="LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
             options=[
                 SwitchOption("", _format_default_value(DEFAULT_CONCURRENCY)),
                 SwitchOption("0", "0"),
@@ -754,7 +754,7 @@ def _build_run_plan(
         ),
         SwitchField(
             key="rps_limit",
-            label="RPS 限流 / RPS limit",
+            label="RPS 最大上限 / Max RPS cap",
             options=[
                 SwitchOption("", _format_default_value(DEFAULT_RPS_LIMIT)),
                 SwitchOption("0", "0"),
@@ -782,6 +782,24 @@ def _build_run_plan(
                 SwitchOption("60", "60"),
             ],
             default_value="",
+        ),
+        SwitchField(
+            key="adaptive_runtime",
+            label="自适应运行时 / Adaptive runtime",
+            options=[
+                SwitchOption("on", "开启（默认） / On (default)"),
+                SwitchOption("off", "关闭 / Off"),
+            ],
+            default_value="on",
+        ),
+        SwitchField(
+            key="recovery_sweep",
+            label="阶段收尾恢复补跑 / End-of-phase recovery sweep",
+            options=[
+                SwitchOption("on", "开启（默认） / On (default)"),
+                SwitchOption("off", "关闭 / Off"),
+            ],
+            default_value="on",
         ),
         SwitchField(
             key="request_timeout",
@@ -857,6 +875,10 @@ def _build_run_plan(
         val = switch_values.get(key, "")
         if val != "":
             argv.extend([flag, val])
+    if switch_values["adaptive_runtime"] == "off":
+        argv.append("--no-adaptive-runtime")
+    if switch_values["recovery_sweep"] == "off":
+        argv.append("--no-recovery-sweep")
 
     _section(output_fn, "环境与附加参数 / Environment and extra flags")
     if switch_values["env_override"] == "yes":
@@ -929,7 +951,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
             ),
             SwitchField(
                 key="concurrency",
-                label="LLM 并发（阶段一/二共用） / Shared LLM concurrency (pass1/pass2)",
+                label="LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
                 options=[
                     SwitchOption("", _format_default_value(DEFAULT_SCORING_CONCURRENCY)),
                     SwitchOption("0", "0"),
@@ -946,7 +968,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
             ),
             SwitchField(
                 key="rps_limit",
-                label="RPS 限流 / RPS limit",
+                label="RPS 最大上限 / Max RPS cap",
                 options=[
                     SwitchOption("", _format_default_value(DEFAULT_RPS_LIMIT)),
                     SwitchOption("0", "0"),
@@ -974,6 +996,24 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
                     SwitchOption("60", "60"),
                 ],
                 default_value="",
+            ),
+            SwitchField(
+                key="adaptive_runtime",
+                label="自适应运行时 / Adaptive runtime",
+                options=[
+                    SwitchOption("on", "开启（默认） / On (default)"),
+                    SwitchOption("off", "关闭 / Off"),
+                ],
+                default_value="on",
+            ),
+            SwitchField(
+                key="recovery_sweep",
+                label="阶段收尾恢复补跑 / End-of-phase recovery sweep",
+                options=[
+                    SwitchOption("on", "开启（默认） / On (default)"),
+                    SwitchOption("off", "关闭 / Off"),
+                ],
+                default_value="on",
             ),
             SwitchField(
                 key="request_timeout",
@@ -1043,6 +1083,10 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
         val = switch_values.get(key, "")
         if val != "":
             argv.extend([flag, val])
+    if switch_values["adaptive_runtime"] == "off":
+        argv.append("--no-adaptive-runtime")
+    if switch_values["recovery_sweep"] == "off":
+        argv.append("--no-recovery-sweep")
 
     if switch_values["env_override"] == "yes":
         env_overrides = _ask_llm_env_overrides(input_fn)
@@ -1125,6 +1169,10 @@ def _build_run_plan_legacy(
         argv.append("--no-arbitration")
 
     _section(output_fn, "模型与推理 / Model and inference")
+    if not _ask_yes_no(input_fn, "启用自适应运行时 / Enable adaptive runtime", default=True):
+        argv.append("--no-adaptive-runtime")
+    if not _ask_yes_no(input_fn, "阶段收尾执行恢复补跑 / Run end-of-phase recovery sweep", default=True):
+        argv.append("--no-recovery-sweep")
     prompt_mode = _ask_choice(
         input_fn,
         output_fn,
@@ -1207,6 +1255,11 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
 
     if _ask_yes_no(input_fn, "续跑评分并跳过已存在样本 / Resume scoring and skip existing samples", default=False):
         argv.append("--resume")
+
+    if not _ask_yes_no(input_fn, "启用自适应运行时 / Enable adaptive runtime", default=True):
+        argv.append("--no-adaptive-runtime")
+    if not _ask_yes_no(input_fn, "阶段收尾执行恢复补跑 / Run end-of-phase recovery sweep", default=True):
+        argv.append("--no-recovery-sweep")
 
     prompt_mode = _ask_choice(
         input_fn,

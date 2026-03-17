@@ -18,6 +18,30 @@ REQUEST_TIMEOUT = 90           # seconds per LLM call (first attempt)
 REQUEST_TIMEOUT_ESCALATION = [60, 90, 120]  # per-attempt timeout escalation
 DEFAULT_RPS_LIMIT = 20         # max LLM requests/sec (0 = unlimited)
 DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
+ENABLE_ADAPTIVE_RUNTIME = True
+ADAPTIVE_MIN_CONCURRENCY = 1
+ADAPTIVE_MIN_RPS = 0.5
+ADAPTIVE_DEGRADE_CONCURRENCY_FACTOR = 0.5
+ADAPTIVE_DEGRADE_RPS_FACTOR = 0.6
+ADAPTIVE_RECOVERY_CONCURRENCY_STEP = 2
+ADAPTIVE_RECOVERY_RPS_STEP = 1.0
+ADAPTIVE_OPEN_BASE_COOLDOWN = 15.0
+ADAPTIVE_OPEN_MAX_COOLDOWN = 120.0
+ADAPTIVE_WINDOW_REQUESTS = 50
+ADAPTIVE_WINDOW_SECONDS = 20.0
+ADAPTIVE_TIMEOUT_RATE_DEGRADED = 0.05
+ADAPTIVE_TIMEOUT_RATE_OPEN = 0.20
+ADAPTIVE_OVERLOAD_RATE_DEGRADED = 0.05
+ADAPTIVE_OVERLOAD_RATE_OPEN = 0.15
+ADAPTIVE_ABNORMAL_RATE_DEGRADED = 0.04
+REQUEST_QUICK_RETRIES = 1
+DISABLE_ARBITRATION_WHEN_DEGRADED = True
+ENABLE_STAGE_RECOVERY_SWEEP = True
+RECOVERY_SWEEP_MAX_PASSES = 1
+RECOVERY_SWEEP_CONCURRENCY_FACTOR = 0.25
+RECOVERY_SWEEP_RPS_FACTOR = 0.25
+RECOVERY_SWEEP_TIMEOUT_MULTIPLIER = 1.5
+RECOVERY_SWEEP_DISABLE_ARBITRATION = True
 
 # ═══════════════════════════════════════════════════════════
 # Pass 1: Tag Labeling
@@ -249,6 +273,30 @@ class PipelineConfig:
     request_timeout_escalation: list = None  # defaults to REQUEST_TIMEOUT_ESCALATION
     rps_limit: float = DEFAULT_RPS_LIMIT
     rps_warmup: float = DEFAULT_RPS_WARMUP
+    enable_adaptive_runtime: bool = ENABLE_ADAPTIVE_RUNTIME
+    adaptive_min_concurrency: int = ADAPTIVE_MIN_CONCURRENCY
+    adaptive_min_rps: float = ADAPTIVE_MIN_RPS
+    adaptive_degrade_concurrency_factor: float = ADAPTIVE_DEGRADE_CONCURRENCY_FACTOR
+    adaptive_degrade_rps_factor: float = ADAPTIVE_DEGRADE_RPS_FACTOR
+    adaptive_recovery_concurrency_step: int = ADAPTIVE_RECOVERY_CONCURRENCY_STEP
+    adaptive_recovery_rps_step: float = ADAPTIVE_RECOVERY_RPS_STEP
+    adaptive_open_base_cooldown: float = ADAPTIVE_OPEN_BASE_COOLDOWN
+    adaptive_open_max_cooldown: float = ADAPTIVE_OPEN_MAX_COOLDOWN
+    adaptive_window_requests: int = ADAPTIVE_WINDOW_REQUESTS
+    adaptive_window_seconds: float = ADAPTIVE_WINDOW_SECONDS
+    adaptive_timeout_rate_degraded: float = ADAPTIVE_TIMEOUT_RATE_DEGRADED
+    adaptive_timeout_rate_open: float = ADAPTIVE_TIMEOUT_RATE_OPEN
+    adaptive_overload_rate_degraded: float = ADAPTIVE_OVERLOAD_RATE_DEGRADED
+    adaptive_overload_rate_open: float = ADAPTIVE_OVERLOAD_RATE_OPEN
+    adaptive_abnormal_rate_degraded: float = ADAPTIVE_ABNORMAL_RATE_DEGRADED
+    request_quick_retries: int = REQUEST_QUICK_RETRIES
+    disable_arbitration_when_degraded: bool = DISABLE_ARBITRATION_WHEN_DEGRADED
+    enable_stage_recovery_sweep: bool = ENABLE_STAGE_RECOVERY_SWEEP
+    recovery_sweep_max_passes: int = RECOVERY_SWEEP_MAX_PASSES
+    recovery_sweep_concurrency_factor: float = RECOVERY_SWEEP_CONCURRENCY_FACTOR
+    recovery_sweep_rps_factor: float = RECOVERY_SWEEP_RPS_FACTOR
+    recovery_sweep_timeout_multiplier: float = RECOVERY_SWEEP_TIMEOUT_MULTIPLIER
+    recovery_sweep_disable_arbitration: bool = RECOVERY_SWEEP_DISABLE_ARBITRATION
 
     # Pass 1: Tag Labeling
     labeling_model: str = DEFAULT_LABELING_MODEL

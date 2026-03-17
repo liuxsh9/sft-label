@@ -113,6 +113,8 @@ def test_parser_accepts_runtime_override_flags():
             "120",
             "--max-retries",
             "5",
+            "--no-adaptive-runtime",
+            "--no-recovery-sweep",
             "--rarity-mode",
             "percentile",
         ]
@@ -122,6 +124,8 @@ def test_parser_accepts_runtime_override_flags():
     assert run_args.rps_warmup == 20
     assert run_args.request_timeout == 120
     assert run_args.max_retries == 5
+    assert run_args.adaptive_runtime is False
+    assert run_args.recovery_sweep is False
     assert run_args.rarity_mode == "percentile"
 
     score_args = parser.parse_args(
@@ -139,6 +143,8 @@ def test_parser_accepts_runtime_override_flags():
             "90",
             "--max-retries",
             "3",
+            "--adaptive-runtime",
+            "--recovery-sweep",
             "--rarity-mode",
             "percentile",
         ]
@@ -148,6 +154,8 @@ def test_parser_accepts_runtime_override_flags():
     assert score_args.rps_warmup == 10
     assert score_args.request_timeout == 90
     assert score_args.max_retries == 3
+    assert score_args.adaptive_runtime is True
+    assert score_args.recovery_sweep is True
     assert score_args.rarity_mode == "percentile"
 
 

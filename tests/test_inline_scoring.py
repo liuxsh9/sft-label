@@ -147,7 +147,10 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
         }
 
     with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
-        stats = await run_scoring(str(source_file), config=PipelineConfig(scoring_concurrency=1))
+        stats = await run_scoring(
+            str(source_file),
+            config=PipelineConfig(scoring_concurrency=1, enable_adaptive_runtime=True),
+        )
 
     assert stats["total_scored"] == 2
     artifact_dir = run_root / "meta_label_data" / "files" / "train"
@@ -157,6 +160,7 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
     assert (artifact_dir / "stats_scoring.json").exists()
     stats_payload = json.loads((artifact_dir / "stats_scoring.json").read_text(encoding="utf-8"))
     assert stats_payload["file"] == "train.jsonl"
+    assert stats_payload["adaptive_runtime"]["enabled"] is True
 
     updated_rows = [json.loads(line) for line in source_file.read_text(encoding="utf-8").splitlines()]
     turns = updated_rows[0]["extra_info"]["unique_info"]["data_label"]["turns"]
@@ -232,7 +236,10 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
         }
 
     with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
-        summary = await run_scoring(str(run_root), config=PipelineConfig(scoring_concurrency=1))
+        summary = await run_scoring(
+            str(run_root),
+            config=PipelineConfig(scoring_concurrency=1, enable_adaptive_runtime=True),
+        )
 
     assert summary["files_processed"] == 2
     assert (run_root / "meta_label_data" / "summary_stats_scoring.json").exists()
@@ -297,7 +304,12 @@ async def test_run_scoring_inline_run_dir_resume_skips_embedded_scored_samples(t
     with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
         summary = await run_scoring(
             str(run_root),
-            config=PipelineConfig(scoring_concurrency=1, chunk_size=1, max_active_chunks=1),
+            config=PipelineConfig(
+                scoring_concurrency=1,
+                chunk_size=1,
+                max_active_chunks=1,
+                enable_adaptive_runtime=True,
+            ),
             resume=True,
         )
 
@@ -356,7 +368,12 @@ async def test_run_scoring_inline_resume_matches_legacy_sample_id_cache(tmp_path
     with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
         summary = await run_scoring(
             str(run_root),
-            config=PipelineConfig(scoring_concurrency=1, chunk_size=1, max_active_chunks=1),
+            config=PipelineConfig(
+                scoring_concurrency=1,
+                chunk_size=1,
+                max_active_chunks=1,
+                enable_adaptive_runtime=True,
+            ),
             resume=True,
         )
 

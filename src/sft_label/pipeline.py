@@ -22,12 +22,14 @@ import json
 import time
 import asyncio
 import argparse
+import inspect
 import random
 import re
 import sys
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 
 import httpx
 from rich.progress import (
@@ -81,6 +83,18 @@ from sft_label.tag_canonicalization import (
     canonicalization_stat_key,
     make_canonicalization_event,
 )
+from sft_label.llm_runtime import (
+    AdaptiveLLMRuntime,
+    OutcomeClass,
+    RequestOutcome,
+    classify_exception,
+    classify_http_result,
+)
+
+try:
+    from sft_label.llm_runtime import AdaptiveLLMRuntime  # type: ignore
+except Exception:  # pragma: no cover - optional dependency while feature is rolling out
+    AdaptiveLLMRuntime = None
 
 
 INLINE_RUN_MODES = {"incremental", "refresh", "migrate", "recompute"}
@@ -496,6 +510,9 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
     last_error = None
     last_error_response = None
 
+    runtime = getattr(config, "_adaptive_runtime", None) if config is not None else None
+    adaptive_mode = runtime is not None
+
     for attempt in range(max_retries + 1):
         _http_recorded = False
         # Adaptive timeout: escalate on retries
@@ -533,6 +550,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                     continue
                 return None, last_error, {
                     "prompt_tokens": 0, "completion_tokens": 0,
+                    "status_code": resp.status_code,
                     "error": last_error,
                     "error_response": resp_body,
                     "error_diag_headers": diag_headers,
@@ -544,15 +562,28 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 resp_lower = resp_text.lower()
                 # LiteLLM "No deployments available" — all deployments are in cooldown,
                 # often caused by upstream content-filter 400s.  Retrying immediately
-                # only prolongs the cooldown cycle, so treat as non-retryable.
+                # only prolongs the cooldown cycle. In adaptive mode, we want the
+                # outer controller to open the circuit and pause; in legacy mode,
+                # treat as non-retryable to avoid local retry storms.
                 if "no deployments available" in resp_lower or "cooldown_list" in resp_lower:
                     return None, f"HTTP {resp.status_code}: {resp_text[:300]}", {
                         "prompt_tokens": 0, "completion_tokens": 0,
+                        "status_code": resp.status_code,
                         "error": f"HTTP {resp.status_code} (deployment cooldown): {resp_text[:300]}",
                         "error_response": resp.text,
-                        "non_retryable": True,
+                        "provider_cooldown": True,
+                        "non_retryable": False if adaptive_mode else True,
                     }
                 # Rate limited or server error — exponential backoff with jitter
+                if adaptive_mode:
+                    return None, f"HTTP {resp.status_code}: {resp_text[:300]}", {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "status_code": resp.status_code,
+                        "error": f"HTTP {resp.status_code}: {resp_text[:300]}",
+                        "error_response": resp.text,
+                        "non_retryable": False,
+                    }
                 base_wait = min(2 ** attempt * 3 + 2, 60)
                 wait = base_wait + random.uniform(0, base_wait * 0.5)
                 last_error = f"HTTP {resp.status_code}: {resp_text[:200]}"
@@ -582,12 +613,22 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 if any(kw in error_lower for kw in _NON_RETRYABLE_400_KEYWORDS):
                     return None, f"HTTP 400: {error_text[:300]}", {
                         "prompt_tokens": 0, "completion_tokens": 0,
+                        "status_code": resp.status_code,
                         "error": f"HTTP 400 (content filtered): {error_text[:300]}",
                         "error_response": resp.text,
                         "content_filtered": True,
                         "non_retryable": True,
                     }
                 # Likely a transient proxy/supplier error — retry with backoff
+                if adaptive_mode:
+                    return None, f"HTTP 400: {error_text[:300]}", {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "status_code": resp.status_code,
+                        "error": f"HTTP 400 (transient): {error_text[:300]}",
+                        "error_response": resp.text,
+                        "non_retryable": False,
+                    }
                 last_error = f"HTTP 400 (transient): {error_text[:200]}"
                 last_error_response = resp.text
                 if attempt < max_retries:
@@ -599,6 +640,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                 error_text = resp.text[:300]
                 return None, f"HTTP 401: {error_text}", {
                     "prompt_tokens": 0, "completion_tokens": 0,
+                    "status_code": resp.status_code,
                     "error": f"HTTP 401: {error_text}",
                     "error_response": resp.text,
                     "non_retryable": True,
@@ -611,6 +653,7 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
             usage_dict = {
                 "prompt_tokens": usage.get("prompt_tokens", 0),
                 "completion_tokens": usage.get("completion_tokens", 0),
+                "status_code": resp.status_code,
             }
 
             # Parse JSON
@@ -634,22 +677,133 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
 
         except (json.JSONDecodeError, KeyError) as e:
             last_error = f"ParseError: {e}"
+            if adaptive_mode:
+                return None, content if 'content' in locals() else "", {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "status_code": 200,
+                    "error": last_error,
+                    "parse_error": True,
+                    "non_retryable": False,
+                }
             if attempt < max_retries:
                 await asyncio.sleep(2 + random.uniform(0, 2))
                 continue
-            return None, content if 'content' in locals() else "", {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error}
+            return None, content if 'content' in locals() else "", {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "status_code": 200,
+                "error": last_error,
+                "parse_error": True,
+            }
         except Exception as e:
             if rate_limiter is not None and not _http_recorded:
                 rate_limiter.stats.record_timeout()
             last_error = f"{type(e).__name__}: {e}"
+            if adaptive_mode:
+                return None, str(e), {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "error": last_error,
+                    "exception_type": type(e).__name__,
+                    "non_retryable": False,
+                }
             if attempt < max_retries:
                 base_wait = min(2 ** attempt * 3 + 2, 60)
                 wait = base_wait + random.uniform(0, base_wait * 0.5)
                 await asyncio.sleep(wait)
                 continue
-            return None, str(e), {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error}
+            return None, str(e), {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error, "exception_type": type(e).__name__}
 
-    return None, f"max retries exceeded: {last_error}", {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error or "max_retries", "error_response": last_error_response}
+    return None, f"max retries exceeded: {last_error}", {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "error": last_error or "max_retries",
+        "error_response": last_error_response,
+    }
+
+def _config_adaptive_runtime(config) -> AdaptiveLLMRuntime | None:
+    """Return the shared adaptive runtime attached to this PipelineConfig, if any."""
+    if config is None:
+        return None
+    if not getattr(config, "enable_adaptive_runtime", False):
+        return None
+    runtime = getattr(config, "_adaptive_runtime", None)
+    return runtime if isinstance(runtime, AdaptiveLLMRuntime) else None
+
+
+def _build_adaptive_runtime(config) -> AdaptiveLLMRuntime:
+    """Build an AdaptiveLLMRuntime from config fields.
+
+    Note: When rps_limit is unset/unlimited (<= 0), we still enable the runtime
+    and treat the runtime RPS limiter as effectively non-binding until it
+    degrades/open-circuits (it will still clamp to min_rps during probe/open).
+    """
+    base_rps = float(getattr(config, "rps_limit", 0.0) or 0.0)
+    if base_rps <= 0:
+        # Avoid disabling adaptive behavior entirely. Concurrency is the main
+        # pressure valve; RPS becomes relevant in probing/open states.
+        base_rps = float(max(getattr(config, "concurrency", 1), 1)) * 1000.0
+    return AdaptiveLLMRuntime(
+        base_concurrency=int(getattr(config, "concurrency", 1) or 1),
+        base_rps=base_rps,
+        min_concurrency=int(getattr(config, "adaptive_min_concurrency", 1) or 1),
+        min_rps=float(getattr(config, "adaptive_min_rps", 0.5) or 0.5),
+        window_requests=int(getattr(config, "adaptive_window_requests", 50) or 50),
+        window_seconds=float(getattr(config, "adaptive_window_seconds", 20.0) or 20.0),
+        degrade_timeout_rate=float(getattr(config, "adaptive_timeout_rate_degraded", 0.05) or 0.05),
+        open_timeout_rate=float(getattr(config, "adaptive_timeout_rate_open", 0.2) or 0.2),
+        degrade_overload_rate=float(getattr(config, "adaptive_overload_rate_degraded", 0.05) or 0.05),
+        open_overload_rate=float(getattr(config, "adaptive_overload_rate_open", 0.15) or 0.15),
+        degrade_abnormal_rate=float(getattr(config, "adaptive_abnormal_rate_degraded", 0.04) or 0.04),
+        open_base_cooldown=float(getattr(config, "adaptive_open_base_cooldown", 15.0) or 15.0),
+        open_max_cooldown=float(getattr(config, "adaptive_open_max_cooldown", 120.0) or 120.0),
+        degrade_concurrency_factor=float(getattr(config, "adaptive_degrade_concurrency_factor", 0.5) or 0.5),
+        degrade_rps_factor=float(getattr(config, "adaptive_degrade_rps_factor", 0.6) or 0.6),
+        recovery_concurrency_step=int(getattr(config, "adaptive_recovery_concurrency_step", 2) or 2),
+        recovery_rps_step=float(getattr(config, "adaptive_recovery_rps_step", 1.0) or 1.0),
+    )
+
+
+def _make_recovery_config(config):
+    """Build a conservative config for recovery sweeps."""
+    if config is None:
+        return None
+    new_conc = max(1, int(round((config.concurrency or 1) * (config.recovery_sweep_concurrency_factor or 0.25))))
+    new_rps = config.rps_limit
+    if isinstance(new_rps, (int, float)) and new_rps > 0:
+        new_rps = float(new_rps) * float(config.recovery_sweep_rps_factor or 0.25)
+        new_rps = max(new_rps, float(getattr(config, "adaptive_min_rps", 0.5) or 0.5))
+    new_timeout = int(round((config.request_timeout or REQUEST_TIMEOUT) * float(config.recovery_sweep_timeout_multiplier or 1.5)))
+    recovery_config = _dc_replace(
+        config,
+        concurrency=new_conc,
+        request_timeout=new_timeout,
+        rps_limit=new_rps,
+    )
+    # Ensure recovery does not run arbitration unless explicitly allowed.
+    if getattr(config, "recovery_sweep_disable_arbitration", True):
+        setattr(recovery_config, "_force_disable_arbitration", True)
+    return recovery_config
+
+
+def _outcome_from_usage(usage: dict, *, default_status: int | None = None) -> RequestOutcome:
+    status_code = usage.get("status_code", default_status)
+    error_text = usage.get("error_response") or usage.get("error") or ""
+    if status_code is not None:
+        return classify_http_result(
+            int(status_code),
+            error_text=error_text,
+            parse_error=bool(usage.get("parse_error")),
+            validation_error=bool(usage.get("validation_error")),
+            content_filtered=bool(usage.get("content_filtered")),
+        )
+    exc_type = str(usage.get("exception_type") or "")
+    err = str(usage.get("error") or "")
+    low = f"{exc_type} {err}".lower()
+    if "timeout" in low:
+        return RequestOutcome(classification=OutcomeClass.TIMEOUT, error=err)
+    return RequestOutcome(classification=OutcomeClass.TRANSIENT_ERROR, error=err)
 
 
 # ─────────────────────────────────────────────────────────
@@ -1065,242 +1219,299 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
     _max_retries = config.max_retries if config else MAX_RETRIES
     _conf_threshold = config.confidence_threshold if config else CONFIDENCE_THRESHOLD
     _compact, _max_chars = _resolved_labeling_prompt_budget(config)
+    runtime = _config_adaptive_runtime(config)
+    if getattr(config, "_force_disable_arbitration", False):
+        enable_arbitration = False
     start = time.time()
 
     # Truncate oversized conversations before sending to LLM
     conversations = sample.get("conversations", [])
     _trunc_kw = {"max_total_chars": _max_chars}
     if config:
-        _trunc_kw.update(head_ratio=config.truncation_head_ratio,
-                         last_response_ratio=config.truncation_last_response_ratio,
-                         per_turn_ratio=config.truncation_per_turn_ratio)
-    truncated_convs, was_truncated = truncate_conversations_for_labeling(
-        conversations, **_trunc_kw)
+        _trunc_kw.update(
+            head_ratio=config.truncation_head_ratio,
+            last_response_ratio=config.truncation_last_response_ratio,
+            per_turn_ratio=config.truncation_per_turn_ratio,
+        )
+    truncated_convs, was_truncated = truncate_conversations_for_labeling(conversations, **_trunc_kw)
     base_conversations_json = json.dumps(truncated_convs, ensure_ascii=False)
     effective_conversations_json = base_conversations_json
     sanitized_conversations_json = None
 
     _cached_call1 = None  # Cache successful Call 1 across sample retries
 
+    async def _call(stage: str, messages, *, temperature=0.1, max_tokens=1000):
+        if runtime is None:
+            parsed, raw, usage = await async_llm_call(
+                http_client,
+                messages,
+                model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=_max_retries,
+                config=config,
+                rate_limiter=rate_limiter,
+            )
+            return parsed, raw, usage, _outcome_from_usage(usage, default_status=usage.get("status_code"))
+
+        quick_retries = int(getattr(config, "request_quick_retries", 0) or 0)
+        last = None
+        for quick_attempt in range(quick_retries + 1):
+            permit = await runtime.acquire(stage=stage, sample_id=sample.get("id", f"sample-{sample_idx}"))
+            try:
+                parsed, raw, usage = await async_llm_call(
+                    http_client,
+                    messages,
+                    model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    max_retries=0,
+                    config=config,
+                    rate_limiter=None,
+                )
+            finally:
+                permit.release()
+            outcome = _outcome_from_usage(usage, default_status=usage.get("status_code"))
+            runtime.observe(outcome)
+            usage = dict(usage)
+            usage["queue_wait_ms"] = permit.queue_wait_ms
+            usage["runtime_state_at_acquire"] = permit.state_at_acquire
+            usage["runtime_state"] = runtime.state
+            last = (parsed, raw, usage, outcome)
+            if parsed is not None:
+                break
+            if outcome.classification is OutcomeClass.TRANSIENT_ERROR and quick_attempt < quick_retries:
+                await asyncio.sleep(0)
+                continue
+            break
+        return last
+
     for sample_attempt in range(_max_retries_sample + 1):
         if sample_attempt > 0:
-            # Back off before retry with jitter, outside semaphore so we don't block others
-            base_wait = 2 ** sample_attempt * 2
-            await asyncio.sleep(base_wait + random.uniform(0, base_wait))
+            if runtime is None:
+                base_wait = 2 ** sample_attempt * 2
+                await asyncio.sleep(base_wait + random.uniform(0, base_wait))
+            else:
+                await asyncio.sleep(0)
 
-        async with sem:
-            monitor = {
-                "sample_id": sample.get("id", f"sample-{sample_idx}"),
-                "index": sample_idx,
-                "llm_calls": 0,
-                "total_prompt_tokens": 0,
-                "total_completion_tokens": 0,
-                "validation_issues": [],
-                "consistency_warnings": [],
-                "low_confidence_dims": [],
-                "arbitrated": False,
-                "sample_attempt": sample_attempt,
-                "status": "success",
-            }
+        monitor = {
+            "sample_id": sample.get("id", f"sample-{sample_idx}"),
+            "index": sample_idx,
+            "llm_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "validation_issues": [],
+            "consistency_warnings": [],
+            "low_confidence_dims": [],
+            "arbitrated": False,
+            "sample_attempt": sample_attempt,
+            "status": "success",
+        }
 
-            try:
-                # Preprocess (uses original conversations for signal extraction)
-                signals = preprocess(sample)
-                signals_str = format_signals_for_prompt(signals)
-                # Use truncated conversations for LLM prompt
-                conversations_json = effective_conversations_json
-                if was_truncated:
-                    monitor["truncated"] = True
+        try:
+            # Preprocess (uses original conversations for signal extraction)
+            signals = preprocess(sample)
+            signals_str = format_signals_for_prompt(signals)
+            # Use truncated conversations for LLM prompt
+            conversations_json = effective_conversations_json
+            if was_truncated:
+                monitor["truncated"] = True
 
-                # Call 1 — reuse cached result if available from a previous attempt
-                if _cached_call1 is not None:
-                    call1_cleaned, msgs1 = _cached_call1
-                    monitor["call1_cached"] = True
-                else:
-                    msgs1 = build_call1_messages(conversations_json, signals_str, compact=_compact)
-                    call1_result, call1_raw, usage1 = await async_llm_call(http_client, msgs1, model,
-                                                                          max_retries=_max_retries, config=config,
-                                                                          rate_limiter=rate_limiter)
-                    monitor["llm_calls"] += 1
-                    monitor["total_prompt_tokens"] += usage1["prompt_tokens"]
-                    monitor["total_completion_tokens"] += usage1["completion_tokens"]
-
-                    if call1_result is None and usage1.get("content_filtered"):
-                        if sanitized_conversations_json is None:
-                            sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
-                            if changed:
-                                sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
-                        if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
-                            retry_msgs1 = build_call1_messages(
-                                sanitized_conversations_json, signals_str, compact=_compact
-                            )
-                            retry_result, retry_raw, retry_usage = await async_llm_call(
-                                http_client,
-                                retry_msgs1,
-                                model,
-                                max_retries=0,
-                                config=config,
-                                rate_limiter=rate_limiter,
-                            )
-                            monitor["llm_calls"] += 1
-                            monitor["total_prompt_tokens"] += retry_usage["prompt_tokens"]
-                            monitor["total_completion_tokens"] += retry_usage["completion_tokens"]
-                            monitor["content_filter_retry"] = "call1"
-                            if retry_result is not None:
-                                call1_result, call1_raw, usage1 = retry_result, retry_raw, retry_usage
-                                msgs1 = retry_msgs1
-                                conversations_json = sanitized_conversations_json
-                                effective_conversations_json = sanitized_conversations_json
-                            else:
-                                call1_result, call1_raw, usage1 = retry_result, retry_raw, retry_usage
-
-                    if call1_result is None:
-                        monitor["status"] = "call1_failed"
-                        monitor["error"] = usage1.get("error", "unknown")
-                        monitor["error_response"] = usage1.get("error_response") or (call1_raw[:500] if call1_raw else "")
-                        if usage1.get("non_retryable"):
-                            return sample_idx, None, monitor
-                        if sample_attempt < _max_retries_sample:
-                            continue
-                        return sample_idx, None, monitor
-
-                    call1_cleaned, call1_issues = validate_tags(call1_result, "call1")
-                    monitor["validation_issues"].extend(call1_issues)
-                    # Cache successful Call 1 for potential sample retry
-                    _cached_call1 = (call1_cleaned, msgs1)
-
-                # Call 2 (depends on Call 1)
-                call1_context = {d: call1_cleaned[d] for d in ["intent", "language", "domain", "task", "difficulty"] if d in call1_cleaned}
-                msgs2 = build_call2_messages(conversations_json, signals_str, call1_context, compact=_compact)
-                call2_result, call2_raw, usage2 = await async_llm_call(http_client, msgs2, model,
-                                                                      max_retries=_max_retries, config=config,
-                                                                      rate_limiter=rate_limiter)
+            # Call 1 — reuse cached result if available from a previous attempt
+            if _cached_call1 is not None:
+                call1_cleaned, msgs1 = _cached_call1
+                monitor["call1_cached"] = True
+            else:
+                msgs1 = build_call1_messages(conversations_json, signals_str, compact=_compact)
+                call1_result, call1_raw, usage1, outcome1 = await _call("pass1.call1", msgs1)
                 monitor["llm_calls"] += 1
-                monitor["total_prompt_tokens"] += usage2["prompt_tokens"]
-                monitor["total_completion_tokens"] += usage2["completion_tokens"]
+                monitor["total_prompt_tokens"] += usage1.get("prompt_tokens", 0)
+                monitor["total_completion_tokens"] += usage1.get("completion_tokens", 0)
+                if "queue_wait_ms" in usage1:
+                    monitor["queue_wait_ms"] = usage1.get("queue_wait_ms")
+                if usage1.get("runtime_state") is not None:
+                    monitor["runtime_state"] = usage1.get("runtime_state")
 
-                if call2_result is None and usage2.get("content_filtered"):
+                if call1_result is None and usage1.get("content_filtered"):
                     if sanitized_conversations_json is None:
                         sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
                         if changed:
                             sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
                     if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
-                        retry_msgs2 = build_call2_messages(
-                            sanitized_conversations_json, signals_str, call1_context, compact=_compact
-                        )
-                        retry_result, retry_raw, retry_usage = await async_llm_call(
-                            http_client,
-                            retry_msgs2,
-                            model,
-                            max_retries=0,
-                            config=config,
-                            rate_limiter=rate_limiter,
+                        retry_msgs1 = build_call1_messages(sanitized_conversations_json, signals_str, compact=_compact)
+                        retry_result, retry_raw, retry_usage, retry_outcome1 = await _call(
+                            "pass1.call1.sanitized",
+                            retry_msgs1,
                         )
                         monitor["llm_calls"] += 1
-                        monitor["total_prompt_tokens"] += retry_usage["prompt_tokens"]
-                        monitor["total_completion_tokens"] += retry_usage["completion_tokens"]
-                        monitor["content_filter_retry"] = "call2"
+                        monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
+                        monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
+                        monitor["content_filter_retry"] = "call1"
                         if retry_result is not None:
-                            call2_result, call2_raw, usage2 = retry_result, retry_raw, retry_usage
+                            call1_result, call1_raw, usage1, outcome1 = retry_result, retry_raw, retry_usage, retry_outcome1
+                            msgs1 = retry_msgs1
                             conversations_json = sanitized_conversations_json
                             effective_conversations_json = sanitized_conversations_json
                         else:
-                            call2_result, call2_raw, usage2 = retry_result, retry_raw, retry_usage
+                            call1_result, call1_raw, usage1, outcome1 = retry_result, retry_raw, retry_usage, retry_outcome1
 
-                if call2_result is None:
-                    monitor["status"] = "call2_failed"
-                    monitor["error"] = usage2.get("error", "unknown")
-                    monitor["error_response"] = usage2.get("error_response") or (call2_raw[:500] if call2_raw else "")
-                    if usage2.get("non_retryable"):
-                        return sample_idx, _build_partial_labels(call1_cleaned, "call2_non_retryable_failure"), monitor
+                if call1_result is None:
+                    monitor["status"] = "call1_failed"
+                    monitor["error"] = usage1.get("error", "unknown")
+                    monitor["error_response"] = usage1.get("error_response") or (call1_raw[:500] if call1_raw else "")
+                    monitor["error_class"] = outcome1.classification.value
+                    monitor["retryable_infra"] = bool(outcome1.is_infra_failure)
+                    monitor["http_status"] = outcome1.status_code
+                    if usage1.get("non_retryable"):
+                        monitor["elapsed_seconds"] = round(time.time() - start, 2)
+                        return sample_idx, None, monitor
                     if sample_attempt < _max_retries_sample:
                         continue
-                    return sample_idx, _build_partial_labels(call1_cleaned, "call2_retry_exhausted"), monitor
+                    monitor["elapsed_seconds"] = round(time.time() - start, 2)
+                    return sample_idx, None, monitor
 
-                call2_cleaned, call2_issues = validate_tags(call2_result, "call2")
-                monitor["validation_issues"].extend(call2_issues)
+                call1_cleaned, call1_issues = validate_tags(call1_result, "call1")
+                monitor["validation_issues"].extend(call1_issues)
+                _cached_call1 = (call1_cleaned, msgs1)
 
-                # Merge
-                labels = {}
-                for d in ["intent", "language", "domain", "task", "difficulty"]:
-                    labels[d] = call1_cleaned.get(d, [] if d in MULTI_SELECT else "")
-                for d in ["concept", "agentic", "constraint", "context"]:
-                    labels[d] = call2_cleaned.get(d, [] if d in MULTI_SELECT else "")
-                labels["confidence"] = {
-                    **(call1_cleaned.get("confidence", {}) if isinstance(call1_cleaned.get("confidence"), dict) else {}),
-                    **(call2_cleaned.get("confidence", {}) if isinstance(call2_cleaned.get("confidence"), dict) else {}),
-                }
-                labels["unmapped"] = call1_cleaned.get("unmapped", []) + call2_cleaned.get("unmapped", [])
-                labels["canonicalized"] = (
-                    list(call1_cleaned.get("canonicalized", []))
-                    + list(call2_cleaned.get("canonicalized", []))
-                )
-                for payload in (call1_cleaned, call2_cleaned):
-                    for d in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
-                        if d not in payload:
-                            continue
-                        if d in SINGLE_SELECT:
-                            if not labels.get(d) and payload.get(d):
-                                labels[d] = payload[d]
-                            continue
-                        for value in payload.get(d, []) or []:
-                            if value not in labels[d]:
-                                labels[d].append(value)
+            # Call 2 (depends on Call 1)
+            call1_context = {d: call1_cleaned[d] for d in ["intent", "language", "domain", "task", "difficulty"] if d in call1_cleaned}
+            msgs2 = build_call2_messages(conversations_json, signals_str, call1_context, compact=_compact)
+            call2_result, call2_raw, usage2, outcome2 = await _call("pass1.call2", msgs2)
+            monitor["llm_calls"] += 1
+            monitor["total_prompt_tokens"] += usage2.get("prompt_tokens", 0)
+            monitor["total_completion_tokens"] += usage2.get("completion_tokens", 0)
 
-                # Consistency
-                warnings = check_consistency(labels)
-                monitor["consistency_warnings"] = warnings
+            if call2_result is None and usage2.get("content_filtered"):
+                if sanitized_conversations_json is None:
+                    sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
+                    if changed:
+                        sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
+                if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
+                    retry_msgs2 = build_call2_messages(sanitized_conversations_json, signals_str, call1_context, compact=_compact)
+                    retry_result, retry_raw, retry_usage, retry_outcome2 = await _call(
+                        "pass1.call2.sanitized",
+                        retry_msgs2,
+                    )
+                    monitor["llm_calls"] += 1
+                    monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
+                    monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
+                    monitor["content_filter_retry"] = "call2"
+                    if retry_result is not None:
+                        call2_result, call2_raw, usage2, outcome2 = retry_result, retry_raw, retry_usage, retry_outcome2
+                        conversations_json = sanitized_conversations_json
+                        effective_conversations_json = sanitized_conversations_json
+                    else:
+                        call2_result, call2_raw, usage2, outcome2 = retry_result, retry_raw, retry_usage, retry_outcome2
 
-                # Arbitration
-                low_conf = find_low_confidence_dims(labels, threshold=_conf_threshold)
-                monitor["low_confidence_dims"] = [{"dim": d, "conf": s} for d, s in low_conf]
-
-                if low_conf and enable_arbitration:
-                    monitor["arbitrated"] = True
-                    # Re-run relevant call(s)
-                    call1_dims = {"intent", "language", "domain", "task", "difficulty"}
-                    call2_dims = {"concept", "agentic", "constraint", "context"}
-
-                    if any(d in call1_dims for d, _ in low_conf):
-                        re1, _, u1 = await async_llm_call(http_client, msgs1, model, temperature=0.3,
-                                                          max_retries=_max_retries, config=config,
-                                                          rate_limiter=rate_limiter)
-                        monitor["llm_calls"] += 1
-                        monitor["total_prompt_tokens"] += u1["prompt_tokens"]
-                        monitor["total_completion_tokens"] += u1["completion_tokens"]
-                        if re1:
-                            re1_clean, _ = validate_tags(re1, "call1")
-                            for d, _ in low_conf:
-                                if d in call1_dims and d in re1_clean:
-                                    labels[d] = re1_clean[d]
-                                    labels["confidence"][d] = re1_clean.get("confidence", {}).get(d, 0)
-
-                    if any(d in call2_dims for d, _ in low_conf):
-                        re2, _, u2 = await async_llm_call(http_client, msgs2, model, temperature=0.3,
-                                                          max_retries=_max_retries, config=config,
-                                                          rate_limiter=rate_limiter)
-                        monitor["llm_calls"] += 1
-                        monitor["total_prompt_tokens"] += u2["prompt_tokens"]
-                        monitor["total_completion_tokens"] += u2["completion_tokens"]
-                        if re2:
-                            re2_clean, _ = validate_tags(re2, "call2")
-                            for d, _ in low_conf:
-                                if d in call2_dims and d in re2_clean:
-                                    labels[d] = re2_clean[d]
-                                    labels["confidence"][d] = re2_clean.get("confidence", {}).get(d, 0)
-
-            except Exception as e:
-                monitor["status"] = f"error: {str(e)[:100]}"
+            if call2_result is None:
+                monitor["status"] = "call2_failed"
+                monitor["error"] = usage2.get("error", "unknown")
+                monitor["error_response"] = usage2.get("error_response") or (call2_raw[:500] if call2_raw else "")
+                monitor["error_class"] = outcome2.classification.value
+                monitor["retryable_infra"] = bool(outcome2.is_infra_failure)
+                monitor["http_status"] = outcome2.status_code
+                monitor["elapsed_seconds"] = round(time.time() - start, 2)
+                if usage2.get("non_retryable"):
+                    return sample_idx, _build_partial_labels(call1_cleaned, "call2_non_retryable_failure"), monitor
                 if sample_attempt < _max_retries_sample:
                     continue
-                return sample_idx, None, monitor
+                return sample_idx, _build_partial_labels(call1_cleaned, "call2_retry_exhausted"), monitor
+
+            call2_cleaned, call2_issues = validate_tags(call2_result, "call2")
+            monitor["validation_issues"].extend(call2_issues)
+
+            # Merge
+            labels = {}
+            for d in ["intent", "language", "domain", "task", "difficulty"]:
+                labels[d] = call1_cleaned.get(d, [] if d in MULTI_SELECT else "")
+            for d in ["concept", "agentic", "constraint", "context"]:
+                labels[d] = call2_cleaned.get(d, [] if d in MULTI_SELECT else "")
+            labels["confidence"] = {
+                **(call1_cleaned.get("confidence", {}) if isinstance(call1_cleaned.get("confidence"), dict) else {}),
+                **(call2_cleaned.get("confidence", {}) if isinstance(call2_cleaned.get("confidence"), dict) else {}),
+            }
+            labels["unmapped"] = call1_cleaned.get("unmapped", []) + call2_cleaned.get("unmapped", [])
+            labels["canonicalized"] = list(call1_cleaned.get("canonicalized", [])) + list(call2_cleaned.get("canonicalized", []))
+            for payload in (call1_cleaned, call2_cleaned):
+                for d in ["intent", "language", "domain", "task", "difficulty", "concept", "agentic", "constraint", "context"]:
+                    if d not in payload:
+                        continue
+                    if d in SINGLE_SELECT:
+                        if not labels.get(d) and payload.get(d):
+                            labels[d] = payload[d]
+                        continue
+                    for value in payload.get(d, []) or []:
+                        if value not in labels[d]:
+                            labels[d].append(value)
+
+            warnings = check_consistency(labels)
+            monitor["consistency_warnings"] = warnings
+
+            low_conf = find_low_confidence_dims(labels, threshold=_conf_threshold)
+            monitor["low_confidence_dims"] = [{"dim": d, "conf": s} for d, s in low_conf]
+
+            arb_allowed = bool(enable_arbitration)
+            if runtime is not None and getattr(config, "disable_arbitration_when_degraded", False):
+                if runtime.state != "healthy":
+                    arb_allowed = False
+                    monitor["arbitration_skipped"] = f"runtime:{runtime.state}"
+
+            if low_conf and arb_allowed:
+                monitor["arbitrated"] = True
+                call1_dims = {"intent", "language", "domain", "task", "difficulty"}
+                call2_dims = {"concept", "agentic", "constraint", "context"}
+
+                if any(d in call1_dims for d, _ in low_conf):
+                    re1, _, u1, _ = await _call("pass1.call1.arb", msgs1, temperature=0.3, max_tokens=1000)
+                    monitor["llm_calls"] += 1
+                    monitor["total_prompt_tokens"] += u1.get("prompt_tokens", 0)
+                    monitor["total_completion_tokens"] += u1.get("completion_tokens", 0)
+                    if re1:
+                        re1_clean, _ = validate_tags(re1, "call1")
+                        for d, _ in low_conf:
+                            if d in call1_dims and d in re1_clean:
+                                labels[d] = re1_clean[d]
+                                labels["confidence"][d] = re1_clean.get("confidence", {}).get(d, 0)
+
+                if any(d in call2_dims for d, _ in low_conf):
+                    re2, _, u2, _ = await _call("pass1.call2.arb", msgs2, temperature=0.3, max_tokens=1000)
+                    monitor["llm_calls"] += 1
+                    monitor["total_prompt_tokens"] += u2.get("prompt_tokens", 0)
+                    monitor["total_completion_tokens"] += u2.get("completion_tokens", 0)
+                    if re2:
+                        re2_clean, _ = validate_tags(re2, "call2")
+                        for d, _ in low_conf:
+                            if d in call2_dims and d in re2_clean:
+                                labels[d] = re2_clean[d]
+                                labels["confidence"][d] = re2_clean.get("confidence", {}).get(d, 0)
 
             monitor["elapsed_seconds"] = round(time.time() - start, 2)
             return sample_idx, labels, monitor
 
-        # Should not reach here, but just in case
-        monitor["elapsed_seconds"] = round(time.time() - start, 2)
-        return sample_idx, None, monitor
+        except Exception as e:
+            monitor["status"] = f"error: {str(e)[:100]}"
+            if sample_attempt < _max_retries_sample:
+                continue
+            monitor["elapsed_seconds"] = round(time.time() - start, 2)
+            return sample_idx, None, monitor
+
+    # Exhausted retries
+    monitor = {
+        "sample_id": sample.get("id", f"sample-{sample_idx}"),
+        "index": sample_idx,
+        "llm_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "validation_issues": [],
+        "consistency_warnings": [],
+        "low_confidence_dims": [],
+        "arbitrated": False,
+        "sample_attempt": _max_retries_sample,
+        "status": "timeout",
+        "elapsed_seconds": round(time.time() - start, 2),
+    }
+    return sample_idx, None, monitor
 
 
 def compute_stats(all_monitors, all_labels, inherit_map=None):
@@ -2092,6 +2303,76 @@ class ChunkCollector:
         self.monitors = [None] * n
 
 
+async def _run_pass1_recovery_sweep(
+    *,
+    samples: list,
+    all_labels: list,
+    all_monitors: list,
+    candidate_indices: list[int],
+    http_client,
+    model: str,
+    config,
+    enable_arbitration: bool,
+) -> int:
+    """Retry infra-failed samples once (or a few passes) before finalizing outputs."""
+    if not config or not getattr(config, "enable_stage_recovery_sweep", False):
+        return 0
+    if not getattr(config, "enable_adaptive_runtime", False):
+        return 0
+    if _config_adaptive_runtime(config) is None:
+        return 0
+    max_passes = int(getattr(config, "recovery_sweep_max_passes", 1) or 0)
+    if max_passes <= 0:
+        return 0
+
+    recovered_total = 0
+    recovery_config = _make_recovery_config(config)
+    if recovery_config is None:
+        return 0
+    recovery_runtime = _build_adaptive_runtime(recovery_config)
+    setattr(recovery_config, "_adaptive_runtime", recovery_runtime)
+    recovery_sem = asyncio.Semaphore(max(1, int(getattr(recovery_config, "concurrency", 1) or 1)))
+
+    for _ in range(max_passes):
+        retry_indices = []
+        for i in candidate_indices:
+            labels = all_labels[i]
+            if labels is not None and not is_partial_labels(labels):
+                continue
+            m = all_monitors[i] or {}
+            if not m.get("retryable_infra", False):
+                continue
+            retry_indices.append(i)
+
+        if not retry_indices:
+            break
+
+        results = await asyncio.gather(
+            *[
+                label_one(
+                    http_client,
+                    samples[i],
+                    model,
+                    i,
+                    len(samples),
+                    recovery_sem,
+                    enable_arbitration=enable_arbitration,
+                    config=recovery_config,
+                    rate_limiter=None,
+                )
+                for i in retry_indices
+            ]
+        )
+        for (_, labels, monitor), idx in zip(results, retry_indices):
+            before = all_labels[idx]
+            all_labels[idx] = labels
+            all_monitors[idx] = monitor
+            if (before is None or is_partial_labels(before)) and (labels is not None and not is_partial_labels(labels)):
+                recovered_total += 1
+
+    return recovered_total
+
+
 def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_acc,
                  input_path, pprint=print, run_failure_log_path=None):
     """Finalize a completed chunk: inherit, attach labels, write, release memory."""
@@ -2135,6 +2416,10 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_ac
                     "error": monitor.get("error", ""),
                     "error_response": monitor.get("error_response", ""),
                     "attempts": monitor.get("sample_attempt", 0) + 1 if monitor else 0,
+                    "error_class": monitor.get("error_class"),
+                    "retryable_infra": monitor.get("retryable_infra"),
+                    "http_status": monitor.get("http_status"),
+                    "runtime_state": monitor.get("runtime_state"),
                 }, ensure_ascii=False) + "\n")
 
     # Update stats accumulator
@@ -2308,7 +2593,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         pending_futures = set()
         next_chunk_to_flush = 0
 
-        def flush_ready_chunks():
+        async def flush_ready_chunks():
             nonlocal next_chunk_to_flush
             while True:
                 c = collectors.get(next_chunk_to_flush)
@@ -2316,6 +2601,30 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                     break
                 if c.done < c.label_count:
                     break
+                # Retry infra failures once, within the chunk boundary, so we can
+                # merge/rewrite outputs deterministically.
+                if config and getattr(config, "enable_stage_recovery_sweep", False):
+                    inherited = set(c.inherit_map.keys()) if c.inherit_map else set()
+                    candidate = [
+                        i for i in range(len(c.labels))
+                        if i not in inherited and (c.labels[i] is None or is_partial_labels(c.labels[i]))
+                    ]
+                    recovered = await _run_pass1_recovery_sweep(
+                        samples=c.samples,
+                        all_labels=c.labels,
+                        all_monitors=c.monitors,
+                        candidate_indices=candidate,
+                        http_client=http_client,
+                        model=model,
+                        config=config,
+                        enable_arbitration=enable_arbitration,
+                    )
+                    if recovered:
+                        c.ok = sum(1 for i in range(len(c.labels)) if is_usable_labels(c.labels[i]))
+                        c.fail = sum(
+                            1 for i in range(len(c.labels))
+                            if (c.labels[i] is None or is_partial_labels(c.labels[i])) and i not in inherited
+                        )
                 _flush_chunk(c, out_rows, out_labeled, out_monitor, out_failed,
                              stats_acc, input_path, pprint=pprint,
                              run_failure_log_path=run_failure_log_path)
@@ -2327,7 +2636,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
         # Initial load
         maybe_load_more(pending_futures, collectors)
-        flush_ready_chunks()
+        await flush_ready_chunks()
 
         file_start = time.time()
 
@@ -2362,12 +2671,12 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                             info = f"{info} • {run_info}"
                     progress.update(sample_task, advance=1, info=info)
 
-            flush_ready_chunks()
+            await flush_ready_chunks()
             # After processing batch, check if we should load more chunks
             maybe_load_more(pending_futures, collectors)
-            flush_ready_chunks()
+            await flush_ready_chunks()
 
-        flush_ready_chunks()
+        await flush_ready_chunks()
 
         file_elapsed = time.time() - file_start
 
@@ -2551,6 +2860,27 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     file_elapsed = time.time() - file_start
 
+    # One conservative sweep over infra-retryable failures (before inheritance/output).
+    if config and getattr(config, "enable_stage_recovery_sweep", False):
+        inherited_indices = set(inherit_map.keys())
+        candidate = [
+            i for i in label_indices
+            if i not in inherited_indices and (all_labels[i] is None or is_partial_labels(all_labels[i]))
+        ]
+        if candidate:
+            recovered = await _run_pass1_recovery_sweep(
+                samples=samples,
+                all_labels=all_labels,
+                all_monitors=all_monitors,
+                candidate_indices=candidate,
+                http_client=http_client,
+                model=model,
+                config=config,
+                enable_arbitration=enable_arbitration,
+            )
+            if recovered:
+                pprint(f"  Recovery sweep: recovered {recovered}/{len(candidate)} samples")
+
     resolved_labels = apply_inherited_labels(samples, all_labels, inherit_map)
     all_labels[:] = resolved_labels
 
@@ -2625,6 +2955,10 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                     "error": (m.get("error", "") if m else "exceeded sample timeout"),
                     "error_response": (m.get("error_response", "")[:1000] if m else ""),
                     "attempts": (m.get("sample_attempt", 0) + 1 if m else 0),
+                    "error_class": (m.get("error_class") if m else None),
+                    "retryable_infra": (m.get("retryable_infra") if m else None),
+                    "http_status": (m.get("http_status") if m else None),
+                    "runtime_state": (m.get("runtime_state") if m else None),
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -3185,8 +3519,16 @@ async def run(
             "dashboards": dashboards,
         }
 
-    # Create shared rate limiter (one per run, shared across all LLM calls)
-    rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
+    # Create shared adaptive runtime (optional). When enabled, concurrency/rps
+    # act as *maximums* and the runtime will lower pressure on instability.
+    if config and getattr(config, "enable_adaptive_runtime", False):
+        setattr(config, "_adaptive_runtime", _build_adaptive_runtime(config))
+
+    # Create shared rate limiter (legacy path). In adaptive mode we rely on
+    # runtime admission control instead of per-request token buckets.
+    rate_limiter = None
+    if _config_adaptive_runtime(config) is None:
+        rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
 
     # ── Resume mode ──────────────────────────────────────
     if resume:

@@ -92,6 +92,18 @@ Dashboards are built from existing run artifacts.
 
 This keeps large runs shareable and avoids embedding giant payloads directly into the HTML.
 
+## Adaptive runtime (optional)
+
+When `--adaptive-runtime` is enabled (default), `sft-label` can treat
+`--concurrency` and `--rps-limit` as caps and adjust effective pressure based on
+observed endpoint health. During instability, it may lower effective throughput,
+pause briefly, and probe for recovery, then gradually ramp back up.
+
+When `--recovery-sweep` is enabled (default), `sft-label` can retry infra-failed
+samples once at the end of Pass 1 and Pass 2 to improve completion rate.
+
+See [Adaptive LLM runtime](adaptive-llm-runtime.md) for details.
+
 ## Input modes
 
 ### Standard file/directory mode

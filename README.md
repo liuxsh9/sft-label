@@ -100,7 +100,7 @@ In the common case:
 What `start` does:
 
 1. **Lets you choose a workflow**: Pass 1 + Pass 2 is the default recommendation, followed by Pass 1 only, scoring only, semantic clustering, filtering, maintenance, export, and dashboard-service workflows.
-2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options.
+2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options (including `--adaptive-runtime` / `--recovery-sweep` toggles when relevant).
 3. **Builds the exact CLI command for you** and shows a launch summary before execution.
 4. **Can finish the run with URLs** by auto-publishing dashboards to your configured service.
 
@@ -132,6 +132,8 @@ The exact layout depends on the input mode, but these are the main artifacts mos
   stats_labeling.json          # Pass 1 stats
   stats_scoring.json           # Pass 2 stats
   conversation_scores.json     # Multi-turn aggregates when scoring is available
+  runtime_events.jsonl         # adaptive runtime events (when enabled)
+  runtime_summary.json         # adaptive runtime summary (when enabled)
   dashboards/
     dashboard_labeling.html
     dashboard_labeling.data/
@@ -216,6 +218,7 @@ More copy-paste recipes: [Common workflows](docs/guides/common-workflows.md).
 - [Getting started](docs/guides/getting-started.md)
 - [How sft-label works](docs/guides/how-sft-label-works.md)
 - [Interactive launcher guide](docs/guides/interactive-launcher.md)
+- [Adaptive LLM runtime](docs/guides/adaptive-llm-runtime.md)
 - [Output files and dashboards](docs/guides/output-files-and-dashboards.md)
 - [Common workflows](docs/guides/common-workflows.md)
 

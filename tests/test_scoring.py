@@ -16,6 +16,7 @@ import re
 import asyncio
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -2682,3 +2683,212 @@ class TestAgenticQualityFloor:
         ]
         penalty, quality_floor, neg_flags = _compute_penalty(slices)
         assert quality_floor == 2  # min, not p10
+
+
+def _full_labels(intent: str = "build") -> dict:
+    return {
+        "intent": intent,
+        "language": ["python"],
+        "domain": ["web-backend"],
+        "task": ["feature-implementation"],
+        "difficulty": "intermediate",
+        "concept": ["algorithms"],
+        "agentic": [],
+        "constraint": [],
+        "context": "snippet",
+        "confidence": {"intent": 0.9, "language": 0.9, "difficulty": 0.9},
+        "unmapped": [],
+    }
+
+
+def _value_payload(sample_id: str, rarity=None) -> dict:
+    return {
+        "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+        "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+        "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+        "rarity": rarity or {"score": 5.0},
+        "flags": [],
+        "thinking_mode": "fast",
+        "value_score": 6.0 if sample_id.endswith("ok") else 6.5,
+        "confidence": 0.85,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pass2_score_one_malformed_response_counts_as_abnormal_infra(tmp_path):
+    """Schema/score failures should be infra-retryable and runtime-health relevant."""
+    from sft_label.scoring import score_one
+
+    class _StubPermit:
+        queue_wait_ms = 0.0
+        state_at_acquire = "healthy"
+
+        def __init__(self):
+            self.released = False
+
+        def release(self):
+            self.released = True
+
+    class _StubRuntime:
+        state = "healthy"
+
+        def __init__(self):
+            self.acquire_calls = []
+            self.observed = []
+
+        async def acquire(self, *, stage, sample_id):
+            self.acquire_calls.append((stage, sample_id))
+            return _StubPermit()
+
+        def observe(self, outcome):
+            self.observed.append(outcome)
+
+    runtime = _StubRuntime()
+    config = PipelineConfig(
+        scoring_concurrency=1,
+        enable_adaptive_runtime=True,
+        sample_max_retries=1,
+        request_quick_retries=0,
+    )
+    setattr(config, "_adaptive_runtime", runtime)
+
+    sample = {
+        "id": "sample-malformed",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+        "labels": _full_labels(),
+        "metadata": {},
+    }
+
+    async def mock_async_llm_call(*_args, **_kwargs):
+        # Parsed JSON exists but does not match expected schema.
+        return {"foo": "bar"}, '{"foo":"bar"}', {"status_code": 200, "prompt_tokens": 1, "completion_tokens": 1}
+
+    # Semaphore=0 should not block when runtime admission is used.
+    sem = asyncio.Semaphore(0)
+    with patch("sft_label.scoring.async_llm_call", side_effect=mock_async_llm_call):
+        value, monitor = await asyncio.wait_for(
+            score_one(
+                None,
+                sample,
+                "mock-model",
+                {"score": 5.0},
+                0,
+                1,
+                sem,
+                config=config,
+                rate_limiter=None,
+            ),
+            timeout=2,
+        )
+
+    assert value is None
+    assert monitor["status"] == "failed"
+    assert monitor.get("error_class") == "abnormal_response"
+    assert monitor.get("retryable_infra") is True
+    assert runtime.acquire_calls
+    assert runtime.observed
+    assert runtime.observed[0].classification.value == "abnormal_response"
+
+
+@pytest.mark.asyncio
+async def test_pass2_recovery_sweep_retries_only_infra_failures_and_emits_runtime_summary(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    input_path = tmp_path / "labeled.json"
+    out_dir = tmp_path / "out"
+
+    samples = [
+        {
+            "id": "sample-retry",
+            "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+            "labels": _full_labels(),
+            "metadata": {},
+        },
+        {
+            "id": "sample-noretry",
+            "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+            "labels": _full_labels("debug"),
+            "metadata": {},
+        },
+        {
+            "id": "sample-ok",
+            "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+            "labels": _full_labels("modify"),
+            "metadata": {},
+        },
+    ]
+    input_path.write_text(json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    calls: dict[str, int] = {}
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        sid = sample["id"]
+        calls[sid] = calls.get(sid, 0) + 1
+
+        if sid == "sample-retry" and calls[sid] == 1:
+            return None, {
+                "sample_id": sid,
+                "status": "failed",
+                "error": "timeout",
+                "error_class": "timeout",
+                "retryable_infra": True,
+                "attempts": 1,
+                "llm_calls": 1,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "validation_issues": [],
+            }
+
+        if sid == "sample-noretry":
+            return None, {
+                "sample_id": sid,
+                "status": "failed",
+                "error": "input error",
+                "error_class": "input_error",
+                "retryable_infra": False,
+                "attempts": 1,
+                "llm_calls": 1,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "validation_issues": [],
+            }
+
+        return _value_payload(sid, rarity_result), {
+            "sample_id": sid,
+            "status": "success",
+            "attempts": 1,
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "validation_issues": [],
+        }
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        stats = await run_scoring(
+            str(input_path),
+            output_dir=str(out_dir),
+            config=PipelineConfig(
+                scoring_concurrency=2,
+                enable_adaptive_runtime=True,
+                enable_stage_recovery_sweep=True,
+                recovery_sweep_max_passes=1,
+            ),
+        )
+
+    assert calls["sample-retry"] == 2  # retried in sweep
+    assert calls["sample-noretry"] == 1  # not retried
+    assert calls["sample-ok"] == 1
+
+    assert stats["recovery_sweep"]["attempted"] == 1
+    assert stats["recovery_sweep"]["recovered"] == 1
+    assert stats["adaptive_runtime"]["enabled"] is True
+
+    stats_payload = json.loads((out_dir / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+    assert stats_payload["recovery_sweep"]["recovered"] == 1
+    assert stats_payload["adaptive_runtime"]["enabled"] is True
+
+    scored_payload = json.loads((out_dir / "scored.json").read_text(encoding="utf-8"))
+    by_id = {s["id"]: s for s in scored_payload}
+    assert by_id["sample-retry"].get("value") is not None
+    assert by_id["sample-noretry"].get("value") is None
