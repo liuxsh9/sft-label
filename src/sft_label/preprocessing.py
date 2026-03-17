@@ -532,6 +532,20 @@ def to_pangu_pseudo_multiturn(sample):
         elif role == "tool":
             prior_parts.append(content)
 
+    # Pack trajectory turns (between last user request and final assistant reply)
+    trajectory_parts = []
+    if last_user_idx is not None:
+        for i in range(last_user_idx + 1, last_reply_idx):
+            turn = conversations[i]
+            role = turn.get("from", "")
+            content = turn.get("value", "")
+            if role == "human":
+                trajectory_parts.append(f"用户：{content} /no_think")
+            elif role == "gpt":
+                trajectory_parts.append(f"助手：[unused16][unused17]{content}")
+            elif role == "tool":
+                trajectory_parts.append(content)
+
     # Build user content
     last_user_content = ""
     if last_user_idx is not None:
@@ -553,6 +567,10 @@ def to_pangu_pseudo_multiturn(sample):
     else:
         # Fast thinking (no attributable COT)
         assistant_content = f"[unused16][unused17]{response}"
+
+    if trajectory_parts:
+        packed_trajectory = "[unused10][unused9]".join(trajectory_parts)
+        assistant_content = f"{packed_trajectory}[unused10][unused9]{assistant_content}"
 
     result = {
         "data": [

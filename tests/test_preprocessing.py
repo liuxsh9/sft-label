@@ -642,6 +642,26 @@ class TestToPanguPseudoMultiturn:
         # Last assistant response
         assert result["data"][1]["content"] == "[unused16][unused17]Here's the code"
 
+    def test_current_turn_tool_trajectory_preserved(self):
+        """Assistant/tool trajectory between user and final reply is preserved."""
+        sample = {
+            "conversations": [
+                {"from": "human", "value": "Fix the bug"},
+                {"from": "gpt", "value": "Let me check the logs"},
+                {"from": "tool", "value": "ERROR: stack trace"},
+                {"from": "gpt", "value": "Apply this patch"},
+            ],
+            "metadata": {},
+        }
+        result = to_pangu_pseudo_multiturn(sample)
+
+        assert result["data"][0]["content"] == "Fix the bug"
+        assistant_content = result["data"][1]["content"]
+        assert "助手：[unused16][unused17]Let me check the logs" in assistant_content
+        assert "ERROR: stack trace" in assistant_content
+        assert assistant_content.endswith("[unused16][unused17]Apply this patch")
+        assert "[unused10][unused9]" in assistant_content
+
     def test_system_prompt_preserved(self):
         """System prompt from metadata → meta_prompt in output."""
         sample = {
