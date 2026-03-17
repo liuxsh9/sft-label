@@ -40,6 +40,8 @@ from sft_label.config import (
     SELECTION_STAGE_VALUE_MULTIPLIERS, SELECTION_STAGE_SELECTION_MULTIPLIERS,
     SELECTION_LOW_INFO_TOOL_PENALTY, SELECTION_SUMMARY_NO_EVIDENCE_PENALTY,
     SELECTION_SUMMARY_EVIDENCE_BONUS,
+    ENABLE_SELECTIVE_SCORING, SELECTIVE_SCORING_POLICY, SELECTIVE_SCORING_MIN_TURNS,
+    SELECTIVE_SCORING_DRIFT_INTERVAL, SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -1487,6 +1489,194 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
 # Per-sample scoring
 # ─────────────────────────────────────────────────────────
 
+_SELECTIVE_COMPLEXITY_PRIOR = {
+    "beginner": 3.5,
+    "intermediate": 5.0,
+    "upper-intermediate": 6.0,
+    "advanced": 7.0,
+    "expert": 8.0,
+}
+_DISABLED_SELECTIVE_POLICIES = {"off", "disabled", "all", "full"}
+
+
+def _resolve_selective_scoring_policy(config=None):
+    enabled = getattr(config, "enable_selective_scoring", ENABLE_SELECTIVE_SCORING)
+    if not enabled:
+        return None
+    policy = getattr(config, "selective_scoring_policy", SELECTIVE_SCORING_POLICY)
+    if policy is None:
+        return None
+    policy = str(policy).strip().lower()
+    if not policy or policy in _DISABLED_SELECTIVE_POLICIES:
+        return None
+    return policy
+
+
+def _required_turn_anchors(total_turns, drift_interval):
+    """Return required turn indices for adaptive selective scoring."""
+    if total_turns <= 0:
+        return set()
+    anchors = {1, total_turns}
+    step = max(drift_interval, 1)
+    for idx in range(1, total_turns + 1, step):
+        anchors.add(idx)
+    return anchors
+
+
+def _selective_scoring_decision(sample, config=None):
+    """Decide whether this sample requires an LLM scoring call."""
+    policy = _resolve_selective_scoring_policy(config)
+    if policy is None:
+        return {
+            "requires_llm": True,
+            "policy": "full",
+            "reason": "selective_scoring_disabled",
+            "anchor_distance": None,
+        }
+
+    if policy != "multiturn_adaptive_v1":
+        return {
+            "requires_llm": True,
+            "policy": policy,
+            "reason": "unknown_policy_fallback",
+            "anchor_distance": None,
+        }
+
+    metadata = sample.get("metadata") or {}
+    labels = sample.get("labels") or {}
+    source_id = metadata.get("source_id")
+    total_turns = _coerce_positive_int(metadata.get("total_turns"))
+    turn_index = _coerce_positive_int(metadata.get("turn_index"))
+    min_turns = max(
+        2,
+        _coerce_positive_int(getattr(config, "selective_scoring_min_turns", SELECTIVE_SCORING_MIN_TURNS)),
+    )
+    drift_interval = max(
+        1,
+        _coerce_positive_int(getattr(config, "selective_scoring_drift_interval", SELECTIVE_SCORING_DRIFT_INTERVAL)),
+    )
+
+    if not source_id or total_turns <= 1 or turn_index <= 0:
+        return {
+            "requires_llm": True,
+            "policy": policy,
+            "reason": "missing_multiturn_metadata",
+            "anchor_distance": None,
+        }
+
+    if total_turns < min_turns:
+        return {
+            "requires_llm": True,
+            "policy": policy,
+            "reason": "below_min_turns_threshold",
+            "anchor_distance": None,
+        }
+
+    if not labels.get("inherited"):
+        return {
+            "requires_llm": True,
+            "policy": policy,
+            "reason": "non_inherited_turn",
+            "anchor_distance": None,
+        }
+
+    anchors = _required_turn_anchors(total_turns, drift_interval)
+    if turn_index in anchors:
+        return {
+            "requires_llm": True,
+            "policy": policy,
+            "reason": "required_anchor_turn",
+            "anchor_distance": 0,
+        }
+
+    anchor_distance = min(abs(turn_index - idx) for idx in anchors) if anchors else None
+    return {
+        "requires_llm": False,
+        "policy": policy,
+        "reason": "inherited_mid_turn_estimate",
+        "anchor_distance": anchor_distance,
+    }
+
+
+def _build_selective_estimate_score(sample, rarity_result, decision, config=None):
+    """Build conservative pseudo scores for non-LLM selective scoring turns."""
+    labels = sample.get("labels") or {}
+    difficulty = labels.get("difficulty")
+    difficulty_key = str(difficulty).strip().lower() if isinstance(difficulty, str) else ""
+    complexity_prior = _SELECTIVE_COMPLEXITY_PRIOR.get(difficulty_key, 5.0)
+    anchor_distance = decision.get("anchor_distance") or 0
+    inherited = bool(labels.get("inherited"))
+
+    complexity = complexity_prior - min(anchor_distance * 0.15, 1.0)
+    quality = 5.0 - (0.8 if inherited else 0.0) - min(anchor_distance * 0.30, 1.2)
+    reasoning = complexity - 0.6 - min(anchor_distance * 0.12, 0.5)
+
+    complexity = round(max(1.0, min(10.0, complexity)), 1)
+    quality = round(max(1.0, min(10.0, quality)), 1)
+    reasoning = round(max(1.0, min(10.0, reasoning)), 1)
+
+    conf_cap = getattr(
+        config,
+        "selective_scoring_estimate_confidence_cap",
+        SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP,
+    )
+    if not isinstance(conf_cap, (int, float)) or isinstance(conf_cap, bool):
+        conf_cap = SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP
+    conf_cap = max(0.2, min(1.0, float(conf_cap)))
+
+    label_conf = _sample_label_confidence(labels, default=0.65)
+    confidence = min(conf_cap, label_conf * 0.72)
+    if inherited:
+        confidence -= 0.06
+    confidence -= min(anchor_distance * 0.03, 0.2)
+    confidence = round(max(0.2, min(conf_cap, confidence)), 2)
+
+    estimated_score = {
+        "complexity": {
+            "instruction": complexity,
+            "analytical_depth": complexity,
+            "implementation": complexity,
+            "overall": complexity,
+        },
+        "quality": {
+            "correctness": quality,
+            "code_quality": quality,
+            "explanation": quality,
+            "completeness": quality,
+            "overall": quality,
+        },
+        "reasoning": {
+            "clarity": reasoning,
+            "consistency": reasoning,
+            "self_correction": False,
+            "overall": reasoning,
+        },
+        "confidence": confidence,
+    }
+
+    weights = config.value_weights if config and config.value_weights else VALUE_WEIGHTS
+    value_score = compute_value_score(estimated_score, rarity_result, weights)
+    features = _infer_selection_features(sample=sample, config=config)
+    value_score = _apply_value_stability(value_score, features, config=config)
+
+    return {
+        "complexity": estimated_score["complexity"],
+        "quality": estimated_score["quality"],
+        "reasoning": estimated_score["reasoning"],
+        "rarity": rarity_result,
+        "flags": [],
+        "value_score": value_score,
+        "confidence": confidence,
+        "estimation": {
+            "llm_scored": False,
+            "policy": decision.get("policy"),
+            "reason": decision.get("reason"),
+            "anchor_distance": decision.get("anchor_distance"),
+            "uncertainty": round(1.0 - confidence, 2),
+        },
+    }
+
+
 async def score_one(http_client, sample, model, rarity_result,
                     sample_idx, total, sem, config=None, rate_limiter=None):
     """Score a single sample: truncate, call LLM, validate, compute value_score.
@@ -1536,6 +1726,23 @@ async def score_one(http_client, sample, model, rarity_result,
         cot_text = saved_cot
     else:
         cot_text, _, _ = extract_cot_content(conversations)
+
+    selective_decision = _selective_scoring_decision(sample, config=config)
+    if not selective_decision.get("requires_llm", True):
+        value = _build_selective_estimate_score(
+            sample,
+            rarity_result,
+            selective_decision,
+            config=config,
+        )
+        value["thinking_mode"] = thinking_mode
+        monitor["status"] = "estimated_selective"
+        monitor["selective_scoring"] = {
+            "policy": selective_decision.get("policy"),
+            "reason": selective_decision.get("reason"),
+            "anchor_distance": selective_decision.get("anchor_distance"),
+        }
+        return value, monitor
 
     # Truncate for scoring
     _compact, _budget = _resolved_scoring_prompt_budget(config)
@@ -1684,6 +1891,7 @@ def compute_value_stats(scored_samples, all_monitors):
 
     total_scored = len(values)
     total_failed = sum(1 for m in all_monitors if m.get("status") == "failed")
+    total_estimated = sum(1 for m in all_monitors if m.get("status") == "estimated_selective")
 
     # Score distributions
     def extract_scores(key_path):
@@ -1882,6 +2090,7 @@ def compute_value_stats(scored_samples, all_monitors):
     return {
         "total_scored": total_scored,
         "total_failed": total_failed,
+        "total_estimated": total_estimated,
         "total_llm_calls": total_llm_calls,
         "total_prompt_tokens": total_prompt_tokens,
         "total_completion_tokens": total_completion_tokens,
@@ -2765,6 +2974,7 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
     """
     total_scored = len(summaries)
     total_failed = sum(1 for m in all_monitors if m.get("status") == "failed")
+    total_estimated = sum(1 for m in all_monitors if m.get("status") == "estimated_selective")
 
     # Score distributions
     def _gather(key):
@@ -2872,6 +3082,7 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
     return {
         "total_scored": total_scored,
         "total_failed": total_failed,
+        "total_estimated": total_estimated,
         "total_llm_calls": total_llm_calls,
         "total_prompt_tokens": total_prompt_tokens,
         "total_completion_tokens": total_completion_tokens,
@@ -2897,11 +3108,14 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
 
     total_scored = stats.get('total_scored', 0)
     total_failed = stats.get('total_failed', 0)
+    total_estimated = stats.get('total_estimated', 0)
     total = total_scored + total_failed
     success_rate = total_scored / total * 100 if total > 0 else 0
     if is_batch:
         print(f"Files:       {stats.get('files_processed', '?')}")
     print(f"Scored:      {total_scored}/{total} ({success_rate:.1f}%)")
+    if total_estimated:
+        print(f"Estimated:   {total_estimated}")
     print(f"LLM calls:   {stats.get('total_llm_calls', 0)}")
     total_tokens = stats.get('total_tokens', 0)
     print(f"Tokens:      {total_tokens:,}")
@@ -3364,18 +3578,56 @@ def _count_scoring_samples_in_file(labeled_path, limit=0):
     return total
 
 
+def _count_required_llm_calls_in_file(labeled_path, limit=0, config=None):
+    """Count samples that still require an LLM scoring call."""
+    if _resolve_selective_scoring_policy(config) is None:
+        return _count_scoring_samples_in_file(labeled_path, limit=limit)
+
+    calls = 0
+    if labeled_path.suffix == ".jsonl":
+        with open(labeled_path, "r", encoding="utf-8") as f:
+            seen = 0
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                seen += 1
+                if limit > 0 and seen > limit:
+                    break
+                sample = json.loads(line)
+                if _selective_scoring_decision(sample, config=config).get("requires_llm", True):
+                    calls += 1
+        return calls
+
+    with open(labeled_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    samples = data if isinstance(data, list) else ([data] if data else [])
+    if limit > 0:
+        samples = samples[:limit]
+    for sample in samples:
+        if _selective_scoring_decision(sample, config=config).get("requires_llm", True):
+            calls += 1
+    return calls
+
+
 def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
     """Estimate scoring workload before directory-mode execution."""
     start = time.time()
     total_samples = 0
+    required_llm_calls = 0
     for labeled_path in labeled_files:
         total_samples += _count_scoring_samples_in_file(labeled_path, limit=limit)
+        required_llm_calls += _count_required_llm_calls_in_file(
+            labeled_path,
+            limit=limit,
+            config=config,
+        )
 
-    baseline_calls = total_samples
-    # Pass 2 has 1 guaranteed scoring call per sample; retries may increase calls.
+    baseline_calls = required_llm_calls
+    # Pass 2 has at most one scoring call per selected slice; retries may increase calls.
     sample_retries = max(getattr(config, "sample_max_retries", SAMPLE_MAX_RETRIES), 1)
     retry_factor = 1.0 + min(0.2, 0.05 * (sample_retries - 1))
-    initial_est_calls = int(round(total_samples * retry_factor))
+    initial_est_calls = int(round(required_llm_calls * retry_factor))
     initial_est_calls = max(initial_est_calls, baseline_calls)
 
     return ScoringDirectoryWorkloadEstimate(
@@ -4193,6 +4445,7 @@ def _merge_value_stats(file_stats_list):
     merged = {
         "total_scored": sum(s.get("total_scored", 0) for s in file_stats_list),
         "total_failed": sum(s.get("total_failed", 0) for s in file_stats_list),
+        "total_estimated": sum(s.get("total_estimated", 0) for s in file_stats_list),
         "total_llm_calls": sum(s.get("total_llm_calls", 0) for s in file_stats_list),
         "total_prompt_tokens": sum(s.get("total_prompt_tokens", 0) for s in file_stats_list),
         "total_completion_tokens": sum(s.get("total_completion_tokens", 0) for s in file_stats_list),

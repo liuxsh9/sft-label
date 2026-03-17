@@ -194,6 +194,13 @@ CONV_V2_DOWNSIDE_CAP = 0.5                # guardrail: v2 should not drop far be
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)
 
+# ─── Selective Scoring (optional Pass 2 LLM reduction) ──
+ENABLE_SELECTIVE_SCORING = False          # default off for backward compatibility
+SELECTIVE_SCORING_POLICY = "multiturn_adaptive_v1"
+SELECTIVE_SCORING_MIN_TURNS = 8           # only apply to longer conversations
+SELECTIVE_SCORING_DRIFT_INTERVAL = 4      # score every Nth turn as drift anchor
+SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP = 0.55  # conservative cap for estimated slices
+
 # ═══════════════════════════════════════════════════════════
 # Trajectory SemHash + ANN Clustering
 # ═══════════════════════════════════════════════════════════
@@ -278,6 +285,11 @@ class PipelineConfig:
     enable_selection_stability: bool = ENABLE_SELECTION_STABILITY
     enable_domain_backfill: bool = ENABLE_DOMAIN_BACKFILL
     enable_rationale: bool = ENABLE_RATIONALE
+    enable_selective_scoring: bool = ENABLE_SELECTIVE_SCORING
+    selective_scoring_policy: str = SELECTIVE_SCORING_POLICY
+    selective_scoring_min_turns: int = SELECTIVE_SCORING_MIN_TURNS
+    selective_scoring_drift_interval: int = SELECTIVE_SCORING_DRIFT_INTERVAL
+    selective_scoring_estimate_confidence_cap: float = SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
     enable_conversation_v2: bool = ENABLE_CONVERSATION_V2
     conversation_v2_turn_threshold: int = CONV_V2_TURN_THRESHOLD

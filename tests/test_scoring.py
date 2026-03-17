@@ -1231,6 +1231,112 @@ class TestResumeScoringFile:
         assert "[Final Assistant] Here is the final fix" in user_msg
         assert "<prior_context>" in user_msg
 
+    def test_score_one_selective_scoring_estimates_inherited_middle_turn(self):
+        from sft_label.scoring import score_one
+        from unittest.mock import patch
+
+        sample = {
+            "id": "mt-mid-inherited",
+            "conversations": [
+                {"from": "human", "value": "turn-1 request"},
+                {"from": "gpt", "value": "turn-1 answer"},
+                {"from": "human", "value": "turn-2 request"},
+                {"from": "gpt", "value": "turn-2 answer"},
+                {"from": "human", "value": "turn-3 request"},
+                {"from": "gpt", "value": "turn-3 answer"},
+            ],
+            "labels": {
+                "intent": "build",
+                "difficulty": "advanced",
+                "inherited": True,
+                "confidence": {"intent": 0.9, "difficulty": 0.8},
+            },
+            "metadata": {"source_id": "conv-1", "turn_index": 3, "total_turns": 10},
+        }
+
+        async def should_not_call_llm(*args, **kwargs):
+            raise AssertionError("LLM call should be skipped for inherited middle turn")
+
+        config = PipelineConfig(
+            sample_max_retries=1,
+            enable_selective_scoring=True,
+            selective_scoring_min_turns=6,
+            selective_scoring_drift_interval=4,
+        )
+        with patch("sft_label.scoring.async_llm_call", side_effect=should_not_call_llm):
+            value, monitor = asyncio.run(
+                score_one(
+                    None,
+                    sample,
+                    "mock-model",
+                    {"score": 6.5, "tag_rarity": 0.8, "combo_rarity": 0.2},
+                    0,
+                    1,
+                    asyncio.Semaphore(1),
+                    config=config,
+                )
+            )
+
+        assert value is not None
+        assert monitor["status"] == "estimated_selective"
+        assert monitor["llm_calls"] == 0
+        assert value.get("estimation", {}).get("llm_scored") is False
+        assert value["value_score"] is not None
+        assert value["confidence"] < 0.7
+
+    def test_score_one_selective_scoring_keeps_drift_anchor_llm_scored(self):
+        from sft_label.scoring import score_one
+        from unittest.mock import patch
+
+        sample = {
+            "id": "mt-anchor",
+            "conversations": [
+                {"from": "human", "value": "request"},
+                {"from": "gpt", "value": "answer"},
+            ],
+            "labels": {
+                "intent": "build",
+                "difficulty": "advanced",
+                "inherited": True,
+            },
+            "metadata": {"source_id": "conv-1", "turn_index": 5, "total_turns": 10},
+        }
+
+        async def fake_async_llm_call(http_client, messages, model, **kwargs):
+            payload = {
+                "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 6, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "flags": [],
+                "confidence": 0.8,
+            }
+            return payload, json.dumps(payload), {"prompt_tokens": 10, "completion_tokens": 5}
+
+        config = PipelineConfig(
+            sample_max_retries=1,
+            enable_selective_scoring=True,
+            selective_scoring_min_turns=6,
+            selective_scoring_drift_interval=4,
+        )
+        with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+            value, monitor = asyncio.run(
+                score_one(
+                    None,
+                    sample,
+                    "mock-model",
+                    {"score": 5.5},
+                    0,
+                    1,
+                    asyncio.Semaphore(1),
+                    config=config,
+                )
+            )
+
+        assert value is not None
+        assert monitor["status"] == "success"
+        assert monitor["llm_calls"] == 1
+        assert "estimation" not in value
+
     def test_directory_jsonl_uses_chunked_pipeline(self, tmp_path):
         from sft_label.scoring import run_scoring
         from unittest.mock import patch
@@ -1577,6 +1683,78 @@ class TestResumeScoringFile:
         assert rarity is not None
         assert rarity["combo_rarity"] > 0.0
         assert stats["rarity_config"]["combo_mode"] == "hybrid"
+
+    def test_run_scoring_file_selective_scoring_reduces_llm_calls(self, tmp_path):
+        from sft_label.scoring import _run_scoring_file
+        from unittest.mock import patch
+
+        samples = [
+            {
+                "id": "turn-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                ],
+                "labels": {"intent": "build", "difficulty": "advanced"},
+                "metadata": {"source_id": "conv-1", "turn_index": 1, "total_turns": 3},
+            },
+            {
+                "id": "turn-2",
+                "conversations": [
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+                "labels": {"intent": "build", "difficulty": "advanced", "inherited": True},
+                "metadata": {"source_id": "conv-1", "turn_index": 2, "total_turns": 3},
+            },
+            {
+                "id": "turn-3",
+                "conversations": [
+                    {"from": "human", "value": "q3"},
+                    {"from": "gpt", "value": "a3"},
+                ],
+                "labels": {"intent": "build", "difficulty": "advanced", "inherited": True},
+                "metadata": {"source_id": "conv-1", "turn_index": 3, "total_turns": 3},
+            },
+        ]
+        labeled_path = tmp_path / "labeled.json"
+        labeled_path.write_text(json.dumps(samples), encoding="utf-8")
+
+        llm_calls = {"count": 0}
+
+        async def fake_async_llm_call(http_client, messages, model, **kwargs):
+            llm_calls["count"] += 1
+            payload = {
+                "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 6, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "flags": [],
+                "confidence": 0.8,
+            }
+            return payload, json.dumps(payload), {"prompt_tokens": 10, "completion_tokens": 5}
+
+        config = PipelineConfig(
+            scoring_concurrency=1,
+            sample_max_retries=1,
+            enable_selective_scoring=True,
+            selective_scoring_min_turns=3,
+            selective_scoring_drift_interval=10,
+        )
+        with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+            stats = asyncio.run(
+                _run_scoring_file(
+                    labeled_path, tmp_path, None, 0, config, resume=False,
+                )
+            )
+
+        assert llm_calls["count"] == 2
+        assert stats["total_llm_calls"] == 2
+        monitor_records = [json.loads(line) for line in (tmp_path / "monitor_value.jsonl").read_text(encoding="utf-8").splitlines()]
+        monitor_by_id = {record["sample_id"]: record for record in monitor_records}
+        assert monitor_by_id["turn-2"]["status"] == "estimated_selective"
+        scored = json.loads((tmp_path / "scored.json").read_text(encoding="utf-8"))
+        scored_by_id = {sample["id"]: sample for sample in scored}
+        assert scored_by_id["turn-2"]["value"]["estimation"]["llm_scored"] is False
 
 
 # ─────────────────────────────────────────────────────────
