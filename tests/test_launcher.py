@@ -32,7 +32,7 @@ class StubIO:
 def test_build_run_pass1_pass2_semantic_plan():
     io = StubIO(
         [
-            "3",          # workflow: pass1+pass2+pass4
+            "4",          # workflow: pass1+pass2+pass3
             "1",          # run mode: new
             "data.json",  # --input
             "",           # --output
@@ -64,7 +64,7 @@ def test_build_run_pass1_pass2_semantic_plan():
 def test_build_score_plan_with_llm_env_override():
     io = StubIO(
         [
-            "4",                      # workflow: score
+            "3",                      # workflow: score
             "labeled.json",           # --input
             "",                       # --tag-stats
             "",                       # rarity mode (default absolute)
@@ -167,7 +167,7 @@ def test_build_semantic_plan_api_provider_supports_env_override():
 def test_build_dashboard_service_init_plan():
     io = StubIO(
         [
-            "15",                    # workflow: dashboard maintenance
+            "7",                     # workflow: dashboard maintenance
             "1",                     # action: init
             "",                      # name -> default
             "/srv/sft-label-dashboard",  # web root
@@ -199,7 +199,7 @@ def test_build_dashboard_service_init_plan():
 def test_build_dashboard_service_runs_plan():
     io = StubIO(
         [
-            "15",     # workflow: dashboard maintenance
+            "7",      # workflow: dashboard maintenance
             "7",      # action: runs
             "prod",   # service name
             "",       # extra flags
@@ -279,36 +279,36 @@ def test_decode_utf8_input_byte_keeps_multibyte_chars():
 def test_all_workflows_generate_parseable_argv():
     parser = build_parser()
     workflow_answers = {
-        # 1. run-pass1
-        1: ["1", "data.json", "", "", "", "", "", "", "", "n", ""],
-        # 2. run-pass1-pass2
-        2: ["1", "data.json", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
-        # 3. run-pass1-pass2-semantic
-        3: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
-        # 4. score
-        4: ["labeled.json", "", "", "", "", "", "", "n", ""],
+        # 1. run-pass1-pass2
+        1: ["1", "data.json", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
+        # 2. run-pass1
+        2: ["1", "data.json", "", "", "", "", "", "", "", "n", ""],
+        # 3. score
+        3: ["labeled.json", "", "", "", "", "", "", "n", ""],
+        # 4. run-pass1-pass2-semantic
+        4: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
         # 5. semantic
         5: ["run_dir", "", "", "", "", "", ""],
         # 6. filter
         6: ["scored.json", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-        # 7. recompute-stats
-        7: ["run_dir/", "", "", "", ""],
-        # 8. refresh-rarity
-        8: ["run_dir/", "", "", "", "", ""],
+        # 7. dashboard-service maintenance
+        7: ["2", "", ""],  # action=status, name default, extra flags
+        # 8. recompute-stats
+        8: ["run_dir/", "", "", "", ""],
         # 9. regenerate-dashboard
         9: ["run_dir/", "", "", "", ""],
-        # 10. validate
-        10: [],
+        # 10. refresh-rarity
+        10: ["run_dir/", "", "", "", "", ""],
         # 11. analyze-unmapped
         11: ["run_dir/", "", "", "", "", ""],
         # 12. optimize-layout
         12: ["run_dir/", "", "", "", ""],
-        # 13. export-semantic
-        13: ["run_dir/", "out.jsonl", "", ""],
-        # 14. export-review
-        14: ["labeled.json", "review.csv", "", "", ""],
-        # 15. dashboard-service maintenance
-        15: ["2", "", ""],  # action=status, name default, extra flags
+        # 13. validate
+        13: [],
+        # 14. export-semantic
+        14: ["run_dir/", "out.jsonl", "", ""],
+        # 15. export-review
+        15: ["labeled.json", "review.csv", "", "", ""],
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -325,7 +325,7 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
 
     io = StubIO(
         [
-            "4",            # score
+            "3",            # score
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode (default absolute)
@@ -348,7 +348,7 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
 def test_required_text_prompt_ignores_arrow_key_input(capsys):
     io = StubIO(
         [
-            "1",          # workflow: run-pass1
+            "2",          # workflow: run-pass1
             "1",          # run mode: new
             "\x1b[A",     # arrow key input on required --input field
             "data.json",  # actual --input
@@ -374,7 +374,7 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
 def test_build_run_plan_can_set_migrate_mode():
     io = StubIO(
         [
-            "1",             # workflow: run-pass1
+            "2",             # workflow: run-pass1
             "1",             # run mode: new
             "dataset",       # --input
             "",              # --output
@@ -405,7 +405,7 @@ def test_build_run_plan_can_set_migrate_mode():
 def test_build_run_plan_can_set_recompute_mode():
     io = StubIO(
         [
-            "1",        # workflow: run-pass1
+            "2",        # workflow: run-pass1
             "1",        # run mode: new
             "dataset",  # --input
             "",         # --output
@@ -427,7 +427,7 @@ def test_build_run_plan_can_set_recompute_mode():
 def test_build_run_resume_plan_skips_output_prompt():
     io = StubIO(
         [
-            "1",        # workflow: run-pass1
+            "2",        # workflow: run-pass1
             "2",        # run mode: resume
             "run-dir",  # --resume
             "",         # also set --input? no
@@ -452,7 +452,7 @@ def test_build_run_resume_plan_skips_output_prompt():
 
 
 def test_build_launch_plan_can_render_english():
-    io = StubIO(["10"])
+    io = StubIO(["13"])
     try:
         plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="en")
         assert plan is not None
@@ -473,7 +473,7 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
 def test_chinese_llm_override_prompt_keeps_full_key_name():
     io = StubIO(
         [
-            "4",            # workflow: score
+            "3",            # workflow: score
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode (default absolute)
@@ -546,7 +546,7 @@ def test_build_analyze_unmapped_plan():
 def test_build_score_plan_can_set_percentile_rarity_mode():
     io = StubIO(
         [
-            "4",            # workflow: score
+            "3",            # workflow: score
             "labeled.json", # --input
             "",             # --tag-stats
             "2",            # rarity mode: percentile
@@ -572,7 +572,7 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
 def test_build_recompute_plan_can_set_workers():
     io = StubIO(
         [
-            "7",        # workflow: recompute-stats
+            "8",        # workflow: recompute-stats
             "run_dir",  # --input
             "",         # pass selection -> both
             "",         # --output
@@ -602,13 +602,13 @@ def test_cmd_start_can_auto_publish_dashboard(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]))
 
-    answers = iter(["", "y", ""])  # confirm, auto-publish yes, restart=no(default)
+    answers = iter(["", "y"])  # confirm, auto-publish yes
     monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
 
     service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
     store = DashboardServiceStore(default_service="default", services={"default": service})
     monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
-    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()}, raising=False)
+    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url(), "public_url": svc.share_base_url()}, raising=False)
 
     published = {
         "run_id": "demo_run",
@@ -628,7 +628,7 @@ def test_cmd_start_can_auto_publish_dashboard(monkeypatch, capsys, tmp_path):
     assert "dashboard_scoring_demo.html" in out
 
 
-def test_cmd_start_can_choose_named_dashboard_service(monkeypatch, capsys, tmp_path):
+def test_cmd_start_auto_publish_uses_default_dashboard_service_without_prompt(monkeypatch, capsys, tmp_path):
     from sft_label.launcher import LaunchPlan
     from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
 
@@ -638,7 +638,7 @@ def test_cmd_start_can_choose_named_dashboard_service(monkeypatch, capsys, tmp_p
 
     monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]))
 
-    answers = iter(["", "y", "2", ""])  # confirm, auto publish, choose 2nd service, don't restart
+    answers = iter(["", "y"])  # confirm, auto publish
     monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
 
     service_a = DashboardServiceConfig(name="a", web_root=str(tmp_path / "a"), host="127.0.0.1", port=8765)
@@ -650,9 +650,9 @@ def test_cmd_start_can_choose_named_dashboard_service(monkeypatch, capsys, tmp_p
         public_base_url="https://dash.example.com",
         service_type="pm2",
     )
-    store = DashboardServiceStore(default_service="a", services={"a": service_a, "b": service_b})
+    store = DashboardServiceStore(default_service="b", services={"a": service_a, "b": service_b})
     monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
-    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()}, raising=False)
+    monkeypatch.setattr("sft_label.cli.dashboard_service_status", lambda svc: {"state": "running", "reachable": True, "url": svc.base_url(), "public_url": svc.share_base_url()}, raising=False)
 
     published_calls = {}
 
@@ -674,3 +674,37 @@ def test_cmd_start_can_choose_named_dashboard_service(monkeypatch, capsys, tmp_p
     out = capsys.readouterr().out
     assert published_calls["service"] == "b"
     assert "https://dash.example.com/runs/demo_run/dashboard_labeling_demo.html" in out
+    assert "请选择 dashboard 服务" not in out
+
+
+def test_cmd_start_dashboard_service_maintenance_can_continue_in_same_session(monkeypatch, capsys):
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    first_plan = LaunchPlan(argv=["dashboard-service", "status"], workflow_key="dashboard-service")
+    next_plan = LaunchPlan(argv=["dashboard-service", "runs"], workflow_key="dashboard-service")
+
+    monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: first_plan)
+    monkeypatch.setattr("sft_label.launcher.build_dashboard_service_plan", lambda **kwargs: next_plan)
+
+    answers = iter(["", "y", "n"])  # confirm start, continue once, then exit
+    monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
+
+    dispatched = []
+
+    def _fake_dispatch(args, parser):
+        dispatched.append((args.command, getattr(args, "dashboard_service_action", None)))
+        return {}
+
+    monkeypatch.setattr("sft_label.cli.dispatch_command", _fake_dispatch, raising=False)
+
+    args = parser.parse_args(["start"])
+    cmd_start(args, parser)
+
+    assert dispatched == [
+        ("dashboard-service", "status"),
+        ("dashboard-service", "runs"),
+    ]
+    out = capsys.readouterr().out
+    assert "dashboard-service status" in out
+    assert "dashboard-service runs" in out

@@ -30,8 +30,8 @@ It is designed for real dataset operations:
 | Pass 1: Tag Labeling | Describe what capability a sample exercises | 2 LLM calls, validation against taxonomy pools, optional arbitration |
 | Pass 2: Value Scoring | Estimate usefulness for training-set selection | rarity from tag stats, CoT-preserving truncation, multi-axis scoring |
 | Pass 2.5: Conversation Aggregation | Treat a multi-turn dialog as one unit | later-turn weighting, inherited confidence penalty, quality-floor penalties |
-| Pass 3: Filtering | Produce subsets for review or training | sample-level, conversation-level, and turn-level criteria |
-| Pass 4: Semantic Clustering | Deduplicate long trajectories by behavior | pinned-prefix windowing, SemHash, ANN refinement, SNR representative pick |
+| Pass 3: Semantic Clustering | Deduplicate long trajectories by behavior | pinned-prefix windowing, SemHash, ANN refinement, SNR representative pick |
+| Pass 4: Filtering | Produce subsets for review or training | sample-level, conversation-level, and turn-level criteria |
 
 ![Operating modes and outputs](docs/assets/operating-modes-v2.svg)
 
@@ -74,12 +74,12 @@ uv run sft-label run --input data.json --score
 # Pass 2: Value scoring (standalone, on pre-labeled data)
 uv run sft-label score --input labeled.json --tag-stats stats_labeling.json
 
-# Filter a training subset
-uv run sft-label filter --input run_dir/ --value-min 7 --format training
-
 # Cluster long trajectories and export representatives
 uv run sft-label semantic-cluster --input run_dir/
 uv run sft-label export-semantic --input run_dir/ --output representatives.jsonl
+
+# Filter a training subset
+uv run sft-label filter --input run_dir/ --value-min 7 --format training
 ```
 
 If your environment variables are only initialized in shell startup files, run one-off commands through an interactive shell, for example:
@@ -98,10 +98,15 @@ sft-label start
 ```
 
 The interactive launcher groups commands by workflow:
-- Pipeline: Pass 1/2/4 combinations, standalone scoring, standalone semantic clustering
-- Data curation: filtering
-- Maintenance: stats recompute, dashboard regeneration, taxonomy validation
+- Pipeline: default #1 is Pass 1 + Pass 2, then Pass 1 only, Pass 2 only, and Pass 1 + Pass 2 + Pass 3
+- Data curation: Pass 4 filtering and selection
+- Service: dashboard service maintenance
+- Maintenance: stats recompute, dashboard regeneration, rarity refresh, taxonomy validation
 - Export: semantic rows, review CSV/TSV
+
+For dashboard auto-publish, `start` now uses the configured default dashboard service directly. If that service is already `running` (or `starting`), the launcher will keep going without prompting you to restart it first.
+
+If you enter **Dashboard service maintenance** from `sft-label start`, you can stay inside one maintenance session and continue with another service action (status, runs, start, restart, etc.) without re-entering the launcher each time.
 
 For `run`, the launcher now also exposes inline JSONL modes directly:
 - `refresh`: recompute and replace the whole embedded `data_label`
@@ -147,7 +152,7 @@ sft-label score --input labeled.json
 sft-label score --input labeled.json --tag-stats global_stats.json
 sft-label score --input results_dir/
 
-# Standalone trajectory semantic clustering (Pass 4)
+# Standalone trajectory semantic clustering (Pass 3)
 sft-label semantic-cluster --input run_dir/
 sft-label semantic-cluster --input run_dir/ --output semantic_out/
 sft-label semantic-cluster --input run_dir/ --resume
@@ -326,23 +331,23 @@ Input (ShareGPT JSON / Pangu JSONL)
   │   ├─ Quality floor + negative flag penalties
   │   └─ Output: conversation_scores.json (conv_value, conv_selection)
   │
-  ├─ Pass 3: Filtering & Selection (tools/filter_value.py)
-  │   ├─ Sample-level: value_min, selection_min, difficulty, thinking_mode
-  │   ├─ Conversation-level: conv_value_min, conv_selection_min, peak_complexity_min
-  │   ├─ Turn-level: turn_value_min, turn_count_min/max, keep_first_last
-  │   ├─ Tag filtering: include_tags / exclude_tags (dim:tag format)
-  │   ├─ Source control: exclude_inherited, verify_source
-  │   └─ Output formats: scored (preserves metadata) or training (stripped)
+  ├─ Pass 3: Trajectory Semantic Clustering (semantic_clustering.py)
+  │   ├─ Long trajectory segmentation (>50 turns) with pinned task-definition prefix
+  │   ├─ Bilingual role-aware rendering for embedding text
+  │   ├─ Lightweight embedding backend (local CPU hash model) or API fallback
+  │   ├─ Deterministic SemHash (seeded random hyperplanes)
+  │   ├─ Coarse candidate retrieval (banded SemHash + hamming radius)
+  │   ├─ ANN refinement (cosine threshold + top-k)
+  │   ├─ Union-find cluster assembly
+  │   └─ Representative selection by SNR (action/observation), tie-break by value_score
   │
-  └─ Pass 4: Trajectory Semantic Clustering (semantic_clustering.py)
-      ├─ Long trajectory segmentation (>50 turns) with pinned task-definition prefix
-      ├─ Bilingual role-aware rendering for embedding text
-      ├─ Lightweight embedding backend (local CPU hash model) or API fallback
-      ├─ Deterministic SemHash (seeded random hyperplanes)
-      ├─ Coarse candidate retrieval (banded SemHash + hamming radius)
-      ├─ ANN refinement (cosine threshold + top-k)
-      ├─ Union-find cluster assembly
-      └─ Representative selection by SNR (action/observation), tie-break by value_score
+  └─ Pass 4: Filtering & Selection (tools/filter_value.py)
+      ├─ Sample-level: value_min, selection_min, difficulty, thinking_mode
+      ├─ Conversation-level: conv_value_min, conv_selection_min, peak_complexity_min
+      ├─ Turn-level: turn_value_min, turn_count_min/max, keep_first_last
+      ├─ Tag filtering: include_tags / exclude_tags (dim:tag format)
+      ├─ Source control: exclude_inherited, verify_source
+      └─ Output formats: scored (preserves metadata) or training (stripped)
 ```
 
 ## Taxonomy (Pass 1)
@@ -483,7 +488,7 @@ Example scoring dashboard from a real e2e run:
 
 ![Scoring dashboard screenshot](docs/assets/dashboard-scoring-e2e.png)
 
-## Trajectory Semantic Clustering (Pass 4)
+## Trajectory Semantic Clustering (Pass 3)
 
 ### What It Does
 
@@ -542,7 +547,7 @@ See [benchmark_semantic_clustering_report.md](scripts/benchmark_semantic_cluster
 - Sample Explorer presets for low coverage / low rarity-confidence conversations
 - File Ranking Table (global dashboard, sortable)
 
-## Filtering (Pass 3)
+## Filtering (Pass 4)
 
 Multi-condition sample selection with AND logic between criteria, OR within tag lists:
 

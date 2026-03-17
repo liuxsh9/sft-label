@@ -76,6 +76,7 @@ class LaunchPlan:
 
     argv: list[str]
     env_overrides: dict[str, str] = field(default_factory=dict)
+    workflow_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,21 +111,15 @@ def _format_default_value(value: int | float | str) -> str:
 
 WORKFLOWS = [
     Workflow(
-        key="run-pass1",
-        label="一阶段标注 / Pass 1 labeling",
-        description="仅运行标签标注 / Run tag labeling only",
-        group="流水线 / Pipeline",
-    ),
-    Workflow(
         key="run-pass1-pass2",
         label="一阶段 + 二阶段 / Pass 1 + Pass 2",
-        description="先标注后打分 / Labeling followed by value scoring",
+        description="默认推荐：先标注后打分 / Recommended default: labeling followed by value scoring",
         group="流水线 / Pipeline",
     ),
     Workflow(
-        key="run-pass1-pass2-semantic",
-        label="一阶段 + 二阶段 + 四阶段 / Pass 1 + Pass 2 + Pass 4",
-        description="标注、打分、语义聚类 / Labeling, scoring, then semantic clustering",
+        key="run-pass1",
+        label="仅一阶段标注 / Pass 1 labeling only",
+        description="只产出 taxonomy 标签与一阶段统计 / Produce taxonomy labels and Pass 1 stats only",
         group="流水线 / Pipeline",
     ),
     Workflow(
@@ -134,21 +129,39 @@ WORKFLOWS = [
         group="流水线 / Pipeline",
     ),
     Workflow(
+        key="run-pass1-pass2-semantic",
+        label="一阶段 + 二阶段 + 三阶段 / Pass 1 + Pass 2 + Pass 3",
+        description="标注、打分、语义聚类 / Labeling, scoring, then semantic clustering",
+        group="流水线 / Pipeline",
+    ),
+    Workflow(
         key="semantic",
-        label="四阶段语义聚类 / Pass 4 semantic clustering",
+        label="仅三阶段语义聚类 / Pass 3 semantic clustering only",
         description="运行 SemHash + ANN 聚类 / Run SemHash + ANN clustering",
         group="流水线 / Pipeline",
     ),
     Workflow(
         key="filter",
-        label="三阶段过滤 / Pass 3 filtering",
-        description="筛选高价值训练样本 / Filter scored data for training selection",
+        label="四阶段过滤与选样 / Pass 4 filtering & selection",
+        description="在最终阶段筛选训练子集 / Final-stage training subset selection",
         group="数据整理 / Data Curation",
+    ),
+    Workflow(
+        key="dashboard-service",
+        label="看板服务维护 / Dashboard service maintenance",
+        description="管理 dashboard 静态服务、默认服务与已发布 runs / Manage dashboard services, defaults, and published runs",
+        group="服务 / Service",
     ),
     Workflow(
         key="recompute-stats",
         label="重算统计 / Recompute stats",
         description="不调用 LLM 重新计算统计 / Rebuild stats without LLM calls",
+        group="维护 / Maintenance",
+    ),
+    Workflow(
+        key="regenerate-dashboard",
+        label="重建看板 / Regenerate dashboards",
+        description="用已有统计重建 HTML 看板 / Rebuild HTML dashboards from existing stats",
         group="维护 / Maintenance",
     ),
     Workflow(
@@ -158,9 +171,15 @@ WORKFLOWS = [
         group="维护 / Maintenance",
     ),
     Workflow(
-        key="regenerate-dashboard",
-        label="重建看板 / Regenerate dashboards",
-        description="用已有统计重建 HTML 看板 / Rebuild HTML dashboards from existing stats",
+        key="analyze-unmapped",
+        label="查看 unmapped 标签 / Inspect unmapped tags",
+        description="查看超出 tag pool 的标签及样例 / Review out-of-pool tags and examples",
+        group="维护 / Maintenance",
+    ),
+    Workflow(
+        key="optimize-layout",
+        label="优化历史文件布局 / Optimize legacy layout",
+        description="统一旧版命名并可选清理 legacy 别名 / Normalize old naming and optionally prune legacy aliases",
         group="维护 / Maintenance",
     ),
     Workflow(
@@ -180,24 +199,6 @@ WORKFLOWS = [
         label="校验 taxonomy / Validate taxonomy",
         description="校验 taxonomy 文件与一致性 / Validate taxonomy files and consistency",
         group="维护 / Maintenance",
-    ),
-    Workflow(
-        key="analyze-unmapped",
-        label="查看 unmapped 标签 / Inspect unmapped tags",
-        description="查看超出 tag pool 的标签及样例 / Review out-of-pool tags and examples",
-        group="维护 / Maintenance",
-    ),
-    Workflow(
-        key="optimize-layout",
-        label="优化历史文件布局 / Optimize legacy layout",
-        description="统一旧版命名并可选清理 legacy 别名 / Normalize old naming and optionally prune legacy aliases",
-        group="维护 / Maintenance",
-    ),
-    Workflow(
-        key="dashboard-service",
-        label="看板服务维护 / Dashboard service maintenance",
-        description="管理 dashboard 静态服务、默认服务与已发布 runs / Manage dashboard services, defaults, and published runs",
-        group="服务 / Service",
     ),
 ]
 
@@ -519,6 +520,11 @@ def _read_input(input_fn: InputFn, prompt: str, *, allow_back: bool = True) -> s
     return value
 
 
+def _with_workflow_key(plan: LaunchPlan, workflow_key: str) -> LaunchPlan:
+    plan.workflow_key = workflow_key
+    return plan
+
+
 def build_launch_plan(
     input_fn: InputFn = interactive_input,
     output_fn: OutputFn = print,
@@ -554,35 +560,35 @@ def build_launch_plan(
 
         try:
             if wf.key == "run-pass1":
-                return _build_run_plan(input_fn, output_fn, chain_score=False, chain_semantic=False)
+                return _with_workflow_key(_build_run_plan(input_fn, output_fn, chain_score=False, chain_semantic=False), wf.key)
             if wf.key == "run-pass1-pass2":
-                return _build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=False)
+                return _with_workflow_key(_build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=False), wf.key)
             if wf.key == "run-pass1-pass2-semantic":
-                return _build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=True)
+                return _with_workflow_key(_build_run_plan(input_fn, output_fn, chain_score=True, chain_semantic=True), wf.key)
             if wf.key == "score":
-                return _build_score_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_score_plan(input_fn, output_fn), wf.key)
             if wf.key == "semantic":
-                return _build_semantic_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_semantic_plan(input_fn, output_fn), wf.key)
             if wf.key == "filter":
-                return _build_filter_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_filter_plan(input_fn, output_fn), wf.key)
             if wf.key == "recompute-stats":
-                return _build_recompute_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_recompute_plan(input_fn, output_fn), wf.key)
             if wf.key == "refresh-rarity":
-                return _build_refresh_rarity_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_refresh_rarity_plan(input_fn, output_fn), wf.key)
             if wf.key == "regenerate-dashboard":
-                return _build_regenerate_dashboard_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_regenerate_dashboard_plan(input_fn, output_fn), wf.key)
             if wf.key == "export-semantic":
-                return _build_export_semantic_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_export_semantic_plan(input_fn, output_fn), wf.key)
             if wf.key == "export-review":
-                return _build_export_review_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_export_review_plan(input_fn, output_fn), wf.key)
             if wf.key == "validate":
-                return LaunchPlan(argv=["validate"])
+                return LaunchPlan(argv=["validate"], workflow_key=wf.key)
             if wf.key == "analyze-unmapped":
-                return _build_analyze_unmapped_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_analyze_unmapped_plan(input_fn, output_fn), wf.key)
             if wf.key == "optimize-layout":
-                return _build_optimize_layout_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_optimize_layout_plan(input_fn, output_fn), wf.key)
             if wf.key == "dashboard-service":
-                return _build_dashboard_service_plan(input_fn, output_fn)
+                return _with_workflow_key(_build_dashboard_service_plan(input_fn, output_fn), wf.key)
             raise ValueError(f"Unknown workflow key: {wf.key}")
         except BackRequested:
             if input_fn is interactive_input:
@@ -684,7 +690,7 @@ def _build_run_plan(
             argv.extend(["--rarity-mode", rarity_mode])
 
     if chain_semantic:
-        _section(output_fn, "四阶段联动 / Pass 4 chaining")
+        _section(output_fn, "三阶段联动 / Pass 3 chaining")
         argv.append("--semantic-cluster")
 
     switch_fields = [
@@ -1158,7 +1164,7 @@ def _build_run_plan_legacy(
             argv.extend(["--rarity-mode", rarity_mode])
 
     if chain_semantic:
-        _section(output_fn, "四阶段联动 / Pass 4 chaining")
+        _section(output_fn, "三阶段联动 / Pass 3 chaining")
         argv.append("--semantic-cluster")
 
     _section(output_fn, "环境与附加参数 / Environment and extra flags")
@@ -1692,6 +1698,14 @@ def _build_dashboard_service_plan(input_fn: InputFn, output_fn: OutputFn) -> Lau
 
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)
+
+
+def build_dashboard_service_plan(
+    input_fn: InputFn = interactive_input,
+    output_fn: OutputFn = print,
+) -> LaunchPlan:
+    """Build one dashboard-service maintenance command plan."""
+    return _with_workflow_key(_build_dashboard_service_plan(input_fn, output_fn), "dashboard-service")
 
 
 def _ask_semantic_overrides(input_fn: InputFn, output_fn: OutputFn) -> dict:
