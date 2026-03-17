@@ -268,11 +268,18 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
     base_id = normalized.get("id", "")
     reply_cot = list(base_meta.get("assistant_cot_by_reply", []))
     for i, conv_slice in enumerate(slices):
+        slice_index = i
+        slice_position = i + 1
+        slice_count = len(slices)
         slice_meta = {
             **base_meta,
             "source_id": base_id,
-            "turn_index": i + 1,
-            "total_turns": len(slices),
+            "turn_index": slice_position,
+            "total_turns": slice_count,
+            "slice_index": slice_index,
+            "slice_position": slice_position,
+            "slice_count": slice_count,
+            "source_turn_count": len(conversations),
         }
         if conversation_uid:
             slice_meta["conversation_uid"] = conversation_uid

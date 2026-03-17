@@ -594,6 +594,7 @@ SCORING_FEWSHOT_COMPACT = SCORING_FEWSHOT[0:2] + SCORING_FEWSHOT[2:4] + SCORING_
 def build_scoring_messages(truncated, thinking_mode, labels,
                            total_turns, code_block_count,
                            enable_rationale=False,
+                           slice_position=None, slice_count=None,
                            turn_index=None, total_turns_meta=None,
                            compact=False):
     """Construct the full message array for the scoring LLM call.
@@ -604,9 +605,15 @@ def build_scoring_messages(truncated, thinking_mode, labels,
         labels: Pass 1 labels dict
         total_turns: total conversation turns
         code_block_count: number of code blocks
-        turn_index: 0-based index of this turn in its multi-turn conversation (optional)
-        total_turns_meta: total number of turns in the source conversation (optional)
+        slice_position: 1-based index of this slice among assistant replies (optional)
+        slice_count: total number of slices (assistant replies) in the source conversation (optional)
+        turn_index: legacy slice position (1-based) for backward compatibility
+        total_turns_meta: legacy slice count for backward compatibility
     """
+    if slice_position is None and isinstance(turn_index, int):
+        slice_position = turn_index
+    if slice_count is None and isinstance(total_turns_meta, int):
+        slice_count = total_turns_meta
     # Build meta block
     meta_parts = [
         f"thinking_mode: {thinking_mode}",
@@ -621,8 +628,8 @@ def build_scoring_messages(truncated, thinking_mode, labels,
         f"code_block_count: {code_block_count}",
         f"tags: {json.dumps(labels, ensure_ascii=False)}",
     ]
-    if turn_index is not None and total_turns_meta is not None and total_turns_meta > 1:
-        meta_parts.append(f"turn_position: {turn_index + 1}/{total_turns_meta} (multi-turn slice)")
+    if slice_position is not None and slice_count is not None and slice_count > 1:
+        meta_parts.append(f"turn_position: {slice_position}/{slice_count} (multi-turn slice)")
     meta = "\n".join(meta_parts)
 
     # Build conversation block

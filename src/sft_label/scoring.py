@@ -977,13 +977,17 @@ def _infer_selection_features(*, sample=None, summary=None, config=None):
     response.lower()
     combined.lower()
 
-    turn_index = metadata.get("turn_index")
-    total_turns = metadata.get("total_turns") or summary.get("total_turns")
-    if not isinstance(turn_index, int):
-        turn_index = summary.get("turn_index")
-    if not isinstance(total_turns, int):
-        total_turns = 1
-    position_ratio = (turn_index / total_turns) if turn_index and total_turns else 1.0
+    slice_position = metadata.get("slice_position")
+    slice_count = metadata.get("slice_count") or summary.get("slice_count")
+    if not isinstance(slice_position, int):
+        slice_position = metadata.get("turn_index")
+    if not isinstance(slice_position, int):
+        slice_position = summary.get("turn_index")
+    if not isinstance(slice_count, int):
+        slice_count = metadata.get("total_turns") or summary.get("total_turns")
+    if not isinstance(slice_count, int):
+        slice_count = 1
+    position_ratio = (slice_position / slice_count) if slice_position and slice_count else 1.0
 
     trajectory_turn_count = view.get("trajectory_turn_count") or 0
     trajectory_tool_turns = view.get("trajectory_tool_turns") or 0
@@ -1547,6 +1551,8 @@ async def score_one(http_client, sample, model, rarity_result,
     total_turns = len(conversations)
 
     # Multi-turn slice position (for incomplete flag calibration)
+    slice_position = metadata.get("slice_position")
+    slice_count = metadata.get("slice_count")
     turn_index = metadata.get("turn_index")
     total_turns_meta = metadata.get("total_turns")
 
@@ -1557,6 +1563,8 @@ async def score_one(http_client, sample, model, rarity_result,
         total_turns=total_turns,
         code_block_count=code_block_count,
         enable_rationale=config.enable_rationale if config else False,
+        slice_position=slice_position,
+        slice_count=slice_count,
         turn_index=turn_index,
         total_turns_meta=total_turns_meta,
         compact=_compact,

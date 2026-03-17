@@ -102,7 +102,7 @@ def _make_multiturn_scored_samples(source_id, n_turns=3):
         s = _make_scored_sample(f"{source_id}-turn{i}", value_score=5.0 + i)
         s["metadata"] = {
             "source_id": source_id,
-            "turn_index": i,
+            "turn_index": i + 1,
             "total_turns": n_turns,
         }
         samples.append(s)

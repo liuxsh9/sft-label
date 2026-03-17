@@ -2046,7 +2046,7 @@ class TestConversationAggregation:
         slices = [
             {
                 "id": "s1",
-                "metadata": {"source_id": "conv-1", "total_turns": 2, "turn_index": 0},
+                "metadata": {"source_id": "conv-1", "total_turns": 2, "turn_index": 1},
                 "labels": {"intent": "build", "language": ["python"]},
                 "value": {
                     "complexity": {"overall": 5},
@@ -2060,7 +2060,7 @@ class TestConversationAggregation:
             },
             {
                 "id": "s2",
-                "metadata": {"source_id": "conv-1", "total_turns": 2, "turn_index": 1},
+                "metadata": {"source_id": "conv-1", "total_turns": 2, "turn_index": 2},
                 "labels": {"intent": "build", "language": ["python"]},
                 "value": {
                     "complexity": {"overall": 7},
@@ -2360,14 +2360,37 @@ class TestBuildScoringMessagesMultiTurn:
             truncated=truncated, thinking_mode="fast",
             labels={"intent": "debug"}, total_turns=2,
             code_block_count=1,
-            turn_index=2, total_turns_meta=5,
+            slice_position=2, slice_count=5,
         )
         user_msg = messages[-1]["content"]
-        assert "turn_position: 3/5 (multi-turn slice)" in user_msg
+        assert "turn_position: 2/5 (multi-turn slice)" in user_msg
         assert "<current_turn_request>" in user_msg
         assert "<trajectory>" in user_msg
         assert "<final_response>" in user_msg
         assert user_msg.index("<current_turn_request>") < user_msg.index("<trajectory>") < user_msg.index("<final_response>")
+
+    def test_turn_position_never_exceeds_total(self):
+        from sft_label.prompts_value import build_scoring_messages
+        truncated = {
+            "current_request": "Write the fix",
+            "instruction": "Write the fix",
+            "response": "Patched the code",
+            "original_prior_context_chars": 0,
+            "original_cot_chars": 0,
+            "original_trajectory_chars": 0,
+            "original_response_chars": 40,
+            "trajectory_turn_count": 0,
+            "trajectory_tool_turns": 0,
+        }
+        messages = build_scoring_messages(
+            truncated=truncated, thinking_mode="fast",
+            labels={"intent": "debug"}, total_turns=2,
+            code_block_count=0,
+            slice_position=2, slice_count=2,
+        )
+        user_msg = messages[-1]["content"]
+        assert "turn_position: 2/2 (multi-turn slice)" in user_msg
+        assert "turn_position: 3/2" not in user_msg
 
     def test_no_turn_position_for_single_turn(self):
         from sft_label.prompts_value import build_scoring_messages
@@ -2386,7 +2409,7 @@ class TestBuildScoringMessagesMultiTurn:
             truncated=truncated, thinking_mode="fast",
             labels={"intent": "build"}, total_turns=2,
             code_block_count=1,
-            turn_index=0, total_turns_meta=1,
+            slice_position=1, slice_count=1,
         )
         user_msg = messages[-1]["content"]
         assert "turn_position" not in user_msg

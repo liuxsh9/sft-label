@@ -130,6 +130,14 @@ class TestNormalizeAndSlice:
         assert len(result) == 2
         assert result[0]["id"] == "m1_t1"
         assert result[1]["id"] == "m1_t2"
+        meta0 = result[0]["metadata"]
+        meta1 = result[1]["metadata"]
+        assert meta0["slice_index"] == 0
+        assert meta0["slice_position"] == 1
+        assert meta0["slice_count"] == 2
+        assert meta1["slice_index"] == 1
+        assert meta1["slice_position"] == 2
+        assert meta1["slice_count"] == 2
 
     def test_sharegpt_cot_metadata_preserved(self):
         """Single-turn ShareGPT with <think> should preserve thinking_mode and cot_text."""
@@ -731,7 +739,7 @@ class TestSparseSamplingSignalDetection:
             code = f"```{lang}\ncode_{i}\n```"
             samples.append({
                 "id": f"s_{i}",
-                "metadata": {"source_id": "conv-1", "turn_index": i, "total_turns": 15},
+                "metadata": {"source_id": "conv-1", "turn_index": i + 1, "total_turns": 15},
                 "conversations": [
                     {"from": "human", "value": f"Q{i}"},
                     {"from": "gpt", "value": code},
