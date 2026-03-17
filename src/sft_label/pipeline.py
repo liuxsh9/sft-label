@@ -1455,7 +1455,13 @@ def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundle
                         continue
                     n_raw += 1
                     raw = json.loads(line)
-                    samples.extend(normalize_and_slice(raw))
+                    samples.extend(
+                        normalize_and_slice(
+                            raw,
+                            source_file=input_path,
+                            source_row=n_raw,
+                        )
+                    )
                     del raw
     else:
         with open(input_path, "r", encoding="utf-8") as f:
@@ -1463,8 +1469,14 @@ def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundle
         if not isinstance(raw_samples, list):
             raw_samples = [raw_samples]
         n_raw = len(raw_samples)
-        for s in raw_samples:
-            samples.extend(normalize_and_slice(s))
+        for row_idx, s in enumerate(raw_samples, start=1):
+            samples.extend(
+                normalize_and_slice(
+                    s,
+                    source_file=input_path,
+                    source_row=row_idx,
+                )
+            )
         del raw_samples
 
     for i, s in enumerate(samples):

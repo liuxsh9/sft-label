@@ -871,9 +871,9 @@ class TestOutputPathGeneration:
 
 # ── Conversation-level filtering ──
 
-def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None):
+def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None, *, conversation_uid=None, source_file=None):
     """Create a multi-turn slice sample."""
-    return {
+    sample = {
         "id": f"{source_id}_t{turn_index}",
         "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
         "metadata": {
@@ -884,6 +884,11 @@ def _mt_sample(source_id, turn_index, total_turns, score=7.0, labels=None):
         "labels": labels or {"difficulty": "advanced"},
         "value": {"value_score": score},
     }
+    if conversation_uid:
+        sample["metadata"]["conversation_uid"] = conversation_uid
+    if source_file:
+        sample["metadata"]["source_file"] = source_file
+    return sample
 
 
 class TestConversationFilter:
@@ -1121,6 +1126,35 @@ class TestConversationFilter:
         summary = run_filter(str(tmp_path), config=FilterConfig(conv_value_min=5.0))
         assert summary["retained"] == 1
 
+    def test_same_file_duplicate_source_ids_use_conversation_uid(self, tmp_path):
+        input_file = tmp_path / "scored.json"
+        samples = [
+            _mt_sample("dup", 1, 2, score=8.0, conversation_uid="uid-a", source_file=str(input_file)),
+            _mt_sample("dup", 2, 2, score=8.0, conversation_uid="uid-a", source_file=str(input_file)),
+            _mt_sample("dup", 1, 2, score=8.0, conversation_uid="uid-b", source_file=str(input_file)),
+            _mt_sample("dup", 2, 2, score=8.0, conversation_uid="uid-b", source_file=str(input_file)),
+        ]
+        input_file.write_text(json.dumps(samples))
+        (tmp_path / "conversation_scores.json").write_text(json.dumps([
+            {
+                "conversation_id": "dup",
+                "conversation_key": "uid-a",
+                "conv_value": 9.0,
+                "conv_selection": 9.0,
+                "peak_complexity": 8,
+            },
+            {
+                "conversation_id": "dup",
+                "conversation_key": "uid-b",
+                "conv_value": 2.0,
+                "conv_selection": 2.0,
+                "peak_complexity": 2,
+            },
+        ]))
+
+        summary = run_filter(str(input_file), config=FilterConfig(conv_value_min=5.0))
+        assert summary["retained"] == 2
+
     def test_turn_count_min_filters_short_conversations(self, tmp_path):
         """turn_count_min should filter out conversations with fewer turns."""
         samples = [
@@ -1168,9 +1202,10 @@ class TestConversationFilter:
 # ── Turn-level pruning ──
 
 def _mt_sample_scored(source_id, turn_index, total_turns, score=7.0,
-                      quality_overall=7.0, labels=None):
+                      quality_overall=7.0, labels=None, *,
+                      conversation_uid=None, source_file=None):
     """Create a multi-turn slice with value_score and quality.overall."""
-    return {
+    sample = {
         "id": f"{source_id}_t{turn_index}",
         "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
         "metadata": {
@@ -1184,6 +1219,11 @@ def _mt_sample_scored(source_id, turn_index, total_turns, score=7.0,
             "quality": {"overall": quality_overall},
         },
     }
+    if conversation_uid:
+        sample["metadata"]["conversation_uid"] = conversation_uid
+    if source_file:
+        sample["metadata"]["source_file"] = source_file
+    return sample
 
 
 class TestTurnLevelPruning:
@@ -1232,6 +1272,23 @@ class TestTurnLevelPruning:
         # Only middle slice pruned; first and last protected
         assert summary["retained"] == 2
         assert summary["turn_pruned"] == 1
+
+    def test_turn_pruning_groups_by_conversation_uid(self, tmp_path):
+        """keep_first_last should apply per conversation even when source_id collides."""
+        samples = [
+            _mt_sample_scored("dup", 1, 3, score=2.0, conversation_uid="uid-a"),  # first, keep
+            _mt_sample_scored("dup", 2, 3, score=9.0, conversation_uid="uid-a"),
+            _mt_sample_scored("dup", 3, 3, score=2.0, conversation_uid="uid-a"),  # last, keep
+            _mt_sample_scored("dup", 1, 3, score=2.0, conversation_uid="uid-b"),  # first, keep
+            _mt_sample_scored("dup", 2, 3, score=9.0, conversation_uid="uid-b"),
+            _mt_sample_scored("dup", 3, 3, score=2.0, conversation_uid="uid-b"),  # last, keep
+        ]
+        input_file = self._setup(tmp_path, samples)
+        config = FilterConfig(turn_value_min=5.0, max_pruned_ratio=1.0)
+        summary = run_filter(str(input_file), config=config)
+
+        assert summary["retained"] == 6
+        assert summary["turn_pruned"] == 0
 
     def test_max_pruned_ratio_limits_pruning(self, tmp_path):
         """Should not prune more than max_pruned_ratio of turns."""

@@ -23,6 +23,7 @@ TURN_ID_HEX_LEN = 20
 
 _INLINE_CONVERSATION_KEYS = (
     "conversation_id",
+    "conversation_uid",
     "conversation_key",
     "source_file",
     "turn_count",

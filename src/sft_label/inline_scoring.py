@@ -313,9 +313,11 @@ def _single_turn_conversation_update(sample: dict) -> dict:
     metadata = sample.get("metadata") or {}
     source_id = metadata.get("source_id") or sample.get("id") or ""
     source_file = metadata.get("source_file")
-    conversation_key = build_conversation_key(source_id, source_file)
+    conversation_uid = metadata.get("conversation_uid")
+    conversation_key = build_conversation_key(source_id, source_file, conversation_uid)
     return {
         "conversation_id": source_id,
+        "conversation_uid": conversation_uid or conversation_key,
         "conversation_key": conversation_key,
         "source_file": source_file,
         "turn_count": 1,
@@ -400,7 +402,11 @@ def update_inline_row_with_scored_samples(
     if updated_turn_samples:
         if len(updated_turn_samples) >= 2:
             first_meta = updated_turn_samples[0].get("metadata") or {}
-            conv_key = first_meta.get("source_id") or get_data_id(row_copy)
+            conv_key = (
+                first_meta.get("conversation_uid")
+                or first_meta.get("source_id")
+                or get_data_id(row_copy)
+            )
             conversation_update = aggregate_conversation(conv_key, updated_turn_samples)
             if conversation_update is not None:
                 compute_conv_selection_scores([conversation_update])

@@ -19,6 +19,8 @@ Signals extracted:
   - Last turn extraction
 """
 
+import hashlib
+import json
 import re
 
 from sft_label.config import (
@@ -71,6 +73,8 @@ def sanitize_training_markers(text: str) -> str:
     return text
 
 PANGU_ROLE_MAP = {"user": "human", "assistant": "gpt", "tool": "tool"}
+
+CONVERSATION_UID_VERSION = "v1"
 
 
 def detect_format(sample):
@@ -204,7 +208,7 @@ def normalize_pangu(sample):
     return normalized
 
 
-def normalize_and_slice(sample):
+def normalize_and_slice(sample, *, source_file=None, source_row=None):
     """Auto-detect format, normalize, and slice multi-turn into training samples.
 
     Returns a list of samples. Single-turn and pseudo multi-turn return [1 sample].
@@ -245,13 +249,23 @@ def normalize_and_slice(sample):
 
     slices = slice_multiturn(conversations)
 
+    base_meta = normalized.get("metadata", {})
+    conversation_uid = base_meta.get("conversation_uid")
+    if not conversation_uid and len(slices) > 1:
+        conversation_uid = build_conversation_uid(
+            normalized,
+            source_file=source_file,
+            source_row=source_row,
+        )
+
     if len(slices) == 1:
+        if conversation_uid:
+            normalized.setdefault("metadata", {})["conversation_uid"] = conversation_uid
         return [normalized]
 
     # Build one sample per slice
     results = []
     base_id = normalized.get("id", "")
-    base_meta = normalized.get("metadata", {})
     reply_cot = list(base_meta.get("assistant_cot_by_reply", []))
     for i, conv_slice in enumerate(slices):
         slice_meta = {
@@ -260,6 +274,8 @@ def normalize_and_slice(sample):
             "turn_index": i + 1,
             "total_turns": len(slices),
         }
+        if conversation_uid:
+            slice_meta["conversation_uid"] = conversation_uid
         final_turn_cot = reply_cot[i] if i < len(reply_cot) else ""
         # Preserve COT only when it belongs to this slice's final assistant reply.
         if final_turn_cot:
@@ -277,6 +293,41 @@ def normalize_and_slice(sample):
         results.append(s)
 
     return results
+
+
+def build_conversation_uid(sample, *, source_file=None, source_row=None):
+    """Build a stable UID for one source conversation row.
+
+    `source_file` + `source_row` disambiguate duplicate source_id/content rows
+    inside the same dataset file while keeping the key deterministic.
+    """
+    metadata = sample.get("metadata") or {}
+    existing = metadata.get("conversation_uid")
+    if existing:
+        return existing
+
+    conversations = sample.get("conversations") or []
+    canonical_turns = [
+        {
+            "from": turn.get("from"),
+            "value": turn.get("value", ""),
+        }
+        for turn in conversations
+        if isinstance(turn, dict)
+    ]
+    payload = {
+        "id": sample.get("id"),
+        "turns": canonical_turns,
+    }
+    if source_file is not None:
+        payload["source_file"] = str(source_file)
+    if source_row is not None:
+        payload["source_row"] = int(source_row)
+
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"conversation_uid:{CONVERSATION_UID_VERSION}:{digest}"
 
 
 # Keep backward-compatible alias
@@ -1367,8 +1418,8 @@ def _should_force_label(source_sample, target_sample):
 def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, max_gap=8, threshold=12):
     """Apply sparse sampling to multi-turn pyramid slices.
 
-    Single-turn samples (no source_id or total_turns=1) are always labeled.
-    Multi-turn slices are grouped by source_id, sorted by turn_index,
+    Single-turn samples (no conversation identity or total_turns=1) are always labeled.
+    Multi-turn slices are grouped by conversation_uid (fallback: source_id), sorted by turn_index,
     and sampled via generate_sparse_schedule.
 
     Returns:
@@ -1382,22 +1433,24 @@ def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_g
     label_indices = set()
     inherit_map = {}
 
-    # Group by source_id; track global index
-    groups = {}  # source_id -> [(global_idx, turn_index)]
+    # Group by stable conversation identity; track global index
+    groups = {}  # conversation_key -> [(global_idx, turn_index)]
     for i, s in enumerate(samples):
         meta = s.get("metadata", {})
+        conversation_uid = meta.get("conversation_uid")
         source_id = meta.get("source_id")
         total_turns = meta.get("total_turns", 1)
+        conversation_key = conversation_uid or source_id
 
-        if not source_id or total_turns <= 1:
+        if not conversation_key or total_turns <= 1:
             # Single-turn: always label
             label_indices.add(i)
         else:
             turn_idx = meta.get("turn_index", 1)
-            groups.setdefault(source_id, []).append((i, turn_idx))
+            groups.setdefault(conversation_key, []).append((i, turn_idx))
 
     # For each multi-turn group, apply sparse schedule
-    for source_id, members in groups.items():
+    for _conversation_key, members in groups.items():
         # Sort by turn_index
         members.sort(key=lambda x: x[1])
         n = len(members)

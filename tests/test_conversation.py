@@ -26,6 +26,7 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
            inherited=False, flags=None, labels=None, thinking_mode=None,
            score_confidence=None,
            source_file=None,
+           conversation_uid=None,
            conversations=None):
     """Build a minimal multi-turn slice sample."""
     s = {
@@ -56,6 +57,8 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
         s["value"]["confidence"] = score_confidence
     if source_file:
         s["metadata"]["source_file"] = source_file
+    if conversation_uid:
+        s["metadata"]["conversation_uid"] = conversation_uid
     if conversations is not None:
         s["conversations"] = conversations
     return s
@@ -114,6 +117,16 @@ class TestGroupByConversation:
             build_conversation_key("dup", "/tmp/a/scored.json"),
             build_conversation_key("dup", "/tmp/b/scored.json"),
         }
+
+    def test_conversation_uid_separates_duplicate_source_ids_in_same_file(self):
+        samples = [
+            _slice("dup", 1, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-a"),
+            _slice("dup", 2, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-a"),
+            _slice("dup", 1, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-b"),
+            _slice("dup", 2, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-b"),
+        ]
+        groups = group_by_conversation(samples)
+        assert set(groups) == {"uid-a", "uid-b"}
 
 
 # ── TestPositionWeight ──
@@ -542,6 +555,18 @@ class TestAggregateConversations:
             build_conversation_key("dup", "/tmp/a/scored.json"),
             build_conversation_key("dup", "/tmp/b/scored.json"),
         }
+
+    def test_duplicate_source_ids_same_file_use_conversation_uid(self):
+        samples = [
+            _slice("dup", 1, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-a"),
+            _slice("dup", 2, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-a"),
+            _slice("dup", 1, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-b"),
+            _slice("dup", 2, 2, source_file="/tmp/a/scored.json", conversation_uid="uid-b"),
+        ]
+        records = aggregate_conversations(samples)
+        assert len(records) == 2
+        keys = {r["conversation_key"] for r in records}
+        assert keys == {"uid-a", "uid-b"}
 
     def test_single_turn_only_returns_empty(self):
         samples = [_single_turn_sample(), _single_turn_sample()]

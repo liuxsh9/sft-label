@@ -25,7 +25,11 @@ class RowSampleBundle:
 def build_row_sample_bundle(raw_row: dict, source_path, row_number: int) -> RowSampleBundle:
     """Create a row bundle with transient slice samples."""
     row_copy = copy.deepcopy(raw_row)
-    bundle_samples = normalize_and_slice(copy.deepcopy(raw_row))
+    bundle_samples = normalize_and_slice(
+        copy.deepcopy(raw_row),
+        source_file=source_path,
+        source_row=row_number,
+    )
     return RowSampleBundle(
         raw_row=row_copy,
         source_path=Path(source_path),

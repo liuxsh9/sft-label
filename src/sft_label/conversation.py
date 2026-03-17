@@ -46,8 +46,10 @@ from sft_label.labels import LABEL_META_KEYS
 from sft_label.score_confidence import apply_score_confidence, score_confidence
 
 
-def build_conversation_key(source_id, source_file=None):
+def build_conversation_key(source_id, source_file=None, conversation_uid=None):
     """Build a stable conversation key across files."""
+    if conversation_uid:
+        return conversation_uid
     if not source_id:
         return None
     if source_file:
@@ -58,7 +60,11 @@ def build_conversation_key(source_id, source_file=None):
 def sample_conversation_key(sample):
     """Build the conversation key for a scored sample."""
     meta = sample.get("metadata") or {}
-    return build_conversation_key(meta.get("source_id"), meta.get("source_file"))
+    return build_conversation_key(
+        meta.get("source_id"),
+        meta.get("source_file"),
+        meta.get("conversation_uid"),
+    )
 
 
 def _compute_percentiles(indexed_values):
@@ -98,7 +104,11 @@ def group_by_conversation(samples):
         meta = s.get("metadata") or {}
         source_id = meta.get("source_id")
         total_turns = meta.get("total_turns", 1)
-        conv_key = build_conversation_key(source_id, meta.get("source_file"))
+        conv_key = build_conversation_key(
+            source_id,
+            meta.get("source_file"),
+            meta.get("conversation_uid"),
+        )
         if conv_key and total_turns > 1:
             groups[conv_key].append(s)
 
@@ -875,6 +885,7 @@ def aggregate_conversation(conversation_key, slices):
     first_meta = (slices[0].get("metadata") or {}) if slices else {}
     source_id = first_meta.get("source_id") or conversation_key
     source_file = first_meta.get("source_file")
+    conversation_uid = first_meta.get("conversation_uid") or conversation_key
 
     weights = _effective_weights(slices)
 
@@ -991,7 +1002,8 @@ def aggregate_conversation(conversation_key, slices):
 
     return {
         "conversation_id": source_id,
-        "conversation_key": build_conversation_key(source_id, source_file),
+        "conversation_uid": conversation_uid,
+        "conversation_key": build_conversation_key(source_id, source_file, conversation_uid),
         "source_file": source_file,
         "turn_count": turn_count,
         "conv_value": round(conv_value, 2),

@@ -166,6 +166,27 @@ class TestNormalizeAndSlice:
         assert result[1]["metadata"]["thinking_mode"] == "fast"
         assert "cot_text" not in result[1]["metadata"]
 
+    def test_multi_turn_assigns_stable_conversation_uid(self):
+        sample = {
+            "id": "dup-source-id",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "a1"},
+                {"from": "human", "value": "q2"},
+                {"from": "gpt", "value": "a2"},
+            ],
+        }
+        first = normalize_and_slice(sample)
+        second = normalize_and_slice(sample)
+
+        assert len(first) == 2
+        uid_first = {s["metadata"].get("conversation_uid") for s in first}
+        uid_second = {s["metadata"].get("conversation_uid") for s in second}
+
+        assert len(uid_first) == 1
+        assert None not in uid_first
+        assert uid_first == uid_second
+
 
 class TestLanguageDetection:
     def test_code_fence_python(self):
@@ -285,6 +306,44 @@ class TestApplySparseSampling:
         label_indices, inherit_map = apply_sparse_sampling(samples)
         assert 9 in label_indices
         assert 9 not in inherit_map
+
+    def test_duplicate_source_ids_do_not_cross_inherit_when_uid_present(self):
+        samples = []
+        for i in range(13):
+            samples.append({
+                "id": f"conv_a_t{i + 1}",
+                "metadata": {
+                    "source_id": "dup",
+                    "conversation_uid": "uid-a",
+                    "turn_index": i + 1,
+                    "total_turns": 13,
+                },
+                "conversations": [
+                    {"from": "human", "value": f"aq{i}"},
+                    {"from": "gpt", "value": f"aa{i}"},
+                ],
+            })
+        for i in range(13):
+            samples.append({
+                "id": f"conv_b_t{i + 1}",
+                "metadata": {
+                    "source_id": "dup",
+                    "conversation_uid": "uid-b",
+                    "turn_index": i + 1,
+                    "total_turns": 13,
+                },
+                "conversations": [
+                    {"from": "human", "value": f"bq{i}"},
+                    {"from": "gpt", "value": f"ba{i}"},
+                ],
+            })
+
+        _label_indices, inherit_map = apply_sparse_sampling(samples)
+
+        for target_idx, source_idx in inherit_map.items():
+            target_uid = samples[target_idx]["metadata"]["conversation_uid"]
+            source_uid = samples[source_idx]["metadata"]["conversation_uid"]
+            assert target_uid == source_uid
 
 
 class TestTruncation:

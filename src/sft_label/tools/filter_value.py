@@ -216,6 +216,9 @@ def _load_conversation_scores(input_path):
             meta["files_loaded"] += 1
             for rec in records:
                 meta["records_loaded"] += 1
+                conversation_uid = rec.get("conversation_uid")
+                if conversation_uid:
+                    lookup[conversation_uid] = rec
                 conv_key = rec.get("conversation_key")
                 if conv_key:
                     lookup[conv_key] = rec
@@ -250,6 +253,11 @@ def _lookup_conversation_record(sample, conv_lookup):
     conv_key = sample_conversation_key(sample)
     if conv_key and conv_key in conv_lookup:
         return conv_lookup[conv_key]
+    conversation_uid = (sample.get("metadata") or {}).get("conversation_uid")
+    if conversation_uid:
+        record = conv_lookup.get(conversation_uid)
+        if record is not None:
+            return record
     source_id = (sample.get("metadata") or {}).get("source_id")
     if source_id:
         return conv_lookup.get(source_id)
@@ -320,7 +328,7 @@ def _has_conv_criteria(config):
 def _is_multi_turn(sample):
     """Check if a sample is from a multi-turn conversation."""
     meta = sample.get("metadata") or {}
-    return meta.get("source_id") and meta.get("total_turns", 1) > 1
+    return bool(sample_conversation_key(sample)) and meta.get("total_turns", 1) > 1
 
 
 def _has_turn_criteria(config):
@@ -624,8 +632,11 @@ def _load_inline_conversation_scores(target, source_files):
                     lookup["__meta__"]["records_loaded"] += 1
                     conversation_copy = copy.deepcopy(conversation)
                     conversation_copy.setdefault("source_file", str(source_file))
+                    conversation_uid = conversation_copy.get("conversation_uid")
                     conversation_id = conversation_copy.get("conversation_id")
                     conversation_key = conversation_copy.get("conversation_key")
+                    if conversation_uid:
+                        lookup[conversation_uid] = conversation_copy
                     if conversation_key:
                         lookup[conversation_key] = conversation_copy
                     elif conversation_id:
@@ -790,12 +801,15 @@ def _prune_turns(retained, config):
     if not (_has_turn_criteria(config) and retained):
         return retained, n_turn_pruned
 
-    mt_groups = {}  # source_id -> [(index_in_retained, sample)]
+    mt_groups = {}  # conversation_key -> [(index_in_retained, sample)]
     final_retained = []
     for i, sample in enumerate(retained):
         if _is_multi_turn(sample):
-            source_id = (sample.get("metadata") or {}).get("source_id")
-            mt_groups.setdefault(source_id, []).append((i, sample))
+            conversation_key = sample_conversation_key(sample)
+            if conversation_key is None:
+                final_retained.append(sample)
+                continue
+            mt_groups.setdefault(conversation_key, []).append((i, sample))
         else:
             if _passes_turn_criteria(sample, config):
                 final_retained.append(sample)
