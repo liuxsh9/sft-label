@@ -510,6 +510,71 @@ class TestAggregateConversation:
         assert rec["trajectory_structure_score"] >= 5.0
         assert rec["detail"]["conv_turn_signal"] >= rec["detail"]["turn_value_mean"]
 
+    def test_conversation_quality_features_capture_clarification_recovery_and_verification(self):
+        full_conversation = [
+            {"from": "human", "value": "Fix the flaky API test."},
+            {"role": "assistant", "content": "Before I change anything, should I keep the public response shape exactly the same?"},
+            {"from": "human", "value": "Yes, keep the API shape unchanged."},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest tests/test_api.py::test_create -q\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "FAILED tests/test_api.py::test_create\nAssertionError: expected 201 got 500"},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"str_replace_editor\",\"arguments\":{\"path\":\"service.py\",\"old_str\":\"return 500\",\"new_str\":\"return 201\"}}</tool_call>"},
+            {"role": "tool", "name": "str_replace_editor", "content": "Updated service.py"},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest tests/test_api.py::test_create -q\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "PASSED tests/test_api.py::test_create"},
+            {"role": "assistant", "content": "Verified with pytest after updating service.py; the flaky test now passes and the API shape is unchanged."},
+        ]
+        slices = [
+            _slice("quality", idx + 1, 4, value_score=score, quality=quality, conversations=full_conversation)
+            for idx, (score, quality) in enumerate([(4.5, 4.0), (5.5, 5.0), (7.5, 7.0), (8.5, 9.0)])
+        ]
+
+        rec = aggregate_conversation("quality", slices)
+        detail = rec["detail"]
+
+        assert detail["clarification_turn_count"] == 1
+        assert detail["clarification_ratio"] == pytest.approx(0.1, abs=0.01)
+        assert detail["tool_call_count"] == 3
+        assert detail["tool_result_count"] == 3
+        assert detail["tool_failure_count"] == 1
+        assert detail["tool_success_count"] == 2
+        assert detail["recovery_attempt_count"] == 1
+        assert detail["recovery_success_count"] == 1
+        assert detail["recovery_success_ratio"] == pytest.approx(1.0)
+        assert detail["verification_turn_count"] >= 3
+        assert detail["verification_success_count"] >= 2
+        assert detail["verification_after_edit_count"] == 1
+        assert detail["has_final_verification"] is True
+        assert detail["redundant_tool_call_count"] == 1
+        assert detail["tool_repeat_ratio"] == pytest.approx(1 / 3, abs=0.01)
+        assert detail["assistant_repeat_turn_count"] == 0
+
+    def test_conversation_quality_features_detect_redundant_non_recovering_trajectory(self):
+        full_conversation = [
+            {"from": "human", "value": "Debug the failing script."},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"python main.py\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "Traceback: ValueError on line 10"},
+            {"role": "assistant", "content": "I will inspect the error."},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"python main.py\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "Traceback: ValueError on line 10"},
+            {"role": "assistant", "content": "I will inspect the error."},
+        ]
+        slices = [
+            _slice("redundant", idx + 1, 3, value_score=score, quality=quality, conversations=full_conversation)
+            for idx, (score, quality) in enumerate([(4.0, 4.0), (4.2, 4.0), (4.1, 4.0)])
+        ]
+
+        rec = aggregate_conversation("redundant", slices)
+        detail = rec["detail"]
+
+        assert detail["tool_failure_count"] == 2
+        assert detail["recovery_attempt_count"] == 2
+        assert detail["recovery_success_count"] == 0
+        assert detail["recovery_success_ratio"] == pytest.approx(0.0)
+        assert detail["redundant_tool_call_count"] == 1
+        assert detail["tool_repeat_ratio"] == pytest.approx(0.5, abs=0.01)
+        assert detail["assistant_repeat_turn_count"] == 1
+        assert detail["has_final_verification"] is False
+
 
 # ── TestComputeConvSelectionScores ──
 

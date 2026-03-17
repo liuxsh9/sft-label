@@ -119,6 +119,12 @@ def test_compute_conv_viz_data_aggregates_new_diagnostics():
                 "turn_value_std": 1.2,
                 "test_related_turn_count": 2,
                 "edit_related_turn_count": 1,
+                "clarification_turn_count": 1,
+                "recovery_success_ratio": 0.5,
+                "tool_result_success_ratio": 0.5,
+                "tool_repeat_ratio": 0.25,
+                "verification_turn_count": 2,
+                "verification_after_edit_count": 1,
             },
         },
         {
@@ -138,6 +144,12 @@ def test_compute_conv_viz_data_aggregates_new_diagnostics():
                 "turn_value_std": 0.8,
                 "test_related_turn_count": 4,
                 "edit_related_turn_count": 3,
+                "clarification_turn_count": 0,
+                "recovery_success_ratio": 1.0,
+                "tool_result_success_ratio": 0.75,
+                "tool_repeat_ratio": 0.0,
+                "verification_turn_count": 4,
+                "verification_after_edit_count": 2,
             },
         },
     ])
@@ -150,6 +162,12 @@ def test_compute_conv_viz_data_aggregates_new_diagnostics():
     assert conv["mean_turn_value_std"] == 1.0
     assert conv["mean_test_related_turns"] == 3.0
     assert conv["mean_edit_related_turns"] == 2.0
+    assert conv["mean_clarification_turns"] == 0.5
+    assert conv["mean_recovery_success_ratio"] == 0.75
+    assert conv["mean_tool_result_success_ratio"] == 0.625
+    assert conv["mean_tool_repeat_ratio"] == 0.125
+    assert conv["mean_verification_turns"] == 3.0
+    assert conv["mean_verification_after_edit_turns"] == 1.5
 
 
 def test_generate_value_dashboard_stats_only_single_scope_uses_serialized_stats(tmp_path):

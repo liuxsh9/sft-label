@@ -114,6 +114,36 @@ def _compute_conv_viz_data(conv_records):
         for row in conv_records
         if (row.get("detail") or {}).get("edit_related_turn_count") is not None
     ]
+    clarification_turns = [
+        (row.get("detail") or {}).get("clarification_turn_count")
+        for row in conv_records
+        if (row.get("detail") or {}).get("clarification_turn_count") is not None
+    ]
+    recovery_success_ratios = [
+        (row.get("detail") or {}).get("recovery_success_ratio")
+        for row in conv_records
+        if (row.get("detail") or {}).get("recovery_success_ratio") is not None
+    ]
+    tool_result_success_ratios = [
+        (row.get("detail") or {}).get("tool_result_success_ratio")
+        for row in conv_records
+        if (row.get("detail") or {}).get("tool_result_success_ratio") is not None
+    ]
+    tool_repeat_ratios = [
+        (row.get("detail") or {}).get("tool_repeat_ratio")
+        for row in conv_records
+        if (row.get("detail") or {}).get("tool_repeat_ratio") is not None
+    ]
+    verification_turns = [
+        (row.get("detail") or {}).get("verification_turn_count")
+        for row in conv_records
+        if (row.get("detail") or {}).get("verification_turn_count") is not None
+    ]
+    verification_after_edit_turns = [
+        (row.get("detail") or {}).get("verification_after_edit_count")
+        for row in conv_records
+        if (row.get("detail") or {}).get("verification_after_edit_count") is not None
+    ]
 
     def _ratio_bands(rows):
         bands = {
@@ -152,6 +182,12 @@ def _compute_conv_viz_data(conv_records):
         "mean_unique_file_count": sum(unique_file_counts) / len(unique_file_counts) if unique_file_counts else 0,
         "mean_test_related_turns": sum(test_related_turns) / len(test_related_turns) if test_related_turns else 0,
         "mean_edit_related_turns": sum(edit_related_turns) / len(edit_related_turns) if edit_related_turns else 0,
+        "mean_clarification_turns": sum(clarification_turns) / len(clarification_turns) if clarification_turns else 0,
+        "mean_recovery_success_ratio": sum(recovery_success_ratios) / len(recovery_success_ratios) if recovery_success_ratios else 0,
+        "mean_tool_result_success_ratio": sum(tool_result_success_ratios) / len(tool_result_success_ratios) if tool_result_success_ratios else 0,
+        "mean_tool_repeat_ratio": sum(tool_repeat_ratios) / len(tool_repeat_ratios) if tool_repeat_ratios else 0,
+        "mean_verification_turns": sum(verification_turns) / len(verification_turns) if verification_turns else 0,
+        "mean_verification_after_edit_turns": sum(verification_after_edit_turns) / len(verification_after_edit_turns) if verification_after_edit_turns else 0,
         "low_observed_coverage_count": sum(1 for value in observed_ratios if value < 0.5),
         "low_rarity_confidence_count": sum(1 for value in rarity_confidences if value < 0.6),
     }

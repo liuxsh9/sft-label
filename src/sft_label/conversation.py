@@ -413,6 +413,35 @@ _BASENAME_RE = re.compile(
     re.IGNORECASE,
 )
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+_CLARIFICATION_TEXT_RE = re.compile(
+    r"\b("
+    r"should\s+i|do\s+you\s+want|would\s+you\s+like|can\s+you\s+confirm|"
+    r"can\s+you\s+clarify|which\s+one|which\s+should|is\s+it\s+okay|"
+    r"before\s+i\s+(?:change|proceed|update)|confirm\s+whether"
+    r")\b",
+    re.IGNORECASE,
+)
+_FAILURE_TEXT_RE = re.compile(
+    r"\b("
+    r"fail(?:ed|ure)?|error|traceback|exception|assertionerror|keyerror|"
+    r"typeerror|valueerror|syntaxerror|runtimeerror|no such file|not found"
+    r")\b",
+    re.IGNORECASE,
+)
+_SUCCESS_TEXT_RE = re.compile(
+    r"\b("
+    r"pass(?:ed|es)?|success(?:ful|fully)?|succeeded|fixed|resolved|"
+    r"updated|patched|written|created|green|verified|done|completed"
+    r")\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_TEXT_RE = re.compile(
+    r"\b("
+    r"verify|verified|verification|confirm|confirmed|assert|assertion|"
+    r"pytest|test|tests|testing|green|pass(?:ed|es)?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_role(turn):
@@ -459,6 +488,65 @@ def _extract_tool_names_from_text(text):
     return names
 
 
+def _extract_tool_payloads(text):
+    payloads = []
+    for match in _TOOL_CALL_RE.finditer(text or ""):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _tool_signature(payload, fallback_name=""):
+    name = ""
+    if isinstance(payload, dict):
+        name = payload.get("name") or ""
+        if not name and isinstance(payload.get("function"), dict):
+            name = payload["function"].get("name") or ""
+    name = str(name or fallback_name or "").strip()
+    if not name:
+        return ""
+
+    arguments = {}
+    if isinstance(payload, dict):
+        arguments = (
+            payload.get("arguments")
+            or payload.get("parameters")
+            or payload.get("args")
+            or {}
+        )
+
+    if isinstance(arguments, dict):
+        compact = {
+            key: arguments[key]
+            for key in (
+                "command",
+                "path",
+                "file_path",
+                "file",
+                "target_file",
+                "target",
+                "uri",
+                "url",
+                "q",
+                "query",
+            )
+            if key in arguments
+        }
+        arg_value = compact or arguments
+    else:
+        arg_value = arguments
+
+    try:
+        encoded = json.dumps(arg_value, sort_keys=True, ensure_ascii=False)
+    except TypeError:
+        encoded = str(arg_value)
+    return f"{name}:{encoded}"
+
+
 def _extract_file_refs(text):
     refs = set()
     for pattern in (_PATH_RE, _BASENAME_RE):
@@ -470,17 +558,25 @@ def _extract_file_refs(text):
     return refs
 
 
+def _conversation_from_slices(slices):
+    for s in reversed(slices):
+        turns = s.get("conversations")
+        if isinstance(turns, list) and turns:
+            return turns
+    return []
+
+
+def _normalize_freeform_text(text):
+    normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
+    return normalized.strip(" .;:,!?")
+
+
 def _extract_structure_signals(slices):
     """Approximate deterministic structure metrics from the final full trajectory."""
     if not slices:
         return {}
 
-    full_conversation = []
-    for s in reversed(slices):
-        turns = s.get("conversations")
-        if isinstance(turns, list) and turns:
-            full_conversation = turns
-            break
+    full_conversation = _conversation_from_slices(slices)
 
     if not full_conversation:
         return {
@@ -552,6 +648,153 @@ def _extract_structure_signals(slices):
         "assistant_turn_count": assistant_turn_count,
         "final_turn_role": final_turn_role,
         "final_turn_text": final_turn_text,
+    }
+
+
+def _extract_trajectory_quality_features(slices):
+    """Extract additive diagnostic-only quality features from the final trajectory."""
+    full_conversation = _conversation_from_slices(slices)
+    if not full_conversation:
+        return {
+            "clarification_turn_count": 0,
+            "clarification_ratio": 0.0,
+            "tool_call_count": 0,
+            "tool_result_count": 0,
+            "tool_success_count": 0,
+            "tool_failure_count": 0,
+            "tool_result_success_ratio": 0.0,
+            "redundant_tool_call_count": 0,
+            "tool_repeat_ratio": 0.0,
+            "assistant_repeat_turn_count": 0,
+            "recovery_attempt_count": 0,
+            "recovery_success_count": 0,
+            "recovery_success_ratio": 0.0,
+            "verification_turn_count": 0,
+            "verification_success_count": 0,
+            "verification_after_edit_count": 0,
+            "has_final_verification": False,
+        }
+
+    clarification_turn_count = 0
+    tool_call_count = 0
+    tool_result_count = 0
+    tool_success_count = 0
+    tool_failure_count = 0
+    redundant_tool_call_count = 0
+    assistant_repeat_turn_count = 0
+    verification_turn_count = 0
+    verification_success_count = 0
+    verification_after_edit_count = 0
+    edit_open = False
+
+    seen_tool_signatures = set()
+    seen_assistant_texts = set()
+    pending_recovery = 0
+    recovery_success_count = 0
+
+    for turn in full_conversation:
+        if not isinstance(turn, dict):
+            continue
+        role = _normalize_role(turn)
+        text = _coerce_turn_text(turn.get("value", turn.get("content")))
+        lower = text.lower()
+        tool_name = str(turn.get("name") or turn.get("tool_name") or "").strip()
+        tool_payloads = _extract_tool_payloads(text)
+        tool_signatures = [
+            _tool_signature(payload, fallback_name=tool_name)
+            for payload in tool_payloads
+        ]
+        tool_signatures = [signature for signature in tool_signatures if signature]
+        if not tool_signatures and role == "assistant" and tool_name:
+            tool_signatures = [_tool_signature({}, fallback_name=tool_name)]
+
+        is_edit_turn = bool(_EDIT_TEXT_RE.search(lower)) or any(
+            signature.startswith(("apply_patch:", "str_replace_editor:", "write_file:"))
+            for signature in tool_signatures
+        )
+        is_verification_turn = bool(_VERIFICATION_TEXT_RE.search(lower) or _TEST_TEXT_RE.search(lower))
+
+        if role == "assistant" and "?" in text and _CLARIFICATION_TEXT_RE.search(lower):
+            clarification_turn_count += 1
+
+        if role == "assistant" and not tool_signatures:
+            normalized_text = _normalize_freeform_text(text)
+            if normalized_text:
+                if normalized_text in seen_assistant_texts:
+                    assistant_repeat_turn_count += 1
+                else:
+                    seen_assistant_texts.add(normalized_text)
+
+        if role == "assistant" and tool_signatures:
+            tool_call_count += len(tool_signatures)
+            for signature in tool_signatures:
+                if signature in seen_tool_signatures:
+                    redundant_tool_call_count += 1
+                else:
+                    seen_tool_signatures.add(signature)
+
+        if role == "tool":
+            tool_result_count += 1
+            is_failure = bool(_FAILURE_TEXT_RE.search(lower))
+            is_success = bool(_SUCCESS_TEXT_RE.search(lower)) and not is_failure
+            if is_failure:
+                tool_failure_count += 1
+                pending_recovery += 1
+            elif is_success:
+                tool_success_count += 1
+                if pending_recovery > 0:
+                    recovery_success_count += pending_recovery
+                    pending_recovery = 0
+
+        if is_edit_turn and pending_recovery > 0:
+            recovery_success_count += pending_recovery
+            pending_recovery = 0
+            edit_open = True
+        elif is_edit_turn:
+            edit_open = True
+
+        if is_verification_turn:
+            verification_turn_count += 1
+            if bool(_SUCCESS_TEXT_RE.search(lower)) and not bool(_FAILURE_TEXT_RE.search(lower)):
+                verification_success_count += 1
+            if edit_open:
+                verification_after_edit_count += 1
+                edit_open = False
+
+    turn_total = len(full_conversation) or 1
+    recovery_attempt_count = tool_failure_count
+    final_turn_text = _coerce_turn_text(
+        (full_conversation[-1] or {}).get("value", (full_conversation[-1] or {}).get("content"))
+    )
+    final_lower = final_turn_text.lower()
+    has_final_verification = bool(_VERIFICATION_TEXT_RE.search(final_lower) and _SUCCESS_TEXT_RE.search(final_lower))
+
+    return {
+        "clarification_turn_count": clarification_turn_count,
+        "clarification_ratio": clarification_turn_count / turn_total,
+        "tool_call_count": tool_call_count,
+        "tool_result_count": tool_result_count,
+        "tool_success_count": tool_success_count,
+        "tool_failure_count": tool_failure_count,
+        "tool_result_success_ratio": (
+            tool_success_count / tool_result_count if tool_result_count else 0.0
+        ),
+        "redundant_tool_call_count": redundant_tool_call_count,
+        "tool_repeat_ratio": (
+            redundant_tool_call_count / tool_call_count if tool_call_count else 0.0
+        ),
+        "assistant_repeat_turn_count": assistant_repeat_turn_count,
+        "recovery_attempt_count": recovery_attempt_count,
+        "recovery_success_count": min(recovery_success_count, recovery_attempt_count),
+        "recovery_success_ratio": (
+            min(recovery_success_count, recovery_attempt_count) / recovery_attempt_count
+            if recovery_attempt_count
+            else 0.0
+        ),
+        "verification_turn_count": verification_turn_count,
+        "verification_success_count": verification_success_count,
+        "verification_after_edit_count": verification_after_edit_count,
+        "has_final_verification": has_final_verification,
     }
 
 
@@ -1014,6 +1257,7 @@ def aggregate_conversation(conversation_key, slices):
         turn_count = traj_turn_count
     turn_metrics = _extract_turn_metrics(slices)
     structure_signals = _extract_structure_signals(slices)
+    quality_features = _extract_trajectory_quality_features(slices)
     conv_turn_signal, turn_signal_detail = _compute_conv_turn_signal(slices)
     trajectory_structure_score, structure_detail = _compute_trajectory_structure_score(
         slices,
@@ -1127,6 +1371,23 @@ def aggregate_conversation(conversation_key, slices):
             "tool_effectiveness_score": _round_or_none(structure_detail.get("tool_effectiveness_score")),
             "resolution_score": _round_or_none(structure_detail.get("resolution_score")),
             "non_redundancy_score": _round_or_none(structure_detail.get("non_redundancy_score")),
+            "clarification_turn_count": quality_features.get("clarification_turn_count"),
+            "clarification_ratio": _round_or_none(quality_features.get("clarification_ratio"), 3),
+            "tool_call_count": quality_features.get("tool_call_count"),
+            "tool_result_count": quality_features.get("tool_result_count"),
+            "tool_success_count": quality_features.get("tool_success_count"),
+            "tool_failure_count": quality_features.get("tool_failure_count"),
+            "tool_result_success_ratio": _round_or_none(quality_features.get("tool_result_success_ratio"), 3),
+            "redundant_tool_call_count": quality_features.get("redundant_tool_call_count"),
+            "tool_repeat_ratio": _round_or_none(quality_features.get("tool_repeat_ratio"), 3),
+            "assistant_repeat_turn_count": quality_features.get("assistant_repeat_turn_count"),
+            "recovery_attempt_count": quality_features.get("recovery_attempt_count"),
+            "recovery_success_count": quality_features.get("recovery_success_count"),
+            "recovery_success_ratio": _round_or_none(quality_features.get("recovery_success_ratio"), 3),
+            "verification_turn_count": quality_features.get("verification_turn_count"),
+            "verification_success_count": quality_features.get("verification_success_count"),
+            "verification_after_edit_count": quality_features.get("verification_after_edit_count"),
+            "has_final_verification": quality_features.get("has_final_verification"),
             "conv_intra_class_rank": None,  # filled later
             "selection_confidence": None,  # filled later
             "conv_value_v2_delta": _round_or_none(conv_value_v2 - conv_value),
