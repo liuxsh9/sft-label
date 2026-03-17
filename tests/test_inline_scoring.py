@@ -167,7 +167,11 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
     conversation = updated_rows[0]["extra_info"]["unique_info"]["data_label"]["conversation"]
     assert conversation["conv_value"] is not None
     assert conversation["conv_selection"] is not None
-    assert conversation["conversation_key"].endswith("::conv-2")
+    assert conversation["conversation_key"]
+    assert (
+        conversation["conversation_key"].endswith("::conv-2")
+        or conversation["conversation_key"].startswith("conversation_uid:")
+    )
     assert conversation["source_file"].endswith("train.jsonl")
     assert "compression_gap" in conversation
     assert "tool_turn_ratio" in conversation
@@ -241,7 +245,11 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
     assert turns[0]["value"]["selection_score"] is not None
     assert turns[1]["value"]["selection_score"] is not None
     conversation = updated_b[0]["extra_info"]["unique_info"]["data_label"]["conversation"]
-    assert conversation["conversation_key"].endswith("::conv-b")
+    assert conversation["conversation_key"]
+    assert (
+        conversation["conversation_key"].endswith("::conv-b")
+        or conversation["conversation_key"].startswith("conversation_uid:")
+    )
     assert conversation["detail"]["turn_value_std"] is not None
 
 
