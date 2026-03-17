@@ -24,7 +24,7 @@ from sft_label.inline_scoring import (
     load_inline_scoring_file,
 )
 from sft_label.labels import LABEL_META_KEYS, is_partial_labels
-from sft_label.conversation import sample_conversation_key
+from sft_label.conversation import is_conversation_object, sample_conversation_key
 
 
 @dataclass
@@ -326,9 +326,9 @@ def _has_conv_criteria(config):
 
 
 def _is_multi_turn(sample):
-    """Check if a sample is from a multi-turn conversation."""
+    """Check if a sample should be gated by conversation-level criteria."""
     meta = sample.get("metadata") or {}
-    return bool(sample_conversation_key(sample)) and meta.get("total_turns", 1) > 1
+    return is_conversation_object(meta)
 
 
 def _has_turn_criteria(config):

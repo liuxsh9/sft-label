@@ -128,6 +128,19 @@ class TestGroupByConversation:
         groups = group_by_conversation(samples)
         assert set(groups) == {"uid-a", "uid-b"}
 
+    def test_includes_single_slice_trajectory_object(self):
+        sample = _slice("traj", 1, 1, conversations=[
+            {"from": "human", "value": "Investigate and fix the bug."},
+            {"from": "tool", "value": "pytest failed"},
+            {"from": "tool", "value": "patched service.py"},
+            {"from": "gpt", "value": "Issue fixed and tests pass."},
+        ])
+        sample["metadata"]["trajectory_object"] = True
+        sample["metadata"]["trajectory_turn_count"] = 4
+        groups = group_by_conversation([sample])
+        assert list(groups) == ["traj"]
+        assert len(groups["traj"]) == 1
+
 
 # ── TestPositionWeight ──
 
@@ -281,6 +294,26 @@ class TestAggregateConversation:
     def test_single_slice_returns_none(self):
         slices = [_slice("c1", 1, 1)]
         assert aggregate_conversation("c1", slices) is None
+
+    def test_single_slice_trajectory_object_returns_record(self):
+        sample = _slice("traj", 1, 1, value_score=8.2, quality=8.0, reasoning=7.0, rarity=6.5, conversations=[
+            {"from": "human", "value": "Fix the failing build and confirm tests."},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"execute_bash\",\"arguments\":{\"command\":\"pytest -q\"}}</tool_call>"},
+            {"role": "tool", "name": "execute_bash", "content": "FAILED tests/test_api.py::test_create"},
+            {"role": "assistant", "content": "<tool_call>{\"name\":\"str_replace_editor\",\"arguments\":{\"path\":\"service.py\",\"old_str\":\"0\",\"new_str\":\"1\"}}</tool_call>"},
+            {"role": "tool", "name": "str_replace_editor", "content": "Updated service.py"},
+            {"from": "gpt", "value": "Patched service.py and tests now pass."},
+        ], labels={"intent": "debug", "difficulty": "advanced", "language": ["python"], "agentic": ["tool-use"]})
+        sample["metadata"]["trajectory_object"] = True
+        sample["metadata"]["trajectory_turn_count"] = 6
+        sample["metadata"]["trajectory_tool_turn_count"] = 2
+        sample["metadata"]["trajectory_assistant_turn_count"] = 3
+
+        rec = aggregate_conversation("traj", [sample])
+
+        assert rec is not None
+        assert rec["turn_count"] == 6
+        assert rec["detail"]["trajectory_v2_enabled"] is True
 
     def test_missing_values_returns_none(self):
         slices = [

@@ -120,6 +120,41 @@ def _strip_pangu_tokens(text):
     return text.strip()
 
 
+def _canonical_role(turn):
+    role = str(turn.get("from") or turn.get("role") or "").strip().lower()
+    if role in {"user", "human"}:
+        return "human"
+    if role in {"assistant", "gpt"}:
+        return "gpt"
+    if role == "tool":
+        return "tool"
+    return role
+
+
+def _detect_single_reply_trajectory_object(conversations):
+    """Detect long tool-heavy traces that should be grouped as trajectory objects."""
+    roles = [_canonical_role(turn) for turn in conversations if isinstance(turn, dict)]
+    if not roles:
+        return None
+
+    assistant_turn_count = sum(1 for role in roles if role == "gpt")
+    tool_turn_count = sum(1 for role in roles if role == "tool")
+    turn_count = len(roles)
+
+    if assistant_turn_count != 1:
+        return None
+    if turn_count < 5 or tool_turn_count < 2:
+        return None
+
+    return {
+        "trajectory_object": True,
+        "trajectory_object_kind": "single_reply_tool_trajectory",
+        "trajectory_turn_count": turn_count,
+        "trajectory_tool_turn_count": tool_turn_count,
+        "trajectory_assistant_turn_count": assistant_turn_count,
+    }
+
+
 def slice_multiturn(conversations):
     """Slice multi-turn conversations into training-aligned samples.
 
@@ -261,6 +296,20 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
     if len(slices) == 1:
         if conversation_uid:
             normalized.setdefault("metadata", {})["conversation_uid"] = conversation_uid
+        trajectory_meta = _detect_single_reply_trajectory_object(conversations)
+        if trajectory_meta:
+            enriched = dict(normalized)
+            meta = dict(enriched.get("metadata") or {})
+            source_id = meta.get("source_id") or enriched.get("id")
+            if source_id:
+                meta["source_id"] = source_id
+            meta.setdefault("turn_index", 1)
+            meta.setdefault("total_turns", 1)
+            if conversation_uid:
+                meta.setdefault("conversation_uid", conversation_uid)
+            meta.update(trajectory_meta)
+            enriched["metadata"] = meta
+            return [enriched]
         return [normalized]
 
     # Build one sample per slice

@@ -11,6 +11,7 @@ from sft_label.conversation import (
     aggregate_conversations,
     build_conversation_key,
     group_by_conversation,
+    is_conversation_object,
 )
 from sft_label.labels import is_usable_labels
 from sft_label.prompts import TAG_POOLS
@@ -259,7 +260,7 @@ def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
     for sample in samples:
         meta = sample.get("metadata") or {}
         key = build_conversation_key(meta.get("source_id"), meta.get("source_file"))
-        if key and meta.get("total_turns", 1) > 1:
+        if key and is_conversation_object(meta):
             continue
         units.append(sample)
 
@@ -523,7 +524,7 @@ def build_pass2_conversation_units(samples: list[dict], conv_records: list[dict]
 
     for sample in samples:
         meta = sample.get("metadata") or {}
-        if meta.get("source_id") and meta.get("total_turns", 1) > 1:
+        if is_conversation_object(meta):
             continue
         unit = _sample_pass2_unit(sample)
         if unit:

@@ -1023,6 +1023,20 @@ class TestConversationFilter:
         # c1 fails conv criteria, single-turn passes through normally
         assert summary["retained"] == 1
 
+    def test_single_slice_trajectory_object_uses_conversation_gate(self, tmp_path):
+        sample = _mt_sample("traj-1", 1, 1, score=8.0)
+        sample["metadata"]["trajectory_object"] = True
+        sample["metadata"]["trajectory_turn_count"] = 6
+        sample["metadata"]["trajectory_tool_turn_count"] = 3
+        samples = [sample]
+        conv_records = [
+            {"conversation_id": "traj-1", "conv_value": 3.0, "conv_selection": 3.0, "peak_complexity": 2},
+        ]
+        input_file = self._setup_conv_data(tmp_path, conv_records, samples)
+        config = FilterConfig(conv_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+        assert summary["retained"] == 0
+
     def test_combined_conv_and_shared(self, tmp_path):
         """Conv criteria + shared criteria (difficulty) both apply."""
         samples = [

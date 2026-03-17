@@ -195,6 +195,28 @@ class TestNormalizeAndSlice:
         assert None not in uid_first
         assert uid_first == uid_second
 
+    def test_long_single_reply_tool_trajectory_gets_trajectory_metadata(self):
+        sample = {
+            "id": "traj-1",
+            "conversations": [
+                {"from": "human", "value": "Fix failing tests and report progress."},
+                {"from": "tool", "value": "pytest failed: tests/test_api.py::test_create"},
+                {"from": "tool", "value": "Opened service.py and inspected return path"},
+                {"from": "tool", "value": "Applied patch to service.py"},
+                {"from": "gpt", "value": "Fixed service.py and tests now pass."},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        meta = result[0].get("metadata", {})
+        assert meta.get("trajectory_object") is True
+        assert meta.get("source_id") == "traj-1"
+        assert meta.get("turn_index") == 1
+        assert meta.get("total_turns") == 1
+        assert meta.get("trajectory_turn_count") == 5
+        assert meta.get("trajectory_tool_turn_count") == 3
+        assert meta.get("trajectory_assistant_turn_count") == 1
+
 
 class TestLanguageDetection:
     def test_code_fence_python(self):

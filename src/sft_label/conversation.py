@@ -67,6 +67,21 @@ def sample_conversation_key(sample):
     )
 
 
+def is_trajectory_object(meta):
+    """Whether metadata marks this sample as a single-slice trajectory object."""
+    return bool((meta or {}).get("trajectory_object"))
+
+
+def is_conversation_object(meta):
+    """Whether metadata should be treated as a conversation-level unit."""
+    meta = meta or {}
+    if not meta.get("source_id"):
+        return False
+    if meta.get("total_turns", 1) > 1:
+        return True
+    return is_trajectory_object(meta)
+
+
 def _compute_percentiles(indexed_values):
     """Assign tie-aware percentiles to (idx, value) pairs."""
     if not indexed_values:
@@ -94,22 +109,20 @@ def _compute_percentiles(indexed_values):
 # ─── Grouping ────────────────────────────────────────────
 
 def group_by_conversation(samples):
-    """Group samples by conversation, filter to multi-turn only.
+    """Group samples by conversation-like units.
 
     Returns dict {conversation_key: [slices sorted by turn_index]}.
-    Only includes conversations where total_turns > 1.
+    Includes regular multi-turn slices and trajectory objects.
     """
     groups = defaultdict(list)
     for s in samples:
         meta = s.get("metadata") or {}
-        source_id = meta.get("source_id")
-        total_turns = meta.get("total_turns", 1)
         conv_key = build_conversation_key(
-            source_id,
+            meta.get("source_id"),
             meta.get("source_file"),
             meta.get("conversation_uid"),
         )
-        if conv_key and total_turns > 1:
+        if conv_key and is_conversation_object(meta):
             groups[conv_key].append(s)
 
     # Sort each group by turn_index
@@ -506,9 +519,12 @@ def _compute_trajectory_structure_score(
     structure_signals,
     turn_metrics,
     turn_signal_detail,
+    turn_count_hint=None,
 ):
     """Estimate conversation-level trajectory quality without extra LLM calls."""
     turn_count = len(slices) or 1
+    if isinstance(turn_count_hint, int) and turn_count_hint > 0:
+        turn_count = max(turn_count, turn_count_hint)
     unique_tool_count = structure_signals.get("unique_tool_count", 0) or 0
     tool_turn_ratio = structure_signals.get("tool_turn_ratio", 0.0) or 0.0
     unique_file_count = structure_signals.get("unique_file_count", 0) or 0
@@ -877,12 +893,16 @@ def _compute_pure_quality_from_slice(s):
 def aggregate_conversation(conversation_key, slices):
     """Aggregate scores for a single conversation.
 
-    Returns a record dict, or None if insufficient data (e.g. single slice).
+    Returns a record dict, or None if insufficient data.
     """
-    if len(slices) < 2:
+    if not slices:
         return None
 
     first_meta = (slices[0].get("metadata") or {}) if slices else {}
+    single_slice_trajectory = len(slices) == 1 and is_trajectory_object(first_meta)
+    if len(slices) < 2 and not single_slice_trajectory:
+        return None
+
     source_id = first_meta.get("source_id") or conversation_key
     source_file = first_meta.get("source_file")
     conversation_uid = first_meta.get("conversation_uid") or conversation_key
@@ -954,6 +974,9 @@ def aggregate_conversation(conversation_key, slices):
 
     # Turn count
     turn_count = len(slices)
+    traj_turn_count = first_meta.get("trajectory_turn_count")
+    if single_slice_trajectory and isinstance(traj_turn_count, int) and traj_turn_count > turn_count:
+        turn_count = traj_turn_count
     turn_metrics = _extract_turn_metrics(slices)
     structure_signals = _extract_structure_signals(slices)
     conv_turn_signal, turn_signal_detail = _compute_conv_turn_signal(slices)
@@ -963,6 +986,7 @@ def aggregate_conversation(conversation_key, slices):
         structure_signals,
         turn_metrics,
         turn_signal_detail,
+        turn_count_hint=turn_count,
     )
     trajectory_v2_enabled = bool(structure_detail.get("trajectory_v2_enabled"))
 
