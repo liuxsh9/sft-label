@@ -43,6 +43,9 @@ _INLINE_CONVERSATION_KEYS = (
     "unique_tool_count",
     "unique_file_count",
     "thinking_mode",
+    "thinking_mode_summary",
+    "thinking_mode_counts",
+    "thinking_mode_ratio",
 )
 
 _INLINE_CONVERSATION_DETAIL_KEYS = (
@@ -534,6 +537,9 @@ def clear_pass2_state(data_label: dict, *, timestamp: str | None = None) -> dict
             "unique_tool_count",
             "unique_file_count",
             "thinking_mode",
+            "thinking_mode_summary",
+            "thinking_mode_counts",
+            "thinking_mode_ratio",
             "merged_labels",
             "detail",
             "slices",

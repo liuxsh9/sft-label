@@ -282,6 +282,44 @@ class TestAggregateConversation:
         assert rec["peak_complexity"] == 9
         assert len(rec["slices"]) == 3
 
+    def test_thinking_mode_summary_all_fast(self):
+        slices = [
+            _slice("tm", 1, 2, thinking_mode="fast"),
+            _slice("tm", 2, 2, thinking_mode="fast"),
+        ]
+        rec = aggregate_conversation("tm", slices)
+        assert rec["thinking_mode"] == "fast"
+        assert rec["thinking_mode_summary"] == "all_fast"
+        assert rec["thinking_mode_counts"] == {"fast": 2, "slow": 0, "unknown": 0}
+        assert rec["thinking_mode_ratio"]["fast"] == pytest.approx(1.0)
+        assert rec["thinking_mode_ratio"]["slow"] == pytest.approx(0.0)
+        assert rec["thinking_mode_ratio"]["unknown"] == pytest.approx(0.0)
+
+    def test_thinking_mode_summary_mixed(self):
+        slices = [
+            _slice("tm2", 1, 3, thinking_mode="fast"),
+            _slice("tm2", 2, 3, thinking_mode="slow"),
+            _slice("tm2", 3, 3),
+        ]
+        rec = aggregate_conversation("tm2", slices)
+        assert rec["thinking_mode"] == "mixed"
+        assert rec["thinking_mode_summary"] == "mixed"
+        assert rec["thinking_mode_counts"] == {"fast": 1, "slow": 1, "unknown": 1}
+        assert rec["thinking_mode_ratio"]["fast"] == pytest.approx(1 / 3)
+        assert rec["thinking_mode_ratio"]["slow"] == pytest.approx(1 / 3)
+        assert rec["thinking_mode_ratio"]["unknown"] == pytest.approx(1 / 3)
+
+    def test_thinking_mode_summary_unknown(self):
+        slices = [
+            _slice("tm3", 1, 2),
+            _slice("tm3", 2, 2),
+        ]
+        rec = aggregate_conversation("tm3", slices)
+        assert rec["thinking_mode"] is None
+        assert rec["thinking_mode_summary"] == "unknown"
+        assert rec["thinking_mode_counts"] == {"fast": 0, "slow": 0, "unknown": 2}
+        assert rec["thinking_mode_ratio"]["unknown"] == pytest.approx(1.0)
+
     def test_record_includes_conversation_key(self):
         slices = [
             _slice("c1", 1, 2, source_file="/tmp/a/scored.json"),

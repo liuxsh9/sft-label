@@ -343,6 +343,48 @@ def _compute_conv_turn_signal(slices):
     }
 
 
+def _slice_thinking_mode(sample):
+    value = sample.get("value") or {}
+    meta = sample.get("metadata") or {}
+    mode = value.get("thinking_mode") or meta.get("thinking_mode")
+    if mode in {"fast", "slow"}:
+        return mode
+    return None
+
+
+def _summarize_thinking_modes(slices):
+    counts = {"fast": 0, "slow": 0, "unknown": 0}
+    for sample in slices:
+        mode = _slice_thinking_mode(sample)
+        if mode == "fast":
+            counts["fast"] += 1
+        elif mode == "slow":
+            counts["slow"] += 1
+        else:
+            counts["unknown"] += 1
+
+    total = len(slices)
+    ratio = {
+        key: (count / total if total else 0.0)
+        for key, count in counts.items()
+    }
+
+    if total > 0 and counts["fast"] == total:
+        summary = "all_fast"
+        thinking_mode = "fast"
+    elif total > 0 and counts["slow"] == total:
+        summary = "all_slow"
+        thinking_mode = "slow"
+    elif counts["fast"] == 0 and counts["slow"] == 0:
+        summary = "unknown"
+        thinking_mode = None
+    else:
+        summary = "mixed"
+        thinking_mode = "mixed"
+
+    return thinking_mode, summary, counts, ratio
+
+
 _TEST_TEXT_RE = re.compile(
     r"\b("
     r"pytest|unittest|go\s+test|cargo\s+test|npm\s+test|pnpm\s+test|yarn\s+test|"
@@ -959,15 +1001,8 @@ def aggregate_conversation(conversation_key, slices):
         _compute_pure_quality_from_slice
     )
 
-    # Thinking mode: use first slice's mode (all slices from same conv share it)
-    thinking_mode = None
-    for s in slices:
-        v = s.get("value") or {}
-        meta = s.get("metadata") or {}
-        tm = v.get("thinking_mode") or meta.get("thinking_mode")
-        if tm:
-            thinking_mode = tm
-            break
+    # Thinking mode: summarize across slices (fast/slow/mixed)
+    thinking_mode, thinking_mode_summary, thinking_mode_counts, thinking_mode_ratio = _summarize_thinking_modes(slices)
 
     # Merged labels
     merged_labels = _merge_labels(slices)
@@ -1046,6 +1081,9 @@ def aggregate_conversation(conversation_key, slices):
         "unique_tool_count": structure_signals.get("unique_tool_count"),
         "unique_file_count": structure_signals.get("unique_file_count"),
         "thinking_mode": thinking_mode,
+        "thinking_mode_summary": thinking_mode_summary,
+        "thinking_mode_counts": thinking_mode_counts,
+        "thinking_mode_ratio": thinking_mode_ratio,
         "merged_labels": merged_labels,
         "detail": {
             "q_base": round(q_base, 2),

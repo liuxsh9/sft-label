@@ -157,6 +157,9 @@ class TestInlineDataLabel:
                 "unique_tool_count": 3,
                 "unique_file_count": 5,
                 "thinking_mode": "fast",
+                "thinking_mode_summary": "all_fast",
+                "thinking_mode_counts": {"fast": 4, "slow": 0, "unknown": 0},
+                "thinking_mode_ratio": {"fast": 1.0, "slow": 0.0, "unknown": 0.0},
                 "detail": {
                     "top_k_mean": 8.4,
                     "bottom_k_mean": 5.1,
@@ -175,6 +178,9 @@ class TestInlineDataLabel:
         assert compact["compression_gap"] == 2.1
         assert compact["tool_turn_ratio"] == 0.75
         assert compact["unique_tool_count"] == 3
+        assert compact["thinking_mode_summary"] == "all_fast"
+        assert compact["thinking_mode_counts"]["fast"] == 4
+        assert compact["thinking_mode_ratio"]["fast"] == 1.0
         assert compact["detail"]["top_k_mean"] == 8.4
         assert compact["detail"]["unique_tools"] == ["bash", "apply_patch"]
         assert "merged_labels" not in compact
