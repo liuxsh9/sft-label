@@ -80,36 +80,6 @@ def _resolve_dashboard_service(store, name: str | None = None):
     return store.services[service_name]
 
 
-def _choose_dashboard_service(store, lang: str, input_fn):
-    services = sorted(store.services.items())
-    if not services:
-        raise ValueError("No dashboard service configured. Run `sft-label dashboard-service init` first.")
-    if len(services) == 1:
-        return services[0][1]
-
-    print(_dashboard_start_msg(lang, "请选择 dashboard 服务：", "Choose a dashboard service:"))
-    default_name = getattr(store, "default_service", None)
-    for idx, (name, service) in enumerate(services, start=1):
-        marker = " (default)" if name == default_name else ""
-        public_url = service.share_base_url()
-        print(f"  {idx}. {name} | {service.service_type} | {public_url}{marker}")
-
-    while True:
-        raw = _dashboard_service_prompt(
-            lang,
-            input_fn,
-            f"输入序号（默认 {next((i for i, (name, _) in enumerate(services, start=1) if name == default_name), 1)}）：",
-            f"Enter number [default {next((i for i, (name, _) in enumerate(services, start=1) if name == default_name), 1)}]: ",
-        ).strip()
-        if not raw:
-            raw = str(next((i for i, (name, _) in enumerate(services, start=1) if name == default_name), 1))
-        if raw.isdigit():
-            index = int(raw)
-            if 1 <= index <= len(services):
-                return services[index - 1][1]
-        print(_dashboard_start_msg(lang, "输入无效，请重新选择。", "Invalid selection, please try again."))
-
-
 def _dashboard_service_prompt(
     lang: str,
     input_fn,
@@ -204,7 +174,7 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             pm2_name=pm2_name,
         )
     else:
-        service = _choose_dashboard_service(store, lang, input_fn)
+        service = _resolve_dashboard_service(store)
 
     status = dashboard_service_status(service)
     public_url = status.get("public_url") or service.share_base_url()
@@ -215,15 +185,8 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             f"Dashboard service: {service.name} | {service.service_type} | {status['state']} | {public_url}",
         )
     )
-    if status["state"] == "running":
-        restart = _dashboard_service_prompt(
-            lang,
-            input_fn,
-            "服务已运行，是否重启后再执行？ [y/N]: ",
-            "Service is already running. Restart before executing? [y/N]: ",
-        ).strip().lower()
-        if restart in ("y", "yes"):
-            status = restart_dashboard_service(service)
+    if status["state"] in {"running", "starting"}:
+        pass
     else:
         start_now = _dashboard_service_prompt(
             lang,
@@ -263,6 +226,67 @@ def _print_published_dashboard_urls(published, lang: str):
         url = dashboards[key].get("url")
         if url:
             print(f"  [{key}] {url}")
+
+
+def _print_start_plan_summary(plan, lang: str):
+    from sft_label.launcher import format_command
+
+    cmd_preview = format_command(plan.argv)
+    print(f"\n{_start_msg(lang, '执行确认', 'Launch summary')}")
+    print("-" * 56)
+    print(_start_msg(lang, "命令：", "Command:"))
+    print(f"  {cmd_preview}")
+    if plan.env_overrides:
+        print(_start_msg(lang, "环境变量覆盖（敏感值已脱敏）：", "Environment overrides (sensitive values masked):"))
+        for line in _format_start_env_lines(plan.env_overrides):
+            print(line)
+    else:
+        print(_start_msg(lang, "环境变量覆盖：无", "Environment overrides: none"))
+    print("-" * 56)
+
+
+def _parse_launch_plan_args(plan, parser, lang: str):
+    try:
+        launched_args = parser.parse_args(plan.argv)
+    except SystemExit:
+        print(_start_msg(
+            lang,
+            "生成参数解析失败，请重试 `sft-label start`。",
+            "Generated arguments failed to parse. Re-run `sft-label start`.",
+        ))
+        return None
+
+    if launched_args.command == "start":
+        print(_start_msg(lang, "交互启动器不能再次启动自身。", "Interactive launcher cannot launch itself."))
+        return None
+    return launched_args
+
+
+def _run_dashboard_service_maintenance_session(
+    parser,
+    lang: str,
+    input_fn,
+    build_dashboard_service_plan_fn,
+    initial_plan,
+):
+    session_plan = initial_plan
+    while True:
+        for key, value in session_plan.env_overrides.items():
+            os.environ[key] = value
+        launched_args = _parse_launch_plan_args(session_plan, parser, lang)
+        if launched_args is None:
+            return None
+        result = dispatch_command(launched_args, parser=parser)
+        keep_going = _dashboard_service_prompt(
+            lang,
+            input_fn,
+            "继续看板服务维护？ [Y/n]: ",
+            "Continue dashboard service maintenance? [Y/n]: ",
+        ).strip().lower()
+        if keep_going in ("n", "no"):
+            return result
+        session_plan = build_dashboard_service_plan_fn(input_fn=input_fn, output_fn=print)
+        _print_start_plan_summary(session_plan, lang)
 
 
 def _apply_runtime_overrides(config, args):
@@ -1015,8 +1039,8 @@ def cmd_dashboard_service(args):
 def cmd_start(args, parser):
     """Interactive launcher for grouped workflows."""
     from sft_label.launcher import (
+        build_dashboard_service_plan,
         build_launch_plan,
-        format_command,
         interactive_input,
         is_back_token,
         set_language,
@@ -1033,18 +1057,7 @@ def cmd_start(args, parser):
         print(_start_msg(lang, "已取消启动。", "Launch cancelled."))
         return
 
-    cmd_preview = format_command(plan.argv)
-    print(f"\n{_start_msg(lang, '执行确认', 'Launch summary')}")
-    print("-" * 56)
-    print(_start_msg(lang, "命令：", "Command:"))
-    print(f"  {cmd_preview}")
-    if plan.env_overrides:
-        print(_start_msg(lang, "环境变量覆盖（敏感值已脱敏）：", "Environment overrides (sensitive values masked):"))
-        for line in _format_start_env_lines(plan.env_overrides):
-            print(line)
-    else:
-        print(_start_msg(lang, "环境变量覆盖：无", "Environment overrides: none"))
-    print("-" * 56)
+    _print_start_plan_summary(plan, lang)
 
     if args.dry_run:
         print(f"\n{_start_msg(lang, '仅预览模式，未执行命令。', 'Dry run mode: command not executed.')}")
@@ -1067,18 +1080,17 @@ def cmd_start(args, parser):
     for key, value in plan.env_overrides.items():
         os.environ[key] = value
 
-    try:
-        launched_args = parser.parse_args(plan.argv)
-    except SystemExit:
-        print(_start_msg(
-            lang,
-            "生成参数解析失败，请重试 `sft-label start`。",
-            "Generated arguments failed to parse. Re-run `sft-label start`.",
-        ))
-        return
+    if getattr(plan, "workflow_key", None) == "dashboard-service":
+        return _run_dashboard_service_maintenance_session(
+            parser=parser,
+            lang=lang,
+            input_fn=interactive_input,
+            build_dashboard_service_plan_fn=build_dashboard_service_plan,
+            initial_plan=plan,
+        )
 
-    if launched_args.command == "start":
-        print(_start_msg(lang, "交互启动器不能再次启动自身。", "Interactive launcher cannot launch itself."))
+    launched_args = _parse_launch_plan_args(plan, parser, lang)
+    if launched_args is None:
         return
 
     dashboard_service = _prepare_dashboard_service_for_start(
@@ -1105,7 +1117,7 @@ def cmd_start(args, parser):
                 lang,
                 "本次任务未返回可发布的 run 目录，跳过 dashboard 发布。",
                 "No publishable run directory was returned; skipped dashboard publishing.",
-            ))
+                ))
     return result
 
 

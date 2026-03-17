@@ -6,7 +6,7 @@
     Raw SFT data to ranked training subsets
   </text>
   <text x="72" y="136" fill="#4D627D" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18">
-    Label. Score. Aggregate. Filter. Cluster.
+    Label. Score. Aggregate. Cluster. Filter.
   </text>
 
   <defs>
@@ -45,10 +45,10 @@
 
   <rect x="1000" y="214" width="196" height="188" rx="22" fill="#F4F7FB" stroke="#D6DFEC"/>
   <text x="1024" y="255" fill="#5F6F88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">PASS 3 + 4</text>
-  <text x="1024" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Filter</text>
-  <text x="1024" y="320" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Cluster</text>
-  <text x="1024" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Select subsets</text>
-  <text x="1024" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Keep reps</text>
+  <text x="1024" y="292" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Cluster</text>
+  <text x="1024" y="320" fill="#10233F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="700">Filter</text>
+  <text x="1024" y="354" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Keep reps</text>
+  <text x="1024" y="380" fill="#42556F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Select subsets</text>
 
   <line x1="256" y1="308" x2="284" y2="308" stroke="#8AA0C2" stroke-width="3" marker-end="url(#arrow-flow)"/>
   <line x1="484" y1="308" x2="512" y2="308" stroke="#8AA0C2" stroke-width="3" marker-end="url(#arrow-flow)"/>

@@ -13,7 +13,8 @@
 - **Pass 1 – labeling:** assign a 9-dimension taxonomy to each sample
 - **Pass 2 – scoring:** estimate training value with complexity / quality / reasoning / rarity
 - **Pass 2.5 – conversation aggregation:** compute conversation-level metrics for multi-turn data
-- **Pass 3 – filtering:** export higher-value subsets for review or training
+- **Pass 3 – semantic clustering:** deduplicate long trajectories and keep representative windows
+- **Pass 4 – filtering:** export higher-value subsets for review or training
 - **Dashboards:** inspect runs in generated HTML dashboards and optionally publish them behind a static service
 
 For the full pipeline design, see [How sft-label works](docs/guides/how-sft-label-works.md).
@@ -73,10 +74,15 @@ uv run sft-label score --input labeled.json
 
 It does four things:
 
-1. **Lets you choose a workflow**: labeling, labeling+scoring, scoring only, filtering, recompute, dashboard regeneration, dashboard service management, and more.
+1. **Lets you choose a workflow**: by default the first recommended option is Pass 1 + Pass 2, followed by Pass 1 only, Pass 2 only, Pass 1 + Pass 2 + Pass 3, filtering, recompute, dashboard regeneration, dashboard service management, and more.
 2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options.
 3. **Builds the exact CLI command for you** and shows a launch summary before execution.
-4. **Can auto-publish dashboards after the run** if you choose a configured dashboard service.
+4. **Can auto-publish dashboards after the run** using your configured default dashboard service.
+
+Two dashboard-service quality-of-life details:
+
+- If the default dashboard service is already `running` or `starting`, `start` will continue directly instead of prompting you to restart it.
+- If you enter dashboard service maintenance from `sft-label start`, you can keep executing maintenance actions in the same session instead of exiting and re-entering the launcher.
 
 Useful flags:
 
