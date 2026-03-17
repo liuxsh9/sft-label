@@ -264,11 +264,41 @@ class TestNormalizeAndSlice:
         meta = result[0].get("metadata", {})
         assert meta.get("trajectory_object") is True
         assert meta.get("source_id") == "traj-1"
+        assert meta.get("conversation_uid", "").startswith("conversation_uid:")
         assert meta.get("turn_index") == 1
         assert meta.get("total_turns") == 1
         assert meta.get("trajectory_turn_count") == 5
         assert meta.get("trajectory_tool_turn_count") == 3
         assert meta.get("trajectory_assistant_turn_count") == 1
+
+    def test_duplicate_single_reply_trajectories_receive_distinct_uids(self):
+        first = {
+            "id": "traj-dup",
+            "conversations": [
+                {"from": "human", "value": "Investigate flaky test A."},
+                {"from": "tool", "value": "Ran pytest -k test_a"},
+                {"from": "tool", "value": "Inspected service_a.py"},
+                {"from": "tool", "value": "Patched retry logic"},
+                {"from": "gpt", "value": "Fixed flaky test A."},
+            ],
+        }
+        second = {
+            "id": "traj-dup",
+            "conversations": [
+                {"from": "human", "value": "Investigate flaky test B."},
+                {"from": "tool", "value": "Ran pytest -k test_b"},
+                {"from": "tool", "value": "Inspected service_b.py"},
+                {"from": "tool", "value": "Patched timeout logic"},
+                {"from": "gpt", "value": "Fixed flaky test B."},
+            ],
+        }
+
+        first_uid = normalize_and_slice(first, source_file="dup.jsonl", source_row=1)[0]["metadata"]["conversation_uid"]
+        second_uid = normalize_and_slice(second, source_file="dup.jsonl", source_row=2)[0]["metadata"]["conversation_uid"]
+
+        assert first_uid.startswith("conversation_uid:")
+        assert second_uid.startswith("conversation_uid:")
+        assert first_uid != second_uid
 
 
 class TestMultiturnRegressionFixtures:

@@ -347,16 +347,21 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
 
     conversations = normalized.get("conversations", [])
     is_pseudo = normalized.get("metadata", {}).get("is_pseudo_multiturn", False)
+    if source_file is not None:
+        normalized.setdefault("metadata", {}).setdefault("source_file", str(source_file))
+    if source_row is not None:
+        normalized.setdefault("metadata", {}).setdefault("source_row", int(source_row))
 
     # Pseudo multi-turn: already one training sample, don't slice
     if is_pseudo:
         return [normalized]
 
     slices = slice_multiturn(conversations)
+    trajectory_meta = _detect_single_reply_trajectory_object(conversations)
 
     base_meta = normalized.get("metadata", {})
     conversation_uid = base_meta.get("conversation_uid")
-    if not conversation_uid and len(slices) > 1:
+    if not conversation_uid and (len(slices) > 1 or trajectory_meta):
         conversation_uid = build_conversation_uid(
             normalized,
             source_file=source_file,
@@ -366,7 +371,6 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
     if len(slices) == 1:
         if conversation_uid:
             normalized.setdefault("metadata", {})["conversation_uid"] = conversation_uid
-        trajectory_meta = _detect_single_reply_trajectory_object(conversations)
         if trajectory_meta:
             enriched = dict(normalized)
             meta = dict(enriched.get("metadata") or {})

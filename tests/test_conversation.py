@@ -19,6 +19,7 @@ from sft_label.conversation import (
     merge_conversation_record_batches,
     write_conversation_scores,
 )
+from sft_label.preprocessing import normalize_and_slice
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -144,8 +145,46 @@ class TestGroupByConversation:
         sample["metadata"]["trajectory_object"] = True
         sample["metadata"]["trajectory_turn_count"] = 4
         groups = group_by_conversation([sample])
-        assert list(groups) == ["traj"]
-        assert len(groups["traj"]) == 1
+        assert len(groups) == 1
+        assert len(next(iter(groups.values()))) == 1
+
+    def test_duplicate_single_slice_trajectory_objects_fallback_to_stable_uid(self):
+        first = normalize_and_slice(
+            {
+                "id": "traj-dup",
+                "conversations": [
+                    {"from": "human", "value": "Fix service A."},
+                    {"from": "tool", "value": "pytest -k service_a"},
+                    {"from": "tool", "value": "opened service_a.py"},
+                    {"from": "tool", "value": "patched service_a.py"},
+                    {"from": "gpt", "value": "service A fixed"},
+                ],
+            },
+            source_file="/tmp/a/scored.json",
+            source_row=1,
+        )[0]
+        second = normalize_and_slice(
+            {
+                "id": "traj-dup",
+                "conversations": [
+                    {"from": "human", "value": "Fix service B."},
+                    {"from": "tool", "value": "pytest -k service_b"},
+                    {"from": "tool", "value": "opened service_b.py"},
+                    {"from": "tool", "value": "patched service_b.py"},
+                    {"from": "gpt", "value": "service B fixed"},
+                ],
+            },
+            source_file="/tmp/a/scored.json",
+            source_row=2,
+        )[0]
+
+        first["metadata"].pop("conversation_uid", None)
+        second["metadata"].pop("conversation_uid", None)
+
+        groups = group_by_conversation([first, second])
+
+        assert len(groups) == 2
+        assert all(key.startswith("conversation_uid:") for key in groups)
 
 
 # ── TestPositionWeight ──

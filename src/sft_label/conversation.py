@@ -43,6 +43,7 @@ from sft_label.config import (
     CONV_V2_DOWNSIDE_CAP,
 )
 from sft_label.labels import LABEL_META_KEYS
+from sft_label.preprocessing import build_conversation_uid
 from sft_label.score_confidence import apply_score_confidence, score_confidence
 
 
@@ -60,10 +61,19 @@ def build_conversation_key(source_id, source_file=None, conversation_uid=None):
 def sample_conversation_key(sample):
     """Build the conversation key for a scored sample."""
     meta = sample.get("metadata") or {}
+    conversation_uid = meta.get("conversation_uid")
+    if conversation_uid:
+        return conversation_uid
+    if is_trajectory_object(meta):
+        return build_conversation_uid(
+            sample,
+            source_file=meta.get("source_file"),
+            source_row=meta.get("source_row"),
+        )
     return build_conversation_key(
         meta.get("source_id"),
         meta.get("source_file"),
-        meta.get("conversation_uid"),
+        None,
     )
 
 
@@ -117,11 +127,7 @@ def group_by_conversation(samples):
     groups = defaultdict(list)
     for s in samples:
         meta = s.get("metadata") or {}
-        conv_key = build_conversation_key(
-            meta.get("source_id"),
-            meta.get("source_file"),
-            meta.get("conversation_uid"),
-        )
+        conv_key = sample_conversation_key(s)
         if conv_key and is_conversation_object(meta):
             groups[conv_key].append(s)
 

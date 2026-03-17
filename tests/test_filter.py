@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
+from sft_label.preprocessing import normalize_and_slice
 from sft_label.tools.filter_value import (
     filter_samples, run_filter, matches_filter, FilterConfig,
     _find_scored_files,
@@ -1036,6 +1037,68 @@ class TestConversationFilter:
         config = FilterConfig(conv_value_min=5.0)
         summary = run_filter(str(input_file), config=config)
         assert summary["retained"] == 0
+
+    def test_duplicate_single_slice_trajectory_objects_match_conversation_uid_fallback(self, tmp_path):
+        first = normalize_and_slice(
+            {
+                "id": "traj-dup",
+                "conversations": [
+                    {"from": "human", "value": "Fix service A."},
+                    {"from": "tool", "value": "pytest -k service_a"},
+                    {"from": "tool", "value": "opened service_a.py"},
+                    {"from": "tool", "value": "patched service_a.py"},
+                    {"from": "gpt", "value": "service A fixed"},
+                ],
+            },
+            source_file=str(tmp_path / "scored.json"),
+            source_row=1,
+        )[0]
+        second = normalize_and_slice(
+            {
+                "id": "traj-dup",
+                "conversations": [
+                    {"from": "human", "value": "Fix service B."},
+                    {"from": "tool", "value": "pytest -k service_b"},
+                    {"from": "tool", "value": "opened service_b.py"},
+                    {"from": "tool", "value": "patched service_b.py"},
+                    {"from": "gpt", "value": "service B fixed"},
+                ],
+            },
+            source_file=str(tmp_path / "scored.json"),
+            source_row=2,
+        )[0]
+
+        first_uid = first["metadata"]["conversation_uid"]
+        second_uid = second["metadata"]["conversation_uid"]
+        first["metadata"].pop("conversation_uid", None)
+        second["metadata"].pop("conversation_uid", None)
+        first["value"] = {"value_score": 8.0}
+        second["value"] = {"value_score": 8.0}
+
+        conv_records = [
+            {
+                "conversation_id": "traj-dup",
+                "conversation_uid": first_uid,
+                "conversation_key": first_uid,
+                "conv_value": 8.0,
+                "conv_selection": 8.0,
+                "peak_complexity": 6,
+            },
+            {
+                "conversation_id": "traj-dup",
+                "conversation_uid": second_uid,
+                "conversation_key": second_uid,
+                "conv_value": 3.0,
+                "conv_selection": 3.0,
+                "peak_complexity": 2,
+            },
+        ]
+
+        input_file = self._setup_conv_data(tmp_path, conv_records, [first, second])
+        config = FilterConfig(conv_value_min=5.0)
+        summary = run_filter(str(input_file), config=config)
+
+        assert summary["retained"] == 1
 
     def test_combined_conv_and_shared(self, tmp_path):
         """Conv criteria + shared criteria (difficulty) both apply."""
