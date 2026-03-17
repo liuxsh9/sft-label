@@ -2930,16 +2930,16 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if not scored_path.exists():
                 return None
 
-            conv_samples = []
-            with open(scored_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        conv_samples.append(json.loads(line))
-            conv_records = aggregate_conversations(conv_samples)
+            def _iter_scored_samples():
+                with open(scored_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            yield json.loads(line)
+
+            conv_records = aggregate_conversations(_iter_scored_samples())
             if conv_records:
                 write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-            del conv_samples
             return conv_records
 
         run_with_heartbeat("Aggregating conversation scores", _aggregate_chunked_conversations)
@@ -4397,30 +4397,23 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
         # Global conversation-level aggregation across all files
         try:
-            from sft_label.conversation import aggregate_conversations, write_conversation_scores
-            all_conv_samples = []
-            for sub in sorted(output_dir.iterdir()):
-                if not sub.is_dir():
+            from sft_label.conversation import (
+                merge_conversation_record_batches,
+                write_conversation_scores,
+            )
+
+            conv_batches = []
+            for conv_path in sorted(output_dir.rglob("conversation_scores.json")):
+                if conv_path.parent == output_dir:
                     continue
-                for pattern in ("scored.json", "scored.jsonl"):
-                    p = sub / pattern
-                    if p.exists():
-                        if p.suffix == ".jsonl":
-                            with open(p, encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if line:
-                                        all_conv_samples.append(json.loads(line))
-                        else:
-                            with open(p, encoding="utf-8") as f:
-                                data = json.load(f)
-                            if isinstance(data, list):
-                                all_conv_samples.extend(data)
-                        break  # prefer .json, skip .jsonl if .json found
-            conv_records = aggregate_conversations(all_conv_samples)
+                with open(conv_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list) and data:
+                    conv_batches.append(data)
+
+            conv_records = merge_conversation_record_batches(conv_batches)
             if conv_records:
                 write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-            del all_conv_samples
         except Exception as e:
             print(f"  Warning: global conversation aggregation failed: {e}")
 

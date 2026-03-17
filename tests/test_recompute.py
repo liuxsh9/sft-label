@@ -464,6 +464,17 @@ class TestRunRecompute:
         assert "summary_stats_value" in written
         assert "conversation_scores" in written
 
+    def test_directory_scored_writes_per_file_conversation_scores(self, tmp_path):
+        sub_path = tmp_path / "multi_turn" / "part1"
+        sub_path.mkdir(parents=True)
+        samples = _make_multiturn_scored_samples("conv-1", n_turns=3)
+        (sub_path / "scored.json").write_text(json.dumps(samples))
+
+        written = run_recompute(str(tmp_path), pass_num="2")
+
+        assert "conversation_scores" in written
+        assert (sub_path / "conversation_scores.json").exists()
+
     def test_directory_scored_parallel_workers(self, tmp_path):
         for i in range(4):
             sub_path = tmp_path / "code" / f"part{i:02d}"

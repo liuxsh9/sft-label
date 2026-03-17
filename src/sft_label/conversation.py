@@ -1271,6 +1271,31 @@ def compute_conv_selection_scores(records):
 
 # ─── Top-level entry points ─────────────────────────────
 
+def _conversation_record_sort_key(record):
+    return (
+        str(record.get("conversation_key") or ""),
+        str(record.get("conversation_id") or ""),
+    )
+
+
+def finalize_conversation_records(records):
+    """Apply global selection scoring and deterministic ordering to records."""
+    if not records:
+        return []
+
+    compute_conv_selection_scores(records)
+    records.sort(key=_conversation_record_sort_key)
+    return records
+
+
+def merge_conversation_record_batches(record_batches):
+    """Merge per-file conversation batches without reloading scored samples."""
+    records = []
+    for batch in record_batches:
+        if batch:
+            records.extend(batch)
+    return finalize_conversation_records(records)
+
 def aggregate_conversations(samples):
     """Top-level: group → aggregate each → compute selection → return list.
 
@@ -1290,10 +1315,7 @@ def aggregate_conversations(samples):
         if rec is not None:
             records.append(rec)
 
-    if records:
-        compute_conv_selection_scores(records)
-
-    return records
+    return finalize_conversation_records(records)
 
 
 def write_conversation_scores(records, path):

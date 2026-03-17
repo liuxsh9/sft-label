@@ -15,6 +15,7 @@ from sft_label.conversation import (
     aggregate_conversation,
     compute_conv_selection_scores,
     aggregate_conversations,
+    merge_conversation_record_batches,
     write_conversation_scores,
 )
 
@@ -642,6 +643,24 @@ class TestAggregateConversations:
     def test_single_turn_only_returns_empty(self):
         samples = [_single_turn_sample(), _single_turn_sample()]
         assert aggregate_conversations(samples) == []
+
+    def test_merge_record_batches_matches_full_aggregation(self):
+        batch_a = [
+            _slice("c1", 1, 3, value_score=5.0),
+            _slice("c1", 2, 3, value_score=6.0),
+            _slice("c1", 3, 3, value_score=8.0),
+        ]
+        batch_b = [
+            _slice("c2", 1, 2, value_score=7.0, quality=7),
+            _slice("c2", 2, 2, value_score=9.0, quality=9),
+        ]
+
+        expected = aggregate_conversations(batch_a + batch_b)
+        merged = merge_conversation_record_batches(
+            [aggregate_conversations(batch_a), aggregate_conversations(batch_b)]
+        )
+
+        assert merged == expected
 
 
 # ── TestWriteConversationScores ──

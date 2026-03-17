@@ -905,6 +905,18 @@ def _recompute_conversations(samples, out_dir):
     return {}
 
 
+def _write_conversation_records(records, out_dir):
+    """Persist pre-aggregated conversation records when present."""
+    from sft_label.conversation import write_conversation_scores
+
+    if not records:
+        return {}
+
+    conv_path = out_dir / "conversation_scores.json"
+    write_conversation_scores(records, conv_path)
+    return {"conversation_scores": str(conv_path)}
+
+
 def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
     """Recompute stats for all files in a run directory."""
     from sft_label.pipeline import merge_stats
@@ -1001,7 +1013,7 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
         scored_files = discover_scored_files(input_dir)
         if scored_files:
             print(f"\nFound {len(scored_files)} scored file(s)")
-            all_scored_samples = []
+            all_conv_batches = []
             p2_workers = _resolve_worker_count(workers, len(scored_files))
             p2_interval = _recompute_progress_interval(len(scored_files))
             p2_compact = p2_interval > 1 and p2_workers == 1
@@ -1011,6 +1023,8 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 print(f"  Pass 2 compact mode: log every {p2_interval} files")
 
             def _process_scored_file(idx, sf):
+                from sft_label.conversation import aggregate_conversations
+
                 rel_label = _relative_file_label(sf, input_dir)
                 samples = load_samples(sf)
                 stats = recompute_value_stats_from_scored(samples)
@@ -1020,10 +1034,12 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS2_STATS_FILE
                 _write_json(stats_path, stats)
+                conversation_records = aggregate_conversations(samples)
+                _write_conversation_records(conversation_records, file_out_dir)
                 return {
                     "idx": idx,
                     "rel_label": rel_label,
-                    "samples": samples,
+                    "conversation_records": conversation_records,
                     "stats_path": stats_path,
                     "stats": stats,
                 }
@@ -1067,7 +1083,8 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
 
             for item in ordered_results:
                 all_pass2_stats.append(item["stats"])
-                all_scored_samples.extend(item["samples"])
+                if item["conversation_records"]:
+                    all_conv_batches.append(item["conversation_records"])
 
             # Merge into summary
             if all_pass2_stats:
@@ -1080,10 +1097,17 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 print(f"\n  Summary: {summary_path} "
                       f"({summary.get('total_scored', 0)} total scored)")
 
-            # Conversation aggregation from all scored samples
-            if all_scored_samples:
-                written.update(
-                    _recompute_conversations(all_scored_samples, out_dir))
+            # Conversation aggregation from per-file records
+            if all_conv_batches:
+                from sft_label.conversation import merge_conversation_record_batches
+
+                merged_records = merge_conversation_record_batches(all_conv_batches)
+                written.update(_write_conversation_records(merged_records, out_dir))
+                if merged_records:
+                    print(
+                        f"  Conversations: {out_dir / 'conversation_scores.json'} "
+                        f"({len(merged_records)} conversations)"
+                    )
 
     return written
 
