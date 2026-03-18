@@ -496,7 +496,12 @@ class TestE2EDirectoryScoring:
         assert score_result is not None
 
         # ── Verify per-file scored outputs ──
-        scored_files = list(run_dir.glob("**/scored*.json"))
+        scored_files = sorted(
+            {
+                *run_dir.glob("**/scored*.json"),
+                *run_dir.glob("**/scored*.jsonl"),
+            }
+        )
         assert len(scored_files) >= 2, f"Expected >=2 scored files, got: {scored_files}"
 
         # ── Verify dashboards ──
