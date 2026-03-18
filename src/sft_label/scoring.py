@@ -188,6 +188,11 @@ async def _runtime_permit(runtime, *, stage, sample_id):
                 pass
 
 
+@asynccontextmanager
+async def _borrow_http_client(client):
+    yield client
+
+
 def _notify_runtime(runtime, outcome: RequestOutcome | None) -> None:
     if runtime is None or outcome is None or not hasattr(runtime, "observe"):
         return
@@ -3262,7 +3267,14 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                      file_label=None,
                                      show_progress=True,
                                      combo_counts_override=None,
-                                     combo_mode_override=None):
+                                     combo_mode_override=None,
+                                     shared_http_client=None,
+                                     shared_semaphore=None,
+                                     shared_rate_limiter=None,
+                                     shared_runtime=None,
+                                     progress_hook=None,
+                                     print_summary=True,
+                                     quiet=False):
     """Score a JSONL labeled file in chunks to bound memory.
 
     Two-pass approach:
@@ -3278,7 +3290,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     resumed_values = _load_resumed_value_cache(output_dir) if resume else {}
-    if resumed_values:
+    if resumed_values and not quiet:
         print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
 
     chunk_size = config.chunk_size if config else CHUNK_SIZE
@@ -3405,16 +3417,23 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     # ── Pass B: Chunked LLM scoring ──
     _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
-    print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
+    if not quiet:
+        print(f"  Scoring {total} samples | model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
 
-    runtime = _instantiate_runtime(config, concurrency=config.scoring_concurrency)
-    setattr(config, "_adaptive_runtime", runtime)
-    rate_limiter = (
-        AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup)
-        if runtime is None and config.rps_limit > 0
-        else None
-    )
-    sem = asyncio.Semaphore(config.scoring_concurrency)
+    runtime = shared_runtime
+    if runtime is None:
+        runtime = _instantiate_runtime(config, concurrency=config.scoring_concurrency)
+        setattr(config, "_adaptive_runtime", runtime)
+    elif config is not None:
+        setattr(config, "_adaptive_runtime", runtime)
+    rate_limiter = shared_rate_limiter
+    if rate_limiter is None:
+        rate_limiter = (
+            AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup)
+            if runtime is None and config.rps_limit > 0
+            else None
+        )
+    sem = shared_semaphore or asyncio.Semaphore(config.scoring_concurrency)
     scored_count = 0
     failed_count = 0
     first_error_logged = False
@@ -3430,14 +3449,19 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     out_failures_log = open(output_dir / "score_failures.jsonl", "w", encoding="utf-8")
 
     try:
-        async with httpx.AsyncClient(
-            proxy=None,
-            timeout=config.request_timeout,
-            limits=httpx.Limits(
-                max_connections=config.scoring_concurrency + 10,
-                max_keepalive_connections=config.scoring_concurrency,
-            ),
-        ) as client:
+        client_ctx = (
+            _borrow_http_client(shared_http_client)
+            if shared_http_client is not None
+            else httpx.AsyncClient(
+                proxy=None,
+                timeout=config.request_timeout,
+                limits=httpx.Limits(
+                    max_connections=config.scoring_concurrency + 10,
+                    max_keepalive_connections=config.scoring_concurrency,
+                ),
+            )
+        )
+        async with client_ctx as client:
 
             # Chunk state tracking
             global_offset = 0
@@ -3592,6 +3616,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 # Initial load
                 resumed_loaded = maybe_load_more_scoring()
                 if resumed_loaded:
+                    if progress_hook is not None:
+                        progress_hook({
+                            "type": "resumed",
+                            "count": resumed_loaded,
+                            "skipped_count": skipped_count,
+                            "label": file_label or input_path.name,
+                        })
                     if progress is not None:
                         progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                 flush_ready_scoring_chunks()
@@ -3600,6 +3631,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     if not pending_futures:
                         resumed_loaded = maybe_load_more_scoring()
                         if resumed_loaded:
+                            if progress_hook is not None:
+                                progress_hook({
+                                    "type": "resumed",
+                                    "count": resumed_loaded,
+                                    "skipped_count": skipped_count,
+                                    "label": file_label or input_path.name,
+                                })
                             if progress is not None:
                                 progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                         flush_ready_scoring_chunks()
@@ -3633,15 +3671,30 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             fail_count=failed_count + (0 if value else 1),
                             request_stats=rate_limiter.stats if rate_limiter else None,
                         )
-                        if llm_progress_cb and monitor:
+                        if llm_progress_cb and monitor and progress_hook is None:
                             run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
                             if run_info:
                                 _info = f"{_info} • {run_info}"
+                        if progress_hook is not None:
+                            progress_hook({
+                                "type": "sample",
+                                "count": 1,
+                                "label": file_label or input_path.name,
+                                "monitor": monitor,
+                                "value": value,
+                            })
                         if progress is not None:
                             progress.update(task, advance=1, info=_info)
                     flush_ready_scoring_chunks()
                     resumed_loaded = maybe_load_more_scoring()
                     if resumed_loaded:
+                        if progress_hook is not None:
+                            progress_hook({
+                                "type": "resumed",
+                                "count": resumed_loaded,
+                                "skipped_count": skipped_count,
+                                "label": file_label or input_path.name,
+                            })
                         if progress is not None:
                             progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                     flush_ready_scoring_chunks()
@@ -3781,7 +3834,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     except Exception as e:
         print(f"  Warning: dashboard generation failed: {e}")
 
-    print_scoring_summary(stats, output_dir)
+    if print_summary:
+        print_scoring_summary(stats, output_dir)
 
     return stats
 
@@ -5250,119 +5304,179 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     )
 
     try:
-        if streaming_inputs:
-            streaming_parallelism = min(
-                len(streaming_inputs),
-                max(int(max_active), 1),
-                max(int(concurrency), 1),
-            )
-
-            async def _run_streaming_file(original_path, scoring_input_path, file_config):
-                print(f"  Streaming JSONL scoring for {original_path.relative_to(input_dir)}")
-                stats = await _run_scoring_file_chunked(
-                    scoring_input_path,
-                    original_path.parent,
-                    shared_tag_stats_path,
-                    limit,
-                    file_config,
-                    resume=resume,
-                    llm_progress_cb=llm_progress_cb,
-                    file_label=_relative_file_label(original_path, input_dir),
-                    show_progress=False,
-                    combo_counts_override=global_combo_counts,
-                    combo_mode_override=global_combo_mode,
+        async with httpx.AsyncClient(
+            proxy=None,
+            timeout=config.request_timeout,
+            limits=httpx.Limits(
+                max_connections=concurrency + 10,
+                max_keepalive_connections=concurrency,
+            ),
+        ) as client:
+            with _create_progress() as progress:
+                global_llm_info = None
+                streaming_ok = 0
+                streaming_fail = 0
+                file_task = progress.add_task("Files", total=len(labeled_files), info="")
+                sample_task = progress.add_task(
+                    "Pass 2",
+                    total=workload_estimate.total_samples,
+                    visible=bool(labeled_files),
+                    info="starting...",
                 )
-                stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
-                return stats
+                llm_task = progress.add_task(
+                    "LLM",
+                    total=max(eta_tracker.estimated_total_calls, 1),
+                    visible=bool(labeled_files),
+                    info=eta_tracker.info_line(),
+                )
+                pprint = progress.console.print
 
-            for batch_start_idx in range(0, len(streaming_inputs), streaming_parallelism):
-                batch = streaming_inputs[batch_start_idx:batch_start_idx + streaming_parallelism]
-                batch_concurrency = _split_integer_budget(concurrency, len(batch))
-                if config.rps_limit > 0:
-                    batch_rps = [float(config.rps_limit) / len(batch)] * len(batch)
-                else:
-                    batch_rps = [config.rps_limit] * len(batch)
+                def _combined_counts():
+                    resident_ok = sum(cc.ok for cc in collectors.values())
+                    resident_fail = sum(cc.fail for cc in collectors.values())
+                    return resident_ok + streaming_ok, resident_fail + streaming_fail
 
-                batch_tasks = []
-                for (original_path, scoring_input_path, _temp_input_path), file_concurrency, file_rps in zip(
-                    batch, batch_concurrency, batch_rps
-                ):
-                    file_config = copy.copy(config)
-                    file_config.scoring_concurrency = max(int(file_concurrency), 1)
-                    if config.rps_limit > 0:
-                        file_config.rps_limit = float(file_rps)
-                    batch_tasks.append(
-                        _run_streaming_file(original_path, scoring_input_path, file_config)
+                def _update_llm_progress(monitor=None):
+                    nonlocal global_llm_info
+                    if llm_progress_cb and monitor:
+                        global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                    eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                    global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
+                    if global_counts:
+                        g_done, g_total = global_counts
+                        progress.update(
+                            llm_task,
+                            total=max(g_total, 1),
+                            completed=min(g_done, g_total),
+                            info=global_llm_info,
+                        )
+                    else:
+                        progress.update(
+                            llm_task,
+                            total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                            completed=eta_tracker.calls_done,
+                            info=eta_tracker.info_line(),
+                        )
+
+                def _update_sample_progress(*, advance, label, monitor=None, skipped_info=None):
+                    total_ok, total_fail = _combined_counts()
+                    info = skipped_info or format_progress_info(
+                        ok_count=total_ok,
+                        fail_count=total_fail,
+                        label=label,
+                        request_stats=rate_limiter.stats if rate_limiter else None,
+                    )
+                    progress.update(sample_task, advance=advance, info=info)
+                    _update_llm_progress(monitor)
+
+                def _streaming_progress_hook(event):
+                    nonlocal streaming_ok, streaming_fail
+                    label = event.get("label")
+                    if event.get("type") == "resumed":
+                        skipped_count = event.get("skipped_count", event.get("count", 0))
+                        _update_sample_progress(
+                            advance=event.get("count", 0),
+                            label=label,
+                            skipped_info=f"skipped {skipped_count} resumed",
+                        )
+                        return
+                    if event.get("type") != "sample":
+                        return
+                    if event.get("value"):
+                        streaming_ok += 1
+                    else:
+                        streaming_fail += 1
+                    _update_sample_progress(
+                        advance=event.get("count", 1),
+                        label=label,
+                        monitor=event.get("monitor"),
                     )
 
-                all_file_stats.extend(await asyncio.gather(*batch_tasks))
+                async def flush_completed_collectors():
+                    flushed = 0
+                    for collector in collectors.values():
+                        if collector.done < collector.total or collector.completed:
+                            continue
+                        sweep = await _run_pass2_recovery_sweep_in_memory(
+                            http_client=client,
+                            samples=collector.samples,
+                            rarity_results=collector.rarity_results,
+                            all_values=collector.values,
+                            all_monitors=collector.monitors,
+                            config=config,
+                        )
+                        setattr(collector, "recovery_sweep", sweep)
+                        collector.ok = sum(1 for v in collector.values if v)
+                        collector.fail = sum(1 for v in collector.values if v is None)
+                        stats = _flush_scoring_file(
+                            collector,
+                            config,
+                            pprint=pprint,
+                            file_label=_relative_file_label(collector.labeled_path, input_dir),
+                        )
+                        stats["file"] = stats.get("file") or _relative_file_label(collector.labeled_path, input_dir)
+                        all_file_stats.append(stats)
+                        progress.update(file_task, advance=1)
+                        flushed += 1
+                    return flushed
 
-        if resident_files:
-            resident_total_samples = max(
-                workload_estimate.total_samples
-                - sum(_count_scoring_samples_in_file(original, limit=limit) for original, _input, _tmp in streaming_inputs),
-                0,
-            )
-            async with httpx.AsyncClient(
-                proxy=None,
-                timeout=config.request_timeout,
-                limits=httpx.Limits(
-                    max_connections=concurrency + 10,
-                    max_keepalive_connections=concurrency,
-                ),
-            ) as client:
-                with _create_progress() as progress:
-                    global_llm_info = None
-                    file_task = progress.add_task("Files", total=len(resident_files), info="")
-                    sample_task = progress.add_task(
-                        "Pass 2",
-                        total=resident_total_samples,
-                        visible=bool(resident_files),
-                        info="starting...",
+                if streaming_inputs:
+                    streaming_parallelism = min(
+                        len(streaming_inputs),
+                        max(int(max_active), 1),
+                        max(int(concurrency), 1),
                     )
-                    llm_task = progress.add_task(
-                        "LLM",
-                        total=max(eta_tracker.estimated_total_calls, 1),
-                        visible=bool(resident_files),
-                        info=eta_tracker.info_line(),
-                    )
-                    pprint = progress.console.print
 
-                    async def flush_completed_collectors():
-                        flushed = 0
-                        for collector in collectors.values():
-                            if collector.done < collector.total or collector.completed:
-                                continue
-                            sweep = await _run_pass2_recovery_sweep_in_memory(
-                                http_client=client,
-                                samples=collector.samples,
-                                rarity_results=collector.rarity_results,
-                                all_values=collector.values,
-                                all_monitors=collector.monitors,
-                                config=config,
-                            )
-                            setattr(collector, "recovery_sweep", sweep)
-                            collector.ok = sum(1 for v in collector.values if v)
-                            collector.fail = sum(1 for v in collector.values if v is None)
-                            stats = _flush_scoring_file(
-                                collector,
-                                config,
-                                pprint=pprint,
-                                file_label=_relative_file_label(collector.labeled_path, input_dir),
-                            )
-                            stats["file"] = stats.get("file") or _relative_file_label(collector.labeled_path, input_dir)
+                    async def _run_streaming_file(original_path, scoring_input_path):
+                        file_config = copy.copy(config)
+                        if runtime is not None:
+                            setattr(file_config, "_adaptive_runtime", runtime)
+                        stats = await _run_scoring_file_chunked(
+                            scoring_input_path,
+                            original_path.parent,
+                            shared_tag_stats_path,
+                            limit,
+                            file_config,
+                            resume=resume,
+                            llm_progress_cb=llm_progress_cb,
+                            file_label=_relative_file_label(original_path, input_dir),
+                            show_progress=False,
+                            combo_counts_override=global_combo_counts,
+                            combo_mode_override=global_combo_mode,
+                            shared_http_client=client,
+                            shared_semaphore=sem,
+                            shared_rate_limiter=rate_limiter,
+                            shared_runtime=runtime,
+                            progress_hook=_streaming_progress_hook,
+                            print_summary=False,
+                            quiet=True,
+                        )
+                        stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
+                        return stats
+
+                    for batch_start_idx in range(0, len(streaming_inputs), streaming_parallelism):
+                        batch = streaming_inputs[batch_start_idx:batch_start_idx + streaming_parallelism]
+                        batch_tasks = [
+                            asyncio.create_task(_run_streaming_file(original_path, scoring_input_path))
+                            for original_path, scoring_input_path, _temp_input_path in batch
+                        ]
+                        for done_task in asyncio.as_completed(batch_tasks):
+                            stats = await done_task
                             all_file_stats.append(stats)
                             progress.update(file_task, advance=1)
-                            flushed += 1
-                        return flushed
 
+                if resident_files:
                     # Initial load
                     next_to_load, resumed_loaded = maybe_load_more(
                         pending_futures, collectors, next_to_load
                     )
                     submit_more_tasks(pending_futures, collectors, client)
                     if resumed_loaded:
-                        progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
+                        _update_sample_progress(
+                            advance=resumed_loaded,
+                            label="resident",
+                            skipped_info=f"skipped {resumed_loaded} resumed",
+                        )
                     await flush_completed_collectors()
 
                     while pending_futures or next_to_load < len(resident_files):
@@ -5372,7 +5486,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                             )
                             submit_more_tasks(pending_futures, collectors, client)
                             if resumed_loaded:
-                                progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
+                                _update_sample_progress(
+                                    advance=resumed_loaded,
+                                    label="resident",
+                                    skipped_info=f"skipped {resumed_loaded} resumed",
+                                )
                             await flush_completed_collectors()
                             if not pending_futures and next_to_load >= len(resident_files):
                                 break
@@ -5401,34 +5519,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                                         pprint(f"      response={err_resp[:200]}")
                                     first_error_logged = True
 
-                            total_ok = sum(cc.ok for cc in collectors.values())
-                            total_fail = sum(cc.fail for cc in collectors.values())
-                            _info = format_progress_info(
-                                ok_count=total_ok,
-                                fail_count=total_fail,
+                            _update_sample_progress(
+                                advance=1,
                                 label=c.labeled_path.name,
-                                request_stats=rate_limiter.stats if rate_limiter else None,
+                                monitor=monitor,
                             )
-                            if llm_progress_cb and monitor:
-                                global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                            progress.update(sample_task, advance=1, info=_info)
-                            eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
-                            global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
-                            if global_counts:
-                                g_done, g_total = global_counts
-                                progress.update(
-                                    llm_task,
-                                    total=max(g_total, 1),
-                                    completed=min(g_done, g_total),
-                                    info=global_llm_info,
-                                )
-                            else:
-                                progress.update(
-                                    llm_task,
-                                    total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-                                    completed=eta_tracker.calls_done,
-                                    info=eta_tracker.info_line(),
-                                )
 
                         # After processing batch, check if we should load more files
                         next_to_load, resumed_loaded = maybe_load_more(
@@ -5436,7 +5531,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         )
                         submit_more_tasks(pending_futures, collectors, client)
                         if resumed_loaded:
-                            progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
+                            _update_sample_progress(
+                                advance=resumed_loaded,
+                                label="resident",
+                                skipped_info=f"skipped {resumed_loaded} resumed",
+                            )
                         await flush_completed_collectors()
 
                         active_names = [c.labeled_path.name for c in collectors.values()

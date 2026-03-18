@@ -1861,7 +1861,7 @@ class TestResumeScoringFile:
 
         assert any(sample_id.startswith("f1-") for sample_id in seen_order[:4])
 
-    def test_directory_scoring_runs_streaming_files_in_parallel_with_split_budget(self, tmp_path):
+    def test_directory_scoring_streaming_files_share_global_progress_and_full_budget(self, tmp_path):
         from sft_label.scoring import run_scoring
         from unittest.mock import patch
 
@@ -1888,6 +1888,29 @@ class TestResumeScoringFile:
         max_active_files = 0
         seen_concurrency = []
         seen_show_progress = []
+        created_progress = []
+        progress_tasks = []
+
+        class FakeProgress:
+            def __init__(self):
+                self.console = self
+
+            def __enter__(self):
+                created_progress.append("entered")
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def add_task(self, description, **kwargs):
+                progress_tasks.append(description)
+                return len(progress_tasks)
+
+            def update(self, *args, **kwargs):
+                return None
+
+            def print(self, *args, **kwargs):
+                return None
 
         async def mock_chunked(input_path, output_dir, tag_stats_path, limit, config, **kwargs):
             nonlocal active_files, max_active_files
@@ -1910,7 +1933,8 @@ class TestResumeScoringFile:
                 "file": f"{Path(input_path).parent.name}/{Path(input_path).name}",
             }
 
-        with patch("sft_label.scoring._run_scoring_file_chunked", side_effect=mock_chunked):
+        with patch("sft_label.scoring._run_scoring_file_chunked", side_effect=mock_chunked), \
+             patch("sft_label.scoring._create_progress", return_value=FakeProgress()):
             asyncio.run(
                 run_scoring(
                     str(tmp_path),
@@ -1924,8 +1948,75 @@ class TestResumeScoringFile:
             )
 
         assert max_active_files == 2
-        assert seen_concurrency == [2, 2]
+        assert created_progress == ["entered"]
+        assert progress_tasks == ["Files", "Pass 2", "LLM"]
+        assert seen_concurrency == [4, 4]
         assert seen_show_progress == [False, False]
+
+    def test_directory_scoring_streaming_files_do_not_double_count_llm_progress(self, tmp_path):
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        batch_dir = tmp_path / "stream_only"
+        batch_dir.mkdir()
+        rows = [
+            {
+                "id": f"sample-{idx}",
+                "conversations": [
+                    {"from": "human", "value": f"Q{idx}"},
+                    {"from": "gpt", "value": f"A{idx}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }
+            for idx in range(2)
+        ]
+        (batch_dir / "labeled.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+        llm_calls_seen = []
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            return {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }, {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+
+        def llm_progress_cb(delta_calls, stage):
+            llm_calls_seen.append((delta_calls, stage))
+            return f"run {len(llm_calls_seen)}/10"
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            asyncio.run(
+                run_scoring(
+                    str(tmp_path),
+                    config=PipelineConfig(
+                        scoring_concurrency=2,
+                        dir_pipeline_watermark=1.0,
+                        dir_pipeline_max_files=1,
+                        enable_adaptive_runtime=False,
+                    ),
+                    llm_progress_cb=llm_progress_cb,
+                )
+            )
+
+        assert llm_calls_seen == [(1, "pass2"), (1, "pass2")]
 
     def test_chunked_stats_use_monitor_totals_not_full_monitor_list(self, tmp_path):
         from sft_label.scoring import _run_scoring_file_chunked, _compute_value_stats_from_summaries
