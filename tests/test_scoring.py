@@ -2018,6 +2018,79 @@ class TestResumeScoringFile:
 
         assert llm_calls_seen == [(1, "pass2"), (1, "pass2")]
 
+    def test_directory_scoring_streaming_files_use_rolling_queue_across_batches(self, tmp_path):
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        for file_idx in range(3):
+            batch_dir = tmp_path / f"stream_{file_idx}"
+            batch_dir.mkdir()
+            rows = [
+                {
+                    "id": f"s{file_idx}-sample-{sample_idx}",
+                    "conversations": [
+                        {"from": "human", "value": f"Q{sample_idx}"},
+                        {"from": "gpt", "value": f"A{sample_idx}"},
+                    ],
+                    "labels": {"intent": "build", "difficulty": "intermediate"},
+                }
+                for sample_idx in range(2)
+            ]
+            (batch_dir / "labeled.jsonl").write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+        started = []
+        finished = []
+        events = []
+        active = 0
+        peak_active = 0
+
+        async def mock_chunked(input_path, output_dir, tag_stats_path, limit, config, **kwargs):
+            nonlocal active, peak_active
+            name = Path(input_path).parent.name
+            started.append(name)
+            events.append(("start", name))
+            active += 1
+            peak_active = max(peak_active, active)
+            try:
+                await asyncio.sleep(0.05 if name == "stream_0" else 0.01)
+                return {
+                    "total_scored": 2,
+                    "total_failed": 0,
+                    "total_llm_calls": 2,
+                    "total_prompt_tokens": 20,
+                    "total_completion_tokens": 10,
+                    "score_distributions": {},
+                    "thinking_mode_breakdown": {},
+                    "tag_insights": {},
+                    "selection_thresholds": {},
+                    "file": f"{Path(input_path).parent.name}/{Path(input_path).name}",
+                }
+            finally:
+                finished.append(name)
+                events.append(("finish", name))
+                active -= 1
+
+        with patch("sft_label.scoring._run_scoring_file_chunked", side_effect=mock_chunked):
+            asyncio.run(
+                run_scoring(
+                    str(tmp_path),
+                    config=PipelineConfig(
+                        scoring_concurrency=2,
+                        dir_pipeline_watermark=1.0,
+                        dir_pipeline_max_files=2,
+                        enable_adaptive_runtime=False,
+                    ),
+                )
+            )
+
+        assert peak_active == 2
+        assert started[:2] == ["stream_0", "stream_1"]
+        assert "stream_2" in started
+        assert events.index(("start", "stream_2")) < events.index(("finish", "stream_0"))
+
     def test_chunked_stats_use_monitor_totals_not_full_monitor_list(self, tmp_path):
         from sft_label.scoring import _run_scoring_file_chunked, _compute_value_stats_from_summaries
         from unittest.mock import patch

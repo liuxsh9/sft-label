@@ -175,3 +175,77 @@ async def test_label_one_skips_arbitration_when_runtime_degraded():
     assert monitor.get("arbitrated") is False
     assert monitor.get("arbitration_skipped") == "runtime:degraded"
     assert fake_async_llm_call.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_label_one_non_adaptive_path_respects_shared_semaphore():
+    active_calls = 0
+    peak_active_calls = 0
+
+    call1_ok = {
+        "intent": "build",
+        "language": ["python"],
+        "domain": [],
+        "task": ["feature-implementation"],
+        "difficulty": "intermediate",
+        "confidence": {"intent": 0.9},
+        "unmapped": [],
+    }
+    call2_ok = {
+        "concept": ["algorithms"],
+        "agentic": [],
+        "constraint": [],
+        "context": "snippet",
+        "confidence": {"concept": 0.9},
+        "unmapped": [],
+    }
+
+    async def fake_async_llm_call(http_client, messages, model, **kwargs):
+        nonlocal active_calls, peak_active_calls
+        active_calls += 1
+        peak_active_calls = max(peak_active_calls, active_calls)
+        try:
+            await asyncio.sleep(0.01)
+            message_blob = json.dumps(messages, ensure_ascii=False)
+            payload = call2_ok if '"concept"' in message_blob or '"context"' in message_blob else call1_ok
+            return payload, json.dumps(payload), {"prompt_tokens": 1, "completion_tokens": 1, "status_code": 200}
+        finally:
+            active_calls -= 1
+
+    config = PipelineConfig(
+        sample_max_retries=0,
+        max_retries=0,
+        enable_adaptive_runtime=False,
+        request_quick_retries=0,
+    )
+    shared_sem = asyncio.Semaphore(1)
+    samples = [
+        {
+            "id": "s-1",
+            "conversations": [{"from": "human", "value": "q1"}, {"from": "gpt", "value": "a1"}],
+        },
+        {
+            "id": "s-2",
+            "conversations": [{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}],
+        },
+    ]
+
+    with patch("sft_label.pipeline.async_llm_call", side_effect=fake_async_llm_call):
+        await asyncio.gather(
+            *[
+                label_one(
+                    http_client=None,
+                    sample=sample,
+                    model="mock",
+                    sample_idx=idx,
+                    total=len(samples),
+                    sem=shared_sem,
+                    enable_arbitration=False,
+                    config=config,
+                    rate_limiter=None,
+                )
+                for idx, sample in enumerate(samples)
+            ]
+        )
+
+    assert peak_active_calls == 1

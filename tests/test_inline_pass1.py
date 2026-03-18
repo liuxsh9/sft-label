@@ -885,6 +885,100 @@ async def test_directory_large_jsonl_reuses_chunked_path(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_directory_large_jsonl_chunked_files_are_admitted_with_rolling_overlap(tmp_path):
+    from sft_label.pipeline import run
+
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    for file_idx in range(3):
+        input_file = input_dir / f"train_{file_idx}.jsonl"
+        rows = [
+            {
+                "meta_prompt": ["system"],
+                "data": [
+                    {"role": "user", "content": f"q{file_idx}-{row_idx}"},
+                    {"role": "assistant", "content": f"a{file_idx}-{row_idx}"},
+                ],
+            }
+            for row_idx in range(2)
+        ]
+        input_file.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+    started: list[str] = []
+    finished: list[str] = []
+    events: list[tuple[str, str]] = []
+    active = 0
+    peak_active = 0
+
+    async def fake_chunked(input_path, *args, **kwargs):
+        nonlocal active, peak_active
+        name = Path(input_path).name
+        started.append(name)
+        events.append(("start", name))
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            await asyncio.sleep(0.05 if name == "train_0.jsonl" else 0.01)
+            return {
+                "total_samples": 2,
+                "distribution_total_samples": 2,
+                "success": 2,
+                "failed": 0,
+                "success_rate": 1.0,
+                "total_llm_calls": 4,
+                "avg_calls_per_sample": 2.0,
+                "total_prompt_tokens": 1,
+                "total_completion_tokens": 1,
+                "total_tokens": 2,
+                "arbitrated_count": 0,
+                "arbitrated_rate": 0.0,
+                "validation_issue_count": 0,
+                "consistency_warning_count": 0,
+                "unmapped_tags": {},
+                "unmapped_unique_count": 0,
+                "canonicalization_counts": {},
+                "canonicalization_total_count": 0,
+                "canonicalization_unique_count": 0,
+                "confidence_stats": {},
+                "low_confidence_frequency": {},
+                "tag_distributions": {},
+                "combo_distributions": {},
+                "cross_matrix": {},
+                "total_elapsed_seconds": 0.1,
+                "input_file": str(input_path),
+                "mode": "refresh",
+                "chunked": True,
+                "chunk_size": 1,
+                "chunks_processed": 2,
+            }
+        finally:
+            finished.append(name)
+            events.append(("finish", name))
+            active -= 1
+
+    with patch("sft_label.pipeline._run_one_file_chunked", side_effect=fake_chunked):
+        await run(
+            input_path=str(input_dir),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(
+                concurrency=2,
+                chunk_size=1,
+                dir_pipeline_max_files=2,
+                dir_pipeline_watermark=1.0,
+                enable_adaptive_runtime=False,
+            ),
+        )
+
+    assert peak_active == 2
+    assert started[:2] == ["train_0.jsonl", "train_1.jsonl"]
+    assert "train_2.jsonl" in started
+    assert events.index(("start", "train_2.jsonl")) < events.index(("finish", "train_0.jsonl"))
+
+
+@pytest.mark.asyncio
 async def test_directory_large_jsonl_chunked_smoke_preserves_full_row_count(tmp_path):
     from sft_label.pipeline import run
 

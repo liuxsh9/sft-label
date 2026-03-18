@@ -1264,16 +1264,17 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
     async def _call(stage: str, messages, *, temperature=0.1, max_tokens=1000):
         if runtime is None:
-            parsed, raw, usage = await async_llm_call(
-                http_client,
-                messages,
-                model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                max_retries=_max_retries,
-                config=config,
-                rate_limiter=rate_limiter,
-            )
+            async with sem:
+                parsed, raw, usage = await async_llm_call(
+                    http_client,
+                    messages,
+                    model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    max_retries=_max_retries,
+                    config=config,
+                    rate_limiter=rate_limiter,
+                )
             return parsed, raw, usage, _outcome_from_usage(usage, default_status=usage.get("status_code"))
 
         quick_retries = int(getattr(config, "request_quick_retries", 0) or 0)
@@ -3479,7 +3480,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         if c.completed:
             return 0
         if c.chunked_delegate:
-            return max(watermark, 1)
+            return 1
         return max(c.label_count - c.done, 0)
 
     # --- Try to load more files if active work is below watermark ---

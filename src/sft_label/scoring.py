@@ -5241,8 +5241,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         return collector, resumed_loaded
 
     # --- Try to load more files if below watermark ---
-    def maybe_load_more(pending_futures, collectors, next_to_load):
-        active_count = sum(1 for c in collectors.values() if not c.completed)
+    def maybe_load_more(pending_futures, collectors, next_to_load, extra_active_files=0):
+        active_count = sum(1 for c in collectors.values() if not c.completed) + extra_active_files
         resumed_loaded = 0
         while (next_to_load < len(resident_files)
                and len(pending_futures) < watermark
@@ -5420,128 +5420,147 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         flushed += 1
                     return flushed
 
-                if streaming_inputs:
-                    streaming_parallelism = min(
-                        len(streaming_inputs),
-                        max(int(max_active), 1),
-                        max(int(concurrency), 1),
+                streaming_parallelism = min(
+                    len(streaming_inputs),
+                    max(int(max_active), 1),
+                    max(int(concurrency), 1),
+                ) if streaming_inputs else 0
+                active_streaming_tasks = {}
+                next_streaming_idx = 0
+
+                async def _run_streaming_file(original_path, scoring_input_path):
+                    file_config = copy.copy(config)
+                    if runtime is not None:
+                        setattr(file_config, "_adaptive_runtime", runtime)
+                    stats = await _run_scoring_file_chunked(
+                        scoring_input_path,
+                        original_path.parent,
+                        shared_tag_stats_path,
+                        limit,
+                        file_config,
+                        resume=resume,
+                        llm_progress_cb=llm_progress_cb,
+                        file_label=_relative_file_label(original_path, input_dir),
+                        show_progress=False,
+                        combo_counts_override=global_combo_counts,
+                        combo_mode_override=global_combo_mode,
+                        shared_http_client=client,
+                        shared_semaphore=sem,
+                        shared_rate_limiter=rate_limiter,
+                        shared_runtime=runtime,
+                        progress_hook=_streaming_progress_hook,
+                        print_summary=False,
+                        quiet=True,
                     )
+                    stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
+                    return stats
 
-                    async def _run_streaming_file(original_path, scoring_input_path):
-                        file_config = copy.copy(config)
-                        if runtime is not None:
-                            setattr(file_config, "_adaptive_runtime", runtime)
-                        stats = await _run_scoring_file_chunked(
-                            scoring_input_path,
-                            original_path.parent,
-                            shared_tag_stats_path,
-                            limit,
-                            file_config,
-                            resume=resume,
-                            llm_progress_cb=llm_progress_cb,
-                            file_label=_relative_file_label(original_path, input_dir),
-                            show_progress=False,
-                            combo_counts_override=global_combo_counts,
-                            combo_mode_override=global_combo_mode,
-                            shared_http_client=client,
-                            shared_semaphore=sem,
-                            shared_rate_limiter=rate_limiter,
-                            shared_runtime=runtime,
-                            progress_hook=_streaming_progress_hook,
-                            print_summary=False,
-                            quiet=True,
-                        )
-                        stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
-                        return stats
+                def _resident_active_count():
+                    return sum(1 for c in collectors.values() if not c.completed)
 
-                    for batch_start_idx in range(0, len(streaming_inputs), streaming_parallelism):
-                        batch = streaming_inputs[batch_start_idx:batch_start_idx + streaming_parallelism]
-                        batch_tasks = [
-                            asyncio.create_task(_run_streaming_file(original_path, scoring_input_path))
-                            for original_path, scoring_input_path, _temp_input_path in batch
-                        ]
-                        for done_task in asyncio.as_completed(batch_tasks):
-                            stats = await done_task
-                            all_file_stats.append(stats)
-                            progress.update(file_task, advance=1)
+                def _update_active_file_info():
+                    streaming_names = list(active_streaming_tasks.values())
+                    resident_names = [
+                        c.labeled_path.name for c in collectors.values() if not c.completed
+                    ]
+                    active_names = streaming_names + resident_names
+                    progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
 
-                if resident_files:
-                    # Initial load
-                    next_to_load, resumed_loaded = maybe_load_more(
-                        pending_futures, collectors, next_to_load
-                    )
-                    submit_more_tasks(pending_futures, collectors, client)
-                    if resumed_loaded:
-                        _update_sample_progress(
-                            advance=resumed_loaded,
-                            label="resident",
-                            skipped_info=f"skipped {resumed_loaded} resumed",
-                        )
-                    await flush_completed_collectors()
+                def submit_more_streaming_tasks():
+                    nonlocal next_streaming_idx
+                    started = 0
+                    while (
+                        next_streaming_idx < len(streaming_inputs)
+                        and len(active_streaming_tasks) < streaming_parallelism
+                        and (_resident_active_count() + len(active_streaming_tasks)) < max_active
+                    ):
+                        original_path, scoring_input_path, _temp_input_path = streaming_inputs[next_streaming_idx]
+                        next_streaming_idx += 1
+                        task = asyncio.create_task(_run_streaming_file(original_path, scoring_input_path))
+                        active_streaming_tasks[task] = _relative_file_label(original_path, input_dir)
+                        started += 1
+                    return started
 
-                    while pending_futures or next_to_load < len(resident_files):
-                        if not pending_futures:
-                            next_to_load, resumed_loaded = maybe_load_more(
-                                pending_futures, collectors, next_to_load
-                            )
-                            submit_more_tasks(pending_futures, collectors, client)
-                            if resumed_loaded:
-                                _update_sample_progress(
-                                    advance=resumed_loaded,
-                                    label="resident",
-                                    skipped_info=f"skipped {resumed_loaded} resumed",
-                                )
-                            await flush_completed_collectors()
-                            if not pending_futures and next_to_load >= len(resident_files):
-                                break
-
-                        done, pending_futures = await asyncio.wait(
-                            pending_futures, return_when=asyncio.FIRST_COMPLETED)
-
-                        for fut in done:
-                            file_idx, sample_idx, value, monitor = fut.result()
-                            c = collectors[file_idx]
-
-                            if 0 <= sample_idx < c.total:
-                                c.values[sample_idx] = value
-                                c.monitors[sample_idx] = monitor
-
-                            c.done += 1
-                            if value:
-                                c.ok += 1
-                            else:
-                                c.fail += 1
-                                if not first_error_logged and monitor:
-                                    err = monitor.get("error", "unknown")
-                                    err_resp = monitor.get("error_response", "")
-                                    pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
-                                    if err_resp and err_resp != err:
-                                        pprint(f"      response={err_resp[:200]}")
-                                    first_error_logged = True
-
-                            _update_sample_progress(
-                                advance=1,
-                                label=c.labeled_path.name,
-                                monitor=monitor,
-                            )
-
-                        # After processing batch, check if we should load more files
+                async def top_up_work():
+                    nonlocal next_to_load
+                    while True:
+                        started_streaming = submit_more_streaming_tasks()
                         next_to_load, resumed_loaded = maybe_load_more(
-                            pending_futures, collectors, next_to_load
+                            pending_futures,
+                            collectors,
+                            next_to_load,
+                            extra_active_files=len(active_streaming_tasks),
                         )
-                        submit_more_tasks(pending_futures, collectors, client)
                         if resumed_loaded:
                             _update_sample_progress(
                                 advance=resumed_loaded,
                                 label="resident",
                                 skipped_info=f"skipped {resumed_loaded} resumed",
                             )
-                        await flush_completed_collectors()
+                        submit_more_tasks(pending_futures, collectors, client)
+                        flushed = await flush_completed_collectors()
+                        if not (started_streaming or resumed_loaded or flushed):
+                            break
+                    _update_active_file_info()
 
-                        active_names = [c.labeled_path.name for c in collectors.values()
-                                        if not c.completed]
-                        progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
-                    await flush_completed_collectors()
+                await top_up_work()
+
+                while (
+                    pending_futures
+                    or active_streaming_tasks
+                    or next_to_load < len(resident_files)
+                    or next_streaming_idx < len(streaming_inputs)
+                ):
+                    waitables = set(pending_futures) | set(active_streaming_tasks.keys())
+                    if not waitables:
+                        await top_up_work()
+                        waitables = set(pending_futures) | set(active_streaming_tasks.keys())
+                        if not waitables:
+                            break
+
+                    done, _pending = await asyncio.wait(
+                        waitables, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    pending_futures.difference_update(done)
+
+                    for fut in done:
+                        if fut in active_streaming_tasks:
+                            active_streaming_tasks.pop(fut, None)
+                            stats = fut.result()
+                            all_file_stats.append(stats)
+                            progress.update(file_task, advance=1)
+                            continue
+
+                        file_idx, sample_idx, value, monitor = fut.result()
+                        c = collectors[file_idx]
+
+                        if 0 <= sample_idx < c.total:
+                            c.values[sample_idx] = value
+                            c.monitors[sample_idx] = monitor
+
+                        c.done += 1
+                        if value:
+                            c.ok += 1
+                        else:
+                            c.fail += 1
+                            if not first_error_logged and monitor:
+                                err = monitor.get("error", "unknown")
+                                err_resp = monitor.get("error_response", "")
+                                pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
+                                if err_resp and err_resp != err:
+                                    pprint(f"      response={err_resp[:200]}")
+                                first_error_logged = True
+
+                        _update_sample_progress(
+                            advance=1,
+                            label=c.labeled_path.name,
+                            monitor=monitor,
+                        )
+
+                    await top_up_work()
+
+                await flush_completed_collectors()
+                _update_active_file_info()
     finally:
         if temp_tag_stats_path and temp_tag_stats_path.exists():
             temp_tag_stats_path.unlink()
