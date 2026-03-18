@@ -1861,6 +1861,72 @@ class TestResumeScoringFile:
 
         assert any(sample_id.startswith("f1-") for sample_id in seen_order[:4])
 
+    def test_directory_scoring_runs_streaming_files_in_parallel_with_split_budget(self, tmp_path):
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        for file_idx in range(2):
+            batch_dir = tmp_path / f"stream_{file_idx}"
+            batch_dir.mkdir()
+            rows = [
+                {
+                    "id": f"s{file_idx}-sample-{sample_idx}",
+                    "conversations": [
+                        {"from": "human", "value": f"Q{sample_idx}"},
+                        {"from": "gpt", "value": f"A{sample_idx}"},
+                    ],
+                    "labels": {"intent": "build", "difficulty": "intermediate"},
+                }
+                for sample_idx in range(2)
+            ]
+            (batch_dir / "labeled.jsonl").write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+        active_files = 0
+        max_active_files = 0
+        seen_concurrency = []
+        seen_show_progress = []
+
+        async def mock_chunked(input_path, output_dir, tag_stats_path, limit, config, **kwargs):
+            nonlocal active_files, max_active_files
+            active_files += 1
+            max_active_files = max(max_active_files, active_files)
+            seen_concurrency.append(config.scoring_concurrency)
+            seen_show_progress.append(kwargs.get("show_progress"))
+            await asyncio.sleep(0.01)
+            active_files -= 1
+            return {
+                "total_scored": 2,
+                "total_failed": 0,
+                "total_llm_calls": 2,
+                "total_prompt_tokens": 20,
+                "total_completion_tokens": 10,
+                "score_distributions": {},
+                "thinking_mode_breakdown": {},
+                "tag_insights": {},
+                "selection_thresholds": {},
+                "file": f"{Path(input_path).parent.name}/{Path(input_path).name}",
+            }
+
+        with patch("sft_label.scoring._run_scoring_file_chunked", side_effect=mock_chunked):
+            asyncio.run(
+                run_scoring(
+                    str(tmp_path),
+                    config=PipelineConfig(
+                        scoring_concurrency=4,
+                        dir_pipeline_watermark=1.0,
+                        dir_pipeline_max_files=2,
+                        enable_adaptive_runtime=False,
+                    ),
+                )
+            )
+
+        assert max_active_files == 2
+        assert seen_concurrency == [2, 2]
+        assert seen_show_progress == [False, False]
+
     def test_chunked_stats_use_monitor_totals_not_full_monitor_list(self, tmp_path):
         from sft_label.scoring import _run_scoring_file_chunked, _compute_value_stats_from_summaries
         from unittest.mock import patch

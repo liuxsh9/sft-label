@@ -233,10 +233,10 @@ class TestFileDiscovery:
     def test_discover_labeled_flat(self, tmp_path):
         (tmp_path / "labeled.json").write_text("[]")
         (tmp_path / "labeled.jsonl").write_text("")
-        # Should dedup to just .json
+        # Should dedup to just .jsonl
         files = discover_labeled_files(tmp_path)
         assert len(files) == 1
-        assert files[0].suffix == ".json"
+        assert files[0].suffix == ".jsonl"
 
     def test_discover_labeled_nested(self, tmp_path):
         sub = tmp_path / "code" / "file1"
@@ -251,20 +251,20 @@ class TestFileDiscovery:
         (tmp_path / "scored.jsonl").write_text("")
         files = discover_scored_files(tmp_path)
         assert len(files) == 1
-        assert files[0].suffix == ".json"
+        assert files[0].suffix == ".jsonl"
 
     def test_discover_empty_dir(self, tmp_path):
         assert discover_labeled_files(tmp_path) == []
         assert discover_scored_files(tmp_path) == []
 
-    def test_dedup_prefers_json(self):
+    def test_dedup_prefers_jsonl(self):
         files = [
             Path("/a/scored.jsonl"),
             Path("/a/scored.json"),
         ]
         result = _dedup_json_jsonl(files)
         assert len(result) == 1
-        assert result[0].suffix == ".json"
+        assert result[0].suffix == ".jsonl"
 
 
 # ─── Test synthesize_monitor ─────────────────────────────

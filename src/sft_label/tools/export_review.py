@@ -106,7 +106,7 @@ def _discover_legacy_labeled_files(input_path: Path):
     dedup = {}
     for file_path in files:
         key = (file_path.parent, file_path.stem)
-        if key in dedup and dedup[key].suffix == ".jsonl" and file_path.suffix == ".json":
+        if key in dedup and dedup[key].suffix == ".json" and file_path.suffix == ".jsonl":
             dedup[key] = file_path
         elif key not in dedup:
             dedup[key] = file_path

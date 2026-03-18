@@ -21,7 +21,7 @@ import asyncio
 import random
 import re
 import inspect
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -3230,6 +3230,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                      limit, config, resume=False,
                                      llm_progress_cb=None,
                                      file_label=None,
+                                     show_progress=True,
                                      combo_counts_override=None,
                                      combo_mode_override=None):
     """Score a JSONL labeled file in chunks to bound memory.
@@ -3554,20 +3555,23 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     flush_scoring_chunk(next_chunk_to_flush)
                     next_chunk_to_flush += 1
 
-            with _create_progress() as progress:
-                task = progress.add_task("Pass 2", total=total, info="")
+            progress_ctx = _create_progress() if show_progress else nullcontext(None)
+            with progress_ctx as progress:
+                task = progress.add_task("Pass 2", total=total, info="") if progress is not None else None
 
                 # Initial load
                 resumed_loaded = maybe_load_more_scoring()
                 if resumed_loaded:
-                    progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
+                    if progress is not None:
+                        progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                 flush_ready_scoring_chunks()
 
                 while pending_futures or not gen_exhausted:
                     if not pending_futures:
                         resumed_loaded = maybe_load_more_scoring()
                         if resumed_loaded:
-                            progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
+                            if progress is not None:
+                                progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                         flush_ready_scoring_chunks()
                         if not pending_futures:
                             if gen_exhausted:
@@ -3603,11 +3607,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
                             if run_info:
                                 _info = f"{_info} • {run_info}"
-                        progress.update(task, advance=1, info=_info)
+                        if progress is not None:
+                            progress.update(task, advance=1, info=_info)
                     flush_ready_scoring_chunks()
                     resumed_loaded = maybe_load_more_scoring()
                     if resumed_loaded:
-                        progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
+                        if progress is not None:
+                            progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                     flush_ready_scoring_chunks()
 
                 flush_ready_scoring_chunks()
@@ -4593,6 +4599,15 @@ def _discover_labeled_input_files(input_dir):
     return sorted(preferred.values())
 
 
+def _split_integer_budget(total: int, parts: int) -> list[int]:
+    """Split a positive integer budget across workers without exceeding the total."""
+    total = max(int(total), 1)
+    parts = max(int(parts), 1)
+    parts = min(parts, total)
+    base, remainder = divmod(total, parts)
+    return [base + (1 if idx < remainder else 0) for idx in range(parts)]
+
+
 def _load_scored_samples(path):
     """Load scored samples from .json or .jsonl."""
     path = Path(path)
@@ -5186,24 +5201,52 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     )
 
     try:
-        for original_path, scoring_input_path, temp_input_path in streaming_inputs:
-            print(f"  Streaming JSONL scoring for {original_path.relative_to(input_dir)}")
-            stats = await _run_scoring_file_chunked(
-                scoring_input_path,
-                original_path.parent,
-                shared_tag_stats_path,
-                limit,
-                config,
-                resume=resume,
-                llm_progress_cb=llm_progress_cb,
-                file_label=_relative_file_label(original_path, input_dir),
-                combo_counts_override=global_combo_counts,
-                combo_mode_override=global_combo_mode,
+        if streaming_inputs:
+            streaming_parallelism = min(
+                len(streaming_inputs),
+                max(int(max_active), 1),
+                max(int(concurrency), 1),
             )
-            stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
-            all_file_stats.append(stats)
-            if temp_input_path is not None and temp_input_path.exists():
-                temp_input_path.unlink()
+
+            async def _run_streaming_file(original_path, scoring_input_path, file_config):
+                print(f"  Streaming JSONL scoring for {original_path.relative_to(input_dir)}")
+                stats = await _run_scoring_file_chunked(
+                    scoring_input_path,
+                    original_path.parent,
+                    shared_tag_stats_path,
+                    limit,
+                    file_config,
+                    resume=resume,
+                    llm_progress_cb=llm_progress_cb,
+                    file_label=_relative_file_label(original_path, input_dir),
+                    show_progress=False,
+                    combo_counts_override=global_combo_counts,
+                    combo_mode_override=global_combo_mode,
+                )
+                stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
+                return stats
+
+            for batch_start_idx in range(0, len(streaming_inputs), streaming_parallelism):
+                batch = streaming_inputs[batch_start_idx:batch_start_idx + streaming_parallelism]
+                batch_concurrency = _split_integer_budget(concurrency, len(batch))
+                if config.rps_limit > 0:
+                    batch_rps = [float(config.rps_limit) / len(batch)] * len(batch)
+                else:
+                    batch_rps = [config.rps_limit] * len(batch)
+
+                batch_tasks = []
+                for (original_path, scoring_input_path, _temp_input_path), file_concurrency, file_rps in zip(
+                    batch, batch_concurrency, batch_rps
+                ):
+                    file_config = copy.copy(config)
+                    file_config.scoring_concurrency = max(int(file_concurrency), 1)
+                    if config.rps_limit > 0:
+                        file_config.rps_limit = float(file_rps)
+                    batch_tasks.append(
+                        _run_streaming_file(original_path, scoring_input_path, file_config)
+                    )
+
+                all_file_stats.extend(await asyncio.gather(*batch_tasks))
 
         if resident_files:
             resident_total_samples = max(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
-from sft_label.tools.export_review import export_review
+from sft_label.tools.export_review import _discover_legacy_labeled_files, export_review
 
 
 def _legacy_sample(sample_id: str) -> dict:
@@ -99,6 +99,18 @@ def _write_inline_rows(source_file: Path) -> None:
 
 
 class TestExportReview:
+    def test_legacy_discovery_prefers_jsonl_siblings(self, tmp_path):
+        (tmp_path / "labeled.json").write_text(json.dumps([_legacy_sample("legacy-json")]), encoding="utf-8")
+        (tmp_path / "labeled.jsonl").write_text(
+            json.dumps(_legacy_sample("legacy-jsonl"), ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        files = _discover_legacy_labeled_files(tmp_path)
+
+        assert len(files) == 1
+        assert files[0].suffix == ".jsonl"
+
     def test_legacy_labeled_json_exports_csv(self, tmp_path):
         input_file = tmp_path / "labeled.json"
         input_file.write_text(json.dumps([_legacy_sample("legacy-1")]), encoding="utf-8")
