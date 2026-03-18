@@ -113,6 +113,17 @@ def test_load_inline_scoring_file_rehydrates_embedded_turn_labels(tmp_path):
     assert samples[1]["id"] == build_turn_id(bundles[0].data_id, 2)
 
 
+def test_infer_inline_scoring_target_does_not_misclassify_standard_run_file(tmp_path):
+    run_root = tmp_path / "dataset_labeled_20260318_120000"
+    standard_file = run_root / "batch" / "labeled.jsonl"
+    standard_file.parent.mkdir(parents=True)
+    standard_file.write_text("", encoding="utf-8")
+
+    target = infer_inline_scoring_target(standard_file)
+
+    assert target is None
+
+
 @pytest.mark.asyncio
 async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
     from sft_label.scoring import run_scoring

@@ -374,6 +374,8 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if scored_file is None or stats_file == PASS2_SUMMARY_STATS_FILE:
+        if not quiet:
+            print("  Scoring dashboard: building scope tree")
         payload, explorer_sources = _tree_payload(run_dir)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
@@ -392,6 +394,8 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
                 }
             )
 
+    if not quiet:
+        print("  Scoring dashboard: writing dashboard bundle")
     _write_dashboard_bundle(
         output_path,
         payload,

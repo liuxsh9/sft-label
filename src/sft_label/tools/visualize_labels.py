@@ -26,6 +26,7 @@ from sft_label.tools.dashboard_aggregation import (
     _coverage_from_distributions,
     build_dashboard_manifest,
     build_pass1_viz,
+    build_pass1_conversation_mode_from_iter,
     build_scope_detail_payload,
     build_scope_summary,
     infer_scope_turn_kind,
@@ -314,18 +315,25 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             continue
         pass1 = None
         if raw_scope.get("raw_pass1"):
+            base_pass1 = compute_viz_data([], raw_scope["raw_pass1"])
             conversation_mode = _load_pass1_conversation_mode(
                 data_path=raw_scope.get("pass1_data_path"),
                 stats_path=raw_scope.get("pass1_stats_path"),
             )
             if conversation_mode:
                 pass1 = _inject_conversation_mode(
-                    compute_viz_data([], raw_scope["raw_pass1"]),
+                    base_pass1,
                     [conversation_mode],
                 )
             else:
-                samples = _load_scope_samples(raw_scope.get("pass1_data_path"))
-                pass1 = compute_viz_data(samples, raw_scope["raw_pass1"])
+                streamed_conversation_mode = build_pass1_conversation_mode_from_iter(
+                    iter_data_file(raw_scope.get("pass1_data_path")),
+                    raw_scope["raw_pass1"],
+                )
+                pass1 = _inject_conversation_mode(
+                    base_pass1,
+                    [streamed_conversation_mode],
+                )
         file_pass1[scope_id] = pass1
         file_conversation_modes[scope_id] = ((pass1 or {}).get("modes") or {}).get("conversation")
 
@@ -488,6 +496,7 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
 
     if labeled_file is None:
         if stats_file == PASS1_SUMMARY_STATS_FILE:
+            print("  Labeling dashboard: building scope tree")
             payload, explorer_sources = _tree_payload(run_dir)
         else:
             samples = []
@@ -534,6 +543,7 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                 }
             )
 
+    print("  Labeling dashboard: writing dashboard bundle")
     _write_dashboard_bundle(
         output_path,
         payload,

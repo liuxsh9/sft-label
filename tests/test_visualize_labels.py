@@ -383,6 +383,118 @@ def test_generate_dashboard_tree_payload_uses_stats_without_preloading_leaf_samp
     assert manifest["scopes"]["file:code/sample.jsonl"]["explorer"]["sample_count"] == 1
 
 
+def test_generate_dashboard_tree_payload_logs_global_build_phases(tmp_path, capsys):
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "labeled.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "sample-1",
+                "metadata": {"source_file": "code/sample.jsonl", "source_id": "conv-1"},
+                "conversations": [
+                    {"from": "human", "value": "first"},
+                    {"from": "gpt", "value": "ok"},
+                ],
+                "labels": _sample_with_unmapped("sample-1", "first", [])["labels"],
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample.jsonl",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    generate_dashboard(meta_root, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
+
+    out = capsys.readouterr().out
+    assert "Labeling dashboard: building scope tree" in out
+    assert "Labeling dashboard: writing dashboard bundle" in out
+
+
+def test_generate_dashboard_tree_payload_uses_stats_without_loading_leaf_samples(tmp_path, monkeypatch):
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "labeled.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "sample-1",
+                "metadata": {"source_file": "code/sample.jsonl", "source_id": "conv-1"},
+                "conversations": [{"from": "human", "value": "first"}, {"from": "gpt", "value": "ok"}],
+                "labels": _sample_with_unmapped("sample-1", "first", [])["labels"],
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample.jsonl",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fail_load(_path):
+        raise AssertionError("tree payload should not load leaf sample bodies for stats-only dashboard generation")
+
+    monkeypatch.setattr(visualize_labels_module, "_load_scope_samples", _fail_load)
+
+    out = generate_dashboard(meta_root, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
+    data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["scopes"]["global"]["summary"]["pass1_total"] == 1
+
+
 def test_generate_dashboard_tree_payload_prefers_conversation_stats_artifact_over_leaf_reload(tmp_path, monkeypatch):
     meta_root = tmp_path / "meta_label_data"
     artifact_dir = meta_root / "files" / "code" / "sample"

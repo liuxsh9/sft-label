@@ -51,6 +51,9 @@ from sft_label.scoring import (
     _infer_domain_backfill,
     compute_selection_scores,
     compute_selection_scores_from_summaries,
+    _count_scoring_samples_in_file,
+    _count_required_llm_calls_in_file,
+    _selection_summary_from_sample,
 )
 from sft_label.prompts_value import SCORING_SYSTEM_COMPACT, build_scoring_messages
 from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
@@ -1435,6 +1438,191 @@ class TestResumeScoringFile:
         assert chunked_input.name == "labeled.jsonl"
         assert result["files_processed"] == 1
         assert result["per_file_summary"][0]["file"] == "batch/labeled.jsonl"
+
+    def test_run_scoring_standard_run_dir_skips_inline_probe_when_root_summary_exists(self, tmp_path):
+        from sft_label.pipeline import PASS1_SUMMARY_STATS_FILE
+        from sft_label.scoring import run_scoring
+
+        run_dir = tmp_path / "dataset_labeled_20260318_120000"
+        batch_dir = run_dir / "batch"
+        batch_dir.mkdir(parents=True)
+        (run_dir / PASS1_SUMMARY_STATS_FILE).write_text(
+            json.dumps({"input_path": "dataset", "total_samples": 1}),
+            encoding="utf-8",
+        )
+        (batch_dir / "labeled.jsonl").write_text(
+            json.dumps({
+                "id": "sample-1",
+                "conversations": [
+                    {"from": "human", "value": "Q"},
+                    {"from": "gpt", "value": "A"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        async def _fake_run_scoring_directory(*args, **kwargs):
+            return {"files_processed": 1, "per_file_summary": [{"file": "batch/labeled.jsonl"}]}
+
+        with patch("sft_label.scoring.infer_inline_scoring_target", side_effect=AssertionError("inline probe should be skipped")), \
+                patch("sft_label.scoring._run_scoring_directory", side_effect=_fake_run_scoring_directory):
+            result = asyncio.run(run_scoring(str(run_dir), config=PipelineConfig()))
+
+        assert result["files_processed"] == 1
+        assert result["per_file_summary"][0]["file"] == "batch/labeled.jsonl"
+
+    def test_run_scoring_wraps_layout_resolution_with_heartbeat(self, tmp_path):
+        from sft_label.scoring import run_scoring
+
+        labeled_path = tmp_path / "labeled.json"
+        labeled_path.write_text(
+            json.dumps([
+                {
+                    "id": "sample-1",
+                    "conversations": [
+                        {"from": "human", "value": "Q"},
+                        {"from": "gpt", "value": "A"},
+                    ],
+                    "labels": {"intent": "build", "difficulty": "intermediate"},
+                }
+            ]),
+            encoding="utf-8",
+        )
+
+        heartbeat_labels = []
+
+        def _fake_heartbeat(message, fn, **kwargs):
+            heartbeat_labels.append(message)
+            return fn()
+
+        async def _fake_run_scoring_file(*args, **kwargs):
+            return {"total_scored": 1}
+
+        with patch("sft_label.scoring.run_with_heartbeat", side_effect=_fake_heartbeat), \
+                patch("sft_label.scoring.infer_inline_scoring_target", return_value=None), \
+                patch("sft_label.scoring._run_scoring_file", side_effect=_fake_run_scoring_file):
+            result = asyncio.run(run_scoring(str(labeled_path), config=PipelineConfig()))
+
+        assert result["total_scored"] == 1
+        assert heartbeat_labels == ["Resolving Pass 2 input layout"]
+
+    def test_directory_large_json_spills_to_temp_jsonl_and_uses_chunked_pipeline(self, tmp_path, monkeypatch):
+        from sft_label.scoring import run_scoring
+
+        batch_dir = tmp_path / "batch"
+        batch_dir.mkdir()
+        sample = {
+            "id": "sample-1",
+            "conversations": [
+                {"from": "human", "value": "Q"},
+                {"from": "gpt", "value": "A"},
+            ],
+            "labels": {"intent": "build", "difficulty": "intermediate"},
+        }
+        json_path = batch_dir / "labeled.json"
+        json_path.write_text(json.dumps([sample]), encoding="utf-8")
+
+        monkeypatch.setattr("sft_label.scoring.DIRECTORY_JSON_STREAMING_THRESHOLD_BYTES", 1)
+
+        observed = {}
+
+        async def _fake_chunked(input_path, output_dir, *args, **kwargs):
+            observed["input_path"] = Path(input_path)
+            observed["output_dir"] = Path(output_dir)
+            assert observed["input_path"].suffix == ".jsonl"
+            assert observed["input_path"] != json_path
+            assert observed["input_path"].exists()
+            return {
+                "total_scored": 1,
+                "total_failed": 0,
+                "total_llm_calls": 0,
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+                "score_distributions": {},
+                "thinking_mode_breakdown": {},
+                "tag_insights": {},
+                "selection_thresholds": {},
+                "file": "batch/labeled.json",
+            }
+
+        with patch("sft_label.scoring._run_scoring_file_chunked", side_effect=_fake_chunked):
+            result = asyncio.run(run_scoring(str(tmp_path), config=PipelineConfig()))
+
+        assert observed["output_dir"] == batch_dir
+        assert result["files_processed"] == 1
+
+    def test_count_scoring_samples_in_file_streams_json_arrays(self, tmp_path, monkeypatch):
+        labeled_path = tmp_path / "labeled.json"
+        labeled_path.write_text(
+            json.dumps([
+                {"id": "sample-1", "labels": {"intent": "build"}},
+                {"id": "sample-2", "labels": {"intent": "debug"}},
+            ]),
+            encoding="utf-8",
+        )
+
+        def _fail_json_load(*args, **kwargs):
+            raise AssertionError("counting samples should not json.load the full array")
+
+        monkeypatch.setattr("sft_label.scoring.json.load", _fail_json_load)
+
+        assert _count_scoring_samples_in_file(labeled_path) == 2
+
+    def test_count_required_llm_calls_in_file_streams_json_arrays(self, tmp_path, monkeypatch):
+        labeled_path = tmp_path / "labeled.json"
+        labeled_path.write_text(
+            json.dumps([
+                {
+                    "id": "sample-1",
+                    "labels": {"intent": "build", "difficulty": "intermediate"},
+                    "conversations": [{"from": "human", "value": "Q"}, {"from": "gpt", "value": "A"}],
+                },
+                {
+                    "id": "sample-2",
+                    "labels": {"intent": "debug", "difficulty": "intermediate"},
+                    "conversations": [{"from": "human", "value": "Q"}, {"from": "gpt", "value": "A"}],
+                },
+            ]),
+            encoding="utf-8",
+        )
+
+        def _fail_json_load(*args, **kwargs):
+            raise AssertionError("counting required calls should not json.load the full array")
+
+        monkeypatch.setattr("sft_label.scoring.json.load", _fail_json_load)
+
+        assert _count_required_llm_calls_in_file(labeled_path, config=PipelineConfig(enable_selective_scoring=False)) == 2
+
+    def test_selection_summary_strips_embedded_selection_view_from_features(self):
+        sample = {
+            "id": "sample-1",
+            "conversations": [
+                {"from": "human", "value": "Need a bugfix"},
+                {"from": "gpt", "value": "I updated /tmp/app.py and ran pytest successfully."},
+            ],
+            "labels": {"intent": "debug", "difficulty": "intermediate", "context": "snippet"},
+            "value": {
+                "complexity": {"overall": 6},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": {"score": 5.5},
+                "value_score": 6.4,
+                "confidence": 0.8,
+            },
+            "metadata": {"turn_index": 2, "total_turns": 3},
+        }
+
+        summary = _selection_summary_from_sample(sample)
+
+        assert "selection_view" not in (summary.get("selection_features") or {})
+        assert summary["selection_features"]["trajectory_stage"] in {
+            "implementation",
+            "verification",
+            "final-summary",
+            "exploration",
+            "opener",
+        }
 
     def test_run_scoring_file_limits_inflight_tasks(self, tmp_path):
         from sft_label.scoring import _run_scoring_file

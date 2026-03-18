@@ -93,6 +93,9 @@ except Exception:  # pragma: no cover - runtime module lands in parallel task
     classify_http_result = None
 
 
+DIRECTORY_JSON_STREAMING_THRESHOLD_BYTES = 64 * 1024 * 1024
+
+
 # ─────────────────────────────────────────────────────────
 # Rarity computation
 # ─────────────────────────────────────────────────────────
@@ -1843,6 +1846,8 @@ def _selection_summary_from_sample(sample, config=None):
         },
         config=config,
     )
+    selection_features = dict(selection_features or {})
+    selection_features.pop("selection_view", None)
     inferred_domain = _infer_domain_backfill(selection_view, labels)
     return {
         "labels": labels,
@@ -2890,6 +2895,26 @@ def _existing_resume_value(sample: dict, resumed_values: dict[str, dict]) -> dic
     return None
 
 
+def _looks_like_legacy_scoring_run_dir(input_path) -> bool:
+    """Return True when a directory already looks like a standard run output."""
+    input_path = Path(input_path)
+    if not input_path.is_dir():
+        return False
+    for marker in (
+        PASS1_SUMMARY_STATS_FILE,
+        PASS2_SUMMARY_STATS_FILE,
+        PASS1_STATS_FILE,
+        PASS2_STATS_FILE,
+        "labeled.json",
+        "labeled.jsonl",
+        "scored.json",
+        "scored.jsonl",
+    ):
+        if (input_path / marker).exists():
+            return True
+    return False
+
+
 def _resumed_monitor(sample_id: str) -> dict:
     """Synthetic scoring monitor for resume-skipped samples."""
     return {
@@ -3146,7 +3171,25 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
         config = PipelineConfig()
 
     input_path = Path(input_path)
-    inline_target = infer_inline_scoring_target(input_path)
+    if _looks_like_legacy_scoring_run_dir(input_path):
+        inline_target = None
+        print(f"  Pass 2 input layout: standard run dir ({input_path.name})")
+    else:
+        inline_target = run_with_heartbeat(
+            "Resolving Pass 2 input layout",
+            lambda: infer_inline_scoring_target(input_path),
+        )
+        if inline_target is not None:
+            if input_path.is_file():
+                print(f"  Pass 2 input layout: inline mirrored file ({input_path.name})")
+            elif input_path == inline_target.layout.run_root:
+                print(f"  Pass 2 input layout: inline mirrored run ({input_path.name})")
+            else:
+                print(f"  Pass 2 input layout: inline mirrored dataset ({input_path.name})")
+        elif input_path.is_dir():
+            print(f"  Pass 2 input layout: standard directory ({input_path.name})")
+        else:
+            print(f"  Pass 2 input layout: single file ({input_path.name})")
 
     if inline_target is not None:
         if input_path.is_file():
@@ -4353,27 +4396,76 @@ class ScoringDirectoryWorkloadEstimate:
     scan_elapsed_seconds: float
 
 
-def _count_scoring_samples_in_file(labeled_path, limit=0):
-    """Count samples in a labeled file with per-file limit applied."""
+def _iter_labeled_samples_streaming(labeled_path, limit=0):
+    """Stream labeled samples from .jsonl or a top-level JSON array."""
+    labeled_path = Path(labeled_path)
+    seen = 0
+
     if labeled_path.suffix == ".jsonl":
-        count = 0
         with open(labeled_path, "r", encoding="utf-8") as f:
             for line in f:
-                if line.strip():
-                    count += 1
-                    if limit > 0 and count >= limit:
-                        break
-        return count
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    yield row
+                    seen += 1
+                    if limit > 0 and seen >= limit:
+                        return
+        return
 
+    decoder = json.JSONDecoder()
+    started = False
+    eof = False
+    buffer = ""
     with open(labeled_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, list):
-        total = len(data)
-    else:
-        total = 1 if data else 0
-    if limit > 0:
-        total = min(total, limit)
-    return total
+        while True:
+            if not eof:
+                chunk = f.read(65536)
+                if chunk:
+                    buffer += chunk
+                else:
+                    eof = True
+
+            while True:
+                buffer = buffer.lstrip()
+                if not buffer:
+                    break
+                if not started:
+                    if buffer[0] != "[":
+                        return
+                    started = True
+                    buffer = buffer[1:]
+                    continue
+                if buffer[0] == "]":
+                    return
+                if buffer[0] == ",":
+                    buffer = buffer[1:]
+                    continue
+                try:
+                    row, consumed = decoder.raw_decode(buffer)
+                except json.JSONDecodeError:
+                    if eof:
+                        return
+                    break
+                buffer = buffer[consumed:]
+                if isinstance(row, dict):
+                    yield row
+                    seen += 1
+                    if limit > 0 and seen >= limit:
+                        return
+
+            if eof:
+                return
+
+
+def _count_scoring_samples_in_file(labeled_path, limit=0):
+    """Count samples in a labeled file with per-file limit applied."""
+    count = 0
+    for _sample in _iter_labeled_samples_streaming(labeled_path, limit=limit):
+        count += 1
+    return count
 
 
 def _count_required_llm_calls_in_file(labeled_path, limit=0, config=None):
@@ -4382,30 +4474,31 @@ def _count_required_llm_calls_in_file(labeled_path, limit=0, config=None):
         return _count_scoring_samples_in_file(labeled_path, limit=limit)
 
     calls = 0
-    if labeled_path.suffix == ".jsonl":
-        with open(labeled_path, "r", encoding="utf-8") as f:
-            seen = 0
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                seen += 1
-                if limit > 0 and seen > limit:
-                    break
-                sample = json.loads(line)
-                if _selective_scoring_decision(sample, config=config).get("requires_llm", True):
-                    calls += 1
-        return calls
-
-    with open(labeled_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    samples = data if isinstance(data, list) else ([data] if data else [])
-    if limit > 0:
-        samples = samples[:limit]
-    for sample in samples:
+    for sample in _iter_labeled_samples_streaming(labeled_path, limit=limit):
         if _selective_scoring_decision(sample, config=config).get("requires_llm", True):
             calls += 1
     return calls
+
+
+def _should_stream_json_directory_input(labeled_path) -> bool:
+    """Return True when a resident JSON file should be converted to temp JSONL."""
+    labeled_path = Path(labeled_path)
+    if labeled_path.suffix == ".jsonl":
+        return False
+    try:
+        return labeled_path.stat().st_size >= DIRECTORY_JSON_STREAMING_THRESHOLD_BYTES
+    except OSError:
+        return False
+
+
+def _spill_json_array_to_jsonl(source_path, *, limit=0):
+    """Convert a large JSON array input into a temp JSONL file for chunked scoring."""
+    source_path = Path(source_path)
+    temp_path = source_path.with_name(f".{source_path.stem}.streaming.jsonl")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        for sample in _iter_labeled_samples_streaming(source_path, limit=limit):
+            f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    return temp_path
 
 
 def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
@@ -4846,29 +4939,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         total = 0
         combo_counts = {}
         for labeled_path in labeled_files:
-            if labeled_path.suffix == ".jsonl":
-                with open(labeled_path, "r", encoding="utf-8") as f:
-                    for i, line in enumerate(f):
-                        if limit > 0 and i >= limit:
-                            break
-                        line = line.strip()
-                        if not line:
-                            continue
-                        sample = json.loads(line)
-                        labels = sample.get("labels") or {}
-                        if _update_distributions_from_labels(distributions, labels, dims):
-                            total += 1
-                        _update_combo_counts_from_labels(combo_counts, labels)
-            else:
-                with open(labeled_path, "r", encoding="utf-8") as f:
-                    samples = json.load(f)
-                if limit > 0:
-                    samples = samples[:limit]
-                for sample in samples:
-                    labels = sample.get("labels") or {}
-                    if _update_distributions_from_labels(distributions, labels, dims):
-                        total += 1
-                    _update_combo_counts_from_labels(combo_counts, labels)
+            for sample in _iter_labeled_samples_streaming(labeled_path, limit=limit):
+                labels = sample.get("labels") or {}
+                if _update_distributions_from_labels(distributions, labels, dims):
+                    total += 1
+                _update_combo_counts_from_labels(combo_counts, labels)
         distributions = {d: c for d, c in distributions.items() if c}
         return distributions, total, combo_counts
 
@@ -4938,8 +5013,20 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             }, f, ensure_ascii=False, indent=2)
         shared_tag_stats_path = str(temp_tag_stats_path)
 
-    streaming_files = [p for p in labeled_files if p.suffix == ".jsonl"]
-    resident_files = [p for p in labeled_files if p.suffix != ".jsonl"]
+    streaming_inputs = [(p, p, None) for p in labeled_files if p.suffix == ".jsonl"]
+    resident_files = []
+    for labeled_path in labeled_files:
+        if labeled_path.suffix == ".jsonl":
+            continue
+        if _should_stream_json_directory_input(labeled_path):
+            temp_jsonl = _spill_json_array_to_jsonl(labeled_path, limit=limit)
+            streaming_inputs.append((labeled_path, temp_jsonl, temp_jsonl))
+            print(
+                f"  Large JSON detected; using streamed temp JSONL for "
+                f"{labeled_path.relative_to(input_dir)}"
+            )
+        else:
+            resident_files.append(labeled_path)
 
     concurrency = config.scoring_concurrency
     watermark = max(concurrency, int(concurrency * config.dir_pipeline_watermark))
@@ -5099,24 +5186,31 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     )
 
     try:
-        for labeled_path in streaming_files:
-            print(f"  Streaming JSONL scoring for {labeled_path.relative_to(input_dir)}")
+        for original_path, scoring_input_path, temp_input_path in streaming_inputs:
+            print(f"  Streaming JSONL scoring for {original_path.relative_to(input_dir)}")
             stats = await _run_scoring_file_chunked(
-                labeled_path,
-                labeled_path.parent,
+                scoring_input_path,
+                original_path.parent,
                 shared_tag_stats_path,
                 limit,
                 config,
                 resume=resume,
                 llm_progress_cb=llm_progress_cb,
-                file_label=_relative_file_label(labeled_path, input_dir),
+                file_label=_relative_file_label(original_path, input_dir),
                 combo_counts_override=global_combo_counts,
                 combo_mode_override=global_combo_mode,
             )
-            stats["file"] = stats.get("file") or _relative_file_label(labeled_path, input_dir)
+            stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
             all_file_stats.append(stats)
+            if temp_input_path is not None and temp_input_path.exists():
+                temp_input_path.unlink()
 
         if resident_files:
+            resident_total_samples = max(
+                workload_estimate.total_samples
+                - sum(_count_scoring_samples_in_file(original, limit=limit) for original, _input, _tmp in streaming_inputs),
+                0,
+            )
             async with httpx.AsyncClient(
                 proxy=None,
                 timeout=config.request_timeout,
@@ -5130,7 +5224,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     file_task = progress.add_task("Files", total=len(resident_files), info="")
                     sample_task = progress.add_task(
                         "Pass 2",
-                        total=sum(_count_scoring_samples_in_file(p, limit=limit) for p in resident_files),
+                        total=resident_total_samples,
                         visible=bool(resident_files),
                         info="starting...",
                     )
@@ -5260,6 +5354,9 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     finally:
         if temp_tag_stats_path and temp_tag_stats_path.exists():
             temp_tag_stats_path.unlink()
+        for _original, _input, temp_input_path in streaming_inputs:
+            if temp_input_path is not None and temp_input_path.exists():
+                temp_input_path.unlink()
 
     elapsed = time.time() - batch_start
 

@@ -63,13 +63,30 @@ def _single_dataset_root(run_root: Path) -> Path | None:
     return None
 
 
+def _looks_like_generated_run_file(input_path: Path) -> bool:
+    """Return True for standard run artifacts that should not be treated as mirrored sources."""
+    name = input_path.name
+    generated_prefixes = ("labeled", "scored", "stats_", "dashboard_", "summary_stats_")
+    generated_names = {
+        "conversation_scores.json",
+        "conversation_stats_labeling.json",
+        "monitor_value.jsonl",
+        "failed_value.jsonl",
+        "score_failures.jsonl",
+    }
+    return name.startswith(generated_prefixes) or name in generated_names
+
+
 def infer_inline_scoring_target(input_path) -> InlineScoringTarget | None:
     """Infer an inline mirrored run target from a run root, dataset root, or file path."""
     input_path = Path(input_path).resolve()
 
     if input_path.is_file():
         for ancestor in [input_path.parent, *input_path.parents]:
-            if not (ancestor / META_LABEL_DATA_DIRNAME).is_dir() and "_labeled_" not in ancestor.name:
+            has_meta_root = (ancestor / META_LABEL_DATA_DIRNAME).is_dir()
+            if not has_meta_root and "_labeled_" not in ancestor.name:
+                continue
+            if not has_meta_root and _looks_like_generated_run_file(input_path):
                 continue
             try:
                 rel = input_path.relative_to(ancestor)
