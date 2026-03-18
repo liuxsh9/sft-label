@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 import re
 import select
@@ -16,7 +17,6 @@ from sft_label.config import (
     DEFAULT_CONCURRENCY,
     DEFAULT_RPS_LIMIT,
     DEFAULT_RPS_WARMUP,
-    DEFAULT_SCORING_CONCURRENCY,
     MAX_RETRIES,
     REQUEST_TIMEOUT,
 )
@@ -199,6 +199,12 @@ WORKFLOWS = [
         label="校验 taxonomy / Validate taxonomy",
         description="校验 taxonomy 文件与一致性 / Validate taxonomy files and consistency",
         group="维护 / Maintenance",
+    ),
+    Workflow(
+        key="smart-resume",
+        label="智能续跑（中断恢复优先） / Smart resume (best first choice for interrupted runs)",
+        description="遇到中断/报错且不确定停在哪一阶段时，优先选这里 / If a run was interrupted and you're unsure which pass failed, start here",
+        group="恢复 / Recovery",
     ),
 ]
 
@@ -525,6 +531,103 @@ def _with_workflow_key(plan: LaunchPlan, workflow_key: str) -> LaunchPlan:
     return plan
 
 
+def _find_resume_checkpoint(run_dir: Path) -> Path | None:
+    candidates = (
+        run_dir / "checkpoint.json",
+        run_dir / "meta_label_data" / "checkpoint.json",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_resume_checkpoint(run_dir: Path) -> tuple[Path | None, dict | None]:
+    checkpoint_path = _find_resume_checkpoint(run_dir)
+    if checkpoint_path is None:
+        return None, None
+    try:
+        with open(checkpoint_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return checkpoint_path, None
+    return checkpoint_path, payload if isinstance(payload, dict) else None
+
+
+def _find_matching_artifacts(root: Path, stem_prefix: str) -> list[Path]:
+    patterns = (
+        f"{stem_prefix}*.json",
+        f"{stem_prefix}*.jsonl",
+        f"*/{stem_prefix}*.json",
+        f"*/{stem_prefix}*.jsonl",
+        f"**/{stem_prefix}*.json",
+        f"**/{stem_prefix}*.jsonl",
+    )
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            found.append(path)
+    return found
+
+
+def _score_command_for_input(target: Path, *, resume: bool) -> list[str]:
+    argv = ["score", "--concurrency", str(DEFAULT_CONCURRENCY), "--input", str(target)]
+    if resume:
+        argv.append("--resume")
+    return argv
+
+
+def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
+    if not target.exists():
+        raise ValueError(_msg(f"目录不存在：{target}", f"Path does not exist: {target}"))
+    if not target.is_dir():
+        raise ValueError(_msg(f"续跑目标必须是目录：{target}", f"Resume target must be a directory: {target}"))
+
+    checkpoint, checkpoint_payload = _load_resume_checkpoint(target)
+    labeled_files = _find_matching_artifacts(target, "labeled")
+    scored_files = _find_matching_artifacts(target, "scored")
+    checkpoint_status = (checkpoint_payload or {}).get("status")
+
+    if checkpoint is not None and checkpoint_status != "done":
+        return (
+            ["run", "--resume", str(target)],
+            _msg(
+                f"检测到 checkpoint：{checkpoint}，将继续一阶段/联跑任务。",
+                f"Detected checkpoint at {checkpoint}; resuming Pass 1 or chained run.",
+            ),
+        )
+
+    if labeled_files:
+        argv = _score_command_for_input(target, resume=bool(scored_files))
+        if scored_files:
+            return (
+                argv,
+                _msg(
+                    f"检测到 {len(labeled_files)} 个 labeled 文件和 {len(scored_files)} 个 scored 文件，将续跑二阶段并跳过已完成样本。",
+                    f"Detected {len(labeled_files)} labeled file(s) and {len(scored_files)} scored file(s); resuming Pass 2 and skipping completed samples.",
+                ),
+            )
+        return (
+            argv,
+            _msg(
+                f"检测到 {len(labeled_files)} 个 labeled 文件，未发现 scored 结果，将启动二阶段打分。",
+                f"Detected {len(labeled_files)} labeled file(s) and no scored outputs; starting Pass 2 scoring.",
+            ),
+        )
+
+    raise ValueError(
+        _msg(
+            "未检测到 checkpoint、labeled 或 scored 产物，请确认你输入的是 run 目录。",
+            "No checkpoint, labeled, or scored artifacts found. Please provide a run directory.",
+        )
+    )
+
+
 def build_launch_plan(
     input_fn: InputFn = interactive_input,
     output_fn: OutputFn = print,
@@ -537,6 +640,7 @@ def build_launch_plan(
     _say(output_fn, SECTION_DIVIDER)
     _say(output_fn, "交互式任务启动器 / Interactive task launcher")
     _say(output_fn, "请选择任务，并只填写必要参数 / Choose a workflow and fill only required options.")
+    _say(output_fn, "如果任务中断或报错，且不确定停在哪一阶段，请优先选择“智能续跑” / If a run was interrupted and you're unsure which pass failed, choose 'Smart resume' first.")
     _say(output_fn, "输入 b/back 可返回上一层，输入 0 可取消 / Type b/back to go back, 0 to cancel.")
     _say(output_fn, SECTION_DIVIDER)
     _say(output_fn, "")
@@ -589,6 +693,8 @@ def build_launch_plan(
                 return _with_workflow_key(_build_optimize_layout_plan(input_fn, output_fn), wf.key)
             if wf.key == "dashboard-service":
                 return _with_workflow_key(_build_dashboard_service_plan(input_fn, output_fn), wf.key)
+            if wf.key == "smart-resume":
+                return _with_workflow_key(_build_smart_resume_plan(input_fn, output_fn), wf.key)
             raise ValueError(f"Unknown workflow key: {wf.key}")
         except BackRequested:
             if input_fn is interactive_input:
@@ -596,6 +702,20 @@ def build_launch_plan(
             _say(output_fn, "")
             _say(output_fn, "已返回任务选择 / Returned to workflow selection.")
             _say(output_fn, "")
+
+
+def _build_smart_resume_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
+    _section(output_fn, "智能续跑 / Smart resume")
+    while True:
+        run_dir = Path(_ask_required_text(input_fn, "续跑目录 / Run directory to resume")).expanduser().resolve()
+        try:
+            argv, detection_message = _detect_smart_resume_command(run_dir)
+        except ValueError as exc:
+            _say(output_fn, str(exc))
+            continue
+        _say(output_fn, detection_message)
+        argv.extend(_ask_extra_flags(input_fn))
+        return LaunchPlan(argv=argv)
 
 
 def _build_run_plan(
@@ -953,10 +1073,9 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
                 key="concurrency",
                 label="LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
                 options=[
-                    SwitchOption("", _format_default_value(DEFAULT_SCORING_CONCURRENCY)),
+                    SwitchOption("100", _format_default_value(DEFAULT_CONCURRENCY)),
                     SwitchOption("0", "0"),
                     SwitchOption("50", "50"),
-                    SwitchOption("100", "100"),
                     SwitchOption("150", "150"),
                     SwitchOption("200", "200"),
                     SwitchOption("250", "250"),
@@ -964,7 +1083,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
                     SwitchOption("400", "400"),
                     SwitchOption("500", "500"),
                 ],
-                default_value="",
+                default_value="100",
             ),
             SwitchField(
                 key="rps_limit",
@@ -1224,7 +1343,7 @@ def _build_run_plan_legacy(
 
 
 def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["score"]
+    argv = ["score", "--concurrency", str(DEFAULT_CONCURRENCY)]
     env_overrides: dict[str, str] = {}
 
     _section(output_fn, "基础输入 / Basic input")

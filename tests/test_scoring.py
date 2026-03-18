@@ -703,6 +703,11 @@ class TestValidateScoreResponse:
         assert result is None
         assert "null response" in issues
 
+    def test_top_level_list_response(self):
+        result, issues = validate_score_response([{"complexity": {"overall": 5}}])
+        assert result is None
+        assert "response not a dict: list" in issues
+
     def test_out_of_range_scores(self):
         parsed = {
             "complexity": {"instruction": 0, "analytical_depth": 11, "implementation": 5, "overall": 5},

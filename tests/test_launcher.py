@@ -116,11 +116,90 @@ def test_build_score_plan_with_llm_env_override():
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
 
     assert plan is not None
-    assert plan.argv == ["score", "--input", "labeled.json"]
+    assert plan.argv == ["score", "--concurrency", "100", "--input", "labeled.json"]
     assert plan.env_overrides == {
         "LITELLM_BASE": "http://proxy/v1",
         "LITELLM_KEY": "secret",
     }
+
+
+def test_build_smart_resume_plan_routes_to_score_for_labeled_run_dir(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "16",              # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "100", "--input", str(tmp_path)]
+
+
+def test_build_smart_resume_plan_routes_to_resumed_score_when_scored_exists(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "16",              # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "100", "--input", str(tmp_path), "--resume"]
+
+
+def test_build_smart_resume_plan_routes_to_run_resume_when_checkpoint_exists(tmp_path):
+    (tmp_path / "checkpoint.json").write_text('{"status":"in_progress"}', encoding="utf-8")
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "16",              # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["run", "--resume", str(tmp_path)]
+
+
+def test_build_smart_resume_plan_checkpoint_done_routes_to_score(tmp_path):
+    (tmp_path / "checkpoint.json").write_text('{"status":"done"}', encoding="utf-8")
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "16",              # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "100", "--input", str(tmp_path)]
 
 
 def test_build_filter_plan_enforces_at_least_one_criterion():
@@ -311,8 +390,12 @@ def test_decode_utf8_input_byte_keeps_multibyte_chars():
     assert "".join(parts) == "中文路径"
 
 
-def test_all_workflows_generate_parseable_argv():
+def test_all_workflows_generate_parseable_argv(tmp_path):
     parser = build_parser()
+    smart_resume_dir = tmp_path / "smart_resume_run"
+    artifact_dir = smart_resume_dir / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
     workflow_answers = {
         # 1. run-pass1-pass2
         1: ["1", "data.json", "", "", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
@@ -344,6 +427,8 @@ def test_all_workflows_generate_parseable_argv():
         14: ["run_dir/", "out.jsonl", "", ""],
         # 15. export-review
         15: ["labeled.json", "review.csv", "", "", ""],
+        # 16. smart-resume
+        16: [str(smart_resume_dir), ""],
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -509,7 +594,8 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
     io = StubIO(["0"])
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
     assert plan is None
-    assert any("请选择任务编号 [0-15, 默认 1]：" in str(item) for item in io.outputs)
+    assert any("请选择任务编号 [0-16, 默认 1]：" in str(item) for item in io.outputs)
+    assert any("如果任务中断或报错" in str(item) and "智能续跑" in str(item) for item in io.outputs)
     assert not any("Select workflow number" in str(item) for item in io.outputs)
 
 
@@ -609,6 +695,8 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
     assert plan is not None
     assert plan.argv == [
         "score",
+        "--concurrency",
+        "100",
         "--input",
         "labeled.json",
         "--rarity-mode",

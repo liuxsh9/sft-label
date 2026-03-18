@@ -1238,6 +1238,8 @@ def validate_score_response(parsed):
     issues = []
     if parsed is None:
         return None, ["null response"]
+    if not isinstance(parsed, dict):
+        return None, [f"response not a dict: {type(parsed).__name__}"]
 
     result = {}
 
