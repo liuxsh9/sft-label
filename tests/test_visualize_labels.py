@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
 from sft_label.tools import visualize_labels as visualize_labels_module
 from sft_label.tools.dashboard_aggregation import infer_scope_turn_kind, infer_scope_turn_kind_from_path
+from sft_label.label_extensions_stats import build_extension_conversation_units
 from sft_label.tools.visualize_labels import compute_viz_data, generate_dashboard
 
 
@@ -91,6 +93,236 @@ def test_compute_viz_data_exposes_prompt_mode_budget():
     assert viz["overview"]["compact_prompt"] is True
     assert viz["overview"]["conversation_char_budget"] == 8000
     assert viz["overview"]["fewshot_variant"] == "compact"
+
+
+def test_compute_viz_data_includes_extension_stats():
+    samples = [
+        {
+            "id": "sample-1",
+            "conversations": [
+                {"from": "human", "value": "Design a UI form."},
+                {"from": "gpt", "value": "Sure."},
+            ],
+            "metadata": {"source_id": "conv-1", "source_file": "train.jsonl", "total_turns": 2},
+            "labels": {"intent": "build"},
+            "label_extensions": {
+                "ui_fine_labels": {
+                    "status": "success",
+                    "matched": True,
+                    "spec_version": "v1",
+                    "spec_hash": "sha256:abc",
+                    "labels": {"component_type": ["form"]},
+                    "confidence": {"component_type": 0.8},
+                    "unmapped": [{"dimension": "component_type", "value": "card"}],
+                }
+            },
+        },
+        {
+            "id": "sample-2",
+            "conversations": [
+                {"from": "human", "value": "Also include a modal."},
+                {"from": "gpt", "value": "Ok."},
+            ],
+            "metadata": {"source_id": "conv-1", "source_file": "train.jsonl", "total_turns": 2},
+            "labels": {"intent": "build"},
+            "label_extensions": {
+                "ui_fine_labels": {
+                    "status": "success",
+                    "matched": True,
+                    "spec_version": "v1",
+                    "spec_hash": "sha256:abc",
+                    "labels": {"component_type": ["modal"]},
+                    "confidence": {"component_type": 0.6},
+                    "unmapped": [],
+                }
+            },
+        },
+    ]
+    stats = {
+        "total_samples": 2,
+        "tag_distributions": {"intent": {"build": 2}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+
+    viz = compute_viz_data(samples, stats)
+
+    ext_sample = viz["extensions"]["modes"]["sample"]["extensions"]["ui_fine_labels"]
+    assert ext_sample["total"] == 2
+    assert ext_sample["matched"] == 2
+    assert ext_sample["summary"]["field_count"] == 1
+    assert ext_sample["summary"]["matched_rate"] == 1.0
+    assert ext_sample["status_counts"]["success"] == 2
+    assert ext_sample["labels"]["component_type"]["form"] == 1
+    assert ext_sample["labels"]["component_type"]["modal"] == 1
+    assert ext_sample["confidence_stats"]["component_type"]["below_threshold"] == 1
+    assert ext_sample["unmapped_details"]["total_occurrences"] == 1
+
+    ext_conv = viz["extensions"]["modes"]["conversation"]["extensions"]["ui_fine_labels"]
+    assert ext_conv["total"] == 1
+    assert ext_conv["labels"]["component_type"]["form"] == 1
+    assert ext_conv["labels"]["component_type"]["modal"] == 1
+
+
+def test_compute_viz_data_uses_stats_extension_payload_without_samples():
+    stats = {
+        "total_samples": 2,
+        "tag_distributions": {"intent": {"build": 2}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+        "extension_stats": {
+            "specs": {
+                "ui_fine_labels": {
+                    "spec_version": "v1",
+                    "spec_hash": "sha256:abc",
+                    "total": 2,
+                    "matched": 2,
+                    "status_counts": {"success": 2},
+                    "field_distributions": {"component_type": {"form": 1, "modal": 1}},
+                    "confidence_stats": {"component_type": {"mean": 0.7, "min": 0.6, "max": 0.8, "count": 2}},
+                    "unmapped_counts": {"component_type:card": 1},
+                }
+            }
+        },
+    }
+
+    viz = compute_viz_data([], stats)
+
+    ext_sample = viz["extensions"]["modes"]["sample"]["extensions"]["ui_fine_labels"]
+    assert ext_sample["total"] == 2
+    assert ext_sample["summary"]["field_count"] == 1
+    assert ext_sample["labels"]["component_type"]["form"] == 1
+    assert viz["extensions"]["extensions"]["ui_fine_labels"]["status_counts"]["success"] == 2
+
+
+def test_compute_viz_data_preserves_extension_config_metadata():
+    stats = {
+        "total_samples": 2,
+        "tag_distributions": {"intent": {"build": 2}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+        "extension_stats": {
+            "specs": {
+                "ui_fine_labels": {
+                    "spec_version": "v1",
+                    "spec_hash": "sha256:abc",
+                    "total": 2,
+                    "matched": 2,
+                    "status_counts": {"success": 2},
+                    "field_distributions": {"component_type": {"form": 1, "modal": 1}},
+                    "confidence_stats": {},
+                    "unmapped_counts": {},
+                    "config": {
+                        "display_name": "UI Fine Labels",
+                        "description": "Fine-grained UI tags for frontend samples.",
+                        "source": "extensions/ui_fine_labels.yaml",
+                        "prompt": "Label the UI sample with detailed frontend tags.",
+                        "schema": {
+                            "component_type": {
+                                "type": "multi_enum",
+                                "description": "Main UI component types.",
+                                "options": ["form", "modal", "table"],
+                                "option_count": 3,
+                            }
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    viz = compute_viz_data([], stats)
+
+    ext_sample = viz["extensions"]["modes"]["sample"]["extensions"]["ui_fine_labels"]
+    assert ext_sample["config"]["display_name"] == "UI Fine Labels"
+    assert ext_sample["config"]["prompt"] == "Label the UI sample with detailed frontend tags."
+    assert ext_sample["config"]["schema"]["component_type"]["option_count"] == 3
+
+
+def test_dashboard_js_moves_extension_section_before_pool_coverage():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    ext_pos = script.index("sections.push(extensionSection)")
+    pool_pos = script.index('section(t("pool_coverage")')
+
+    assert ext_pos < pool_pos
+
+
+def test_dashboard_js_contains_extension_drilldown_hook():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert "data-extension-drilldown" in script
+    assert "buttonDataAttr: rankOptions.buttonDataAttr" in script
+
+
+def test_dashboard_js_scrolls_to_explorer_for_extension_drilldown():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert "scrollExplorerIntoView" in script
+    assert 'node.hasAttribute("data-extension-drilldown")' in script
+    assert "scrollIntoView" in script
+
+
+def test_dashboard_js_contains_explorer_active_filter_chips():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert "renderExplorerActiveFilters" in script
+    assert "data-explorer-remove-tag" in script
+    assert "formatExplorerQueryToken" in script
+
+
+def test_dashboard_js_renders_extension_tags_inside_explorer_results():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert "row.extension_tags" in script
+    assert "preview-tag extension-tag" in script
+
+
+def test_dashboard_js_contains_extension_config_and_inspect_hooks():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert "extension_prompt" in script
+    assert "extension_schema" in script
+    assert "inspect_matched_samples" in script
+    assert "extid:" in script
+    assert "extfield:" in script
+
+
+def test_dashboard_js_renders_extension_payloads_in_drawer():
+    script = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert "detail.label_extensions" in script
+    assert "renderDrawerExtensionPayloads" in script
+
+
+def test_extension_conversation_units_keep_standalone_samples():
+    samples = [
+        {
+            "id": "standalone-1",
+            "conversations": [{"from": "human", "value": "Build a modal."}],
+            "metadata": {},
+            "label_extensions": {
+                "ui_fine_labels": {
+                    "status": "success",
+                    "matched": True,
+                    "spec_version": "v1",
+                    "spec_hash": "sha256:abc",
+                    "labels": {"component_type": ["modal"]},
+                    "confidence": {},
+                    "unmapped": [],
+                }
+            },
+        }
+    ]
+
+    units = build_extension_conversation_units(samples)
+
+    assert len(units) == 1
+    assert units[0]["id"] == "standalone-1"
+    assert units[0]["label_extensions"]["ui_fine_labels"]["labels"]["component_type"] == ["modal"]
 
 
 def test_generate_dashboard_renders_unmapped_section(tmp_path):

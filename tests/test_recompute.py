@@ -364,6 +364,45 @@ class TestRecomputePass1Stats:
         assert stats["success"] == 1
         assert stats["failed"] == 1
 
+    def test_extension_stats_aggregated_from_samples(self):
+        base = _make_labeled_sample("a", intent="build")
+        base["labels"]["label_extensions"] = {
+            "ui_fine_labels": {
+                "status": "success",
+                "matched": True,
+                "spec_version": "v1",
+                "spec_hash": "sha256:ui-v1",
+                "labels": {"component_type": ["form", "modal"], "visual_complexity": "high"},
+                "confidence": {"component_type": 0.8},
+                "unmapped": [{"dimension": "component_type", "value": "unknown"}],
+            }
+        }
+        inline = _make_labeled_sample("b", intent="build")
+        inline["label_extensions"] = {
+            "ui_fine_labels": {
+                "status": "skipped",
+                "matched": False,
+                "spec_version": "v1",
+                "spec_hash": "sha256:ui-v1",
+                "labels": {},
+                "confidence": {},
+                "unmapped": [],
+            }
+        }
+
+        stats = recompute_stats_from_labeled([base, inline])
+        spec_stats = stats["extension_stats"]["specs"]["ui_fine_labels"]
+
+        assert spec_stats["total"] == 2
+        assert spec_stats["matched"] == 1
+        assert spec_stats["status_counts"]["success"] == 1
+        assert spec_stats["status_counts"]["skipped"] == 1
+        assert spec_stats["field_distributions"]["component_type"]["form"] == 1
+        assert spec_stats["field_distributions"]["component_type"]["modal"] == 1
+        assert spec_stats["field_distributions"]["visual_complexity"]["high"] == 1
+        assert spec_stats["confidence_stats"]["component_type"]["count"] == 1
+        assert spec_stats["unmapped_counts"]["component_type:unknown"] == 1
+
 
 # ─── Test recompute_value_stats_from_scored ──────────────
 

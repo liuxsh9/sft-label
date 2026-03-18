@@ -14,6 +14,7 @@ from sft_label.conversation import (
     group_by_conversation,
     is_conversation_object,
 )
+from sft_label.label_extensions_stats import build_extension_dashboard_payload
 from sft_label.labels import is_usable_labels
 from sft_label.prompts import TAG_POOLS
 from sft_label.score_confidence import score_confidence
@@ -593,6 +594,9 @@ def build_pass1_viz(samples: list[dict], stats: dict) -> dict:
         "sample": sample_mode,
         "conversation": conversation_mode,
     }
+    extension_payload = build_extension_dashboard_payload(samples, extension_stats=stats.get("extension_stats"))
+    if extension_payload:
+        payload["extensions"] = extension_payload
     return payload
 
 
@@ -1151,6 +1155,22 @@ def _trim_unmapped_examples(mode: dict, example_limit: int = 1) -> dict:
     return mode
 
 
+def _trim_extension_examples(bucket: dict, example_limit: int = 1) -> dict:
+    if not isinstance(bucket, dict):
+        return bucket
+    for mode_payload in (bucket.get("modes") or {}).values():
+        if not isinstance(mode_payload, dict):
+            continue
+        for ext_payload in (mode_payload.get("extensions") or {}).values():
+            details = (ext_payload.get("unmapped_details") or {}).get("by_dimension") or {}
+            for rows in details.values():
+                for row in rows or []:
+                    examples = row.get("examples")
+                    if isinstance(examples, list):
+                        row["examples"] = examples[:example_limit]
+    return bucket
+
+
 def _export_dashboard_bucket(bucket: dict | None) -> dict | None:
     if not bucket:
         return None
@@ -1164,7 +1184,16 @@ def _export_dashboard_bucket(bucket: dict | None) -> dict | None:
             if key != "conf_matrix"
         }
         exported_modes[mode_name] = _round_numbers(_trim_unmapped_examples(cleaned))
-    return {"modes": exported_modes} if exported_modes else None
+    extensions = bucket.get("extensions")
+    exported_extensions = None
+    if isinstance(extensions, dict):
+        exported_extensions = _round_numbers(_trim_extension_examples(dict(extensions)))
+    if not exported_modes and not exported_extensions:
+        return None
+    payload = {"modes": exported_modes} if exported_modes else {}
+    if exported_extensions:
+        payload["extensions"] = exported_extensions
+    return payload
 
 
 def build_scope_detail_payload(scope: dict) -> dict:

@@ -225,6 +225,198 @@ def _build_inherit_map(samples):
     return inherit_map
 
 
+def _extract_extension_payloads(sample: dict) -> dict[str, dict]:
+    """Return extension payloads from either inline or legacy storage."""
+    if isinstance(sample.get("label_extensions"), dict):
+        return sample["label_extensions"]
+    labels = sample.get("labels") or {}
+    if isinstance(labels.get("label_extensions"), dict):
+        return labels["label_extensions"]
+    return {}
+
+
+def _accumulate_confidence_stat(acc: dict, field: str, score: float) -> None:
+    stats = acc.setdefault(field, {"sum": 0.0, "min": score, "max": score, "count": 0})
+    stats["sum"] += float(score)
+    stats["count"] += 1
+    stats["min"] = min(stats["min"], float(score))
+    stats["max"] = max(stats["max"], float(score))
+
+
+def _accumulate_confidence_bulk(
+    acc: dict,
+    field: str,
+    *,
+    mean: float,
+    count: int,
+    min_val: float,
+    max_val: float,
+) -> None:
+    if count <= 0:
+        return
+    stats = acc.setdefault(field, {"sum": 0.0, "min": min_val, "max": max_val, "count": 0})
+    stats["sum"] += float(mean) * count
+    stats["count"] += count
+    stats["min"] = min(stats["min"], float(min_val))
+    stats["max"] = max(stats["max"], float(max_val))
+
+
+def _finalize_confidence_stats(acc: dict) -> dict[str, dict]:
+    finalized = {}
+    for field, stats in acc.items():
+        count = stats.get("count", 0) or 0
+        if count <= 0:
+            continue
+        finalized[field] = {
+            "mean": round(stats["sum"] / count, 3),
+            "min": round(stats["min"], 3),
+            "max": round(stats["max"], 3),
+            "count": count,
+        }
+    return finalized
+
+
+def _aggregate_extension_stats(samples: list[dict]) -> dict | None:
+    specs: dict[str, dict] = {}
+    confidence_acc: dict[str, dict] = {}
+
+    for sample in samples:
+        payloads = _extract_extension_payloads(sample)
+        if not payloads:
+            continue
+        for spec_id, payload in payloads.items():
+            if not isinstance(payload, dict):
+                continue
+            spec_stats = specs.setdefault(
+                spec_id,
+                {
+                    "spec_version": payload.get("spec_version"),
+                    "spec_hash": payload.get("spec_hash"),
+                    "total": 0,
+                    "matched": 0,
+                    "status_counts": {},
+                    "field_distributions": {},
+                    "confidence_stats": {},
+                    "unmapped_counts": {},
+                },
+            )
+            if not spec_stats.get("spec_version") and payload.get("spec_version"):
+                spec_stats["spec_version"] = payload.get("spec_version")
+            if not spec_stats.get("spec_hash") and payload.get("spec_hash"):
+                spec_stats["spec_hash"] = payload.get("spec_hash")
+
+            spec_stats["total"] += 1
+            if payload.get("matched") is True:
+                spec_stats["matched"] += 1
+
+            status = payload.get("status") or "unknown"
+            spec_stats["status_counts"][status] = spec_stats["status_counts"].get(status, 0) + 1
+
+            labels = payload.get("labels") or {}
+            if isinstance(labels, dict):
+                for field, value in labels.items():
+                    dist = spec_stats["field_distributions"].setdefault(field, {})
+                    if isinstance(value, list):
+                        for item in value:
+                            if item:
+                                dist[item] = dist.get(item, 0) + 1
+                    elif value:
+                        dist[value] = dist.get(value, 0) + 1
+
+            confidence = payload.get("confidence") or {}
+            if isinstance(confidence, dict):
+                spec_conf_acc = confidence_acc.setdefault(spec_id, {})
+                for field, score in confidence.items():
+                    if isinstance(score, (int, float)):
+                        _accumulate_confidence_stat(spec_conf_acc, field, float(score))
+
+            unmapped = payload.get("unmapped") or []
+            if isinstance(unmapped, list):
+                for item in unmapped:
+                    if isinstance(item, dict):
+                        dim = str(item.get("dimension", "unknown"))
+                        value = str(item.get("value", "?"))
+                        key = f"{dim}:{value}"
+                    else:
+                        key = str(item)
+                    spec_stats["unmapped_counts"][key] = spec_stats["unmapped_counts"].get(key, 0) + 1
+
+    for spec_id, acc in confidence_acc.items():
+        specs[spec_id]["confidence_stats"] = _finalize_confidence_stats(acc)
+
+    if not specs:
+        return None
+    return {"specs": specs}
+
+
+def _merge_extension_stats(stats_list: list[dict]) -> dict | None:
+    specs: dict[str, dict] = {}
+    confidence_acc: dict[str, dict] = {}
+
+    for stats in stats_list:
+        extension_stats = stats.get("extension_stats") or {}
+        for spec_id, spec in (extension_stats.get("specs") or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            merged = specs.setdefault(
+                spec_id,
+                {
+                    "spec_version": spec.get("spec_version"),
+                    "spec_hash": spec.get("spec_hash"),
+                    "total": 0,
+                    "matched": 0,
+                    "status_counts": {},
+                    "field_distributions": {},
+                    "confidence_stats": {},
+                    "unmapped_counts": {},
+                },
+            )
+            if not merged.get("spec_version") and spec.get("spec_version"):
+                merged["spec_version"] = spec.get("spec_version")
+            if not merged.get("spec_hash") and spec.get("spec_hash"):
+                merged["spec_hash"] = spec.get("spec_hash")
+
+            merged["total"] += int(spec.get("total", 0) or 0)
+            merged["matched"] += int(spec.get("matched", 0) or 0)
+
+            for status, count in (spec.get("status_counts") or {}).items():
+                merged["status_counts"][status] = merged["status_counts"].get(status, 0) + int(count or 0)
+
+            for field, dist in (spec.get("field_distributions") or {}).items():
+                merged_dist = merged["field_distributions"].setdefault(field, {})
+                for value, count in (dist or {}).items():
+                    merged_dist[value] = merged_dist.get(value, 0) + int(count or 0)
+
+            for key, count in (spec.get("unmapped_counts") or {}).items():
+                merged["unmapped_counts"][key] = merged["unmapped_counts"].get(key, 0) + int(count or 0)
+
+            for field, conf in (spec.get("confidence_stats") or {}).items():
+                if not isinstance(conf, dict):
+                    continue
+                count = int(conf.get("count", 0) or 0)
+                if count <= 0:
+                    continue
+                mean = float(conf.get("mean", 0.0) or 0.0)
+                min_val = float(conf.get("min", mean))
+                max_val = float(conf.get("max", mean))
+                spec_conf_acc = confidence_acc.setdefault(spec_id, {})
+                _accumulate_confidence_bulk(
+                    spec_conf_acc,
+                    field,
+                    mean=mean,
+                    count=count,
+                    min_val=min_val,
+                    max_val=max_val,
+                )
+
+    for spec_id, acc in confidence_acc.items():
+        specs[spec_id]["confidence_stats"] = _finalize_confidence_stats(acc)
+
+    if not specs:
+        return None
+    return {"specs": specs}
+
+
 def recompute_stats_from_labeled(samples):
     """Rebuild Pass 1 stats content from labeled output samples.
 
@@ -250,6 +442,10 @@ def recompute_stats_from_labeled(samples):
     stats["total_prompt_tokens"] = 0
     stats["total_completion_tokens"] = 0
     stats["total_tokens"] = 0
+
+    extension_stats = _aggregate_extension_stats(samples)
+    if extension_stats:
+        stats["extension_stats"] = extension_stats
 
     return stats
 
@@ -980,7 +1176,7 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 }
 
             ordered_results = []
-            if p1_workers > 1 and len(labeled_files) > 1:
+            if p1_workers > 1 and len(pass1_files) > 1:
                 done = 0
                 results_by_idx = {}
                 with ThreadPoolExecutor(max_workers=p1_workers) as pool:
@@ -1025,6 +1221,9 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 summary = merge_stats(all_pass1_stats)
                 summary["recomputed"] = True
                 summary["recomputed_at"] = datetime.now().isoformat()
+                extension_stats = _merge_extension_stats(all_pass1_stats)
+                if extension_stats:
+                    summary["extension_stats"] = extension_stats
                 summary_path = out_dir / PASS1_SUMMARY_STATS_FILE
                 _write_json(summary_path, summary)
                 written["summary_stats"] = str(summary_path)

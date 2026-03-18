@@ -11,6 +11,7 @@
 `sft-label` is designed for real labeling/curation workflows instead of one-off tagging.
 
 - **Pass 1 – labeling:** assign a 9-dimension taxonomy to each sample
+- **Pass 1 extensions (optional):** add spec-driven fine-grained tags
 - **Pass 2 – scoring:** estimate training value with complexity / quality / reasoning / rarity
 - **Pass 2.5 – conversation aggregation:** compute conversation-level metrics for multi-turn data
 - **Pass 3 – semantic clustering:** deduplicate long trajectories and keep representative windows
@@ -202,6 +203,92 @@ If `dashboard-service start`, `dashboard-service restart`, or the interactive la
 
 For production-style hosting, there is also a PM2-backed service mode. See [Output files and dashboards](docs/guides/output-files-and-dashboards.md).
 
+## Recommended practices for extension labeling
+
+If you want domain-specific labels on top of the core 9-dimension Pass 1 taxonomy, use **label extensions** with a `prompt + explicit schema` contract.
+
+Recommended rollout:
+
+1. **Start minimal** — begin with a small schema that is easy to review manually.
+2. **Verify trigger quality first** — make sure only the intended samples match.
+3. **Then add richer fields** — expand schema granularity only after the first version is stable.
+4. **Keep multiple extensions separate** — use repeated `--label-extension` flags instead of overloading one spec.
+
+Bundled examples:
+
+- Minimal starter: `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
+- Richer UI example: `docs/examples/extensions/ui_fine_labels_v1.yaml`
+
+Typical commands:
+
+```bash
+# minimal first rollout
+uv run sft-label run \
+  --input data.jsonl \
+  --label-extension docs/examples/extensions/ui_fine_labels_minimal_v1.yaml
+
+# richer UI extension
+uv run sft-label run \
+  --input data.jsonl \
+  --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+
+# multiple extensions side by side
+uv run sft-label run \
+  --input data.jsonl \
+  --label-extension docs/examples/extensions/ui_fine_labels_minimal_v1.yaml \
+  --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+
+# export review CSV with extension columns
+uv run sft-label export-review \
+  --input <run_dir> \
+  --output review.csv \
+  --include-extensions
+```
+
+Best practice:
+
+- keep each extension focused on one domain,
+- make field ids stable and dashboard-friendly,
+- prefer enum / multi-enum fields with clear option IDs,
+- review dashboard distributions before widening the schema.
+
+### First run checklist
+
+1.  Run one minimal spec (e.g., `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`) against a small sample and confirm the extension appears in the dashboard.
+2.  Check that only the intended rows match the trigger so you can trust `matched` counts.
+3.  Inspect `label_extensions.<spec_id>` payload for a few samples in the drawer to make sure the JSON is valid and fields align with the schema.
+4.  Rerun `uv run sft-label export-review --include-extensions` on that subset to see the columns you plan to publish.
+5.  Once the minimal spec looks stable, add richer fields or a second extension.
+
+### Recommended spec size
+
+- Aim for **≤ 5 fields** per extension to keep the review surface manageable.
+- Keep the total number of enum options per field in the low double digits; more than ~20 options usually signals a field that should be split or simplified.
+- Treat prompt text as a resource: a good prompt+schema serialization stays under ~2,000 characters, which leaves plenty of headroom under the compact budget.
+- If a prompt is longer than that, shorten the instructions, trim examples, or split the logic into multiple specs.
+
+### Compact-mode guidance
+
+1.  The compact conversation budget is 8,000 characters; we do not enforce it, but a single extension’s prompt+schema should stay under ~2,000 characters to avoid hitting payload limits.
+2.  After you enable compact mode, print the current prompt length, schema summary, and the soft recommendation above before the run so you can adjust if anything looks bloated.
+3.  Long prompts or large schemas should be handled by either trimming prose, limiting options, or moving parts of the classification to a separate extension.
+
+### Validation checklist
+
+Before trusting the extension results, confirm:
+- Trigger hit rate matches expectations (compare `matched` vs. `skipped` in `stats_labeling.json`).
+- Per-field distributions show the values you expect instead of a single dominant option.
+- Low-confidence values and unmapped entries stay within acceptable bounds for your domain.
+- The dashboard drill-down returns the samples you care about so you can spot-check 10–20 rows manually.
+- Exported review CSV columns include the extension fields so downstream reviewers can read the labels.
+
+### When to split into multiple extensions
+
+- The domain shifts (e.g., mobile vs. web vs. infra) or the prompt logic has distinct responsibilities.
+- One spec would otherwise contain more than ~5 fields, >20 options per field, or a prompt that would exceed the recommended prompt+schema length.
+- You want different trigger rules or sampling strategies per extension so you can enable/disable them independently.
+- You need to measure adoption per schema; separate specs keep stats isolated.
+
 ## Common next steps
 
 ```bash
@@ -224,6 +311,7 @@ More copy-paste recipes: [Common workflows](docs/guides/common-workflows.md).
 
 - [Getting started](docs/guides/getting-started.md)
 - [How sft-label works](docs/guides/how-sft-label-works.md)
+- [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md)
 - [Interactive launcher guide](docs/guides/interactive-launcher.md)
 - [Adaptive LLM runtime](docs/guides/adaptive-llm-runtime.md)
 - [Output files and dashboards](docs/guides/output-files-and-dashboards.md)

@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 
 from sft_label.artifacts import PASS2_STATS_FILE, PASS2_SUMMARY_STATS_FILE
+from sft_label.artifacts import PASS1_STATS_FILE
+from sft_label.tools.visualize_labels import generate_dashboard
 from sft_label.tools.visualize_value import generate_value_dashboard
 
 
@@ -218,3 +220,65 @@ def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Pa
     assert detail["conversation"]["mean_conv_value"] == 6.5
     explorer_dir = data_dir / "explorer"
     assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
+
+
+def test_generate_label_dashboard_preview_assets_include_extension_tags(tmp_path: Path) -> None:
+    sample = {
+        "id": "sample-1",
+        "conversations": [
+            {"from": "human", "value": "Build a modal form UI."},
+            {"from": "gpt", "value": "Sure."},
+        ],
+        "metadata": {
+            "source_file": "train.jsonl",
+            "source_id": "conv-1",
+            "thinking_mode": "fast",
+        },
+        "labels": {
+            "intent": "build",
+            "language": ["typescript"],
+            "task": ["feature-implementation"],
+            "difficulty": "intermediate",
+            "context": "single-file",
+        },
+        "label_extensions": {
+            "ui_fine_labels": {
+                "status": "success",
+                "matched": True,
+                "spec_version": "v1",
+                "spec_hash": "sha256:abc",
+                "labels": {
+                    "component_type": ["form", "modal"],
+                    "visual_complexity": "medium",
+                },
+                "confidence": {},
+                "unmapped": [],
+            }
+        },
+    }
+    _write_json(tmp_path / "labeled.json", [sample])
+    _write_json(
+        tmp_path / PASS1_STATS_FILE,
+        {
+            "input_file": "train.jsonl",
+            "total_samples": 1,
+            "success_rate": 1.0,
+            "total_tokens": 10,
+            "arbitrated_rate": 0.0,
+            "tag_distributions": {"intent": {"build": 1}},
+            "confidence_stats": {},
+            "cross_matrix": {},
+            "unmapped_tags": {},
+        },
+    )
+
+    dashboard_path = generate_dashboard(tmp_path, labeled_file="labeled.json")
+    data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
+    preview_asset = next(path for path in (data_dir / "explorer").iterdir() if path.name.startswith("preview_"))
+    preview_text = preview_asset.read_text(encoding="utf-8")
+
+    assert '"extension_tags":' in preview_text
+    assert 'extid:ui_fine_labels' in preview_text
+    assert 'extfield:ui_fine_labels:component_type' in preview_text
+    assert 'ext:ui_fine_labels:component_type:form' in preview_text
+    assert 'ext:ui_fine_labels:visual_complexity:medium' in preview_text

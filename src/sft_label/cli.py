@@ -42,6 +42,11 @@ from sft_label.dashboard_service import (
     stop_dashboard_service,
     update_dashboard_service_port,
 )
+from sft_label.label_extensions_guidance import (
+    COMPACT_EXTENSION_RECOMMENDED_CHARS,
+    summarize_extension_specs,
+)
+from sft_label.label_extensions_schema import load_extension_specs
 from sft_label.progress_heartbeat import run_with_heartbeat
 
 
@@ -69,6 +74,59 @@ def _format_start_env_lines(env_overrides: dict[str, str]) -> list[str]:
         shown = _mask_secret(value) if _is_sensitive_env_key(key) else value
         lines.append(f"  {key}={shown}")
     return lines
+
+
+def _print_extension_preflight(specs, *, prompt_mode: str) -> None:
+    if not specs:
+        return
+    summaries = summarize_extension_specs(specs)
+    print("\nExtension preflight")
+    print("-" * 56)
+    print(
+        "Current prompt mode: "
+        f"{prompt_mode}. Compact-friendly guidance: keep prompt+schema <= {COMPACT_EXTENSION_RECOMMENDED_CHARS} chars per extension."
+    )
+    print("Recommended first run: start with one extension and validate on a small sample (limit=10/50).")
+    for summary in summaries:
+        status = "OK" if summary["compact_within_recommendation"] else "WARN"
+        trigger = "yes" if summary["has_trigger"] else "no"
+        name = summary["display_name"] or summary["id"]
+        print(
+            f"  - {name} ({summary['id']}) | fields={summary['field_count']} | options={summary['option_count']} "
+            f"| trigger={trigger} | prompt={summary['prompt_chars']} chars | schema≈{summary['schema_chars']} chars "
+            f"| prompt+schema≈{summary['prompt_schema_chars']} chars | compact<={COMPACT_EXTENSION_RECOMMENDED_CHARS}: {status}"
+        )
+        if "triggerless" in summary["warnings"]:
+            print("    advisory: no trigger configured; this extension may run on a broader set of samples.")
+        if "compact_over_budget" in summary["warnings"]:
+            print("    advisory: consider shortening the prompt, reducing schema size, or splitting this spec.")
+    print("-" * 56)
+
+
+def _print_extension_followup(stats: dict | None, run_dir: str | None) -> None:
+    extension_stats = (stats or {}).get("extension_stats") or {}
+    specs = (extension_stats.get("specs") or {}) if isinstance(extension_stats, dict) else {}
+    if not specs:
+        return
+    print("\nExtension follow-up")
+    print("-" * 56)
+    for ext_id, spec in sorted(specs.items()):
+        total = int((spec or {}).get("total", 0) or 0)
+        matched = int((spec or {}).get("matched", 0) or 0)
+        statuses = ", ".join(
+            f"{key} ({int(value or 0)})"
+            for key, value in sorted(((spec or {}).get("status_counts") or {}).items())
+            if int(value or 0) > 0
+        ) or "none"
+        unmapped_total = sum(int(value or 0) for value in (((spec or {}).get("unmapped_counts") or {}).values()))
+        print(f"  - {ext_id}: matched {matched} / {total} | statuses: {statuses} | unmapped={unmapped_total}")
+    if run_dir:
+        print(f"Open the dashboard and inspect extension panels under: {run_dir}")
+        print(f"Review export with extensions: uv run sft-label export-review --input {run_dir} --include-extensions")
+    else:
+        print("Open the generated dashboard and inspect extension panels, then export review with --include-extensions if needed.")
+    print("First-run checklist: verify trigger scope, inspect 10-20 matched samples, and check low-confidence / unmapped values before scaling up.")
+    print("-" * 56)
 
 
 def _dashboard_start_msg(lang: str, zh: str, en: str) -> str:
@@ -543,6 +601,8 @@ def _estimate_end_to_end_llm_calls(args, config):
     from sft_label.inline_scoring import infer_inline_scoring_target
     from sft_label.scoring import ScoringDirectoryWorkloadEstimate
 
+    spec_count = len(config.extension_spec_paths or [])
+
     inline_target = infer_inline_scoring_target(input_path)
     if inline_target is not None and input_path.is_dir() and input_path == inline_target.layout.run_root:
         input_path = inline_target.layout.dataset_root
@@ -553,6 +613,12 @@ def _estimate_end_to_end_llm_calls(args, config):
             migration_index, _stats = load_inline_migration_index(args.migrate_from)
         except (FileNotFoundError, ValueError):
             return None
+
+    pass1_labeled = 0
+    pass1_calls = 0
+    pass2_samples = 0
+    pass1_workload_estimate = None
+    pass2_workload_estimate = None
 
     if input_path.is_dir():
         files = discover_input_files(input_path)
@@ -613,16 +679,18 @@ def _estimate_end_to_end_llm_calls(args, config):
         baseline = pass1_labeled * 2
         calls_per_sample = 2.2 if not args.no_arbitration else 2.0
         pass1_calls = max(int(round(pass1_labeled * calls_per_sample)), baseline)
-        pass1_workload_estimate = None
-        pass2_workload_estimate = None
 
+    pass1_extension_calls = pass1_labeled * spec_count
     pass2_calls = _estimate_pass2_calls(pass2_samples, config.sample_max_retries)
+    total_est_calls = pass1_calls + pass1_extension_calls + pass2_calls
+
     return {
         "pass1_labeled_samples": pass1_labeled,
         "pass2_samples": pass2_samples,
         "pass1_est_calls": pass1_calls,
         "pass2_est_calls": pass2_calls,
-        "total_est_calls": pass1_calls + pass2_calls,
+        "pass1_extension_calls": pass1_extension_calls,
+        "total_est_calls": total_est_calls,
         "pass1_workload_estimate": pass1_workload_estimate,
         "pass2_workload_estimate": pass2_workload_estimate,
     }
@@ -657,6 +725,13 @@ def cmd_run(args):
     if args.model:
         config.labeling_model = args.model
         config.scoring_model = args.model
+    config.extension_spec_paths = args.label_extension or []
+    if config.extension_spec_paths:
+        config.extension_specs = load_extension_specs(config.extension_spec_paths)
+    else:
+        config.extension_specs = []
+    setattr(config, "label_extension_specs", config.extension_specs)
+    _print_extension_preflight(config.extension_specs, prompt_mode=args.prompt_mode)
 
     llm_progress_cb = None
     global_tracker = None
@@ -671,10 +746,12 @@ def cmd_run(args):
             global_tracker = _CombinedLLMProgressTracker(plan["total_est_calls"])
             precomputed_workload_estimate = plan.get("pass1_workload_estimate")
             precomputed_scoring_workload_estimate = plan.get("pass2_workload_estimate")
+            ext_calls = plan.get("pass1_extension_calls", 0)
+            ext_segment = f" + ext~{ext_calls}" if ext_calls else ""
             print(
                 "Run plan | "
                 f"llm~{plan['total_est_calls']} = "
-                f"p1~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled) + "
+                f"p1~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled){ext_segment} + "
                 f"p2~{plan['pass2_est_calls']} ({plan['pass2_samples']} samples)"
             )
             llm_progress_cb = global_tracker.update
@@ -743,6 +820,7 @@ def cmd_run(args):
         run_dir = stats.get("run_dir")
     if not run_dir and isinstance(score_summary, dict):
         run_dir = score_summary.get("run_dir")
+    _print_extension_followup(stats if isinstance(stats, dict) else None, run_dir)
     return {
         "command": "run",
         "run_dir": run_dir,
@@ -780,6 +858,8 @@ def cmd_export_review(args):
         patched.extend(["--monitor", args.monitor])
     if args.output_format:
         patched.extend(["--format", args.output_format])
+    if getattr(args, "include_extensions", False):
+        patched.append("--include-extensions")
     sys.argv = patched
     try:
         export_main()
@@ -1406,8 +1486,8 @@ def build_parser():
                             choices=["absolute", "percentile"],
                             help="Rarity normalization mode for Pass 2 (used with --score)")
     run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
-                            default="full",
-                            help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
+                            default="compact",
+                            help="Prompt mode: 'full' or 'compact' (default: compact). Compact uses smaller payloads; for extension labeling, keep each prompt+schema compact-friendly when possible.")
     run_parser.add_argument("--model", type=str, default=None,
                             help="LLM model name (default: gpt-4o-mini)")
     run_parser.add_argument("--concurrency", type=int, default=None,
@@ -1428,6 +1508,8 @@ def build_parser():
     run_parser.add_argument("--recovery-sweep", action=argparse.BooleanOptionalAction,
                             default=None,
                             help="Retry infra-failed samples once before finalizing each stage (default: on)")
+    run_parser.add_argument("--label-extension", action="append", default=None,
+                            help="Path to a label extension spec (YAML/JSON). Repeatable; each spec should use a unique id and multiple specs run independently.")
 
     # --- validate ---
     subparsers.add_parser("validate", help="Validate taxonomy definitions")
@@ -1455,8 +1537,8 @@ def build_parser():
     score_parser.add_argument("--resume", action="store_true",
                                help="Resume scoring: skip samples already in scored.jsonl")
     score_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
-                               default="full",
-                               help="Prompt mode: 'full' (all few-shots) or 'compact' (reduced for small payloads)")
+                               default="compact",
+                               help="Prompt mode: 'full' or 'compact' (default: compact). Compact uses smaller payloads for size-limited endpoints.")
     score_parser.add_argument("--model", type=str, default=None,
                                help="LLM model name (default: gpt-4o-mini)")
     score_parser.add_argument("--concurrency", type=int, default=None,
@@ -1628,6 +1710,8 @@ def build_parser():
     review_parser.add_argument("--format", choices=["csv", "tsv"], default=None,
                                dest="output_format",
                                help="Output format override (default: infer from extension)")
+    review_parser.add_argument("--include-extensions", action="store_true",
+                               help="Include flattened label extension columns in the review export")
 
     # --- filter ---
     filter_parser = subparsers.add_parser(

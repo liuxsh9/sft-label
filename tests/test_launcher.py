@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from sft_label.launcher import (
+    LaunchPlan,
     _decode_utf8_input_byte,
+    _ask_extension_spec_paths,
     build_launch_plan,
     format_command,
     format_env_prefix,
@@ -170,6 +174,45 @@ def test_cmd_dashboard_service_start_can_cancel_port_retry_with_ctrl_c(monkeypat
     assert "已取消 dashboard 服务启动。" in out
 
 
+def _write_extension_spec(path, *, prompt_text="Label UI data.", options=None, trigger=True):
+    options = options or ["form", "modal"]
+    trigger_block = """
+trigger:
+  domain_any_of: [web-frontend]
+""".strip() if trigger else ""
+    path.write_text(
+        (
+            f"""
+id: ui_fine_labels
+spec_version: v1
+display_name: UI Fine Labels
+description: Fine-grained UI labels.
+prompt: |
+  {prompt_text}
+schema:
+  component_type:
+    type: multi_enum
+    description: Main UI components.
+    options: [{", ".join(options)}]
+{trigger_block}
+""".strip()
+            + "\n"
+        ),
+        encoding="utf-8",
+    )
+
+
+def _extension_run_answers(extension_paths: list[str]) -> list[str]:
+    base_answers = ["2", "1", "dataset", "", ""] + [""] * 24
+    extension_flow = ["y"]
+    for path in extension_paths:
+        extension_flow.append(path)
+        extension_flow.append("y")
+    if extension_flow:
+        extension_flow[-1] = "n"
+    return base_answers[:5] + extension_flow + base_answers[5:] + [""]
+
+
 def test_build_run_pass1_pass2_semantic_plan():
     io = StubIO(
         [
@@ -178,6 +221,7 @@ def test_build_run_pass1_pass2_semantic_plan():
             "data.json",  # --input
             "",           # --output
             "",           # inline mode (refresh)
+            "",           # extension labeling prompt (default no)
             "",           # --limit (default 0)
             "",           # shuffle (default no)
             "",           # arbitration (default yes)
@@ -212,6 +256,7 @@ def test_build_run_plan_can_disable_adaptive_runtime_and_recovery_sweep():
             "data.json",  # --input
             "",           # --output
             "",           # inline mode (refresh)
+            "",           # extension labeling prompt (default no)
             "",           # --limit (default 0)
             "",           # shuffle (default no)
             "",           # arbitration (default yes)
@@ -573,7 +618,7 @@ def test_all_workflows_generate_parseable_argv(tmp_path):
     }
 
     for wf_num, answers in workflow_answers.items():
-        io = StubIO([str(wf_num)] + answers)
+        io = StubIO([str(wf_num)] + answers + [""] * 10)
         plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
         assert plan is not None
         parsed = parser.parse_args(plan.argv)
@@ -617,6 +662,7 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
             "data.json",  # actual --input
             "",           # --output
             "",           # inline mode
+            "",           # extension labeling prompt (default no)
             "",           # --limit
             "",           # --shuffle
             "",           # --arbitration
@@ -645,6 +691,7 @@ def test_build_run_plan_can_set_migrate_mode():
             "",              # --output
             "3",             # inline mode: migrate
             "old-run",       # --migrate-from
+            "",              # extension labeling prompt (default no)
             "",              # --limit
             "",              # --shuffle
             "",              # --arbitration
@@ -698,6 +745,7 @@ def test_build_run_resume_plan_skips_output_prompt():
             "2",        # run mode: resume
             "run-dir",  # --resume
             "",         # also set --input? no
+            "",         # extension labeling prompt (default no)
             "",         # --limit
             "",         # --shuffle
             "",         # --arbitration
@@ -1194,3 +1242,81 @@ def test_cmd_start_auto_publish_bootstraps_lan_service_with_shareable_url(monkey
     assert init_calls["public_base_url"] == "http://192.168.1.25:8765"
     assert init_calls["service_type"] == "pm2"
     assert "http://192.168.1.25:8765" in out
+
+
+def test_extension_labeling_prompt_flow_collects_paths(tmp_path):
+    extension_paths = [str(tmp_path / "ui.yaml"), str(tmp_path / "mobile.yaml")]
+    _write_extension_spec(Path(extension_paths[0]), prompt_text="Label UI data.")
+    _write_extension_spec(Path(extension_paths[1]), prompt_text="Label mobile data.")
+    io = StubIO(_extension_run_answers(extension_paths))
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+
+    prompt_log = " ".join(str(item).lower() for item in io.outputs)
+    assert "extension labeling" in prompt_log or "extension 标" in prompt_log
+    assert "extension" in prompt_log and any(keyword in prompt_log for keyword in ("path", "路径", "spec", "规范"))
+
+
+def test_extension_labeling_plan_includes_repeated_flags(tmp_path):
+    extension_paths = [str(tmp_path / "ui.yaml"), str(tmp_path / "mobile.yaml")]
+    _write_extension_spec(Path(extension_paths[0]), prompt_text="Label UI data.")
+    _write_extension_spec(Path(extension_paths[1]), prompt_text="Label mobile data.")
+    io = StubIO(_extension_run_answers(extension_paths))
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+
+    flag_positions = [idx for idx, arg in enumerate(plan.argv) if arg == "--label-extension"]
+    assert len(flag_positions) == len(extension_paths)
+    for index, position in enumerate(flag_positions):
+        assert plan.argv[position + 1] == extension_paths[index]
+
+
+def test_extension_labeling_prompt_flow_shows_spec_summary_and_compact_guidance(tmp_path):
+    spec_path = tmp_path / "ui-extension.yaml"
+    _write_extension_spec(spec_path, prompt_text=("Label UI data with frontend review hints. " * 80).strip())
+
+    io = StubIO(_extension_run_answers([str(spec_path)]))
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    joined = "\n".join(str(item) for item in io.outputs)
+    assert "ui_fine_labels" in joined
+    assert "2000" in joined
+    assert any(keyword in joined.lower() for keyword in ["prompt", "schema", "compact"])
+
+
+def test_ask_extension_spec_paths_reprompts_until_valid_spec(tmp_path):
+    invalid_path = tmp_path / "missing.yaml"
+    valid_path = tmp_path / "valid.yaml"
+    _write_extension_spec(valid_path)
+
+    io = StubIO(["y", str(invalid_path), str(valid_path), "n"])
+    paths = _ask_extension_spec_paths(io.input, io.output)
+
+    assert paths == [str(valid_path)]
+    joined = "\n".join(str(item) for item in io.outputs)
+    assert "does not exist" in joined or "不存在" in joined
+
+
+def test_cmd_start_dry_run_shows_label_extension_flags(monkeypatch, capsys):
+    parser = build_parser()
+    plan = LaunchPlan(
+        argv=[
+            "run",
+            "--input",
+            "data.json",
+            "--label-extension",
+            "extensions/ui.yaml",
+            "--label-extension",
+            "extensions/mobile.yaml",
+        ]
+    )
+    monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: plan, raising=False)
+    args = parser.parse_args(["start", "--dry-run"])
+
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert out.count("--label-extension") >= 2
+    assert "extensions/ui.yaml" in out
+    assert "extensions/mobile.yaml" in out

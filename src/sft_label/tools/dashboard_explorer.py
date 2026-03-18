@@ -69,7 +69,7 @@ def _flatten_tags(labels: dict) -> tuple[list[str], list[str]]:
     flat = []
     dims = []
     for key, value in labels.items():
-        if key in {"confidence", "canonicalized", "unmapped", "inherited", "inherited_from", "partial", "partial_stage", "partial_reason"}:
+        if key in {"confidence", "canonicalized", "unmapped", "inherited", "inherited_from", "partial", "partial_stage", "partial_reason", "label_extensions"}:
             continue
         if isinstance(value, list):
             for item in value:
@@ -82,6 +82,30 @@ def _flatten_tags(labels: dict) -> tuple[list[str], list[str]]:
     return sorted(set(flat)), sorted(set(dims))
 
 
+def _flatten_extension_tags(sample: dict) -> list[str]:
+    payload = sample.get("label_extensions")
+    if not isinstance(payload, dict):
+        return []
+
+    tags: list[str] = []
+    for ext_id, ext_payload in payload.items():
+        if not isinstance(ext_payload, dict):
+            continue
+        tags.append(f"extid:{ext_id}")
+        labels = ext_payload.get("labels") or {}
+        if not isinstance(labels, dict):
+            continue
+        for field, value in labels.items():
+            tags.append(f"extfield:{ext_id}:{field}")
+            if isinstance(value, list):
+                for item in value:
+                    if item not in (None, ""):
+                        tags.append(f"ext:{ext_id}:{field}:{item}")
+            elif value not in (None, ""):
+                tags.append(f"ext:{ext_id}:{field}:{value}")
+    return sorted(set(tags))
+
+
 def _detail_payload(sample: dict) -> dict:
     payload = {
         "id": sample.get("id", ""),
@@ -90,6 +114,8 @@ def _detail_payload(sample: dict) -> dict:
         "value": sample.get("value") or {},
         "metadata": sample.get("metadata") or {},
     }
+    if isinstance(sample.get("label_extensions"), dict):
+        payload["label_extensions"] = sample["label_extensions"]
     if isinstance(sample.get("labeling_monitor"), dict):
         payload["labeling_monitor"] = sample["labeling_monitor"]
     if isinstance(sample.get("scoring_monitor"), dict):
@@ -127,6 +153,7 @@ def _preview_payload(sample: dict, *, doc_id: str, detail_chunk: str, scope_id: 
     conversations = sample.get("conversations") or []
     query_text, response_text = extract_last_turn(conversations)
     flat_tags, dim_tags = _flatten_tags(labels)
+    extension_tags = _flatten_extension_tags(sample)
 
     return {
         "doc_id": doc_id,
@@ -147,6 +174,7 @@ def _preview_payload(sample: dict, *, doc_id: str, detail_chunk: str, scope_id: 
         "tasks": labels.get("task") or [],
         "flat_tags": flat_tags,
         "dim_tags": dim_tags,
+        "extension_tags": extension_tags,
         "thinking_mode": value.get("thinking_mode") or metadata.get("thinking_mode", ""),
         "inherited": bool(labels.get("inherited")),
         "flags": value.get("flags") or [],

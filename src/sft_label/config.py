@@ -315,6 +315,10 @@ class PipelineConfig:
     sparse_max_gap: int = SPARSE_MAX_GAP
     sparse_threshold: int = SPARSE_THRESHOLD
 
+    # Extension specs
+    extension_spec_paths: list[str] | None = None
+    extension_specs: list | None = None
+
     # Pass 2: Value Scoring
     scoring_model: str = DEFAULT_SCORING_MODEL
     scoring_concurrency: int = DEFAULT_SCORING_CONCURRENCY

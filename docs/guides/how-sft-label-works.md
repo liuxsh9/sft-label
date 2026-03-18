@@ -17,10 +17,14 @@ Main steps:
    - labels intent, language, domain, task, difficulty
 3. **LLM call 2**
    - labels concept, agentic, constraint, context
-4. **Validation**
+4. **Optional extension labeling**
+   - runs only when `--label-extension` specs are provided
+   - uses the core labels + conversation context
+   - writes `label_extensions` payloads per turn
+5. **Validation**
    - checks labels against the taxonomy pools
    - applies consistency rules
-5. **Optional arbitration**
+6. **Optional arbitration**
    - retries low-confidence dimensions with different settings
 
 Output highlights:
@@ -28,6 +32,7 @@ Output highlights:
 - `labeled.json` or mirrored inline labels in `data_label`
 - `stats_labeling.json`
 - Pass 1 dashboards
+- Optional extension aggregates in `stats_labeling.json` (see [Pass 1 extension labeling](pass1-extension-labeling.md))
 
 ## Pass 2: value scoring
 

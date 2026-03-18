@@ -1,0 +1,40 @@
+id: ui_fine_labels
+spec_version: v1
+display_name: UI Fine Labels
+enabled: true
+description: Fine-grained UI labels for UI-heavy samples.
+
+trigger:
+  domain_any_of: [web-frontend]
+  language_any_of: [html, css, javascript, typescript]
+  intent_any_of: [build, modify]
+  task_any_of: [feature-implementation, design-system]
+  context_any_of: [snippet, dashboard, mobile-app]
+  difficulty_any_of: [beginner, intermediate, advanced]
+
+prompt: |
+  你是一个 UI 数据细粒度标注器。
+  请基于 conversation、preprocessed signals、以及 core labels，
+  严格按照 schema 输出。
+
+schema:
+  component_type:
+    type: multi_enum
+    options: [form, table, modal, chart, nav, card, editor]
+    description: Main UI components present in the task or response.
+  interaction_pattern:
+    type: multi_enum
+    options: [crud, wizard, search-filter, drag-drop, inline-editing, dashboard]
+    description: Dominant interaction patterns involved.
+  visual_complexity:
+    type: enum
+    options: [low, medium, high]
+    description: Overall visual complexity of the UI.
+
+output:
+  include_confidence: true
+  allow_unmapped: true
+
+dashboard:
+  group: ui
+  priority: 10

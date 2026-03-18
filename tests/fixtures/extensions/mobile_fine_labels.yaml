@@ -1,0 +1,35 @@
+id: mobile_fine_labels
+spec_version: v1
+display_name: Mobile Fine Labels
+enabled: true
+description: Mobile-specific UI labeling for handset experiences.
+
+trigger:
+  domain_all_of: [mobile, frontend]
+  language_any_of: [kotlin, swift, dart]
+  intent_any_of: [build, debug]
+  task_any_of: [mobile-ui, mobile-performance]
+  context_any_of: [mobile-app, single-device]
+  difficulty_any_of: [intermediate, advanced]
+
+prompt: |
+  你在为手机端界面撰写说明文案。
+  请基于 schema 结构提供精细化标签。
+
+schema:
+  platform:
+    type: enum
+    options: [ios, android, flutter]
+    description: 主导的移动平台。
+  interaction_pattern:
+    type: multi_enum
+    options: [touch, swipe, scroll, gesture]
+    description: 交互方式。
+
+output:
+  include_confidence: true
+  allow_unmapped: false
+
+dashboard:
+  group: mobile
+  priority: 8

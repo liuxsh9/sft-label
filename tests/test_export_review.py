@@ -37,6 +37,22 @@ def _legacy_sample(sample_id: str) -> dict:
     }
 
 
+def _legacy_sample_with_extension(sample_id: str) -> dict:
+    sample = _legacy_sample(sample_id)
+    sample["labels"]["label_extensions"] = {
+        "ui_fine_labels": {
+            "status": "success",
+            "matched": True,
+            "spec_version": "v1",
+            "spec_hash": "sha256:ui-v1",
+            "labels": {"component_type": ["form", "modal"], "visual_complexity": "high"},
+            "confidence": {"component_type": 0.76},
+            "unmapped": [],
+        }
+    }
+    return sample
+
+
 def _inline_labels(intent: str = "build") -> dict:
     return {
         "intent": intent,
@@ -140,3 +156,20 @@ class TestExportReview:
         assert rows[0]["data_id"]
         assert rows[0]["turn_index"] == "1"
         assert rows[1]["turn_index"] == "2"
+
+    def test_export_review_can_include_extension_columns(self, tmp_path):
+        input_file = tmp_path / "labeled.json"
+        input_file.write_text(json.dumps([_legacy_sample_with_extension("legacy-2")]), encoding="utf-8")
+        output_file = tmp_path / "review.csv"
+
+        summary = export_review(str(input_file), str(output_file), include_extensions=True)
+
+        assert summary["rows"] == 1
+        with open(output_file, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        row = rows[0]
+        assert row["ext_ui_fine_labels_status"] == "success"
+        assert row["ext_ui_fine_labels_matched"] == "True"
+        assert row["ext_ui_fine_labels_labels_component_type"] == "form, modal"
+        assert row["ext_ui_fine_labels_labels_visual_complexity"] == "high"
+        assert row["ext_ui_fine_labels_confidence_component_type"] == "0.76"

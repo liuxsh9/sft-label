@@ -3524,3 +3524,57 @@ async def test_pass2_recovery_sweep_retries_only_infra_failures_and_emits_runtim
     by_id = {s["id"]: s for s in scored_payload}
     assert by_id["sample-retry"].get("value") is not None
     assert by_id["sample-noretry"].get("value") is None
+
+def test_run_scoring_preserves_label_extensions(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir()
+    labeled_path = batch_dir / "labeled.json"
+    sample = {
+        "id": "ext-sample",
+        "conversations": [
+            {"from": "human", "value": "Question"},
+            {"from": "gpt", "value": "Answer"},
+        ],
+        "labels": {
+            "intent": "build",
+            "difficulty": "intermediate",
+            "language": ["python"],
+            "confidence": {"intent": 0.95, "difficulty": 0.95},
+        },
+        "label_extensions": {
+            "ui": {"status": "success", "labels": {"component": "dialog"}},
+        },
+    }
+    labeled_path.write_text(json.dumps([sample]), encoding="utf-8")
+
+    async def fake_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        value = {
+            "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+            "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
+            "reasoning": {"clarity": 5, "consistency": 5, "self_correction": False, "overall": 5},
+            "rarity": {"score": 5.0, "tag_rarity": None, "combo_rarity": None, "stats_ref": None},
+            "flags": [],
+            "thinking_mode": "fast",
+            "value_score": 5.0,
+            "confidence": 0.92,
+        }
+        monitor = {
+            "sample_id": sample.get("id", f"sample-{sample_idx}"),
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+        return value, monitor
+
+    with patch("sft_label.scoring.score_one", side_effect=fake_score_one):
+        asyncio.run(run_scoring(str(tmp_path), config=PipelineConfig(scoring_concurrency=1, sample_max_retries=1)))
+
+    scored_path = batch_dir / "scored.jsonl"
+    scored = json.loads(scored_path.read_text(encoding="utf-8").splitlines()[0])
+    assert scored["label_extensions"] == sample["label_extensions"]

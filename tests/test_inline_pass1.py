@@ -9,8 +9,9 @@ import pytest
 
 from sft_label.config import PipelineConfig
 from sft_label.inline_migration import InlineMigrationMatch
-from sft_label.inline_pass1 import merge_pass1_results, prepare_inline_pass1_batch
+from sft_label.inline_pass1 import InlineBundlePlan, merge_pass1_results, prepare_inline_pass1_batch
 from sft_label.inline_rows import RowSampleBundle, build_row_sample_bundle, flatten_row_sample_bundles
+from sft_label.label_extensions_schema import ExtensionSpec, SchemaField
 
 
 def _full_labels(intent: str = "build") -> dict:
@@ -43,6 +44,37 @@ def _monitor(status: str = "success", llm_calls: int = 2) -> dict:
         "sample_attempt": 0,
         "elapsed_seconds": 0.5,
     }
+
+
+def _extension_payload(label: str = "form") -> dict:
+    return {
+        "ui_fine_labels": {
+            "status": "success",
+            "matched": True,
+            "spec_version": "v1",
+            "spec_hash": "sha256:ui-v1",
+            "labels": {"component_type": [label]},
+            "confidence": {"component_type": 0.8},
+            "unmapped": [],
+            "monitor": {"status": "success", "llm_calls": 1},
+        }
+    }
+
+
+def _extension_spec(spec_hash_suffix: str = "v1") -> ExtensionSpec:
+    return ExtensionSpec(
+        id="ui_fine_labels",
+        spec_version="v1",
+        display_name="UI Fine Labels",
+        description=None,
+        enabled=True,
+        trigger={"domain_any_of": ("web-backend",)},
+        prompt="Label UI",
+        schema={"component_type": SchemaField(field_type="multi_enum", options=("form", "modal"))},
+        output={"include_confidence": True, "allow_unmapped": True},
+        dashboard={},
+        source=f"/tmp/spec-{spec_hash_suffix}.yaml",
+    )
 
 
 def test_merge_pass1_results_preserves_sibling_fields_on_single_turn_row(tmp_path):
@@ -174,6 +206,103 @@ def test_merge_pass1_results_refresh_replaces_old_scoring_state(tmp_path):
     assert "conv_value" not in merged["data_label"]["conversation"]
 
 
+def test_merge_pass1_results_promotes_label_extensions_to_samples_and_turns(tmp_path):
+    row = {
+        "meta_prompt": ["system"],
+        "data": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+    labels = _full_labels("fresh")
+    labels["label_extensions"] = _extension_payload()
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [labels],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+    )
+
+    sample_record = result.samples[0]
+    assert sample_record["labels"]["intent"] == "fresh"
+    assert "label_extensions" not in sample_record["labels"]
+    assert sample_record["label_extensions"]["ui_fine_labels"]["labels"]["component_type"] == ["form"]
+
+    data_label = result.rows[0]["extra_info"]["unique_info"]["data_label"]
+    assert data_label["meta"]["extension_specs"]["ui_fine_labels"]["spec_hash"] == "sha256:ui-v1"
+    assert data_label["turns"][0]["label_extensions"]["ui_fine_labels"]["labels"]["component_type"] == ["form"]
+
+
+def test_merge_pass1_results_preserves_pass2_when_only_extensions_change(tmp_path):
+    row = {
+        "meta_prompt": ["system"],
+        "data": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+        "extra_info": {
+            "unique_info": {
+                "data_label": {
+                    "meta": {
+                        "schema_version": "1",
+                        "label_version": "inline-v1",
+                        "source_format": "pangu",
+                        "mode": "refresh",
+                        "created_at": "2026-03-11T09:00:00",
+                        "updated_at": "2026-03-11T09:00:00",
+                        "pass1_at": "2026-03-11T09:00:00",
+                        "pass2_at": "2026-03-11T09:10:00",
+                        "recomputed_at": None,
+                        "migrated_at": None,
+                        "migration_source": None,
+                    },
+                    "turns": [{
+                        "turn_index": 1,
+                        "labels": _full_labels("fresh"),
+                        "label_extensions": _extension_payload("form"),
+                        "value": {"value_score": 8.2},
+                        "scoring_monitor": {"status": "success"},
+                    }],
+                    "conversation": {"conv_value": 8.2, "turn_count": 1},
+                },
+            },
+        },
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+    samples[0].setdefault("metadata", {})["turn_index"] = 1
+    new_labels = _full_labels("fresh")
+    new_labels["label_extensions"] = _extension_payload("modal")
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [new_labels],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+        bundle_plans=[InlineBundlePlan(
+            local_label_indices=[0],
+            local_inherit_map={},
+            preserved_labels=[],
+            use_existing_data_label=True,
+            pass1_changed=True,
+            invalidate_pass2=False,
+        )],
+        updated_sample_indices={0},
+    )
+
+    turn = result.rows[0]["extra_info"]["unique_info"]["data_label"]["turns"][0]
+    assert turn["value"]["value_score"] == 8.2
+    assert turn["scoring_monitor"]["status"] == "success"
+    assert turn["label_extensions"]["ui_fine_labels"]["labels"]["component_type"] == ["modal"]
+
+
 def test_prepare_inline_pass1_batch_copies_migration_provenance(tmp_path):
     target_row = {
         "meta_prompt": ["system"],
@@ -224,6 +353,56 @@ def test_prepare_inline_pass1_batch_copies_migration_provenance(tmp_path):
     assert prepared.labels[0]["intent"] == "copied"
     assert migrated_meta["migration_source"] == "old/train.jsonl:1"
     assert migrated_meta["migrated_at"] is not None
+
+
+def test_prepare_inline_pass1_batch_reruns_extension_only_changes_without_invalidating_pass2(tmp_path):
+    row = {
+        "meta_prompt": ["system"],
+        "data": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+        "extra_info": {
+            "unique_info": {
+                "data_label": {
+                    "meta": {
+                        "schema_version": "1",
+                        "label_version": "inline-v1",
+                        "source_format": "pangu",
+                        "mode": "refresh",
+                        "created_at": "2026-03-11T09:00:00",
+                        "updated_at": "2026-03-11T09:00:00",
+                        "pass1_at": "2026-03-11T09:00:00",
+                        "pass2_at": "2026-03-11T09:10:00",
+                        "extension_specs": {
+                            "ui_fine_labels": {
+                                "spec_version": "v1",
+                                "spec_hash": "sha256:old",
+                            }
+                        },
+                    },
+                    "turns": [{
+                        "turn_index": 1,
+                        "labels": _full_labels("build"),
+                        "label_extensions": _extension_payload("form"),
+                        "value": {"value_score": 8.2},
+                    }],
+                    "conversation": {"conv_value": 8.2, "turn_count": 1},
+                }
+            }
+        },
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+
+    prepared = prepare_inline_pass1_batch(
+        [bundle],
+        mode="incremental",
+        extension_specs=[_extension_spec("new")],
+    )
+
+    assert prepared.label_indices == [0]
+    assert prepared.bundle_plans[0].pass1_changed is True
+    assert prepared.bundle_plans[0].invalidate_pass2 is False
 
 
 @pytest.mark.asyncio

@@ -46,6 +46,21 @@ def _monitor(status: str = "success", llm_calls: int = 2) -> dict:
     }
 
 
+def _extension_payload() -> dict:
+    return {
+        "ui_fine_labels": {
+            "status": "success",
+            "matched": True,
+            "spec_version": "v1",
+            "spec_hash": "sha256:ui-v1",
+            "labels": {"component_type": ["form"]},
+            "confidence": {"component_type": 0.8},
+            "unmapped": [],
+            "monitor": {"status": "success", "llm_calls": 1},
+        }
+    }
+
+
 def _score_value(sample_id: str, rarity_result: dict | None = None) -> dict:
     return {
         "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
@@ -122,6 +137,37 @@ def test_infer_inline_scoring_target_does_not_misclassify_standard_run_file(tmp_
     target = infer_inline_scoring_target(standard_file)
 
     assert target is None
+
+
+def test_load_inline_scoring_file_rehydrates_label_extensions(tmp_path):
+    source_file = tmp_path / "train.jsonl"
+    row = {
+        "id": "conv-1",
+        "conversations": [
+            {"from": "human", "value": "q1"},
+            {"from": "gpt", "value": "a1"},
+        ],
+        "extra_info": {
+            "unique_info": {
+                "data_label": {
+                    "meta": {"schema_version": "1", "label_version": "inline-v1"},
+                    "turns": [{
+                        "turn_index": 1,
+                        "sample_id": "s1",
+                        "labels": _full_labels("build"),
+                        "label_extensions": _extension_payload(),
+                        "labeling_monitor": {"status": "success"},
+                    }],
+                    "conversation": {"turn_count": 1},
+                }
+            }
+        },
+    }
+    _write_jsonl(source_file, [row])
+
+    _, samples, _ = load_inline_scoring_file(source_file)
+
+    assert samples[0]["label_extensions"]["ui_fine_labels"]["labels"]["component_type"] == ["form"]
 
 
 @pytest.mark.asyncio

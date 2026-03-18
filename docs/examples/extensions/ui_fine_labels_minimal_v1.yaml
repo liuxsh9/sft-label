@@ -1,0 +1,41 @@
+id: ui_fine_labels_minimal
+spec_version: v1
+display_name: UI Fine Labels (Minimal Example)
+enabled: true
+description: Conservative starter extension for user-facing frontend data.
+
+trigger:
+  domain_any_of: [web-frontend]
+  language_any_of: [html, css, javascript, typescript]
+  intent_any_of: [build, modify]
+  task_any_of: [feature-implementation, code-refactoring]
+  context_any_of: [snippet, single-file, multi-file]
+
+prompt: |
+  你是一个前端 / UI 粗粒度标注器。
+  你会收到 conversation、preprocessed signals、以及 core labels。
+  请仅依据给定内容，严格按照 schema 输出 JSON，不要输出额外解释。
+
+schema:
+  component_type:
+    type: multi_enum
+    options: [form-input, modal-dialog, navigation, notification, data-display]
+    description: Primary UI component family present in the sample.
+
+  interaction_pattern:
+    type: multi_enum
+    options: [edit-submit, select-filter, confirm-dismiss, navigate]
+    description: Main user interaction pattern.
+
+  visual_complexity:
+    type: enum
+    options: [low, medium, high]
+    description: Overall UI complexity implied by the sample.
+
+output:
+  include_confidence: true
+  allow_unmapped: true
+
+dashboard:
+  group: ui
+  priority: 5

@@ -79,6 +79,77 @@ def join_tags(val):
     return str(val) if val else ""
 
 
+def _extract_extension_payloads(sample: dict) -> dict[str, dict]:
+    if isinstance(sample.get("label_extensions"), dict):
+        return sample["label_extensions"]
+    labels = sample.get("labels") or {}
+    if isinstance(labels.get("label_extensions"), dict):
+        return labels["label_extensions"]
+    return {}
+
+
+def _collect_extension_specs(samples: list[dict]) -> dict[str, dict]:
+    specs: dict[str, dict] = {}
+    for sample in samples:
+        payloads = _extract_extension_payloads(sample)
+        for spec_id, payload in payloads.items():
+            if not isinstance(payload, dict):
+                continue
+            spec = specs.setdefault(spec_id, {"labels": set(), "confidence": set()})
+            labels = payload.get("labels") or {}
+            if isinstance(labels, dict):
+                spec["labels"].update(labels.keys())
+            confidence = payload.get("confidence") or {}
+            if isinstance(confidence, dict):
+                spec["confidence"].update(confidence.keys())
+    return specs
+
+
+def _extension_fieldnames(specs: dict[str, dict]) -> list[str]:
+    fieldnames: list[str] = []
+    for spec_id in sorted(specs):
+        fieldnames.append(f"ext_{spec_id}_status")
+        fieldnames.append(f"ext_{spec_id}_matched")
+        for field in sorted(specs[spec_id]["labels"]):
+            fieldnames.append(f"ext_{spec_id}_labels_{field}")
+        for field in sorted(specs[spec_id]["confidence"]):
+            fieldnames.append(f"ext_{spec_id}_confidence_{field}")
+        fieldnames.append(f"ext_{spec_id}_unmapped")
+    return fieldnames
+
+
+def _extension_row_payload(sample: dict, specs: dict[str, dict]) -> dict[str, str]:
+    payloads = _extract_extension_payloads(sample)
+    rows: dict[str, str] = {}
+    for spec_id in sorted(specs):
+        payload = payloads.get(spec_id) if isinstance(payloads, dict) else None
+        rows[f"ext_{spec_id}_status"] = payload.get("status", "") if isinstance(payload, dict) else ""
+        matched = payload.get("matched") if isinstance(payload, dict) else None
+        rows[f"ext_{spec_id}_matched"] = str(matched) if matched is not None else ""
+        labels = payload.get("labels") if isinstance(payload, dict) else None
+        confidence = payload.get("confidence") if isinstance(payload, dict) else None
+        for field in sorted(specs[spec_id]["labels"]):
+            value = labels.get(field) if isinstance(labels, dict) else ""
+            rows[f"ext_{spec_id}_labels_{field}"] = join_tags(value)
+        for field in sorted(specs[spec_id]["confidence"]):
+            score = confidence.get(field) if isinstance(confidence, dict) else None
+            rows[f"ext_{spec_id}_confidence_{field}"] = str(score) if isinstance(score, (int, float)) else ""
+        unmapped = payload.get("unmapped") if isinstance(payload, dict) else None
+        if isinstance(unmapped, list):
+            tokens = []
+            for item in unmapped:
+                if isinstance(item, dict):
+                    dim = str(item.get("dimension", "unknown"))
+                    value = str(item.get("value", "?"))
+                    tokens.append(f"{dim}:{value}")
+                else:
+                    tokens.append(str(item))
+            rows[f"ext_{spec_id}_unmapped"] = ", ".join(tokens)
+        else:
+            rows[f"ext_{spec_id}_unmapped"] = ""
+    return rows
+
+
 def _load_json_or_jsonl(path: Path):
     """Load samples from one JSON or JSONL file."""
     if path.suffix == ".jsonl":
@@ -152,9 +223,10 @@ def load_review_samples(input_path):
     return _load_legacy_review_samples(input_path)
 
 
-def build_review_rows(samples, monitors=None):
+def build_review_rows(samples, monitors=None, *, include_extensions: bool = False, extension_specs: dict[str, dict] | None = None):
     """Build flat review rows from labeled samples."""
     monitors = monitors or {}
+    extension_specs = extension_specs or {}
     rows = []
     for sample in samples:
         sid = sample.get("id", "")
@@ -181,7 +253,7 @@ def build_review_rows(samples, monitors=None):
             mon.get("total_completion_tokens", 0)
         )
 
-        rows.append({
+        row = {
             "id": sid,
             "source_file": source_file,
             "data_id": data_id,
@@ -200,11 +272,14 @@ def build_review_rows(samples, monitors=None):
             "elapsed_s": mon.get("elapsed_seconds", ""),
             "tokens": total_tokens if total_tokens > 0 else "",
             "confidence_min": find_min_confidence(labels),
-        })
+        }
+        if include_extensions and extension_specs:
+            row.update(_extension_row_payload(sample, extension_specs))
+        rows.append(row)
     return rows
 
 
-def export_review(input_path, output_path, monitor_path="", output_format="csv"):
+def export_review(input_path, output_path, monitor_path="", output_format="csv", *, include_extensions: bool = False):
     """Export review rows from inline or legacy labeled inputs."""
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -217,14 +292,21 @@ def export_review(input_path, output_path, monitor_path="", output_format="csv")
     if monitor_path and Path(monitor_path).exists():
         monitors = load_monitor(monitor_path)
 
-    rows = build_review_rows(samples, monitors=monitors)
+    extension_specs = _collect_extension_specs(samples) if include_extensions else {}
+    rows = build_review_rows(
+        samples,
+        monitors=monitors,
+        include_extensions=include_extensions,
+        extension_specs=extension_specs,
+    )
 
     delimiter = "\t" if fmt == "tsv" else ","
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = REVIEW_FIELDNAMES + _extension_fieldnames(extension_specs) if include_extensions else REVIEW_FIELDNAMES
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=REVIEW_FIELDNAMES,
+            fieldnames=fieldnames,
             delimiter=delimiter,
             extrasaction="ignore",
         )
@@ -235,7 +317,7 @@ def export_review(input_path, output_path, monitor_path="", output_format="csv")
         "rows": len(rows),
         "labeled_rows": sum(1 for sample in samples if sample.get("labels") is not None),
         "format": fmt.upper(),
-        "columns": len(REVIEW_FIELDNAMES),
+        "columns": len(fieldnames),
         "output": str(output_path),
     }
     return summary
@@ -258,6 +340,11 @@ def main():
         default="csv",
         help="Output format (default: csv, auto-detected from extension)",
     )
+    parser.add_argument(
+        "--include-extensions",
+        action="store_true",
+        help="Include extension-label columns (opt-in).",
+    )
     args = parser.parse_args()
 
     summary = export_review(
@@ -265,6 +352,7 @@ def main():
         args.output,
         monitor_path=args.monitor,
         output_format=args.format,
+        include_extensions=args.include_extensions,
     )
 
     print(f"Exported {summary['rows']} rows to {summary['output']}")

@@ -28,6 +28,7 @@ from sft_label.inline_labels import (
 from sft_label.inline_migration import InlineMigrationMatch, seed_row_from_migration
 from sft_label.inline_rows import RowSampleBundle
 from sft_label.inline_rows import assign_stable_sample_ids
+from sft_label.label_extensions_schema import spec_hash
 from sft_label.labels import is_usable_labels
 from sft_label.preprocessing import apply_sparse_sampling
 
@@ -81,6 +82,9 @@ def _turn_label_payload_from_record(turn_record: dict | None):
     labels = copy.deepcopy(turn_record.get("labels"))
     if not is_usable_labels(labels):
         return None
+    label_extensions = turn_record.get("label_extensions")
+    if isinstance(label_extensions, dict) and label_extensions:
+        labels["label_extensions"] = copy.deepcopy(label_extensions)
     if turn_record.get("inherited"):
         labels["inherited"] = True
     if turn_record.get("inherited_from"):
@@ -120,13 +124,49 @@ def _is_bundle_complete(bundle: RowSampleBundle, *, label_version: str) -> bool:
     return bool(bundle.samples) and all(is_usable_labels(labels) for labels in preserved)
 
 
+def _extension_fingerprints(extension_specs) -> dict[str, dict[str, str]]:
+    fingerprints: dict[str, dict[str, str]] = {}
+    for spec in extension_specs or []:
+        if not getattr(spec, "enabled", True):
+            continue
+        fingerprints[str(spec.id)] = {
+            "spec_version": str(spec.spec_version),
+            "spec_hash": spec_hash(spec),
+        }
+    return fingerprints
+
+
+def _needs_extension_refresh(bundle: RowSampleBundle, *, extension_specs=None, label_version: str) -> bool:
+    if not extension_specs or _needs_full_relabel(bundle, label_version=label_version):
+        return False
+
+    current = _extension_fingerprints(extension_specs)
+    if not current:
+        return False
+
+    meta = get_data_label_meta(bundle.raw_row, default={}) or {}
+    existing = meta.get("extension_specs")
+    if not isinstance(existing, dict) or existing != current:
+        return True
+
+    existing_turns = _existing_turn_records(bundle)
+    for default_idx, sample in enumerate(bundle.samples, start=1):
+        turn_index = _sample_turn_index(sample, default_idx)
+        turn = existing_turns.get(turn_index) or {}
+        label_extensions = turn.get("label_extensions") or {}
+        if not isinstance(label_extensions, dict) or set(label_extensions) != set(current):
+            return True
+
+    return False
+
+
 def _sparse_plan(samples: list[dict], sparse_kwargs: dict) -> tuple[list[int], dict[int, int]]:
     label_indices, inherit_map = apply_sparse_sampling(samples, **(sparse_kwargs or {}))
     return list(label_indices), dict(inherit_map)
 
 
 def _plan_bundle(bundle: RowSampleBundle, *, mode: str, label_version: str,
-                 sparse_kwargs: dict) -> InlineBundlePlan:
+                 sparse_kwargs: dict, extension_specs=None) -> InlineBundlePlan:
     preserved_labels = _preserved_labels_for_bundle(bundle)
 
     if mode == "refresh":
@@ -157,6 +197,15 @@ def _plan_bundle(bundle: RowSampleBundle, *, mode: str, label_version: str,
         if not is_usable_labels(labels)
     ]
     if not missing_indices:
+        if _needs_extension_refresh(bundle, extension_specs=extension_specs, label_version=label_version):
+            return InlineBundlePlan(
+                local_label_indices=list(range(len(bundle.samples))),
+                local_inherit_map={},
+                preserved_labels=preserved_labels,
+                use_existing_data_label=True,
+                pass1_changed=bool(bundle.samples),
+                invalidate_pass2=False,
+            )
         return InlineBundlePlan(
             local_label_indices=[],
             local_inherit_map={},
@@ -182,6 +231,7 @@ def prepare_inline_pass1_batch(
     mode: str = "refresh",
     label_version: str = DEFAULT_LABEL_VERSION,
     sparse_kwargs: dict | None = None,
+    extension_specs: list | None = None,
     migration_index: dict[str, InlineMigrationMatch] | None = None,
     timestamp: str | None = None,
 ) -> InlinePreparedBatch:
@@ -227,6 +277,7 @@ def prepare_inline_pass1_batch(
             mode=mode,
             label_version=label_version,
             sparse_kwargs=sparse_kwargs or {},
+            extension_specs=extension_specs,
         )
         if bundle_idx in migrated_bundle_indices:
             bundle_plan = InlineBundlePlan(
@@ -333,7 +384,10 @@ def build_sample_artifacts(
     for sample, label_payload, monitor in zip(samples, labels, monitors):
         sample_record = copy.deepcopy(sample)
         sample_record.setdefault("metadata", {})["source_file"] = str(source_file)
-        sample_record["labels"] = copy.deepcopy(label_payload)
+        core_labels, label_extensions, _inherited, _inherited_from = _normalize_turn_labels(label_payload)
+        sample_record["labels"] = core_labels
+        if label_extensions:
+            sample_record["label_extensions"] = copy.deepcopy(label_extensions)
 
         monitor_summary = None
         if monitor:
@@ -363,22 +417,25 @@ def build_sample_artifacts(
 
 def _normalize_turn_labels(label_payload):
     if label_payload is None:
-        return None, False, None
+        return None, None, False, None
     labels = copy.deepcopy(label_payload)
+    label_extensions = labels.pop("label_extensions", None)
     inherited = bool(labels.pop("inherited", False))
     inherited_from = labels.pop("inherited_from", None)
-    return labels, inherited, inherited_from
+    return labels, label_extensions, inherited, inherited_from
 
 
 def _turn_record(sample: dict, label_payload, monitor: dict | None, *, default_turn_index: int) -> dict:
     turn_index = (sample.get("metadata") or {}).get("turn_index") or default_turn_index
-    labels, inherited, inherited_from = _normalize_turn_labels(label_payload)
+    labels, label_extensions, inherited, inherited_from = _normalize_turn_labels(label_payload)
 
     record = {
         "turn_index": turn_index,
         "sample_id": sample.get("id"),
         "labels": labels,
     }
+    if label_extensions:
+        record["label_extensions"] = copy.deepcopy(label_extensions)
     if inherited:
         record["inherited"] = True
     if inherited_from:
@@ -494,17 +551,45 @@ def merge_pass1_results(
             monitors[sample_idx],
             default_turn_index=default_turn_index,
         )
+        if (
+            isinstance(existing_turn, dict)
+            and not bundle_plan.invalidate_pass2
+            and (existing_turn.get("labels") or None) == (record.get("labels") or None)
+        ):
+            if isinstance(existing_turn.get("value"), dict):
+                record["value"] = copy.deepcopy(existing_turn["value"])
+            if isinstance(existing_turn.get("scoring_monitor"), dict):
+                record["scoring_monitor"] = copy.deepcopy(existing_turn["scoring_monitor"])
         turns_by_bundle[bundle_idx][record["turn_index"]] = record
         upsert_turn_record(data_labels[bundle_idx], record)
 
     for bundle_idx, (bundle, bundle_plan) in enumerate(zip(bundles, bundle_plans)):
-        if bundle_plan.invalidate_pass2 and bundle_plan.pass1_changed:
+        preserved_turns = _existing_turn_records(bundle) if bundle_plan.use_existing_data_label else {}
+        core_changed = False
+        for turn_index, turn_record in turns_by_bundle[bundle_idx].items():
+            previous = preserved_turns.get(turn_index) or {}
+            if (previous.get("labels") or None) != (turn_record.get("labels") or None):
+                core_changed = True
+                break
+
+        if (bundle_plan.invalidate_pass2 or core_changed) and bundle_plan.pass1_changed:
             clear_pass2_state(data_labels[bundle_idx], timestamp=now)
 
         turn_records = [
             turns_by_bundle[bundle_idx][turn_index]
             for turn_index in sorted(turns_by_bundle[bundle_idx])
         ]
+        extension_specs = {}
+        for turn_record in turn_records:
+            for ext_id, payload in (turn_record.get("label_extensions") or {}).items():
+                if not isinstance(payload, dict):
+                    continue
+                extension_specs[ext_id] = {
+                    "spec_version": payload.get("spec_version"),
+                    "spec_hash": payload.get("spec_hash"),
+                }
+        if extension_specs:
+            data_labels[bundle_idx].setdefault("meta", {})["extension_specs"] = extension_specs
         compact_turns = []
         for turn_record in turn_records:
             compact_turn = compact_turn_record(turn_record, data_id=bundle.data_id)

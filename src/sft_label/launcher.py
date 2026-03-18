@@ -20,6 +20,8 @@ from sft_label.config import (
     MAX_RETRIES,
     REQUEST_TIMEOUT,
 )
+from sft_label.label_extensions_guidance import summarize_extension_specs
+from sft_label.label_extensions_schema import load_extension_spec_file
 
 DEFAULT_LITELLM_BASE = "http://localhost:4000/v1"
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -789,6 +791,8 @@ def _build_run_plan(
         argv.extend(_ask_extra_flags(input_fn))
         return LaunchPlan(argv=argv, env_overrides=env_overrides)
 
+    for path in _ask_extension_spec_paths(input_fn, output_fn):
+        argv.extend(["--label-extension", path])
     if chain_score:
         argv.append("--score")
         tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
@@ -818,7 +822,7 @@ def _build_run_plan(
             key="prompt_mode",
             label="Prompt 模式 / Prompt mode",
             options=[
-                SwitchOption("compact", "compact（默认） / compact (default)"),
+                SwitchOption("compact", "compact（默认，extension 建议 <=2000 chars） / compact (default, extension guideline <=2000 chars)"),
                 SwitchOption("full", "full"),
             ],
             default_value=INTERACTIVE_DEFAULT_PROMPT_MODE,
@@ -1032,7 +1036,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
                 key="prompt_mode",
                 label="Prompt 模式 / Prompt mode",
                 options=[
-                    SwitchOption("compact", "compact（默认） / compact (default)"),
+                    SwitchOption("compact", "compact（默认，extension 建议 <=2000 chars） / compact (default, extension guideline <=2000 chars)"),
                     SwitchOption("full", "full"),
                 ],
                 default_value=INTERACTIVE_DEFAULT_PROMPT_MODE,
@@ -1277,6 +1281,8 @@ def _build_run_plan_legacy(
         argv.extend(_ask_extra_flags(input_fn))
         return LaunchPlan(argv=argv, env_overrides=env_overrides)
 
+    for path in _ask_extension_spec_paths(input_fn, output_fn):
+        argv.extend(["--label-extension", path])
     limit = _ask_int(input_fn, "每个文件采样上限（0=全部） / Sample limit per file (0 = all)", default=0)
     if limit:
         argv.extend(["--limit", str(limit)])
@@ -1298,7 +1304,7 @@ def _build_run_plan_legacy(
         "Prompt 模式 / Prompt mode",
         [
             ("full", "full", "质量更高，负载更大 / Higher quality, larger payload"),
-            ("compact", "compact", "负载更小，适合受限端点 / Smaller payload for size-limited endpoints"),
+            ("compact", "compact", "负载更小；如启用 extension，建议单个 prompt+schema <= 2000 chars / Smaller payloads; with extensions, aim for prompt+schema <= 2000 chars per spec"),
         ],
         default_index=1,
     )
@@ -1386,7 +1392,7 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
         "Prompt 模式 / Prompt mode",
         [
             ("full", "full", "质量更高，负载更大 / Higher quality, larger payload"),
-            ("compact", "compact", "负载更小，适合受限端点 / Smaller payload for size-limited endpoints"),
+            ("compact", "compact", "负载更小；如启用 extension，建议单个 prompt+schema <= 2000 chars / Smaller payloads; with extensions, aim for prompt+schema <= 2000 chars per spec"),
         ],
         default_index=1,
     )
@@ -2053,6 +2059,111 @@ def _ask_extra_flags(input_fn: InputFn) -> list[str]:
         except ValueError as e:
             print(_msg(f"无效 shell 风格参数：{e}", f"Invalid shell-style flags: {e}"))
 
+
+def _extension_example_hint() -> str:
+    return "docs/examples/extensions/ui_fine_labels_minimal_v1.yaml"
+
+
+def _say_extension_first_run_guidance(output_fn: OutputFn) -> None:
+    _say(
+        output_fn,
+        _msg(
+            f"首次建议从最小样例开始：{_extension_example_hint()}，先在 limit=10/50 的小样本上验证。",
+            f"First run recommendation: start from the minimal example at {_extension_example_hint()} and validate on a small sample first (limit=10/50).",
+        ),
+    )
+    _say(
+        output_fn,
+        _msg(
+            "建议一个 extension 只覆盖一个领域；多个领域请拆成多个 spec。",
+            "Prefer one domain per extension; split into multiple specs when domains diverge.",
+        ),
+    )
+
+
+def _say_extension_spec_summary(output_fn: OutputFn, path: str, summary: dict) -> None:
+    status = "OK" if summary["compact_within_recommendation"] else "WARN"
+    trigger = _msg("是", "yes") if summary["has_trigger"] else _msg("否", "no")
+    name = summary["display_name"] or summary["id"]
+    _say(
+        output_fn,
+        _msg(
+            f"已载入扩展：{name} ({summary['id']}) | fields={summary['field_count']} | options={summary['option_count']} | trigger={trigger} | prompt={summary['prompt_chars']} chars | prompt+schema≈{summary['prompt_schema_chars']} chars | compact<=2000: {status}",
+            f"Loaded extension: {name} ({summary['id']}) | fields={summary['field_count']} | options={summary['option_count']} | trigger={trigger} | prompt={summary['prompt_chars']} chars | prompt+schema≈{summary['prompt_schema_chars']} chars | compact<=2000: {status}",
+        ),
+    )
+    if "triggerless" in summary["warnings"]:
+        _say(
+            output_fn,
+            _msg(
+                f"  提醒：{path} 未配置 trigger，可能会对更多样本生效。",
+                f"  Advisory: {path} has no trigger and may run on a broader set of samples.",
+            ),
+        )
+    if "compact_over_budget" in summary["warnings"]:
+        _say(
+            output_fn,
+            _msg(
+                "  提醒：compact 友好建议值为 prompt+schema <= 2000 chars；如超出，优先精简 prompt、减少字段/选项或拆分 spec。",
+                "  Advisory: compact-friendly guidance is prompt+schema <= 2000 chars; if you exceed it, first shorten the prompt, reduce fields/options, or split the spec.",
+            ),
+        )
+
+
+def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> bool:
+    spec_path = Path(path)
+    if not spec_path.exists():
+        _say(
+            output_fn,
+            _msg(
+                f"扩展规范不存在：{path}，请重新输入。",
+                f"Extension spec does not exist: {path}. Please enter a valid path.",
+            ),
+        )
+        return False
+    try:
+        spec = load_extension_spec_file(spec_path)
+    except Exception as exc:
+        _say(
+            output_fn,
+            _msg(
+                f"扩展预览失败：{path}（{exc}），请修复后重新输入。",
+                f"Extension preview failed: {path} ({exc}). Please fix the spec and try again.",
+            ),
+        )
+        return False
+    summary = summarize_extension_specs([spec])[0]
+    _say_extension_spec_summary(output_fn, path, summary)
+    return True
+
+
+
+def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[str]:
+    """Collect extension spec paths when the user opts in."""
+
+    if not _ask_yes_no(
+        input_fn,
+        "启用扩展标注 / Enable extension labeling",
+        default=False,
+    ):
+        return []
+
+    _section(output_fn, "扩展标注 / Extension labeling")
+    _say_extension_first_run_guidance(output_fn)
+    specs: list[str] = []
+    while True:
+        while True:
+            path = _ask_required_text(input_fn, "扩展规范路径 / Extension spec path")
+            if _maybe_preview_extension_spec(path, output_fn):
+                specs.append(path)
+                break
+        if not _ask_yes_no(
+            input_fn,
+            "添加另一个扩展规范路径 / Add another extension spec path",
+            default=True,
+        ):
+            break
+    return specs
 
 def _ask_required_text(input_fn: InputFn, prompt: str) -> str:
     return _ask_text(input_fn, prompt, required=True)

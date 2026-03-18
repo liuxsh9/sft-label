@@ -176,6 +176,8 @@ def _sample_from_turn_record(
 
     if "labels" in turn_record:
         sample_copy["labels"] = _labels_from_turn_record(turn_record)
+    if isinstance(turn_record.get("label_extensions"), dict):
+        sample_copy["label_extensions"] = copy.deepcopy(turn_record["label_extensions"])
     if isinstance(turn_record.get("value"), dict):
         sample_copy["value"] = copy.deepcopy(turn_record["value"])
     if isinstance(turn_record.get("labeling_monitor"), dict):

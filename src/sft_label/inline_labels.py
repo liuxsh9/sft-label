@@ -417,6 +417,10 @@ def compact_turn_record(turn_record: dict | None, *, data_id: str | None = None)
     if labels is not None:
         compact["labels"] = copy.deepcopy(labels)
 
+    label_extensions = turn_record.get("label_extensions")
+    if isinstance(label_extensions, dict) and label_extensions:
+        compact["label_extensions"] = copy.deepcopy(label_extensions)
+
     if turn_record.get("inherited"):
         compact["inherited"] = True
 

@@ -11,6 +11,7 @@ English version: [`README.md`](README.md)
 `sft-label` 不只是“打标签工具”，而是面向真实数据整理流程的 pipeline。
 
 - **Pass 1 – 标注**：为每个样本打 9 个维度的 taxonomy 标签
+- **Pass 1 扩展（可选）**：用扩展规范补充更细粒度标签
 - **Pass 2 – 打分**：从 complexity / quality / reasoning / rarity 评估训练价值
 - **Pass 2.5 – 会话聚合**：为多轮数据计算 conversation 级指标
 - **Pass 3 – 过滤**：导出更高价值的 review / training 子集
@@ -199,6 +200,91 @@ uv run sft-label dashboard-service register-run --run-dir <run_dir>
 
 生产环境也支持 PM2 模式，详见英文文档：[Output files and dashboards](docs/guides/output-files-and-dashboards.md)。
 
+## 扩展标注推荐实践
+
+如果你希望在核心 9 维 Pass 1 taxonomy 之上增加领域细化标签，推荐使用 **label extension**，并采用 `prompt + 明确 schema` 的配置方式。
+
+推荐落地顺序：
+
+1. **先上最小版 schema**：字段少一些，便于人工抽查。
+2. **先验证 trigger 命中质量**：确保只命中你真正关心的数据。
+3. **稳定后再加细粒度字段**：先把第一版跑稳，再逐步丰富。
+4. **多个 extension 分开维护**：通过重复 `--label-extension` 并存，不要把所有需求塞进一个 spec。
+
+仓库内置样例：
+
+- 最小起步版：`docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
+- 更丰富的 UI 版：`docs/examples/extensions/ui_fine_labels_v1.yaml`
+
+典型命令：
+
+```bash
+# 最小版起步
+uv run sft-label run \
+  --input data.jsonl \
+  --label-extension docs/examples/extensions/ui_fine_labels_minimal_v1.yaml
+
+# 更细粒度的 UI extension
+uv run sft-label run \
+  --input data.jsonl \
+  --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+
+# 多个 extension 并存
+uv run sft-label run \
+  --input data.jsonl \
+  --label-extension docs/examples/extensions/ui_fine_labels_minimal_v1.yaml \
+  --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+
+# 导出带 extension 列的 review CSV
+uv run sft-label export-review \
+  --input <run_dir> \
+  --output review.csv \
+  --include-extensions
+```
+
+实践建议：
+
+- 一个 extension 聚焦一个领域；
+- 字段 id 保持稳定、适合 dashboard 展示；
+- 优先使用 enum / multi-enum 这种稳定离散字段；
+- 先看 dashboard 分布，再决定是否继续加字段。
+
+### 首次运行清单
+
+1.  先用 `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml` 等最小样例跑一小批数据并确认 dashboard 里出现该 extension。
+2.  核对 `matched/skipped` 数据，确认 extension 只命中期待范围。
+3.  打开样本详情，把 `label_extensions.<id>` JSON 看一遍，确保字段值、confidence、unmapped 结构可读。
+4.  用 `uv run sft-label export-review --include-extensions` 导出几条样本，验收列名和内容。
+5.  上述都看过后再把第二个 extension 加入或扩展 schema。
+
+### 推荐 schema 尺寸
+
+- 每个 extension 控制在 5 个字段以内，方便人工复核。
+- 单字段选项数控制在 10~20 个，超过说明字段过于细化。
+- prompt + schema 序列化字符数建议在 2000 字以内，compact 模式还能有充分预算空间。
+- 超出该范围时，请精简 prompt、删掉多余选项，或者把部分逻辑拆为独立 extension。
+
+### compact 模式友好提醒
+
+1.  compact 模式的对话预算是 8000 字符，我们不会封堵，但建议 prompt+schema 控制在 2000 字左右，留出截断和 token 发放的余地。
+2.  在 launcher/CLI 里进入 compact 模式时打印当前 prompt 长度、schema 概览以及推荐值，帮助你迅速定位是否需要调整。
+3.  如果提示超出推荐值，优先缩减 prompt、减少选项、下放部分功能到另一份 spec。
+
+### 首次运行后的验证清单
+
+- 确认 `extension_stats.specs.<id>.matched` 命中率合理。
+- 每个字段的分布不是全部聚集在一个值，必要时看一看 top values。
+- low-confidence 与 unmapped 数量在可接受范围之内。
+- dashboard drill-down 返回的样本匹配预期，手动抽查 10~20 条。
+- 导出的 review CSV 中包含 extension 字段，便于 downstream 审阅。
+
+### 什么时候拆多个 extension
+
+- 领域不同（比如 web vs mobile vs infra）或 prompt/trigger 本质不同。
+- 一个 spec 的字段数 > 5、选项太多、提示文本太长，接近/超过建议的 2000 字。
+- 需要按 trigger、启用状态或数据源来分别控制逻辑。
+- 想单独观察某个 schema 的命中率、unmapped 情况或重跑效果。
+
 ## 常见后续操作
 
 ```bash
@@ -221,6 +307,7 @@ uv run sft-label validate
 
 - [Getting started](docs/guides/getting-started.md)
 - [How sft-label works](docs/guides/how-sft-label-works.md)
+- [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md)
 - [Interactive launcher guide](docs/guides/interactive-launcher.md)
 - [Adaptive LLM runtime](docs/guides/adaptive-llm-runtime.md)
 - [Output files and dashboards](docs/guides/output-files-and-dashboards.md)

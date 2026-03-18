@@ -240,6 +240,28 @@ const I18N = {
     retained: "Retained",
     sample_pct: "Sample %",
     tag_coverage: "Tag Coverage",
+    extension_labels: "Extension Labels",
+    extension_summary: "Extension Summary",
+    extension_matched: "Matched",
+    extension_status: "Status",
+    extension_versions: "Spec Versions",
+    extension_hashes: "Spec Hashes",
+    extension_fields: "Extension Fields",
+    extension_fields_used: "Fields Used",
+    extension_values: "Values",
+    matched_rate: "Matched Rate",
+    extension_prompt: "Prompt",
+    extension_schema: "Schema",
+    extension_source: "Spec Source",
+    extension_field_type: "Field Type",
+    extension_option_count: "Options",
+    inspect_matched_samples: "Inspect Matched Samples",
+    inspect_field_samples: "Inspect Field Samples",
+    inspect_extension_value: "Inspect Value Samples",
+    extension_configuration: "Extension Configuration",
+    extension_details: "Extension Details",
+    extension_short_id: "Extension",
+    extension_field_short: "Field",
     inspect_retained: "Inspect Retained",
     flag_impact: "Flag Impact",
     value_score: "Value Score",
@@ -326,6 +348,10 @@ const I18N = {
     run_query: "Run Query",
     scanning: "Scanning…",
     reset: "Reset",
+    active_filters: "Active Filters",
+    clear_all: "Clear All",
+    remove_filter: "Remove filter",
+    extension_short: "Ext",
     current_scope_summary: "Current scope: {samples} indexed samples · {files} candidate files · showing top {limit} results sorted by {sort}",
     matches_retained: "{matches} matches retained after scanning {rows} rows",
     total: "Total",
@@ -458,6 +484,28 @@ const I18N = {
     retained: "保留数",
     sample_pct: "样本占比",
     tag_coverage: "标签覆盖率",
+    extension_labels: "扩展标签",
+    extension_summary: "扩展概览",
+    extension_matched: "命中",
+    extension_status: "状态",
+    extension_versions: "版本",
+    extension_hashes: "哈希",
+    extension_fields: "扩展字段",
+    extension_fields_used: "字段数",
+    extension_values: "值数",
+    matched_rate: "命中率",
+    extension_prompt: "Prompt",
+    extension_schema: "Schema",
+    extension_source: "Spec 来源",
+    extension_field_type: "字段类型",
+    extension_option_count: "选项数",
+    inspect_matched_samples: "查看命中样本",
+    inspect_field_samples: "查看字段样本",
+    inspect_extension_value: "查看该值样本",
+    extension_configuration: "扩展配置",
+    extension_details: "扩展详情",
+    extension_short_id: "扩展",
+    extension_field_short: "字段",
     inspect_retained: "查看保留结果",
     flag_impact: "标记影响",
     value_score: "价值分",
@@ -544,6 +592,10 @@ const I18N = {
     run_query: "运行查询",
     scanning: "扫描中…",
     reset: "重置",
+    active_filters: "当前过滤条件",
+    clear_all: "清空",
+    remove_filter: "移除过滤条件",
+    extension_short: "扩展",
     current_scope_summary: "当前范围：{samples} 条已索引样本 · {files} 个候选文件 · 展示前 {limit} 条，排序方式：{sort}",
     matches_retained: "扫描 {rows} 行后保留了 {matches} 条匹配结果",
     total: "总计",
@@ -803,6 +855,36 @@ function mergeCsvValues(existing, additions) {
     merged.push(part);
   }
   return merged.join(", ");
+}
+
+function removeCsvValue(existing, removal) {
+  const needle = String(removal || "").trim().toLowerCase();
+  return splitCsv(existing)
+    .filter((part) => part.toLowerCase() !== needle)
+    .join(", ");
+}
+
+function parseExtensionQueryToken(token) {
+  const raw = String(token || "").trim();
+  let match = /^extid:([^:]+)$/.exec(raw);
+  if (match) return { kind: "extension", extensionId: match[1] };
+  match = /^extfield:([^:]+):([^:]+)$/.exec(raw);
+  if (match) return { kind: "field", extensionId: match[1], field: match[2] };
+  match = /^ext:([^:]+):([^:]+):(.+)$/.exec(raw);
+  if (!match) return null;
+  return { kind: "value", extensionId: match[1], field: match[2], value: match[3] };
+}
+
+function formatExplorerQueryToken(token) {
+  const parsed = parseExtensionQueryToken(token);
+  if (!parsed) return String(token || "");
+  if (parsed.kind === "extension") {
+    return `${t("extension_short_id")} · ${parsed.extensionId}`;
+  }
+  if (parsed.kind === "field") {
+    return `${t("extension_field_short")} · ${parsed.extensionId} / ${parsed.field}`;
+  }
+  return `${t("extension_short")} · ${parsed.extensionId} / ${parsed.field} = ${parsed.value}`;
 }
 
 function explorerRegistry() {
@@ -1246,6 +1328,7 @@ function renderRankingTable(items, metricLabel, valueRenderer, actionBuilder = n
       barMetricLabel,
       barMax,
       barColor,
+      buttonDataAttr: rankOptions.buttonDataAttr,
     })}</td>
     <td class="metric-cell">${escapeHtml(valueRenderer(item))}</td>
   </tr>`).join("");
@@ -1260,6 +1343,7 @@ function renderRankingTagCell(item, actionBuilder, options = null) {
   const metricKey = rankOptions.barMetricKey || "";
   const rawMetric = metricKey ? Number(item?.[metricKey]) || 0 : 0;
   const barMax = Number(rankOptions.barMax) || 0;
+  const extraButtonAttr = rankOptions.buttonDataAttr ? ` ${rankOptions.buttonDataAttr}="1"` : "";
   const mode = STATE.tagBarMode || "relative";
   let pct = 0;
   if (metricKey && barMax > 0 && mode !== "hidden") {
@@ -1274,7 +1358,7 @@ function renderRankingTagCell(item, actionBuilder, options = null) {
     ? `<div class="rank-tag-bar" style="width:${pct.toFixed(1)}%;background:linear-gradient(90deg, ${hexToRgba(rankOptions.barColor, 0.18)} 0%, ${hexToRgba(rankOptions.barColor, 0.10)} 85%, ${hexToRgba(rankOptions.barColor, 0.04)} 100%);border:1px solid ${hexToRgba(rankOptions.barColor, 0.12)}" title="${escapeHtml(`${item.label} · ${rankOptions.barMetricLabel || t("count")}: ${rawMetric}`)}"></div>`
     : "";
   const labelHtml = actionBuilder
-    ? `<button class="link-btn rank-tag-link" type="button" data-explorer-patch="${escapeAttrJson(actionBuilder(item))}" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`
+    ? `<button class="link-btn rank-tag-link" type="button"${extraButtonAttr} data-explorer-patch="${escapeAttrJson(actionBuilder(item))}" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`
     : `<span class="rank-tag-text" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>`;
   return `<div class="rank-tag-wrap">${fill}<div class="rank-tag-content">${labelHtml}</div></div>`;
 }
@@ -1521,13 +1605,23 @@ function applyExplorerQueryPatch(patch) {
   renderScope();
 }
 
+function scrollExplorerIntoView() {
+  const node = document.getElementById("explorer-panel");
+  if (node && typeof node.scrollIntoView === "function") {
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
 function rowMatchesExplorerQuery(row, query) {
   if (!row) return false;
   const tagTerms = String(query.tagQuery || "")
     .split(",")
     .map((part) => part.trim().toLowerCase())
     .filter(Boolean);
-  const rowTags = new Set((row.flat_tags || []).map((item) => String(item).toLowerCase()));
+  const rowTags = new Set([
+    ...(row.flat_tags || []).map((item) => String(item).toLowerCase()),
+    ...(row.extension_tags || []).map((item) => String(item).toLowerCase()),
+  ]);
   if (tagTerms.length && !tagTerms.every((term) => rowTags.has(term))) return false;
 
   const language = String(query.language || "").trim().toLowerCase();
@@ -1953,11 +2047,202 @@ function renderPass1(pass1) {
       ${tags}
     </div>`;
   }).join("");
+  const extensionSection = renderExtensions(pass1.extensions);
+  if (extensionSection) {
+    sections.push(extensionSection);
+  }
+
   if (coverageItems) {
     sections.push(section(t("pool_coverage"), `<div class="grid">${coverageItems}</div>`, "", false));
   }
 
   return sections.join("");
+}
+
+function formatCountList(items, limit = 6) {
+  const entries = Object.entries(items || {}).filter(([, value]) => Number(value) > 0);
+  if (!entries.length) return t("no_data");
+  entries.sort((a, b) => (b[1] || 0) - (a[1] || 0) || a[0].localeCompare(b[0]));
+  const shown = entries.slice(0, limit).map(([key, value]) => `${key} (${fmtInt(value)})`);
+  const suffix = entries.length > limit ? ` +${entries.length - limit}` : "";
+  return shown.join(", ") + suffix;
+}
+
+function renderExtensionInspectButton(label, patch, dataAttr = "data-extension-drilldown") {
+  return `<button class="action-btn subtle-btn" type="button" ${dataAttr}="1" data-explorer-patch="${escapeAttrJson(patch)}">${escapeHtml(label)}</button>`;
+}
+
+function sortExtensionFieldEntries(ext) {
+  const labels = ext.labels || {};
+  const schema = ((ext.config || {}).schema) || {};
+  return Object.entries(labels).sort((left, right) => {
+    const leftTotal = Object.values(left[1] || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    const rightTotal = Object.values(right[1] || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    if (rightTotal !== leftTotal) return rightTotal - leftTotal;
+    const leftOptions = Number((((schema[left[0]] || {}).option_count) || 0));
+    const rightOptions = Number((((schema[right[0]] || {}).option_count) || 0));
+    if (rightOptions !== leftOptions) return rightOptions - leftOptions;
+    return left[0].localeCompare(right[0]);
+  });
+}
+
+function renderExtensionConfig(ext) {
+  const config = ext.config || {};
+  const schema = config.schema || {};
+  const schemaEntries = Object.entries(schema);
+  const metaBits = [];
+  if (config.description) metaBits.push(`<div class="note">${escapeHtml(config.description)}</div>`);
+  if (config.source) metaBits.push(`<div class="note">${escapeHtml(t("extension_source"))}: ${escapeHtml(config.source)}</div>`);
+  const promptBlock = config.prompt
+    ? `<details class="drawer-collapse">
+        <summary>${escapeHtml(t("extension_prompt"))}</summary>
+        <div class="drawer-json extension-config-code">${escapeHtml(config.prompt)}</div>
+      </details>`
+    : "";
+  const schemaBlock = schemaEntries.length
+    ? `<details class="drawer-collapse">
+        <summary>${escapeHtml(t("extension_schema"))}</summary>
+        <div class="extension-schema-list">${schemaEntries.map(([fieldName, fieldConfig]) => {
+          const info = [];
+          if (fieldConfig.type) info.push(`${t("extension_field_type")}: ${fieldConfig.type}`);
+          if (fieldConfig.option_count !== null && fieldConfig.option_count !== undefined) info.push(`${t("extension_option_count")}: ${fmtInt(fieldConfig.option_count)}`);
+          const options = Array.isArray(fieldConfig.options) && fieldConfig.options.length
+            ? `<div class="tags">${fieldConfig.options.map((option) => `<span class="tag">${escapeHtml(option)}</span>`).join("")}</div>`
+            : "";
+          return `<div class="extension-schema-item">
+            <div class="extension-schema-header"><strong>${escapeHtml(fieldName)}</strong>${info.length ? `<span class="note"> · ${escapeHtml(info.join(" · "))}</span>` : ""}</div>
+            ${fieldConfig.description ? `<div class="note">${escapeHtml(fieldConfig.description)}</div>` : ""}
+            ${options}
+          </div>`;
+        }).join("")}</div>
+      </details>`
+    : "";
+  if (!metaBits.length && !promptBlock && !schemaBlock) return "";
+  return `<div class="extension-config">
+    ${metaBits.join("")}
+    ${promptBlock}
+    ${schemaBlock}
+  </div>`;
+}
+
+function renderExtensions(extensionsBucket) {
+  const extView = aggregationPayload(extensionsBucket);
+  if (!extView) return "";
+  const extensions = extView.extensions || {};
+  const entries = Object.entries(extensions).sort((left, right) => {
+    const leftMatched = Number((left[1] || {}).matched || 0);
+    const rightMatched = Number((right[1] || {}).matched || 0);
+    if (rightMatched !== leftMatched) return rightMatched - leftMatched;
+    const leftFieldCount = Number((((left[1] || {}).summary || {}).field_count) || 0);
+    const rightFieldCount = Number((((right[1] || {}).summary || {}).field_count) || 0);
+    if (rightFieldCount !== leftFieldCount) return rightFieldCount - leftFieldCount;
+    return String(left[0]).localeCompare(String(right[0]));
+  });
+  if (!entries.length) return "";
+
+  const panels = entries.map(([extId, ext]) => {
+    const summaryInfo = ext.summary || {};
+    const total = fmtInt(ext.total || 0);
+    const matched = fmtInt(ext.matched || 0);
+    const statusLine = formatCountList(ext.status_counts);
+    const versionLine = formatCountList(ext.spec_versions);
+    const hashLine = formatCountList(ext.spec_hashes);
+    const summary = [
+      `${escapeHtml(t("total"))}: ${total}`,
+      `${escapeHtml(t("extension_matched"))}: ${matched}`,
+      `${escapeHtml(t("extension_status"))}: ${escapeHtml(statusLine)}`,
+    ];
+    if (versionLine !== t("no_data")) summary.push(`${escapeHtml(t("extension_versions"))}: ${escapeHtml(versionLine)}`);
+    if (hashLine !== t("no_data")) summary.push(`${escapeHtml(t("extension_hashes"))}: ${escapeHtml(hashLine)}`);
+
+    const summaryCards = renderCards([
+      {label: t("extension_matched"), value: `${matched} / ${total}`},
+      {label: t("matched_rate"), value: `${((Number(summaryInfo.matched_rate) || 0) * 100).toFixed(1)}%`},
+      {label: t("extension_fields_used"), value: fmtInt(summaryInfo.field_count || 0)},
+      {label: t("extension_values"), value: fmtInt(summaryInfo.value_count || 0)},
+      {label: t("total"), value: total},
+    ]);
+
+    const fieldEntries = sortExtensionFieldEntries(ext);
+    const labelPanels = fieldEntries.map(([field, dist]) => {
+      const fieldConfig = (((ext.config || {}).schema) || {})[field] || {};
+      const totalCount = Object.values(dist || {}).reduce((sum, value) => sum + value, 0);
+      const entries = Object.entries(dist || {}).map(([label, value]) => ({
+        label,
+        value,
+        count: value,
+        extensionTag: `ext:${extId}:${field}:${label}`,
+      }));
+      if (!entries.length) return "";
+      const maxValue = Math.max(...entries.map((entry) => Number(entry.value) || 0), 0);
+      const fieldMeta = [];
+      if (fieldConfig.type) fieldMeta.push(`${t("extension_field_type")}: ${fieldConfig.type}`);
+      if (fieldConfig.option_count !== null && fieldConfig.option_count !== undefined) fieldMeta.push(`${t("extension_option_count")}: ${fmtInt(fieldConfig.option_count)}`);
+      return `<div class="mini-panel">
+        <div class="extension-field-header">
+          <div>
+            <h4>${escapeHtml(field)}</h4>
+            ${fieldMeta.length ? `<div class="note">${escapeHtml(fieldMeta.join(" · "))}</div>` : ""}
+            ${fieldConfig.description ? `<div class="note">${escapeHtml(fieldConfig.description)}</div>` : ""}
+          </div>
+          ${renderExtensionInspectButton(
+            t("inspect_field_samples"),
+            { tagQueryAppend: [`extfield:${extId}:${field}`], sort: "sample_id_asc" },
+          )}
+        </div>
+        ${renderRankingTable(entries, t("count"), (entry) => (
+          totalCount > 0 ? `${entry.value} (${((entry.value / totalCount) * 100).toFixed(1)}%)` : `${entry.value}`
+        ), (entry) => ({
+          tagQueryAppend: [entry.extensionTag],
+          sort: "sample_id_asc",
+        }), {
+          barMetricKey: "count",
+          barMetricLabel: t("count"),
+          barColor: "#0ea5e9",
+          globalBarMax: maxValue,
+          buttonDataAttr: "data-extension-drilldown",
+        })}
+      </div>`;
+    }).join("");
+
+    let labelsHtml = labelPanels;
+    if (!labelPanels) {
+      labelsHtml = `<div class="note">${escapeHtml(t("no_tags"))}</div>`;
+    } else {
+      labelsHtml = `<div class="grid">${labelPanels}</div>`;
+    }
+
+    const unmappedDetails = ext.unmapped_details || {};
+    const unmappedRows = Object.entries(unmappedDetails.by_dimension || {}).flatMap(([dim, rows]) => (
+      (rows || []).slice(0, 6).map((row) => `<div class="note">${escapeHtml(dim)}: ${escapeHtml(row.label)} (${fmtInt(row.count || 0)})</div>`)
+    ));
+    const unmappedHtml = unmappedRows.length
+      ? `<div class="note">${escapeHtml(t("unmapped"))}:<br>${unmappedRows.join("")}</div>`
+      : "";
+    const configHtml = renderExtensionConfig(ext);
+    const inspectMatched = renderExtensionInspectButton(
+      t("inspect_matched_samples"),
+      { tagQueryAppend: [`extid:${extId}`], sort: "sample_id_asc" },
+    );
+    const title = ((ext.config || {}).display_name) || extId;
+
+    return `<div class="mini-panel">
+      <div class="extension-panel-header">
+        <div>
+          <h4>${escapeHtml(title)}</h4>
+          ${title !== extId ? `<div class="note">${escapeHtml(extId)}</div>` : ""}
+        </div>
+        <div class="extension-action-row">${inspectMatched}</div>
+      </div>
+      ${summaryCards}
+      <div class="note">${summary.join("<br>")}</div>
+      ${configHtml ? `<div class="drawer-section"><h4>${escapeHtml(t("extension_configuration"))}</h4>${configHtml}</div>` : ""}
+      <div class="drawer-section"><h4>${escapeHtml(t("extension_details"))}</h4>${labelsHtml}</div>
+      ${unmappedHtml}
+    </div>`;
+  }).join("");
+
+  return section(t("extension_labels"), `<div class="grid">${panels}</div>`, t("extension_fields"), true);
 }
 
 function renderPass2(pass2) {
@@ -2252,12 +2537,35 @@ function explorerQueryHasFilters(query) {
     || !!query.includeInherited;
 }
 
+function renderExplorerActiveFilters(query) {
+  const tagTokens = splitCsv((query || {}).tagQuery);
+  if (!tagTokens.length) return "";
+  const chips = tagTokens.map((token) => {
+    const isExtension = !!parseExtensionQueryToken(token);
+    const className = isExtension ? "tag explorer-filter-chip extension-tag" : "tag explorer-filter-chip";
+    return `<button class="${className}" type="button" data-explorer-remove-tag="${escapeHtml(token)}" title="${escapeHtml(t("remove_filter"))}">
+      <span>${escapeHtml(formatExplorerQueryToken(token))}</span>
+      <span class="chip-remove" aria-hidden="true">×</span>
+    </button>`;
+  }).join("");
+  return `<div class="explorer-active-filters">
+    <div class="note">${escapeHtml(t("active_filters"))}</div>
+    <div class="tags">${chips}</div>
+  </div>`;
+}
+
 function renderExplorerResults(rows) {
   if (!rows.length) {
     return `<div class="empty">${escapeHtml(t("run_query_or_choose_preset"))}</div>`;
   }
   const body = rows.map((row) => {
-    const tags = (row.flat_tags || []).slice(0, 6).map((tag) => `<span class="preview-tag">${escapeHtml(tag)}</span>`).join("");
+    const coreTags = (row.flat_tags || []).slice(0, 4).map((tag) => `<span class="preview-tag">${escapeHtml(tag)}</span>`).join("");
+    const extensionTags = (row.extension_tags || [])
+      .filter((tag) => String(tag || "").startsWith("ext:"))
+      .slice(0, 3)
+      .map((tag) => `<span class="preview-tag extension-tag" title="${escapeHtml(tag)}">${escapeHtml(formatExplorerQueryToken(tag))}</span>`)
+      .join("");
+    const tags = [coreTags, extensionTags].filter(Boolean).join("");
     return `<tr>
       <td><button class="link-btn" data-explorer-detail="${escapeHtml(row.doc_id)}" data-explorer-scope="${escapeHtml(row.scope_id)}" data-explorer-detail-chunk="${escapeHtml(row.detail_chunk)}">${escapeHtml(row.sample_id || row.doc_id)}</button></td>
       <td class="preview-query" title="${escapeHtml(row.query_preview || "")}">${textPreview(row.query_preview)}</td>
@@ -2279,6 +2587,33 @@ function renderExplorerResults(rows) {
   </table></div>`;
 }
 
+function renderDrawerExtensionPayloads(payload) {
+  const extensions = payload || {};
+  const entries = Object.entries(extensions);
+  if (!entries.length) return `<span class="note">${escapeHtml(t("no_tags"))}</span>`;
+  return `<div class="grid">${entries.map(([extId, extPayload]) => {
+    const labels = extPayload.labels || {};
+    const confidence = extPayload.confidence || {};
+    const labelRows = Object.entries(labels).map(([field, value]) => {
+      const rendered = Array.isArray(value)
+        ? value.map((item) => `<span class="tag extension-tag">${escapeHtml(item)}</span>`).join("")
+        : value ? `<span class="tag extension-tag">${escapeHtml(value)}</span>` : `<span class="note">-</span>`;
+      const conf = confidence[field];
+      return `<div class="extension-schema-item">
+        <div class="extension-schema-header"><strong>${escapeHtml(field)}</strong>${conf !== null && conf !== undefined ? `<span class="note"> · ${escapeHtml(t("confidence"))}: ${escapeHtml(fmt(conf, 2))}</span>` : ""}</div>
+        <div class="tags">${rendered}</div>
+      </div>`;
+    }).join("");
+    const unmapped = (extPayload.unmapped || []).map((item) => `<span class="tag">${escapeHtml(`${item.dimension}:${item.value}`)}</span>`).join("");
+    return `<div class="mini-panel">
+      <h4>${escapeHtml(extId)}</h4>
+      <div class="note">${escapeHtml(t("extension_status"))}: ${escapeHtml(extPayload.status || "unknown")} · ${escapeHtml(t("extension_matched"))}: ${escapeHtml(String(!!extPayload.matched))}</div>
+      ${labelRows || `<div class="note">${escapeHtml(t("no_tags"))}</div>`}
+      ${unmapped ? `<div class="note">${escapeHtml(t("unmapped"))}</div><div class="tags">${unmapped}</div>` : ""}
+    </div>`;
+  }).join("")}</div>`;
+}
+
 function renderExplorerDrawer() {
   if (!STATE.explorer.detailDocId) return "";
   const detail = STATE.explorer.detailData;
@@ -2291,6 +2626,7 @@ function renderExplorerDrawer() {
   let body = `<div class="drawer-section"><div class="note">${loading ? escapeHtml(t("loading_full_sample_payload")) : escapeHtml((DATA.explorer || {}).detail_limit_notice || "")}</div></div>`;
   if (detail && !loading) {
     const labels = detail.labels || {};
+    const extensionPayloads = detail.label_extensions || {};
     const value = detail.value || {};
     const flatTags = Object.entries(labels).flatMap(([key, val]) => {
       if (["confidence", "unmapped", "inherited", "inherited_from"].includes(key)) return [];
@@ -2323,6 +2659,7 @@ function renderExplorerDrawer() {
     body = `
       <div class="drawer-section"><div class="drawer-grid">${cards}</div></div>
       <div class="drawer-section"><h4>${escapeHtml(t("tags"))}</h4><div class="tags">${flatTags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") || `<span class="note">${escapeHtml(t("no_tags"))}</span>`}</div></div>
+      <div class="drawer-section"><h4>${escapeHtml(t("extension_labels"))}</h4>${renderDrawerExtensionPayloads(extensionPayloads)}</div>
       <div class="drawer-section"><h4>${escapeHtml(t("conversation"))}</h4>${renderDrawerTurns(detail.conversations || [])}</div>
       <div class="drawer-section"><h4>${escapeHtml(t("json"))}</h4>${renderDrawerJson(detail)}</div>
     `;
@@ -2373,7 +2710,8 @@ function renderExplorer(scope) {
 
   return section(
     t("sample_explorer"),
-    `<div class="explorer-toolbar">
+    `<div id="explorer-panel">
+    <div class="explorer-toolbar">
       <div>
         <div class="explorer-summary">${escapeHtml(t("explorer_summary", { limit: fmtInt(STATE.explorer.limit) }))}</div>
         <div class="preset-row">${presets.map((preset) => `<button class="preset-btn" type="button" data-explorer-preset="${escapeHtml(preset.id)}">${escapeHtml(preset.label)}</button>`).join("")}</div>
@@ -2411,12 +2749,13 @@ function renderExplorer(scope) {
       <button class="action-btn" type="button" id="explorer-run">${STATE.explorer.busy ? escapeHtml(t("scanning")) : escapeHtml(t("run_query"))}</button>
       <button class="action-btn" type="button" id="explorer-reset">${escapeHtml(t("reset"))}</button>
     </div>
+    ${renderExplorerActiveFilters(query)}
     <div class="result-meta">
       <div class="result-count">${escapeHtml(t("current_scope_summary", { samples: fmtInt(totalSamples), files: fmtInt(candidateFileCount), limit: fmtInt(STATE.explorer.limit), sort: (availableSorts.find(([value]) => value === STATE.explorer.sort) || ["", STATE.explorer.sort])[1] }))}</div>
       <div class="result-count">${escapeHtml(t("matches_retained", { matches: fmtInt(STATE.explorer.matched), rows: fmtInt(STATE.explorer.scanned) }))}</div>
     </div>
     ${renderExplorerResults(STATE.explorer.results)}
-    ${renderExplorerDrawer()}`,
+    ${renderExplorerDrawer()}</div>`,
     `${fmtInt(totalSamples)} ${escapeHtml(t("samples"))}`,
     true,
   );
@@ -2509,11 +2848,26 @@ async function renderScope() {
       const raw = node.getAttribute("data-explorer-patch");
       if (!raw) return;
       try {
+        const shouldScrollToExplorer = node.hasAttribute("data-extension-drilldown");
         applyExplorerQueryPatch(JSON.parse(raw));
         await runExplorerQuery();
+        if (shouldScrollToExplorer) scrollExplorerIntoView();
       } catch (error) {
         console.warn("Failed to apply explorer patch", error);
       }
+    });
+  });
+  document.querySelectorAll("[data-explorer-remove-tag]").forEach((node) => {
+    node.addEventListener("click", async () => {
+      const token = node.getAttribute("data-explorer-remove-tag");
+      if (!token) return;
+      STATE.explorer.queryModel = {
+        ...STATE.explorer.queryModel,
+        tagQuery: removeCsvValue(STATE.explorer.queryModel.tagQuery, token),
+      };
+      persistDashboardState();
+      await runExplorerQuery();
+      scrollExplorerIntoView();
     });
   });
   document.querySelectorAll("[data-explorer-preset]").forEach((node) => {

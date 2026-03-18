@@ -11,6 +11,7 @@ from sft_label.cli import (
     _SemanticProgressPrinter,
     _estimate_end_to_end_llm_calls,
     build_parser,
+    cmd_export_review,
     cmd_run,
 )
 from sft_label.config import PipelineConfig
@@ -55,6 +56,29 @@ def test_estimate_end_to_end_llm_calls_single_file(tmp_path):
     assert plan["pass1_est_calls"] == 7
     assert plan["pass2_est_calls"] == 3
     assert plan["total_est_calls"] == 10
+
+def test_estimate_end_to_end_llm_calls_accounts_for_extensions(tmp_path):
+    input_file = tmp_path / "input.json"
+    _write_input(input_file, 3)
+
+    args = SimpleNamespace(
+        input=str(input_file),
+        resume=None,
+        limit=0,
+        shuffle=False,
+        no_arbitration=False,
+        mode="refresh",
+        migrate_from=None,
+    )
+    config = PipelineConfig(sample_max_retries=1)
+    config.extension_spec_paths = ["ui.yaml", "mobile.yaml"]
+    plan = _estimate_end_to_end_llm_calls(args, config)
+
+    assert plan is not None
+    assert plan["pass1_extension_calls"] == plan["pass1_labeled_samples"] * len(config.extension_spec_paths)
+    assert plan["total_est_calls"] == (
+        plan["pass1_est_calls"] + plan["pass1_extension_calls"] + plan["pass2_est_calls"]
+    )
 
 
 def test_combined_llm_progress_tracker_updates():
@@ -161,6 +185,117 @@ def test_cmd_run_wraps_estimation_and_reuses_precomputed_estimates(monkeypatch):
     assert any("Estimating workload" in label for label in heartbeat_labels)
 
 
+def test_cmd_run_loads_label_extension_specs_before_pipeline(monkeypatch, tmp_path):
+    spec_path = tmp_path / "ui-extension.yaml"
+    spec_path.write_text(
+        """
+id: ui_fine_labels
+spec_version: v1
+prompt: |
+  Label UI data.
+schema:
+  component_type:
+    type: multi_enum
+    options: [form, modal]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    async def _fake_run(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+        return {"run_dir": "/tmp/fake-run"}
+
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+
+    parser = build_parser()
+    args = parser.parse_args(["run", "--input", "input.json", "--label-extension", str(spec_path)])
+    result = cmd_run(args)
+
+    assert result["run_dir"] == "/tmp/fake-run"
+    assert captured["config"].extension_spec_paths == [str(spec_path)]
+    assert captured["config"].extension_specs is not None
+    assert [spec.id for spec in captured["config"].extension_specs] == ["ui_fine_labels"]
+
+
+def test_cmd_run_prints_extension_preflight_and_followup(monkeypatch, tmp_path, capsys):
+    spec_path = tmp_path / "ui-extension.yaml"
+    spec_path.write_text(
+        """
+id: ui_fine_labels
+spec_version: v1
+display_name: UI Fine Labels
+description: Fine-grained UI tags.
+prompt: |
+  Label UI data with frontend review hints.
+schema:
+  component_type:
+    type: multi_enum
+    options: [form, modal, table]
+trigger:
+  domain_any_of: [web-frontend]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    async def _fake_run(*args, **kwargs):
+        return {
+            "run_dir": "/tmp/fake-run",
+            "extension_stats": {
+                "specs": {
+                    "ui_fine_labels": {
+                        "total": 10,
+                        "matched": 7,
+                        "status_counts": {"success": 7, "skipped": 3},
+                        "unmapped_counts": {"component_type:card": 2},
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "run",
+        "--input",
+        "input.json",
+        "--prompt-mode",
+        "compact",
+        "--label-extension",
+        str(spec_path),
+    ])
+    result = cmd_run(args)
+
+    assert result["run_dir"] == "/tmp/fake-run"
+    out = capsys.readouterr().out
+    assert "ui_fine_labels" in out
+    assert "2000" in out
+    assert "Inspect" in out or "dashboard" in out.lower()
+    assert "--include-extensions" in out
+
+
+def test_run_parser_help_mentions_repeatable_extension_guidance():
+    parser = build_parser()
+    subparsers_action = next(item for item in parser._actions if item.dest == "command")
+    run_parser = subparsers_action.choices["run"]
+    action = next(item for item in run_parser._actions if getattr(item, "dest", None) == "label_extension")
+    assert "repeatable" in action.help.lower()
+    assert "unique" in action.help.lower()
+
+
+def test_run_and_score_parser_default_prompt_mode_is_compact():
+    parser = build_parser()
+    args_run = parser.parse_args(["run", "--input", "input.json"])
+    args_score = parser.parse_args(["score", "--input", "labeled.json"])
+
+    assert args_run.prompt_mode == "compact"
+    assert args_score.prompt_mode == "compact"
+
+
 def test_semantic_progress_printer_shows_progress_without_spam(capsys):
     printer = _SemanticProgressPrinter()
     printer("start", "Semantic clustering started", None, None)
@@ -223,6 +358,48 @@ def test_dashboard_service_parser_supports_init_and_register_run():
     assert args.command == "dashboard-service"
     assert args.dashboard_service_action == "register-run"
     assert args.run_dir == "/tmp/run-1"
+
+def test_run_parser_accepts_multiple_label_extensions():
+    parser = build_parser()
+    args = parser.parse_args(["run", "--label-extension", "ui.yaml", "--label-extension", "mobile.yaml"])
+    assert args.command == "run"
+    assert args.label_extension == ["ui.yaml", "mobile.yaml"]
+
+
+def test_export_review_parser_accepts_include_extensions():
+    parser = build_parser()
+    args = parser.parse_args([
+        "export-review",
+        "--input",
+        "run_dir",
+        "--output",
+        "review.csv",
+        "--include-extensions",
+    ])
+    assert args.command == "export-review"
+    assert args.include_extensions is True
+
+
+def test_cmd_export_review_forwards_include_extensions(monkeypatch):
+    captured = {}
+
+    def _fake_main():
+        captured["argv"] = list(sys.argv)
+
+    monkeypatch.setitem(sys.modules, "sft_label.tools.export_review", SimpleNamespace(main=_fake_main))
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "export-review",
+        "--input",
+        "run_dir",
+        "--output",
+        "review.csv",
+        "--include-extensions",
+    ])
+    cmd_export_review(args)
+
+    assert "--include-extensions" in captured["argv"]
 
 
 def test_dispatch_dashboard_service_register_run(monkeypatch, capsys, tmp_path):

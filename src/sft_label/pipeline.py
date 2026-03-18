@@ -22,7 +22,6 @@ import json
 import time
 import asyncio
 import argparse
-import inspect
 import random
 import re
 import sys
@@ -88,9 +87,11 @@ from sft_label.llm_runtime import (
     AdaptiveLLMRuntime,
     OutcomeClass,
     RequestOutcome,
-    classify_exception,
     classify_http_result,
 )
+from sft_label.label_extensions import run_label_extensions
+from sft_label.label_extensions_schema import load_extension_specs
+from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
 
 try:
     from sft_label.llm_runtime import AdaptiveLLMRuntime  # type: ignore
@@ -99,6 +100,23 @@ except Exception:  # pragma: no cover - optional dependency while feature is rol
 
 
 INLINE_RUN_MODES = {"incremental", "refresh", "migrate", "recompute"}
+
+
+def _resolved_extension_specs(config: PipelineConfig | None) -> list:
+    if config is None:
+        return []
+
+    specs = getattr(config, "extension_specs", None)
+    if specs is None:
+        specs = getattr(config, "label_extension_specs", None)
+    if specs is None:
+        paths = list(getattr(config, "extension_spec_paths", None) or [])
+        specs = load_extension_specs(paths) if paths else []
+
+    resolved = list(specs or [])
+    config.extension_specs = resolved
+    setattr(config, "label_extension_specs", resolved)
+    return resolved
 
 
 # ─────────────────────────────────────────────────────────
@@ -296,6 +314,9 @@ def merge_stats(all_file_stats):
     merged["unmapped_unique_count"] = len(merged["unmapped_tags"])
     merged["canonicalization_counts"] = dict(sorted(merged["canonicalization_counts"].items(), key=lambda x: (-x[1], x[0])))
     merged["canonicalization_unique_count"] = len(merged["canonicalization_counts"])
+    extension_stats = merge_extension_stats(all_file_stats)
+    if extension_stats:
+        merged["extension_stats"] = extension_stats
 
     # Finalize confidence_stats: convert accumulated sum/count to mean
     for dim, entry in merged["confidence_stats"].items():
@@ -1487,6 +1508,49 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                                 labels[d] = re2_clean[d]
                                 labels["confidence"][d] = re2_clean.get("confidence", {}).get(d, 0)
 
+            extension_specs = _resolved_extension_specs(config)
+            if extension_specs:
+                extension_usage: dict[str, dict] = {}
+
+                async def _extension_llm_caller(messages, spec):
+                    parsed, raw, usage, _outcome = await _call(
+                        f"pass1.extension.{spec.id}",
+                        messages,
+                        temperature=0.1,
+                        max_tokens=800,
+                    )
+                    extension_usage[spec.id] = dict(usage)
+                    if parsed is None:
+                        raise RuntimeError(usage.get("error") or raw or "extension labeling failed")
+                    return parsed
+
+                extension_payloads = await run_label_extensions(
+                    conversation_json=conversations_json,
+                    preprocessed_signals=signals_str,
+                    core_labels=labels,
+                    extension_specs=extension_specs,
+                    llm_caller=_extension_llm_caller,
+                )
+                for spec_id, payload in extension_payloads.items():
+                    usage = extension_usage.get(spec_id) or {}
+                    monitor["llm_calls"] += int((payload.get("monitor") or {}).get("llm_calls", 0))
+                    monitor["total_prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+                    monitor["total_completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+                    if isinstance(payload.get("monitor"), dict):
+                        payload["monitor"]["prompt_tokens"] = int(usage.get("prompt_tokens", 0) or 0)
+                        payload["monitor"]["completion_tokens"] = int(usage.get("completion_tokens", 0) or 0)
+                        if usage.get("runtime_state") is not None:
+                            payload["monitor"]["runtime_state"] = usage.get("runtime_state")
+                labels["label_extensions"] = extension_payloads
+                monitor["label_extensions"] = {
+                    spec_id: {
+                        "status": payload.get("status"),
+                        "matched": payload.get("matched"),
+                        "llm_calls": (payload.get("monitor") or {}).get("llm_calls", 0),
+                    }
+                    for spec_id, payload in extension_payloads.items()
+                }
+
             monitor["elapsed_seconds"] = round(time.time() - start, 2)
             return sample_idx, labels, monitor
 
@@ -1515,7 +1579,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
     return sample_idx, None, monitor
 
 
-def compute_stats(all_monitors, all_labels, inherit_map=None):
+def compute_stats(all_monitors, all_labels, inherit_map=None, extension_specs=None):
     """Compute aggregate statistics.
 
     When inherit_map is provided, inherited samples are:
@@ -1596,7 +1660,7 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
         key = f"{intent}|{diff}"
         cross[key] = cross.get(key, 0) + 1
 
-    return {
+    stats = {
         "total_samples": total,
         "distribution_total_samples": distribution_total,
         "success": success,
@@ -1625,6 +1689,13 @@ def compute_stats(all_monitors, all_labels, inherit_map=None):
         "combo_distributions": dict(sorted(combo_counts.items(), key=lambda x: -x[1])),
         "cross_matrix": cross,
     }
+    extension_stats = aggregate_extension_stats(
+        [{"labels": labels} for labels in all_labels if is_usable_labels(labels)],
+        extension_specs=extension_specs,
+    )
+    if extension_stats:
+        stats["extension_stats"] = extension_stats
+    return stats
 
 
 # ─────────────────────────────────────────────────────────
@@ -1899,6 +1970,8 @@ def estimate_directory_workload(
             threshold=config.sparse_threshold,
         )
 
+    extension_specs = _resolved_extension_specs(config)
+
     # Preserve RNG state so pre-scan doesn't perturb runtime shuffle behavior.
     rng_state = random.getstate()
     try:
@@ -1922,6 +1995,7 @@ def estimate_directory_workload(
                         mode=mode,
                         label_version=label_version,
                         sparse_kwargs=_sparse_kw,
+                        extension_specs=extension_specs,
                         migration_index=migration_index,
                     )
                     n_raw += len(prepared.bundles)
@@ -2051,7 +2125,12 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
 
     # Compute and write stats
     valid_monitors = [m for m in all_monitors if m is not None]
-    stats = compute_stats(valid_monitors, all_labels, inherit_map=collector.inherit_map)
+    stats = compute_stats(
+        valid_monitors,
+        all_labels,
+        inherit_map=collector.inherit_map,
+        extension_specs=_resolved_extension_specs(collector.config),
+    )
     stats["input_file"] = str(collector.abs_path)
     stats["mode"] = collector.run_mode
     if collector.plan_stats:
@@ -2159,7 +2238,7 @@ class StatsAccumulator:
     DIMS = ["intent", "language", "domain", "concept", "task",
             "agentic", "constraint", "context", "difficulty"]
 
-    def __init__(self):
+    def __init__(self, extension_specs=None):
         self.total = 0
         self.distribution_total = 0
         self.success = 0
@@ -2186,6 +2265,8 @@ class StatsAccumulator:
         # Sparse tracking
         self.sparse_labeled = 0
         self.sparse_inherited = 0
+        self.extension_stats_batches = []
+        self.extension_specs = extension_specs or []
 
     def update(self, all_labels, all_monitors, inherit_map=None):
         """Ingest one chunk's labels and monitors.
@@ -2261,6 +2342,13 @@ class StatsAccumulator:
         if inherit_map:
             self.sparse_inherited += len(inherit_map)
 
+        extension_stats = aggregate_extension_stats(
+            [{"labels": labels} for labels in all_labels if is_usable_labels(labels)],
+            extension_specs=self.extension_specs,
+        )
+        if extension_stats:
+            self.extension_stats_batches.append({"extension_stats": extension_stats})
+
     def set_sparse_labeled(self, count):
         """Track total sparse-labeled count across chunks."""
         self.sparse_labeled += count
@@ -2311,6 +2399,9 @@ class StatsAccumulator:
             "combo_distributions": dict(sorted(self.combo_counts.items(), key=lambda x: -x[1])),
             "cross_matrix": self.cross_matrix,
         }
+        extension_stats = merge_extension_stats(self.extension_stats_batches)
+        if extension_stats:
+            result["extension_stats"] = extension_stats
         if self.sparse_inherited > 0:
             result["sparse_labeled"] = self.sparse_labeled
             result["sparse_inherited"] = self.sparse_inherited
@@ -2556,7 +2647,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                           max_gap=config.sparse_max_gap,
                           threshold=config.sparse_threshold)
 
-    stats_acc = StatsAccumulator()
+    stats_acc = StatsAccumulator(extension_specs=_resolved_extension_specs(config))
     chunk_gen = iter_row_sample_bundle_chunks_from_jsonl(input_path, chunk_size, limit=limit)
     plan_totals = {
         "rows_total": 0,
@@ -2600,6 +2691,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                 mode=mode,
                 label_version=DEFAULT_LABEL_VERSION,
                 sparse_kwargs=_sparse_kw,
+                extension_specs=_resolved_extension_specs(config),
                 migration_index=migration_index,
             )
             samples = prepared.samples
@@ -2857,6 +2949,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             mode=mode,
             label_version=DEFAULT_LABEL_VERSION,
             sparse_kwargs=_sparse_kw,
+            extension_specs=_resolved_extension_specs(config),
             migration_index=migration_index,
         )
         samples = prepared_batch.samples
@@ -3061,7 +3154,12 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     # Compute and write stats
     valid_monitors = [m for m in all_monitors if m is not None]
-    stats = compute_stats(valid_monitors, all_labels, inherit_map=inherit_map)
+    stats = compute_stats(
+        valid_monitors,
+        all_labels,
+        inherit_map=inherit_map,
+        extension_specs=_resolved_extension_specs(config),
+    )
     stats["total_elapsed_seconds"] = round(file_elapsed, 1)
     stats["input_file"] = str(input_path)
     stats["mode"] = mode
@@ -3317,10 +3415,10 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 mode=mode,
                 label_version=DEFAULT_LABEL_VERSION,
                 sparse_kwargs=_sparse_kw,
+                extension_specs=_resolved_extension_specs(config),
                 migration_index=migration_index,
             )
             samples = prepared.samples
-            n_raw = len(prepared.bundles)
             row_bundles = prepared.bundles
             sample_to_bundle = prepared.sample_to_bundle
         else:
@@ -3808,6 +3906,7 @@ async def run(
     """
     if config is None:
         config = PipelineConfig()
+    _resolved_extension_specs(config)
 
     mode = _resolve_mode(mode)
 
