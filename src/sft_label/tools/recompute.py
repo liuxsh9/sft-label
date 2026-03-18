@@ -107,7 +107,7 @@ def _dedup_json_jsonl(files):
         key = (f.parent, f.stem)
         if key in seen:
             existing = seen[key]
-            if existing.suffix == ".jsonl" and f.suffix == ".json":
+            if existing.suffix == ".json" and f.suffix == ".jsonl":
                 seen[key] = f
         else:
             seen[key] = f

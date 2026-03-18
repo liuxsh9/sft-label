@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from sft_label.tools.analyze_unmapped import run_unmapped_analysis
+from sft_label.tools.analyze_unmapped import _discover_legacy_sample_files, run_unmapped_analysis
 
 
 def test_run_unmapped_analysis_reports_sample_examples(tmp_path, capsys):
@@ -95,3 +95,21 @@ def test_run_unmapped_analysis_prefers_labeled_over_scored_in_directory(tmp_path
     assert summary["source_kind"] == "directory"
     assert summary["total_occurrences"] == 1
     assert "1 occurrences, 1 unique tags" in out
+
+
+def test_legacy_sample_discovery_prefers_jsonl_siblings(tmp_path):
+    labeled_json = tmp_path / "labeled.json"
+    labeled_jsonl = tmp_path / "labeled.jsonl"
+    sample = {
+        "id": "sample-1",
+        "conversations": [{"from": "human", "value": "Inspect the streamed sample."}],
+        "labels": {"unmapped": [{"dimension": "task", "value": "gpu-porting"}]},
+    }
+    with open(labeled_json, "w", encoding="utf-8") as handle:
+        json.dump([sample], handle)
+    labeled_jsonl.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    files = _discover_legacy_sample_files(tmp_path)
+
+    assert len(files) == 1
+    assert files[0].suffix == ".jsonl"

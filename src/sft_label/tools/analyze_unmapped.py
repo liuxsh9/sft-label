@@ -77,7 +77,7 @@ def _discover_legacy_sample_files(input_path: Path) -> list[Path]:
         for file_path in selected_files:
             key = (parent, file_path.stem)
             existing = dedup.get(key)
-            if existing is None or (existing.suffix == ".jsonl" and file_path.suffix == ".json"):
+            if existing is None or (existing.suffix == ".json" and file_path.suffix == ".jsonl"):
                 dedup[key] = file_path
     return sorted(dedup.values())
 
