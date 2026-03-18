@@ -198,6 +198,7 @@ Key design notes:
 
 - Multi-turn slices are marked `thinking_mode="fast"` and have `cot_text` removed during slicing to avoid misleading Pass 2 evaluation.
 - Pass 2 preserves COT fragments where available because reasoning quality is part of the score.
+- Pass 2 flags are intentionally a **tiny hard-filter exception set** for downstream review/filtering: `has-bug` (objective failure, including hallucination/unsafe shortcuts) and `incomplete` (request not adequately satisfied, including explicit format/constraint misses).
 - Default weighted score:
   - `0.25 * complexity`
   - `0.40 * quality`
@@ -349,6 +350,7 @@ Treat that as an environment-specific note, not a guaranteed path.
 - Taxonomy package data lives under `/Users/lxs/.codex/worktrees/e39f/sft-label/src/sft_label/taxonomy/` and should be loaded via `_resources.py`, not raw file-system assumptions.
 - Runtime defaults live in `/Users/lxs/.codex/worktrees/e39f/sft-label/src/sft_label/config.py`; CLI flags selectively override those defaults.
 - `LITELLM_BASE` and `LITELLM_KEY` configure the LLM endpoint.
+- Prompt budget is a production constraint, not a soft preference: when editing labeling/scoring prompts, **do not increase prompt length**, and treat **compact prompt length as a hard ceiling**. Prefer equal-or-shorter rewrites; if a change adds wording in one area, remove at least as much elsewhere first.
 - Python requirement is `>=3.9`; any file using `X | Y` unions should include:
 
 ```python

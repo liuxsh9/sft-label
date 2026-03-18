@@ -113,7 +113,7 @@ SCORE_RESPONSE = {
     "reasoning": {
         "clarity": 7, "consistency": 8, "self_correction": False, "overall": 7,
     },
-    "flags": ["clean-code"],
+    "flags": ["has-bug"],
     "confidence": 0.85,
 }
 

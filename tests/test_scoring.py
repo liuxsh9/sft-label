@@ -25,7 +25,7 @@ from sft_label.artifacts import (
     PASS2_DASHBOARD_FILE,
     dashboard_relpath,
 )
-from sft_label.config import PipelineConfig
+from sft_label.config import PipelineConfig, KNOWN_FLAGS_NEGATIVE
 from sft_label.conversation import (
     _compute_penalty,
     _compute_pure_quality_from_slice,
@@ -55,7 +55,7 @@ from sft_label.scoring import (
     _count_required_llm_calls_in_file,
     _selection_summary_from_sample,
 )
-from sft_label.prompts_value import SCORING_SYSTEM_COMPACT, build_scoring_messages
+from sft_label.prompts_value import SCORING_SYSTEM, SCORING_SYSTEM_COMPACT, build_scoring_messages
 from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
 
 
@@ -683,12 +683,15 @@ class TestLoadTagStats:
 # ─────────────────────────────────────────────────────────
 
 class TestValidateScoreResponse:
+    def test_known_flags_contract_is_coarse_hard_filter(self):
+        assert KNOWN_FLAGS_NEGATIVE == frozenset({"has-bug", "incomplete"})
+
     def test_valid_response(self):
         parsed = {
             "complexity": {"instruction": 7, "analytical_depth": 8, "implementation": 6, "overall": 7},
             "quality": {"correctness": 8, "code_quality": 7, "explanation": 6, "completeness": 8, "overall": 7},
             "reasoning": {"clarity": 7, "consistency": 9, "self_correction": True, "overall": 8},
-            "flags": ["clean-code"],
+            "flags": ["has-bug"],
             "confidence": 0.85,
         }
         result, issues = validate_score_response(parsed)
@@ -698,7 +701,7 @@ class TestValidateScoreResponse:
         assert result["quality"]["overall"] == 7
         assert result["reasoning"]["overall"] == 8
         assert result["reasoning"]["self_correction"] is True
-        assert result["flags"] == ["clean-code"]
+        assert result["flags"] == ["has-bug"]
         assert result["confidence"] == 0.85
 
     def test_null_response(self):
@@ -744,11 +747,13 @@ class TestValidateScoreResponse:
             "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
-            "flags": ["clean-code", "totally-made-up-flag", "another-fake"],
+            "flags": ["has-bug", "incorrect-output", "totally-made-up-flag", "another-fake"],
             "confidence": 0.8,
         }
         result, issues = validate_score_response(parsed)
-        assert "clean-code" in result["flags"]
+        assert "has-bug" in result["flags"]
+        assert "incorrect-output" not in result["flags"]
+        assert "incorrect-output" in result["unknown_flags"]
         assert "totally-made-up-flag" not in result["flags"]
         assert "totally-made-up-flag" in result["unknown_flags"]
         assert "another-fake" in result["unknown_flags"]
@@ -778,18 +783,22 @@ class TestValidateScoreResponse:
         assert result["complexity"]["instruction"] == 7
         assert result["complexity"]["analytical_depth"] == 8
 
-    def test_negative_flags_preserved(self):
+    def test_only_two_negative_flags_preserved(self):
         parsed = {
             "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
             "quality": {"correctness": 5, "code_quality": 5, "explanation": 5, "completeness": 5, "overall": 5},
             "reasoning": {"clarity": 5, "consistency": 5, "overall": 5},
-            "flags": ["has-bug", "security-issue"],
+            "flags": ["has-bug", "incomplete", "security-issue", "constraint-violation"],
             "confidence": 0.7,
         }
         result, issues = validate_score_response(parsed)
         assert "has-bug" in result["flags"]
-        assert "security-issue" in result["flags"]
-        assert len(issues) == 0
+        assert "incomplete" in result["flags"]
+        assert "security-issue" not in result["flags"]
+        assert "constraint-violation" not in result["flags"]
+        assert "security-issue" in result["unknown_flags"]
+        assert "constraint-violation" in result["unknown_flags"]
+        assert any("unknown flags" in i for i in issues)
 
     def test_boolean_in_numeric_fields(self):
         """P0-1: isinstance(True, int) is True — booleans must be rejected as numeric scores."""
@@ -1021,7 +1030,7 @@ class TestComputeValueStats:
                     "quality": {"correctness": 8, "overall": 8},
                     "reasoning": {"clarity": 6, "overall": 6},
                     "rarity": {"score": 5.0},
-                    "flags": ["clean-code"],
+                    "flags": ["has-bug"],
                     "thinking_mode": "slow",
                     "value_score": 6.8,
                     "confidence": 0.85,
@@ -1054,7 +1063,7 @@ class TestComputeValueStats:
         assert "thinking_mode_stats" in stats
         assert stats["thinking_mode_stats"]["slow"]["count"] == 1
         assert stats["thinking_mode_stats"]["fast"]["count"] == 1
-        assert stats["flag_counts"]["clean-code"] == 1
+        assert stats["flag_counts"]["has-bug"] == 1
 
     def test_empty_samples(self):
         stats = compute_value_stats([], [])
@@ -2708,6 +2717,29 @@ class TestDomainBackfill:
 
 
 class TestPromptBudgetRegression:
+    def test_flags_prompt_is_two_bucket_and_non_growing(self):
+        full_start = SCORING_SYSTEM.index("## Flags")
+        full_end = SCORING_SYSTEM.index("## Important Notes")
+        compact_start = SCORING_SYSTEM_COMPACT.index("## Flags")
+        compact_end = SCORING_SYSTEM_COMPACT.index("## Notes")
+
+        full_flags = SCORING_SYSTEM[full_start:full_end]
+        compact_flags = SCORING_SYSTEM_COMPACT[compact_start:compact_end]
+
+        for text in (full_flags, compact_flags):
+            assert "has-bug" in text
+            assert "incomplete" in text
+            assert "objective failure" in text
+            assert "no objective failure" in text
+            assert "secret" in text
+            assert "auth bypass" in text
+            assert "hallucination" not in text
+            assert "constraint-violation" not in text
+            assert "security-issue" not in text
+
+        assert len(full_flags) <= 515
+        assert len(compact_flags) <= 352
+
     def test_compact_prompt_budget_does_not_grow(self):
         truncated = {
             "original_prior_context_chars": 120,
@@ -2737,7 +2769,8 @@ class TestPromptBudgetRegression:
             compact=True,
         )
 
-        assert len(SCORING_SYSTEM_COMPACT) <= 5996
+        assert len(SCORING_SYSTEM) <= 8791
+        assert len(SCORING_SYSTEM_COMPACT) <= 4598
         assert sum(len(message["content"]) for message in messages) <= 10888
 
 

@@ -99,21 +99,13 @@ For fast-mode samples, the absence of a separate COT block does NOT itself indic
 
 ## Flags
 
-Optionally tag notable qualities. Use ONLY these flag values:
+Flags are optional hard-filter exceptions. Most samples have no flags. Use at most 1. If unsure, use scores.
 
-Positive: excellent-explanation, clean-code, creative-solution, good-error-handling, comprehensive-testing
-Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation, hallucination
+Use ONLY:
+- has-bug: Objective failure — bug, invented results/APIs/files, secret, auth bypass, or unsafe shortcut.
+- incomplete: Request not satisfied — missing major functionality or required format/constraint miss, only when there is no objective failure. In multi-turn slices, normal partial progress is NOT incomplete.
 
-Flag criteria (be selective — most samples should have 0-1 flags):
-- clean-code: Reserve for NOTABLY well-crafted code — thoughtful abstractions, excellent naming, clear separation of concerns. Merely correct or working code does NOT qualify.
-- comprehensive-testing: Must include actual test code (unit tests, assertions, test cases) covering multiple scenarios including edge cases. Simply mentioning "you should test" or having 1-2 basic asserts does NOT qualify.
-- excellent-explanation: Explanation that teaches transferable concepts or provides deep insight, not just describes what the code does line-by-line.
-- good-error-handling: Thoughtful, non-trivial error strategy (custom error types, retry logic, graceful degradation). Basic try/catch alone does NOT qualify.
-- creative-solution: Uses an approach that is notably non-obvious — e.g., an elegant algorithmic insight, a clever use of language features, or a particularly efficient design. Standard well-known patterns do NOT qualify even if well-implemented.
-- has-bug: Only for bugs that would cause incorrect output or runtime errors, not minor style issues or missing edge cases.
-- incomplete: The response is missing major requested functionality. For multi-turn slices (turn_position shown in meta), an intermediate turn that contributes partial progress is NOT incomplete — only flag if the turn fails to make meaningful progress on its specific step.
-- hallucination: The response fabricates non-existent APIs, libraries, functions, or language features.
-- An empty flags list is expected for most samples.
+Do NOT use flags for softer issues already captured by scores.
 
 ## Important Notes
 
@@ -203,19 +195,10 @@ For fast-mode, absence of separate COT does NOT mean lower quality.
 
 ## Flags
 
-Positive: excellent-explanation, clean-code, creative-solution, good-error-handling, comprehensive-testing
-Negative: has-bug, security-issue, outdated-practice, incomplete, over-engineered, incorrect-output, poor-explanation, hallucination
-
-Be selective — most samples have 0 flags; 2+ rare.
-Flag criteria (err on the side of NOT flagging):
-- excellent-explanation: RARE (<5% of samples). Must provide unusual insight that teaches WHY something works, not just WHAT it does. A clear, well-structured, helpful explanation does NOT qualify — it must be exceptional educational depth that would make a senior developer say "I learned something new."
-- clean-code: RARELY awarded. Requires notably elegant abstractions, excellent naming, and thoughtful design visible throughout. Correct, working code with standard style does NOT qualify.
-- creative-solution: Genuinely non-obvious algorithmic or design insight. Standard library usage, common patterns, and well-known algorithms do NOT qualify.
-- comprehensive-testing: Actual test code covering multiple scenarios + edge cases. Mentioning "you should test" does NOT qualify.
-- good-error-handling: Thoughtful error strategy (custom error types, retry logic with backoff, graceful degradation). Basic try/catch does NOT qualify.
-- has-bug: Bugs causing incorrect output or runtime errors. Minor style issues do NOT qualify.
-- incomplete: The response is MISSING major functionality that was explicitly requested. A partial implementation that makes meaningful progress on the stated goal is NOT incomplete. Multi-turn slices contributing partial progress toward the overall task are NOT incomplete.
-- hallucination: Fabricates non-existent APIs, libraries, functions, or language features.
+Optional hard-filter buckets. Most samples: 0 flags. Use at most 1; if unsure, use scores.
+Use ONLY: has-bug, incomplete.
+- has-bug: Objective failure — bug, invented results/APIs/files, secret/auth bypass, or unsafe shortcut.
+- incomplete: Request not satisfied; use only when no objective failure. Do not flag normal multi-turn progress.
 
 ## Notes
 
@@ -319,7 +302,7 @@ COLORS = ("red", "green", "blue")
     },
     {
         "role": "assistant",
-        "content": '{"complexity":{"instruction":2,"analytical_depth":2,"implementation":1,"overall":2},"quality":{"correctness":9,"code_quality":8,"explanation":9,"completeness":9,"overall":9},"reasoning":{"clarity":6,"consistency":6,"self_correction":false,"overall":6},"flags":["excellent-explanation"],"confidence":0.95}',
+        "content": '{"complexity":{"instruction":2,"analytical_depth":2,"implementation":1,"overall":2},"quality":{"correctness":9,"code_quality":8,"explanation":9,"completeness":9,"overall":9},"reasoning":{"clarity":6,"consistency":6,"self_correction":false,"overall":6},"flags":[],"confidence":0.95}',
     },
     # Example 3: High complexity, low quality (has bugs, incomplete)
     {
@@ -586,7 +569,7 @@ Updated output format when rationale is enabled:
 
 # ─── Compact few-shot subset (for --prompt-mode compact) ──
 
-# Scoring: keep 3 of 6 — quality=7(DP), excellent-explanation(list-vs-tuple), truncated Go quality=6
+# Scoring: keep 3 of 6 — quality=7(DP), strong explanation(list-vs-tuple), truncated Go quality=6
 # Intentionally exclude example 2 (has-bug+incomplete) to avoid anchoring incomplete over-tagging
 SCORING_FEWSHOT_COMPACT = SCORING_FEWSHOT[0:2] + SCORING_FEWSHOT[2:4] + SCORING_FEWSHOT[8:10]
 

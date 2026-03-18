@@ -44,7 +44,7 @@ Main steps:
    - complexity
    - quality
    - reasoning
-   - flags
+   - coarse hard-filter flags (`has-bug`, `incomplete`)
 4. **Aggregation**
    - computes composite `value_score`
    - computes `selection_score`

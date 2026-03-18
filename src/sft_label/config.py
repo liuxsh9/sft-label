@@ -154,14 +154,12 @@ VALUE_TRUNCATION_RESPONSE_RATIO = 0.35
 VALUE_TRUNCATION_META_RATIO = 0.05
 VALUE_TRUNCATION_FRAGMENT_COUNT = 3  # middle fragments for COT sampling
 
-KNOWN_FLAGS_POSITIVE = frozenset({
-    "excellent-explanation", "clean-code", "creative-solution",
-    "good-error-handling", "comprehensive-testing",
-})
+# Positive flags were removed to keep Pass 2 focused on actionable hard-filter
+# exceptions without increasing prompt or schema complexity.
+KNOWN_FLAGS_POSITIVE = frozenset()
 KNOWN_FLAGS_NEGATIVE = frozenset({
-    "has-bug", "security-issue", "outdated-practice",
-    "incomplete", "over-engineered", "incorrect-output", "poor-explanation",
-    "hallucination",
+    "has-bug",
+    "incomplete",
 })
 KNOWN_FLAGS = KNOWN_FLAGS_POSITIVE | KNOWN_FLAGS_NEGATIVE
 
