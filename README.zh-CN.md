@@ -129,6 +129,7 @@ uv run sft-label start --lang zh
   labeled.json
   scored.json
   stats_labeling.json
+  conversation_stats_labeling.json  # 单文件 run 会直接写在这里；目录 run 会写在每个文件的 Pass 1 stats 旁边
   stats_scoring.json
   conversation_scores.json
   runtime_events.jsonl         # 自适应运行时事件（开启时）
@@ -151,12 +152,15 @@ uv run sft-label start --lang zh
     summary_stats_labeling.json
     summary_stats_scoring.json
     conversation_scores.json
+    files/.../conversation_stats_labeling.json  # 每个源文件的 Pass 1 轻量会话聚合
     dashboards/
       dashboard_labeling*.html
       dashboard_scoring*.html
 ```
 
 更详细的文件结构解释见英文文档：[Output files and dashboards](docs/guides/output-files-and-dashboards.md)。
+
+`conversation_stats_labeling.json` 会尽量保持很小，标注 dashboard 的树视图会优先读取它，而不是重新打开大的 `labeled.jsonl`，这样在超大规模运行时更稳。
 
 ## 如何查看 dashboard
 
@@ -170,6 +174,7 @@ uv run sft-label start --lang zh
 如果你后续修改了结果或重算了统计：
 
 ```bash
+uv run sft-label recompute-stats --input <run_dir>
 uv run sft-label regenerate-dashboard --input <run_dir>
 ```
 

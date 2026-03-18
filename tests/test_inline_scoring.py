@@ -261,6 +261,118 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_inline_directory_prefers_chunked_jsonl_scoring(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    run_root = tmp_path / "dataset_labeled_20260311_120000"
+    file_a = run_root / "dataset" / "code" / "a.jsonl"
+
+    rows_a = _inline_rows_for_file(
+        file_a,
+        [{
+            "id": "conv-a",
+            "conversations": [
+                {"from": "human", "value": "qa"},
+                {"from": "gpt", "value": "aa"},
+            ],
+        }],
+        [[_full_labels("build")]],
+    )
+    _write_jsonl(file_a, rows_a)
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        return _score_value(sample["id"], rarity_result), {
+            "sample_id": sample["id"],
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        summary = await run_scoring(
+            str(run_root),
+            config=PipelineConfig(
+                scoring_concurrency=1,
+                chunk_size=1,
+                max_active_chunks=1,
+                enable_adaptive_runtime=False,
+                enable_stage_recovery_sweep=False,
+            ),
+        )
+
+    stats_files = list((run_root / "meta_label_data" / "files").rglob("stats_scoring.json"))
+    assert len(stats_files) == 1
+    per_file_stats = json.loads(stats_files[0].read_text(encoding="utf-8"))
+    assert per_file_stats.get("chunked") is True
+    assert summary["files_processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_directory_large_jsonl_chunked_smoke_scores_all_rows(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    run_root = tmp_path / "dataset_labeled_20260311_120000"
+    file_a = run_root / "dataset" / "code" / "a.jsonl"
+    row_count = 256
+
+    rows = [
+        {
+            "id": f"conv-{i}",
+            "conversations": [
+                {"from": "human", "value": f"q{i}"},
+                {"from": "gpt", "value": f"a{i}"},
+            ],
+        }
+        for i in range(row_count)
+    ]
+    merged_rows = _inline_rows_for_file(
+        file_a,
+        rows,
+        [[_full_labels("build")] for _ in range(row_count)],
+    )
+    _write_jsonl(file_a, merged_rows)
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        return _score_value(sample["id"], rarity_result), {
+            "sample_id": sample["id"],
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        summary = await run_scoring(
+            str(run_root),
+            config=PipelineConfig(
+                scoring_concurrency=4,
+                chunk_size=64,
+                max_active_chunks=2,
+                enable_adaptive_runtime=False,
+                enable_stage_recovery_sweep=False,
+            ),
+        )
+
+    stats_files = list((run_root / "meta_label_data" / "files").rglob("stats_scoring.json"))
+    assert len(stats_files) == 1
+    per_file_stats = json.loads(stats_files[0].read_text(encoding="utf-8"))
+    scored_lines = [
+        line for line in (stats_files[0].parent / "scored.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert per_file_stats["total_scored"] == row_count
+    assert len(scored_lines) == row_count
+    assert summary["files_processed"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_scoring_inline_run_dir_resume_skips_embedded_scored_samples(tmp_path):
     from sft_label.scoring import run_scoring
 

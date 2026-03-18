@@ -10,6 +10,7 @@ import webbrowser
 from pathlib import Path
 
 from sft_label.artifacts import (
+    PASS1_CONVERSATION_STATS_FILE,
     PASS1_STATS_FILE,
     PASS1_SUMMARY_STATS_FILE,
     dashboard_data_dirname,
@@ -22,12 +23,16 @@ from sft_label.tools.dashboard_template import ensure_dashboard_runtime_assets, 
 
 
 from sft_label.tools.dashboard_aggregation import (
+    _coverage_from_distributions,
     build_dashboard_manifest,
     build_pass1_viz,
     build_scope_detail_payload,
     build_scope_summary,
     infer_scope_turn_kind,
+    infer_scope_turn_kind_from_path,
+    iter_data_file,
     load_data_file,
+    merge_turn_kinds,
 )
 
 
@@ -85,8 +90,18 @@ def _dashboard_subtitle(run_dir: Path, root_label: str | None = None) -> str:
     return str(run_dir)
 
 
-def _single_scope_payload(run_dir: Path, samples: list[dict], viz_data: dict, stats: dict) -> dict:
+def _single_scope_payload(
+    run_dir: Path,
+    samples: list[dict],
+    viz_data: dict,
+    stats: dict,
+    *,
+    data_path: str | Path | None = None,
+) -> dict:
     label = Path(stats.get("input_file") or run_dir.name or "current").name
+    turn_kind = infer_scope_turn_kind(samples)
+    if turn_kind == "unknown" and data_path:
+        turn_kind = infer_scope_turn_kind_from_path(data_path)
     scopes = {
         "global": {
             "id": "global",
@@ -97,7 +112,7 @@ def _single_scope_payload(run_dir: Path, samples: list[dict], viz_data: dict, st
             "children": [],
             "descendant_files": [stats.get("input_file") or label],
             "pass1": viz_data,
-                "turn_kind": infer_scope_turn_kind(samples),
+            "turn_kind": turn_kind,
         }
     }
     scopes["global"]["summary"] = _scope_summary(scopes["global"])
@@ -112,6 +127,176 @@ def _single_scope_payload(run_dir: Path, samples: list[dict], viz_data: dict, st
     }
 
 
+def _load_scope_samples(path: str | Path | None) -> list[dict]:
+    if not path:
+        return []
+    return [row for row in iter_data_file(path)]
+
+
+def _conversation_stats_path(
+    *,
+    data_path: str | Path | None = None,
+    stats_path: str | Path | None = None,
+) -> Path | None:
+    if stats_path:
+        return Path(stats_path).with_name(PASS1_CONVERSATION_STATS_FILE)
+    if data_path:
+        return Path(data_path).with_name(PASS1_CONVERSATION_STATS_FILE)
+    return None
+
+
+def _load_pass1_conversation_mode(
+    *,
+    data_path: str | Path | None = None,
+    stats_path: str | Path | None = None,
+) -> dict | None:
+    conversation_path = _conversation_stats_path(data_path=data_path, stats_path=stats_path)
+    if not conversation_path or not conversation_path.exists():
+        return None
+    ref_paths = [Path(path) for path in (data_path, stats_path) if path]
+    try:
+        conversation_mtime = conversation_path.stat().st_mtime
+        if any(path.exists() and path.stat().st_mtime > conversation_mtime for path in ref_paths):
+            return None
+    except OSError:
+        return None
+    try:
+        with open(conversation_path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _merge_pass1_conversation_modes(modes: list[dict], fallback: dict | None) -> dict | None:
+    valid_modes = [mode for mode in modes if isinstance(mode, dict)]
+    if not valid_modes:
+        return fallback
+
+    total = sum(int(mode.get("total", 0) or 0) for mode in valid_modes)
+    distribution_total = sum(int(mode.get("distribution_total", mode.get("total", 0)) or 0) for mode in valid_modes)
+
+    distributions: dict[str, dict[str, int]] = {}
+    for mode in valid_modes:
+        for dim, rows in (mode.get("distributions") or {}).items():
+            bucket = distributions.setdefault(dim, {})
+            for tag, count in (rows or {}).items():
+                bucket[tag] = bucket.get(tag, 0) + int(count)
+    distributions = {
+        dim: dict(sorted(rows.items(), key=lambda item: (-item[1], item[0])))
+        for dim, rows in distributions.items()
+    }
+
+    confidence_stats = {}
+    conf_accumulator = {}
+    for mode in valid_modes:
+        for dim, stats in (mode.get("confidence_stats") or {}).items():
+            count = int((stats or {}).get("count", 0) or 0)
+            if count <= 0:
+                continue
+            entry = conf_accumulator.setdefault(
+                dim,
+                {"sum": 0.0, "count": 0, "min": None, "max": None, "below_threshold": 0},
+            )
+            mean = float((stats or {}).get("mean", 0) or 0)
+            entry["sum"] += mean * count
+            entry["count"] += count
+            entry["below_threshold"] += int((stats or {}).get("below_threshold", 0) or 0)
+            current_min = (stats or {}).get("min")
+            if isinstance(current_min, (int, float)):
+                entry["min"] = current_min if entry["min"] is None else min(entry["min"], current_min)
+            current_max = (stats or {}).get("max")
+            if isinstance(current_max, (int, float)):
+                entry["max"] = current_max if entry["max"] is None else max(entry["max"], current_max)
+    for dim, entry in conf_accumulator.items():
+        count = entry.get("count", 0) or 0
+        if count <= 0:
+            continue
+        confidence_stats[dim] = {
+            "mean": round(entry["sum"] / count, 3),
+            "min": round(float(entry["min"]), 3) if isinstance(entry["min"], (int, float)) else 0,
+            "max": round(float(entry["max"]), 3) if isinstance(entry["max"], (int, float)) else 0,
+            "below_threshold": entry["below_threshold"],
+            "count": count,
+        }
+
+    cross_counts = {}
+    for mode in valid_modes:
+        for key, count in ((mode.get("cross_matrix") or {}).get("data") or {}).items():
+            cross_counts[key] = cross_counts.get(key, 0) + int(count)
+    cross_rows = sorted({key.split("|", 1)[0] for key in cross_counts if "|" in key})
+    difficulty_order = ["beginner", "intermediate", "upper-intermediate", "advanced", "expert"]
+    cross_cols = [
+        difficulty
+        for difficulty in difficulty_order
+        if any(cross_counts.get(f"{row}|{difficulty}", 0) for row in cross_rows)
+    ]
+    cross_matrix = {
+        "rows": cross_rows,
+        "cols": cross_cols,
+        "data": dict(sorted(cross_counts.items(), key=lambda item: item[0])),
+    }
+
+    unmapped = {}
+    for mode in valid_modes:
+        by_dim = ((mode.get("unmapped_details") or {}).get("by_dimension") or {})
+        for dim, rows in by_dim.items():
+            bucket = unmapped.setdefault(dim, {})
+            for row in rows or []:
+                label = row.get("label")
+                if not isinstance(label, str):
+                    continue
+                entry = bucket.setdefault(label, {"label": label, "count": 0, "examples": []})
+                entry["count"] += int(row.get("count", 0) or 0)
+                for example in row.get("examples") or []:
+                    if len(entry["examples"]) >= 2:
+                        break
+                    entry["examples"].append(example)
+    unmapped_by_dimension = {
+        dim: sorted(rows.values(), key=lambda item: (-item["count"], item["label"]))
+        for dim, rows in unmapped.items()
+    }
+    total_occurrences = sum(row["count"] for rows in unmapped_by_dimension.values() for row in rows)
+    unmapped_details = {
+        "total_occurrences": total_occurrences,
+        "by_dimension": unmapped_by_dimension,
+    }
+
+    overview = dict((fallback or {}).get("overview") or {})
+    overview["success_rate"] = round(distribution_total / max(total, 1), 4)
+    overview["unmapped_unique"] = sum(len(rows) for rows in unmapped_by_dimension.values())
+
+    mode = dict(fallback or {})
+    mode.update(
+        {
+            "total": total,
+            "distribution_total": distribution_total,
+            "distributions": distributions,
+            "unmapped_details": unmapped_details,
+            "confidence_stats": confidence_stats,
+            "cross_matrix": cross_matrix,
+            "coverage": _coverage_from_distributions(distributions),
+            "overview": overview,
+            "unit_label": mode.get("unit_label", "units"),
+            "mode_id": "conversation",
+        }
+    )
+    return mode
+
+
+def _inject_conversation_mode(pass1: dict | None, descendant_modes: list[dict]) -> dict | None:
+    if not isinstance(pass1, dict):
+        return pass1
+    modes = dict(pass1.get("modes") or {})
+    merged = _merge_pass1_conversation_modes(descendant_modes, modes.get("conversation"))
+    if not merged:
+        return pass1
+    modes["conversation"] = merged
+    payload = dict(pass1)
+    payload["modes"] = modes
+    return payload
+
+
 def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     tree = build_scope_tree(
         run_dir,
@@ -122,16 +307,51 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     )
     scopes = {}
     explorer_sources = []
-    file_sample_cache = {
-        scope_id: load_data_file(raw_scope.get("pass1_data_path"))
+    file_pass1: dict[str, dict | None] = {}
+    file_conversation_modes: dict[str, dict | None] = {}
+    for scope_id, raw_scope in tree["scopes"].items():
+        if raw_scope.get("kind") != "file":
+            continue
+        pass1 = None
+        if raw_scope.get("raw_pass1"):
+            conversation_mode = _load_pass1_conversation_mode(
+                data_path=raw_scope.get("pass1_data_path"),
+                stats_path=raw_scope.get("pass1_stats_path"),
+            )
+            if conversation_mode:
+                pass1 = _inject_conversation_mode(
+                    compute_viz_data([], raw_scope["raw_pass1"]),
+                    [conversation_mode],
+                )
+            else:
+                samples = _load_scope_samples(raw_scope.get("pass1_data_path"))
+                pass1 = compute_viz_data(samples, raw_scope["raw_pass1"])
+        file_pass1[scope_id] = pass1
+        file_conversation_modes[scope_id] = ((pass1 or {}).get("modes") or {}).get("conversation")
+
+    file_turn_kind = {
+        scope_id: infer_scope_turn_kind_from_path(raw_scope.get("pass1_data_path"))
         for scope_id, raw_scope in tree["scopes"].items()
         if raw_scope.get("kind") == "file"
     }
     for scope_id, raw_scope in tree["scopes"].items():
-        samples = []
-        for leaf_path in raw_scope.get("descendant_files", []):
-            samples.extend(file_sample_cache.get(f"file:{leaf_path}", []))
-        pass1 = compute_viz_data(samples, raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
+        pass1 = None
+        if raw_scope.get("raw_pass1"):
+            if raw_scope.get("kind") == "file":
+                pass1 = file_pass1.get(scope_id)
+            else:
+                base_pass1 = compute_viz_data([], raw_scope["raw_pass1"])
+                descendant_modes = [
+                    file_conversation_modes.get(f"file:{leaf_path}")
+                    for leaf_path in raw_scope.get("descendant_files", [])
+                ]
+                pass1 = _inject_conversation_mode(base_pass1, descendant_modes)
+        if raw_scope.get("kind") == "file":
+            turn_kind = file_turn_kind.get(scope_id)
+        else:
+            turn_kind = merge_turn_kinds(
+                [file_turn_kind.get(f"file:{leaf_path}") for leaf_path in raw_scope.get("descendant_files", [])]
+            )
         scopes[scope_id] = {
             "id": raw_scope["id"],
             "label": raw_scope["label"],
@@ -141,7 +361,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             "children": raw_scope["children"],
             "descendant_files": raw_scope["descendant_files"],
             "pass1": pass1,
-            "turn_kind": infer_scope_turn_kind(samples),
+            "turn_kind": turn_kind,
         }
         scopes[scope_id]["summary"] = _scope_summary(scopes[scope_id])
         data_path = raw_scope.get("pass1_data_path")
@@ -278,9 +498,17 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                 (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / "labeled.json") if candidate.exists()),
                 None,
             )
-            if data_path is not None:
-                samples = load_data_file(data_path)
-            payload = _single_scope_payload(run_dir, samples, compute_viz_data(samples, stats), stats)
+            conversation_mode = _load_pass1_conversation_mode(
+                data_path=data_path,
+                stats_path=run_dir / stats_file,
+            )
+            if data_path is not None and conversation_mode:
+                pass1 = _inject_conversation_mode(compute_viz_data([], stats), [conversation_mode])
+            else:
+                if data_path is not None:
+                    samples = load_data_file(data_path)
+                pass1 = compute_viz_data(samples, stats)
+            payload = _single_scope_payload(run_dir, samples, pass1, stats, data_path=data_path)
             if data_path is not None:
                 explorer_sources.append(
                     {
@@ -291,12 +519,12 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                 )
     else:
         samples, stats = load_run(run_dir, labeled_file=labeled_file, stats_file=stats_file)
-        payload = _single_scope_payload(run_dir, samples, compute_viz_data(samples, stats), stats)
-        explorer_sources = []
         data_path = next(
             (candidate for candidate in (run_dir / "labeled.jsonl", run_dir / labeled_file) if candidate.exists()),
             None,
         )
+        payload = _single_scope_payload(run_dir, samples, compute_viz_data(samples, stats), stats, data_path=data_path)
+        explorer_sources = []
         if data_path is not None:
             explorer_sources.append(
                 {

@@ -10,7 +10,7 @@ import pytest
 from sft_label.config import PipelineConfig
 from sft_label.inline_migration import InlineMigrationMatch
 from sft_label.inline_pass1 import merge_pass1_results, prepare_inline_pass1_batch
-from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
+from sft_label.inline_rows import RowSampleBundle, build_row_sample_bundle, flatten_row_sample_bundles
 
 
 def _full_labels(intent: str = "build") -> dict:
@@ -565,3 +565,465 @@ async def test_migrate_run_copies_matching_rows_and_marks_provenance(tmp_path):
     assert "merged_labels" not in copied["conversation"]
     assert copied["meta"]["migration_source"] == "train.jsonl:1"
     assert filled["turns"][0]["labels"]["intent"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_directory_run_bounds_inflight_submission_by_watermark(tmp_path):
+    from sft_label.pipeline import run
+
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    input_file = input_dir / "many.json"
+    payload = [
+        {
+            "id": f"sample-{i}",
+            "conversations": [
+                {"from": "human", "value": f"q{i}"},
+                {"from": "gpt", "value": f"a{i}"},
+            ],
+        }
+        for i in range(24)
+    ]
+    input_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    peak_inflight = 0
+    inflight = 0
+    real_ensure_future = asyncio.ensure_future
+
+    def tracking_ensure_future(coro):
+        nonlocal inflight, peak_inflight
+        task = real_ensure_future(coro)
+        inflight += 1
+        peak_inflight = max(peak_inflight, inflight)
+
+        def _mark_done(_task):
+            nonlocal inflight
+            inflight -= 1
+
+        task.add_done_callback(_mark_done)
+        return task
+
+    async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
+                             config=None, rate_limiter=None):
+        await asyncio.sleep(0.01)
+        return sample_idx, _full_labels("bounded"), _monitor()
+
+    config = PipelineConfig(
+        concurrency=2,
+        dir_pipeline_watermark=1.0,
+        dir_pipeline_max_files=1,
+        enable_adaptive_runtime=False,
+    )
+
+    with patch("sft_label.pipeline.label_one", side_effect=mock_label_one), patch(
+        "sft_label.pipeline.asyncio.ensure_future",
+        new=tracking_ensure_future,
+    ):
+        await run(
+            input_path=str(input_dir),
+            output=str(tmp_path / "out"),
+            config=config,
+        )
+
+    assert peak_inflight <= 2
+
+
+@pytest.mark.asyncio
+async def test_directory_large_jsonl_reuses_chunked_path(tmp_path):
+    from sft_label.pipeline import run
+
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    input_file = input_dir / "train.jsonl"
+    rows = [
+        {
+            "meta_prompt": ["system"],
+            "data": [
+                {"role": "user", "content": f"q{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ],
+        }
+        for i in range(3)
+    ]
+    input_file.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("directory mode should delegate large JSONL to chunked pipeline")
+
+    async def fake_chunked(*args, **kwargs):
+        return {
+            "total_samples": 3,
+            "distribution_total_samples": 3,
+            "success": 3,
+            "failed": 0,
+            "success_rate": 1.0,
+            "total_llm_calls": 6,
+            "avg_calls_per_sample": 2.0,
+            "total_prompt_tokens": 1,
+            "total_completion_tokens": 1,
+            "total_tokens": 2,
+            "arbitrated_count": 0,
+            "arbitrated_rate": 0.0,
+            "validation_issue_count": 0,
+            "consistency_warning_count": 0,
+            "unmapped_tags": {},
+            "unmapped_unique_count": 0,
+            "canonicalization_counts": {},
+            "canonicalization_total_count": 0,
+            "canonicalization_unique_count": 0,
+            "confidence_stats": {},
+            "low_confidence_frequency": {},
+            "tag_distributions": {},
+            "combo_distributions": {},
+            "cross_matrix": {},
+            "total_elapsed_seconds": 0.1,
+            "input_file": str(input_file),
+            "mode": "refresh",
+            "chunked": True,
+            "chunk_size": 1,
+            "chunks_processed": 3,
+        }
+
+    with patch("sft_label.pipeline.label_one", side_effect=fail_if_called), patch(
+        "sft_label.pipeline._run_one_file_chunked",
+        side_effect=fake_chunked,
+    ) as mocked_chunked:
+        await run(
+            input_path=str(input_dir),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(
+                concurrency=1,
+                chunk_size=1,
+                dir_pipeline_max_files=1,
+                enable_adaptive_runtime=False,
+            ),
+        )
+
+    assert mocked_chunked.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_directory_large_jsonl_chunked_smoke_preserves_full_row_count(tmp_path):
+    from sft_label.pipeline import run
+
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    input_file = input_dir / "train.jsonl"
+    row_count = 512
+    rows = [
+        {
+            "meta_prompt": ["system"],
+            "data": [
+                {"role": "user", "content": f"q{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ],
+        }
+        for i in range(row_count)
+    ]
+    input_file.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
+                             config=None, rate_limiter=None):
+        return sample_idx, _full_labels(f"intent-{sample_idx}"), _monitor()
+
+    with patch("sft_label.pipeline.label_one", side_effect=mock_label_one):
+        stats = await run(
+            input_path=str(input_dir),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(
+                concurrency=4,
+                chunk_size=64,
+                max_active_chunks=2,
+                dir_pipeline_max_files=1,
+                enable_adaptive_runtime=False,
+            ),
+        )
+
+    run_dir = Path(stats["run_dir"])
+    dataset_path = run_dir / "dataset" / "train.jsonl"
+    merged_rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert len(merged_rows) == row_count
+    assert merged_rows[0]["data"][0]["content"] == "q0"
+    assert merged_rows[-1]["data"][0]["content"] == f"q{row_count - 1}"
+    assert stats["total_samples"] == row_count
+
+
+@pytest.mark.asyncio
+async def test_pass1_writes_conversation_stats_artifact_for_inline_jsonl(tmp_path):
+    from sft_label.pipeline import run
+
+    input_path = tmp_path / "train.jsonl"
+    rows = [
+        {
+            "id": "conv-1",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "a1"},
+                {"from": "human", "value": "q2"},
+                {"from": "gpt", "value": "a2"},
+            ],
+        }
+    ]
+    input_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
+                             config=None, rate_limiter=None):
+        turn_index = (sample.get("metadata") or {}).get("turn_index", 1)
+        return sample_idx, _full_labels(f"turn-{turn_index}"), _monitor()
+
+    with patch("sft_label.pipeline.label_one", side_effect=mock_label_one):
+        stats = await run(
+            input_path=str(input_path),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(concurrency=1, enable_adaptive_runtime=False),
+        )
+
+    artifact_dir = Path(stats["run_dir"]) / "meta_label_data" / "files" / "train"
+    conversation_stats = json.loads(
+        (artifact_dir / "conversation_stats_labeling.json").read_text(encoding="utf-8")
+    )
+
+    assert conversation_stats["mode_id"] == "conversation"
+    assert conversation_stats["total"] == 1
+    assert conversation_stats["distributions"]["intent"] == {"turn-2": 1}
+
+
+@pytest.mark.asyncio
+async def test_pass1_chunked_conversation_stats_artifact_deduplicates_same_source_across_rows(tmp_path):
+    from sft_label.pipeline import _write_pass1_conversation_stats_from_path
+
+    artifact_dir = tmp_path / "meta"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    labeled_path = artifact_dir / "labeled.jsonl"
+    labeled_path.write_text(
+        "\n".join(
+            json.dumps(row, ensure_ascii=False)
+            for row in [
+                {
+                    "id": "conv-1-turn-1",
+                    "metadata": {"source_id": "conv-1", "source_file": "train.jsonl", "turn_index": 1, "total_turns": 2},
+                    "conversations": [{"from": "human", "value": "q1"}, {"from": "gpt", "value": "a1"}],
+                    "labels": _full_labels("turn-1"),
+                },
+                {
+                    "id": "conv-1-turn-2",
+                    "metadata": {"source_id": "conv-1", "source_file": "train.jsonl", "turn_index": 2, "total_turns": 2},
+                    "conversations": [{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}],
+                    "labels": _full_labels("turn-2"),
+                },
+            ]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    stats = {
+        "input_file": "train.jsonl",
+        "total_samples": 2,
+        "success_rate": 1.0,
+        "total_tokens": 0,
+        "arbitrated_rate": 0.0,
+        "tag_distributions": {"intent": {"turn-1": 1, "turn-2": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+
+    _write_pass1_conversation_stats_from_path(artifact_dir, labeled_path, stats)
+
+    conversation_stats = json.loads(
+        (artifact_dir / "conversation_stats_labeling.json").read_text(encoding="utf-8")
+    )
+
+    assert conversation_stats["total"] == 1
+    assert conversation_stats["distributions"]["intent"] == {"turn-2": 1}
+
+
+@pytest.mark.asyncio
+async def test_pass1_conversation_stats_sidecar_failure_does_not_abort_run(tmp_path):
+    from sft_label.pipeline import run
+
+    input_path = tmp_path / "train.jsonl"
+    rows = [
+        {
+            "id": "conv-1",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "a1"},
+            ],
+        }
+    ]
+    input_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
+                             config=None, rate_limiter=None):
+        return sample_idx, _full_labels("turn-1"), _monitor()
+
+    with patch("sft_label.pipeline.label_one", side_effect=mock_label_one), \
+            patch("sft_label.pipeline._compute_pass1_conversation_mode", side_effect=RuntimeError("boom")):
+        stats = await run(
+            input_path=str(input_path),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(concurrency=1, enable_adaptive_runtime=False),
+        )
+
+    artifact_dir = Path(stats["run_dir"]) / "meta_label_data" / "files" / "train"
+    assert (artifact_dir / "stats_labeling.json").exists()
+
+
+def test_flush_file_and_chunk_collectors_release_heavy_references(tmp_path):
+    from sft_label.inline_rows import build_row_sample_bundle
+    from sft_label.pipeline import (
+        ChunkCollector,
+        FileCollector,
+        StatsAccumulator,
+        _flush_chunk,
+        flush_file_output,
+    )
+
+    row = {
+        "meta_prompt": ["system"],
+        "data": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ],
+    }
+    source_file = tmp_path / "train.jsonl"
+    bundle = build_row_sample_bundle(row, source_file, 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+
+    collector = FileCollector(
+        file_idx=0,
+        abs_path=source_file,
+        rel_path=Path("train.jsonl"),
+        output_dir=tmp_path / "meta" / "train",
+        prefix="train",
+        total=len(samples),
+        samples=samples,
+        row_bundles=[bundle],
+        sample_to_bundle=sample_to_bundle,
+        dataset_output_path=tmp_path / "dataset" / "train.jsonl",
+        run_failure_log_path=tmp_path / "failures.jsonl",
+        config=PipelineConfig(enable_adaptive_runtime=False),
+        inline_output=True,
+        label_count=1,
+        inherit_map={},
+        updated_sample_indices={0},
+        bundle_plans=[],
+        plan_stats={},
+    )
+    collector.labels = [_full_labels()]
+    collector.monitors = [_monitor()]
+
+    flush_file_output(collector, tmp_path, checkpoint_path=None, pprint=lambda _msg: None)
+
+    assert collector.completed is True
+    assert collector.samples is None
+    assert collector.labels is None
+    assert collector.monitors is None
+    assert collector.row_bundles is None
+    assert collector.sample_to_bundle is None
+    assert collector.inherit_map == {}
+    assert collector.updated_sample_indices == set()
+    assert collector.bundle_plans is None
+    assert collector.plan_stats == {}
+
+    chunk = ChunkCollector(
+        chunk_idx=0,
+        samples=samples,
+        row_bundles=[bundle],
+        sample_to_bundle=sample_to_bundle,
+        label_count=1,
+        inherit_map={},
+        updated_sample_indices={0},
+        bundle_plans=[],
+        plan_stats={},
+    )
+    chunk.labels = [_full_labels()]
+    chunk.monitors = [_monitor()]
+    stats_acc = StatsAccumulator()
+
+    out_rows = open(tmp_path / "chunk_rows.jsonl", "w", encoding="utf-8")
+    out_labeled = open(tmp_path / "chunk_labeled.jsonl", "w", encoding="utf-8")
+    out_monitor = open(tmp_path / "chunk_monitor.jsonl", "w", encoding="utf-8")
+    out_failed = open(tmp_path / "chunk_failed.jsonl", "w", encoding="utf-8")
+    try:
+        _flush_chunk(
+            chunk,
+            out_rows,
+            out_labeled,
+            out_monitor,
+            out_failed,
+            stats_acc,
+            source_file,
+            pprint=lambda _msg: None,
+            run_failure_log_path=tmp_path / "failures.jsonl",
+        )
+    finally:
+        out_rows.close()
+        out_labeled.close()
+        out_monitor.close()
+        out_failed.close()
+
+    assert chunk.completed is True
+    assert chunk.samples is None
+    assert chunk.labels is None
+    assert chunk.monitors is None
+    assert chunk.row_bundles is None
+    assert chunk.sample_to_bundle is None
+    assert chunk.inherit_map == {}
+    assert chunk.updated_sample_indices == set()
+    assert chunk.bundle_plans is None
+    assert chunk.plan_stats == {}
+
+
+def test_estimate_directory_workload_streams_inline_jsonl_planning(monkeypatch, tmp_path):
+    from sft_label.pipeline import estimate_directory_workload
+
+    events = []
+    real_prepare = prepare_inline_pass1_batch
+    source_path = tmp_path / "large.jsonl"
+
+    bundles = [
+        RowSampleBundle(
+            raw_row={"id": f"row-{idx}", "conversations": []},
+            source_path=source_path,
+            row_number=idx + 1,
+            data_id=f"row-{idx}",
+            samples=[{"id": f"sample-{idx}", "conversations": []}],
+        )
+        for idx in range(3)
+    ]
+
+    def fake_iter(_input_path, limit=0):
+        for idx, bundle in enumerate(bundles):
+            events.append(("yield", idx))
+            yield bundle
+
+    def tracking_prepare(batch_bundles, **kwargs):
+        events.append(("prepare", len(batch_bundles)))
+        return real_prepare(batch_bundles, **kwargs)
+
+    monkeypatch.setattr("sft_label.pipeline.iter_row_sample_bundles_from_jsonl", fake_iter)
+    monkeypatch.setattr("sft_label.pipeline.prepare_inline_pass1_batch", tracking_prepare)
+
+    estimate = estimate_directory_workload(
+        [(source_path, Path("large.jsonl"))],
+        config=PipelineConfig(chunk_size=1, enable_adaptive_runtime=False),
+    )
+
+    assert estimate.files_planned == 1
+    assert estimate.total_samples == 3
+    assert estimate.total_labeled_samples == 3
+    assert events[:4] == [("yield", 0), ("prepare", 1), ("yield", 1), ("prepare", 1)]

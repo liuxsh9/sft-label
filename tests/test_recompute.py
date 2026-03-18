@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from sft_label.artifacts import PASS1_STATS_FILE, DASHBOARDS_DIRNAME
+from sft_label.artifacts import PASS1_CONVERSATION_STATS_FILE, PASS1_STATS_FILE, DASHBOARDS_DIRNAME
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
 from sft_label.tools.recompute import (
@@ -410,6 +410,28 @@ class TestRunRecompute:
         assert stats["total_samples"] == 5
         assert stats["recomputed"] is True
 
+    def test_single_labeled_file_writes_conversation_stats_artifact(self, tmp_path):
+        samples = []
+        for turn_index, intent in ((1, "build"), (2, "debug")):
+            sample = _make_labeled_sample(f"conv-1-turn{turn_index}", intent=intent)
+            sample["metadata"] = {
+                "source_id": "conv-1",
+                "source_file": "dataset/train.jsonl",
+                "turn_index": turn_index,
+                "total_turns": 2,
+            }
+            samples.append(sample)
+
+        path = tmp_path / "labeled.json"
+        path.write_text(json.dumps(samples))
+
+        run_recompute(str(path), pass_num="1")
+
+        conversation_stats = json.loads((tmp_path / PASS1_CONVERSATION_STATS_FILE).read_text())
+        assert conversation_stats["mode_id"] == "conversation"
+        assert conversation_stats["total"] == 1
+        assert conversation_stats["distributions"]["intent"] == {"debug": 1}
+
     def test_single_scored_file(self, tmp_path):
         samples = [_make_scored_sample(f"s{i}") for i in range(5)]
         path = tmp_path / "scored.json"
@@ -441,6 +463,18 @@ class TestRunRecompute:
         assert "summary_stats" in written
         summary = json.loads(Path(written["summary_stats"]).read_text())
         assert summary.get("recomputed") is True
+
+    def test_directory_pass1_recompute_works_for_scored_only_trees(self, tmp_path):
+        sub_path = tmp_path / "code" / "part1"
+        sub_path.mkdir(parents=True)
+        samples = [_make_scored_sample(f"s{i}") for i in range(2)]
+        (sub_path / "scored.json").write_text(json.dumps(samples))
+
+        written = run_recompute(str(tmp_path), pass_num="1")
+
+        assert "summary_stats" in written
+        assert (sub_path / PASS1_STATS_FILE).exists()
+        assert (sub_path / PASS1_CONVERSATION_STATS_FILE).exists()
 
     def test_directory_scored_summary_uses_relative_paths(self, tmp_path):
         for sub in ("code/part1", "multi_turn/part1"):
@@ -904,6 +938,19 @@ class TestRegenerateDashboard:
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1", workers=4)
         assert len(generated) >= 2
+
+    def test_batch_mode_discovers_deeper_output_directories(self, tmp_path):
+        sub = tmp_path / "nested" / "code" / "file1"
+        sub.mkdir(parents=True)
+        samples = [_make_labeled_sample(f"s{i}") for i in range(3)]
+        stats = recompute_stats_from_labeled(samples)
+        (sub / PASS1_STATS_FILE).write_text(json.dumps(stats))
+        (sub / "labeled.json").write_text(json.dumps(samples))
+
+        generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
+
+        assert len(generated) >= 1
+        assert any("file1" in str(path) for path in generated)
 
     def test_regenerate_for_dir_logs_failure_context(self, tmp_path, capsys):
         self._setup_stats_dir(tmp_path)

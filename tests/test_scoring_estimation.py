@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from sft_label.config import PipelineConfig
-from sft_label.scoring import estimate_scoring_directory_workload
+from sft_label.scoring import compute_value_stats, estimate_scoring_directory_workload
 
 
 def _write_labeled_json(path: Path, count: int):
@@ -49,3 +49,32 @@ def test_estimate_scoring_directory_workload_retry_factor(tmp_path):
     assert est.total_samples == 10
     assert est.baseline_total_llm_calls == 10
     assert est.initial_estimated_llm_calls == 12
+
+
+def test_compute_value_stats_can_skip_raw_score_arrays():
+    scored = [{
+        "labels": {"intent": "build"},
+        "value": {
+            "complexity": {"overall": 5},
+            "quality": {"overall": 7},
+            "reasoning": {"overall": 6},
+            "rarity": {"score": 4.5},
+            "flags": [],
+            "thinking_mode": "fast",
+            "value_score": 6.2,
+            "selection_score": 6.0,
+            "intra_class_rank": 5.5,
+            "confidence": 0.8,
+        },
+    }]
+    monitors = [{
+        "status": "success",
+        "llm_calls": 1,
+        "prompt_tokens": 12,
+        "completion_tokens": 8,
+    }]
+
+    stats = compute_value_stats(scored, monitors, include_raw_scores=False)
+
+    assert "_raw_scores" not in stats
+    assert stats["total_scored"] == 1

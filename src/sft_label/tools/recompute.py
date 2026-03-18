@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sft_label.config import CONFIDENCE_THRESHOLD
 from sft_label.artifacts import (
+    PASS1_CONVERSATION_STATS_FILE,
     PASS1_STATS_FILE,
     PASS1_SUMMARY_STATS_FILE,
     PASS1_DASHBOARD_FILE,
@@ -86,6 +87,17 @@ def discover_scored_files(input_dir):
     for pattern in ("**/scored*.json", "**/scored*.jsonl"):
         files.extend(input_dir.glob(pattern))
     return _dedup_json_jsonl(files)
+
+
+def discover_pass1_source_files(input_dir):
+    """Find files that can rebuild Pass 1 stats, preferring labeled over scored."""
+    labeled_files = discover_labeled_files(input_dir)
+    labeled_dirs = {path.parent.resolve() for path in labeled_files}
+    scored_fallbacks = [
+        path for path in discover_scored_files(input_dir)
+        if path.parent.resolve() not in labeled_dirs
+    ]
+    return sorted([*labeled_files, *scored_fallbacks])
 
 
 def _dedup_json_jsonl(files):
@@ -240,6 +252,15 @@ def recompute_stats_from_labeled(samples):
     stats["total_tokens"] = 0
 
     return stats
+
+
+def _write_pass1_conversation_stats(samples, stats, out_dir):
+    """Persist lightweight Pass 1 conversation-mode stats for dashboards."""
+    from sft_label.tools.visualize_labels import compute_viz_data
+
+    conversation_mode = ((compute_viz_data(samples, stats) or {}).get("modes") or {}).get("conversation")
+    if isinstance(conversation_mode, dict):
+        _write_json(Path(out_dir) / PASS1_CONVERSATION_STATS_FILE, conversation_mode)
 
 
 # ─── Pass 2: Recompute value stats from scored output ────
@@ -870,6 +891,7 @@ def _recompute_single_file(file_path, pass_num, out_dir):
             stats = recompute_stats_from_labeled(samples)
             stats_path = out_dir / PASS1_STATS_FILE
             _write_json(stats_path, stats)
+            _write_pass1_conversation_stats(samples, stats, out_dir)
             written["stats"] = str(stats_path)
             print(f"  Pass 1 stats: {stats_path} "
                   f"({stats['success']}/{stats['total_samples']} success)")
@@ -928,13 +950,13 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
 
     # Pass 1: labeled files
     if pass_num in ("1", "both"):
-        labeled_files = discover_labeled_files(input_dir)
-        if labeled_files:
-            print(f"Found {len(labeled_files)} labeled file(s)")
-            p1_workers = _resolve_worker_count(workers, len(labeled_files))
-            p1_interval = _recompute_progress_interval(len(labeled_files))
+        pass1_files = discover_pass1_source_files(input_dir)
+        if pass1_files:
+            print(f"Found {len(pass1_files)} Pass 1 source file(s)")
+            p1_workers = _resolve_worker_count(workers, len(pass1_files))
+            p1_interval = _recompute_progress_interval(len(pass1_files))
             p1_compact = p1_interval > 1 and p1_workers == 1
-            if p1_workers > 1 and len(labeled_files) > 1:
+            if p1_workers > 1 and len(pass1_files) > 1:
                 print(f"  Pass 1 parallel mode: workers={p1_workers}")
             elif p1_compact:
                 print(f"  Pass 1 compact mode: log every {p1_interval} files")
@@ -949,6 +971,7 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS1_STATS_FILE
                 _write_json(stats_path, stats)
+                _write_pass1_conversation_stats(samples, stats, file_out_dir)
                 return {
                     "idx": idx,
                     "rel_label": rel_label,
@@ -963,21 +986,21 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 with ThreadPoolExecutor(max_workers=p1_workers) as pool:
                     futures = {
                         pool.submit(_process_labeled_file, idx, lf): idx
-                        for idx, lf in enumerate(labeled_files, start=1)
+                        for idx, lf in enumerate(pass1_files, start=1)
                     }
                     for fut in as_completed(futures):
                         item = fut.result()
                         results_by_idx[item["idx"]] = item
                         done += 1
-                        if done == 1 or done == len(labeled_files) or done % p1_interval == 0:
+                        if done == 1 or done == len(pass1_files) or done % p1_interval == 0:
                             print(
-                                f"  Pass 1 progress {done}/{len(labeled_files)} | "
+                                f"  Pass 1 progress {done}/{len(pass1_files)} | "
                                 f"{item['rel_label']} | "
                                 f"{item['stats']['success']}/{item['stats']['total_samples']} success"
                             )
-                ordered_results = [results_by_idx[i] for i in range(1, len(labeled_files) + 1)]
+                ordered_results = [results_by_idx[i] for i in range(1, len(pass1_files) + 1)]
             else:
-                for idx, lf in enumerate(labeled_files, start=1):
+                for idx, lf in enumerate(pass1_files, start=1):
                     rel_label = _relative_file_label(lf, input_dir)
                     if not p1_compact:
                         print(f"\n  Processing: {rel_label}")
@@ -987,9 +1010,9 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                             f"    → {item['stats_path']} "
                             f"({item['stats']['success']}/{item['stats']['total_samples']} success)"
                         )
-                    elif idx == 1 or idx == len(labeled_files) or idx % p1_interval == 0:
+                    elif idx == 1 or idx == len(pass1_files) or idx % p1_interval == 0:
                         print(
-                            f"  Pass 1 progress {idx}/{len(labeled_files)} | "
+                            f"  Pass 1 progress {idx}/{len(pass1_files)} | "
                             f"{item['rel_label']} | "
                             f"{item['stats']['success']}/{item['stats']['total_samples']} success"
                         )
@@ -1330,32 +1353,21 @@ def _run_regenerate_dashboard_legacy(input_path, pass_num="both", open_browser=F
 
 def _find_output_subdirs(run_dir):
     """Find subdirectories containing labeled/scored/stats files."""
-    pass1_stats_names = (PASS1_STATS_FILE,)
-    pass2_stats_names = (PASS2_STATS_FILE,)
-    subdirs = []
-    for child in sorted(run_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        has_output = any(
-            (child / name).exists()
-            for name in ("labeled.json", "labeled.jsonl",
-                         "scored.json", "scored.jsonl",
-                         *pass1_stats_names, *pass2_stats_names)
-        )
-        if has_output:
-            subdirs.append(child)
-        # Check one level deeper (e.g., run_dir/code/subdir/)
-        for grandchild in sorted(child.iterdir()):
-            if grandchild.is_dir():
-                has_deep = any(
-                    (grandchild / name).exists()
-                    for name in ("labeled.json", "labeled.jsonl",
-                                 "scored.json", "scored.jsonl",
-                                 *pass1_stats_names, *pass2_stats_names)
-                )
-                if has_deep:
-                    subdirs.append(grandchild)
-    return subdirs
+    patterns = (
+        "**/labeled.json",
+        "**/labeled.jsonl",
+        "**/scored.json",
+        "**/scored.jsonl",
+        f"**/{PASS1_STATS_FILE}",
+        f"**/{PASS2_STATS_FILE}",
+    )
+    dirs = {
+        path.parent
+        for pattern in patterns
+        for path in run_dir.glob(pattern)
+        if path.parent != run_dir
+    }
+    return sorted(dirs)
 
 
 def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):

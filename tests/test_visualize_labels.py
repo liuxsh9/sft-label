@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
-from sft_label.tools.dashboard_aggregation import infer_scope_turn_kind
+from sft_label.tools import visualize_labels as visualize_labels_module
+from sft_label.tools.dashboard_aggregation import infer_scope_turn_kind, infer_scope_turn_kind_from_path
 from sft_label.tools.visualize_labels import compute_viz_data, generate_dashboard
 
 
@@ -200,6 +202,264 @@ def test_generate_dashboard_stats_only_single_scope_uses_stats_and_explorer_asse
     assert detail.get("pass2") is None
 
 
+def test_generate_dashboard_stats_only_single_scope_prefers_conversation_stats_artifact(tmp_path, monkeypatch):
+    (tmp_path / "labeled.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "sample-1",
+                "metadata": {"source_file": "train.jsonl", "source_id": "conv-1", "turn_index": 1},
+                "conversations": [{"from": "human", "value": "first"}, {"from": "gpt", "value": "ok"}],
+                "labels": _sample_with_unmapped("sample-1", "first", [])["labels"],
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "conversation_stats_labeling.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "distribution_total": 1,
+                "input_file": "train.jsonl",
+                "distributions": {"intent": {"build": 1}},
+                "unmapped_details": {"total_occurrences": 0, "by_dimension": {}},
+                "confidence_stats": {},
+                "conf_matrix": [],
+                "coverage": {"intent": 1},
+                "cross_matrix": {"rows": [], "cols": [], "data": {}},
+                "overview": {"success_rate": 1.0, "unmapped_unique": 0},
+                "unit_label": "units",
+                "mode_id": "conversation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    stats = {
+        "total_samples": 1,
+        "input_file": "train.jsonl",
+        "success_rate": 1.0,
+        "total_tokens": 123,
+        "arbitrated_rate": 0.0,
+        "unmapped_unique_count": 0,
+        "tag_distributions": {"intent": {"build": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+    (tmp_path / PASS1_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+    fresh_time = (tmp_path / PASS1_STATS_FILE).stat().st_mtime + 5
+    os.utime(tmp_path / "conversation_stats_labeling.json", (fresh_time, fresh_time))
+
+    def _fail_load(_path):
+        raise AssertionError("stats-only single-scope dashboard should use conversation_stats_labeling.json")
+
+    monkeypatch.setattr(visualize_labels_module, "load_data_file", _fail_load)
+
+    out = generate_dashboard(tmp_path, labeled_file=None, stats_file=PASS1_STATS_FILE)
+    data_dir = out.with_name(f"{out.stem}.data")
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+
+    assert detail["pass1"]["modes"]["conversation"]["total"] == 1
+
+
+def test_generate_dashboard_stats_only_single_scope_ignores_stale_conversation_stats_artifact(tmp_path, monkeypatch):
+    sample = {
+        "id": "sample-1",
+        "metadata": {"source_file": "train.jsonl", "source_id": "conv-1", "turn_index": 1},
+        "conversations": [{"from": "human", "value": "first"}, {"from": "gpt", "value": "ok"}],
+        "labels": _sample_with_unmapped("sample-1", "first", [])["labels"],
+    }
+    data_path = tmp_path / "labeled.jsonl"
+    data_path.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+    conversation_stats_path = tmp_path / "conversation_stats_labeling.json"
+    conversation_stats_path.write_text(
+        json.dumps(
+            {
+                "total": 99,
+                "distribution_total": 99,
+                "input_file": "train.jsonl",
+                "distributions": {"intent": {"stale": 99}},
+                "unmapped_details": {"total_occurrences": 0, "by_dimension": {}},
+                "confidence_stats": {},
+                "conf_matrix": [],
+                "coverage": {"intent": 1},
+                "cross_matrix": {"rows": [], "cols": [], "data": {}},
+                "overview": {"success_rate": 1.0, "unmapped_unique": 0},
+                "unit_label": "units",
+                "mode_id": "conversation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    stats = {
+        "total_samples": 1,
+        "input_file": "train.jsonl",
+        "success_rate": 1.0,
+        "total_tokens": 123,
+        "arbitrated_rate": 0.0,
+        "unmapped_unique_count": 0,
+        "tag_distributions": {"intent": {"build": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+    stats_path = tmp_path / PASS1_STATS_FILE
+    stats_path.write_text(json.dumps(stats), encoding="utf-8")
+    stale_time = stats_path.stat().st_mtime - 5
+    os.utime(conversation_stats_path, (stale_time, stale_time))
+
+    called = {"count": 0}
+    real_load_data_file = visualize_labels_module.load_data_file
+
+    def _tracking_load(path):
+        called["count"] += 1
+        return real_load_data_file(path)
+
+    monkeypatch.setattr(visualize_labels_module, "load_data_file", _tracking_load)
+
+    out = generate_dashboard(tmp_path, labeled_file=None, stats_file=PASS1_STATS_FILE)
+    data_dir = out.with_name(f"{out.stem}.data")
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+
+    assert called["count"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["total"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["distributions"]["intent"] == {"build": 1}
+
+
+def test_generate_dashboard_tree_payload_uses_stats_without_preloading_leaf_samples(tmp_path, monkeypatch):
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "labeled.jsonl").write_text(
+        json.dumps(
+            _sample_with_unmapped(
+                "sample-1",
+                "Add WebGPU rendering support to this pipeline.",
+                [{"dimension": "task", "value": "gpu-porting"}],
+            ),
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample.jsonl",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"task": {"feature-implementation": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {"task:gpu-porting": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"task": {"feature-implementation": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {"task:gpu-porting": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fail_load(_path):
+        raise AssertionError("tree payload should not preload leaf sample files")
+
+    monkeypatch.setattr(visualize_labels_module, "load_data_file", _fail_load)
+
+    out = generate_dashboard(meta_root, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
+    data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["scopes"]["global"]["summary"]["pass1_total"] == 1
+    assert manifest["scopes"]["file:code/sample.jsonl"]["explorer"]["sample_count"] == 1
+
+
+def test_generate_dashboard_tree_payload_prefers_conversation_stats_artifact_over_leaf_reload(tmp_path, monkeypatch):
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "labeled.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "sample-1",
+                "metadata": {"source_file": "code/sample.jsonl", "source_id": "conv-1", "turn_index": 1},
+                "conversations": [{"from": "human", "value": "first"}, {"from": "gpt", "value": "ok"}],
+                "labels": _sample_with_unmapped("sample-1", "first", [])["labels"],
+            },
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample.jsonl",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "conversation_stats_labeling.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "distribution_total": 1,
+                "input_file": "code/sample.jsonl",
+                "distributions": {"intent": {"build": 1}},
+                "unmapped_details": {"total_occurrences": 0, "by_dimension": {}},
+                "confidence_stats": {},
+                "conf_matrix": [],
+                "coverage": {"intent": 1},
+                "cross_matrix": {"rows": [], "cols": [], "data": {}},
+                "overview": {"success_rate": 1.0, "unmapped_unique": 0},
+                "unit_label": "units",
+                "mode_id": "conversation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fail_iter(_path):
+        raise AssertionError("dashboard should use conversation_stats_labeling.json instead of reloading leaf samples")
+
+    monkeypatch.setattr(visualize_labels_module, "_load_scope_samples", _fail_iter)
+
+    out = generate_dashboard(meta_root, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
+    data_dir = out.with_name(f"{out.stem}.data")
+    detail = json.loads((data_dir / "scopes" / "file_code_sample_jsonl.json").read_text(encoding="utf-8"))
+
+    assert detail["pass1"]["modes"]["conversation"]["total"] == 1
+    assert detail["summary_modes"]["conversation"]["pass1_total"] == 1
+
+
 def test_compute_viz_data_conversation_mode_merges_multiturn_tags():
     samples = [
         {
@@ -354,6 +614,137 @@ def test_generated_dashboard_uses_sidebar_runtime_assets_for_compact_meta(tmp_pa
     assert '${escapeHtml(scopeKindLabel(scope.kind))}</span>' not in js
 
 
+def test_generate_dashboard_tree_payload_aggregates_conversation_mode_from_leaf_samples(tmp_path):
+    meta_root = tmp_path / "meta_label_data"
+    code_leaf = meta_root / "files" / "code" / "sample_a"
+    docs_leaf = meta_root / "files" / "docs" / "sample_b"
+    code_leaf.mkdir(parents=True, exist_ok=True)
+    docs_leaf.mkdir(parents=True, exist_ok=True)
+
+    code_rows = [
+        {
+            "id": "code-1",
+            "metadata": {"source_file": "code/sample_a.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
+            "conversations": [{"from": "human", "value": "first"}, {"from": "gpt", "value": "ok"}],
+            "labels": {
+                "intent": "build",
+                "difficulty": "intermediate",
+                "language": ["python"],
+                "domain": [],
+                "concept": [],
+                "task": ["feature-implementation"],
+                "agentic": [],
+                "constraint": [],
+                "context": "snippet",
+                "confidence": {"intent": 0.8},
+                "unmapped": [],
+            },
+        },
+        {
+            "id": "code-2",
+            "metadata": {"source_file": "code/sample_a.jsonl", "source_id": "conv-1", "turn_index": 2, "total_turns": 2},
+            "conversations": [{"from": "human", "value": "second"}, {"from": "gpt", "value": "ok"}],
+            "labels": {
+                "intent": "debug",
+                "difficulty": "advanced",
+                "language": ["python"],
+                "domain": [],
+                "concept": [],
+                "task": ["bug-fixing"],
+                "agentic": [],
+                "constraint": [],
+                "context": "repository",
+                "confidence": {"intent": 0.9},
+                "unmapped": [],
+            },
+        },
+    ]
+    docs_rows = [
+        {
+            "id": "docs-1",
+            "metadata": {"source_file": "docs/sample_b.jsonl"},
+            "conversations": [{"from": "human", "value": "single"}, {"from": "gpt", "value": "ok"}],
+            "labels": {
+                "intent": "build",
+                "difficulty": "beginner",
+                "language": ["python"],
+                "domain": [],
+                "concept": [],
+                "task": ["feature-implementation"],
+                "agentic": [],
+                "constraint": [],
+                "context": "snippet",
+                "confidence": {"intent": 0.7},
+                "unmapped": [],
+            },
+        }
+    ]
+
+    (code_leaf / "labeled.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in code_rows) + "\n",
+        encoding="utf-8",
+    )
+    (docs_leaf / "labeled.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in docs_rows) + "\n",
+        encoding="utf-8",
+    )
+
+    (code_leaf / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample_a.jsonl",
+                "total_samples": 2,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1, "debug": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (docs_leaf / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "docs/sample_b.jsonl",
+                "total_samples": 1,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_samples": 3,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 2, "debug": 1}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = generate_dashboard(meta_root, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
+    data_dir = out.with_name(f"{out.stem}.data")
+    code_detail = json.loads((data_dir / "scopes" / "file_code_sample_a_jsonl.json").read_text(encoding="utf-8"))
+    dir_detail = json.loads((data_dir / "scopes" / "dir_code.json").read_text(encoding="utf-8"))
+    global_detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+
+    assert code_detail["pass1"]["modes"]["conversation"]["total"] == 1
+    assert dir_detail["pass1"]["modes"]["conversation"]["total"] == 1
+    assert global_detail["pass1"]["modes"]["conversation"]["total"] == 2
+    assert global_detail["summary_modes"]["conversation"]["pass1_total"] == 2
+    assert global_detail["pass1"]["modes"]["conversation"]["distributions"]["intent"] == {"build": 1, "debug": 1}
+
+
 def test_infer_scope_turn_kind_distinguishes_single_multi_and_mixed():
     assert infer_scope_turn_kind([
         {"metadata": {}},
@@ -367,3 +758,23 @@ def test_infer_scope_turn_kind_distinguishes_single_multi_and_mixed():
         {"metadata": {}},
         {"metadata": {"source_id": "conv-1"}},
     ]) == "mixed"
+
+
+def test_infer_scope_turn_kind_from_json_path_streams_without_json_load(tmp_path, monkeypatch):
+    data_path = tmp_path / "labeled.json"
+    data_path.write_text(
+        json.dumps(
+            [
+                {"metadata": {}},
+                {"metadata": {"source_id": "conv-1"}},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def _fail_json_load(*args, **kwargs):
+        raise AssertionError("turn-kind inference should not full-load JSON arrays")
+
+    monkeypatch.setattr("sft_label.tools.dashboard_aggregation.json.load", _fail_json_load)
+
+    assert infer_scope_turn_kind_from_path(data_path) == "mixed"

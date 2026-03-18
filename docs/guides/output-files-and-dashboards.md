@@ -11,6 +11,7 @@ A typical standard run looks like this:
   labeled.json
   scored.json
   stats_labeling.json
+  conversation_stats_labeling.json
   stats_scoring.json
   conversation_scores.json
   dashboards/
@@ -30,6 +31,7 @@ A typical standard run looks like this:
 Notes:
 
 - `scored.json` only exists if you ran Pass 2
+- `conversation_stats_labeling.json` is a compact Pass 1 conversation aggregate used by dashboard tree views; single-file runs place it at the run root, while directory runs place it next to each per-file `stats_labeling.json`
 - `conversation_scores.json` appears when conversation aggregation is available
 - dashboard HTML files are lightweight bootstraps; most data lives in the adjacent `.data/` folder
 - `_dashboard_static/v1/` contains the JS/CSS runtime for local viewing
@@ -51,6 +53,7 @@ Typical layout:
     conversation_scores.json
     files/
       ... per-source caches and per-file artifacts ...
+      .../conversation_stats_labeling.json
     dashboards/
       dashboard_labeling_<scope>.html
       dashboard_labeling_<scope>.data/
@@ -68,6 +71,8 @@ uv run sft-label regenerate-dashboard --input <run_dir>
 ```
 
 For inline mirrored runs, recomputed artifacts are written under `meta_label_data/`.
+
+`recompute-stats` also rebuilds `conversation_stats_labeling.json` for Pass 1 outputs, so regenerated labeling dashboards keep the lighter per-file tree payload path after offline maintenance.
 
 ## Opening dashboards locally
 

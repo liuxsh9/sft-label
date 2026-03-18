@@ -130,6 +130,7 @@ The exact layout depends on the input mode, but these are the main artifacts mos
   labeled.json                 # Pass 1 output (or per-file labeled outputs)
   scored.json                  # Pass 2 output when --score is enabled
   stats_labeling.json          # Pass 1 stats
+  conversation_stats_labeling.json  # for single-file runs; directory runs write this beside each per-file Pass 1 stats file
   stats_scoring.json           # Pass 2 stats
   conversation_scores.json     # Multi-turn aggregates when scoring is available
   runtime_events.jsonl         # adaptive runtime events (when enabled)
@@ -152,12 +153,15 @@ The exact layout depends on the input mode, but these are the main artifacts mos
     summary_stats_labeling.json
     summary_stats_scoring.json
     conversation_scores.json
+    files/.../conversation_stats_labeling.json  # per-file lightweight Pass 1 conversation aggregate
     dashboards/
       dashboard_labeling*.html
       dashboard_scoring*.html
 ```
 
 For a deeper explanation of each artifact, see [Output files and dashboards](docs/guides/output-files-and-dashboards.md).
+
+`conversation_stats_labeling.json` is intentionally small: the labeling dashboard tree can reuse it instead of reopening large per-file `labeled.jsonl` artifacts, which helps keep memory bounded on very large runs.
 
 ## Viewing dashboards
 
@@ -173,6 +177,7 @@ Typical locations:
 If you edit outputs or rebuild stats later:
 
 ```bash
+uv run sft-label recompute-stats --input <run_dir>
 uv run sft-label regenerate-dashboard --input <run_dir>
 ```
 

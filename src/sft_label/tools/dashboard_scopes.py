@@ -365,10 +365,21 @@ def _with_scoring_file_label(stats: dict | None, file_label: str) -> dict | None
 def _find_sibling_artifact(stats_path: Path, candidates: list[str] | None) -> str | None:
     if not candidates:
         return None
+    suffix = ""
+    for prefix in ("stats_labeling", "stats_scoring", "stats_value", "stats"):
+        if stats_path.stem.startswith(prefix):
+            suffix = stats_path.stem[len(prefix):]
+            break
     for name in candidates:
         candidate = stats_path.parent / name
         if candidate.exists():
             return str(candidate)
+        if suffix:
+            stem = Path(name).stem
+            ext = Path(name).suffix
+            suffixed_candidate = stats_path.parent / f"{stem}{suffix}{ext}"
+            if suffixed_candidate.exists():
+                return str(suffixed_candidate)
     return None
 
 
@@ -411,6 +422,7 @@ def _discover_leaf_records(root_dir: Path, stats_filename: str | None, *,
         discovered[rel_path] = {
             "path": rel_path,
             "stats": stats,
+            "stats_path": str(stats_path),
             "conv_records": conv_records,
             "conv_path": conv_path_str,
             "data_path": _find_sibling_artifact(stats_path, data_candidates),
@@ -542,6 +554,7 @@ def build_scope_tree(
             "raw_pass1": (pass1_leaves.get(leaf_path) or {}).get("stats"),
             "raw_pass2": (pass2_leaves.get(leaf_path) or {}).get("stats"),
             "raw_conversations": (pass2_leaves.get(leaf_path) or {}).get("conv_records", []),
+            "pass1_stats_path": (pass1_leaves.get(leaf_path) or {}).get("stats_path"),
             "pass1_data_path": (pass1_leaves.get(leaf_path) or {}).get("data_path"),
             "pass2_data_path": (pass2_leaves.get(leaf_path) or {}).get("data_path"),
             "conversation_data_path": (pass2_leaves.get(leaf_path) or {}).get("conv_path"),
@@ -564,10 +577,6 @@ def build_scope_tree(
         pass2_stats = merge_scoring_stats(
             [stats for stats in dir_pass2_inputs if stats]
         )
-        conv_records = []
-        for leaf_path in dir_to_files[dir_path]:
-            conv_records.extend(scopes[f"file:{leaf_path}"]["raw_conversations"])
-
         scopes[scope_id] = {
             "id": scope_id,
             "label": path.name,
@@ -577,7 +586,8 @@ def build_scope_tree(
             "children": [],
             "raw_pass1": pass1_stats,
             "raw_pass2": pass2_stats,
-            "raw_conversations": conv_records,
+            "raw_conversations": [],
+            "pass1_stats_path": None,
             "pass1_data_path": None,
             "pass2_data_path": None,
             "descendant_files": dir_to_files[dir_path][:],
@@ -600,10 +610,6 @@ def build_scope_tree(
         root_pass2 = dict(root_pass2)
         root_pass2["per_file_summary"] = merged_root_pass2["per_file_summary"]
     root_conv = _summary_conversations(root_dir)
-    if not root_conv:
-        for payload in scopes.values():
-            if payload.get("kind") == "file":
-                root_conv.extend(payload.get("raw_conversations", []))
 
     scopes["global"]["raw_pass1"] = root_pass1
     scopes["global"]["raw_pass2"] = root_pass2

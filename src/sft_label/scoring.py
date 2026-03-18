@@ -474,18 +474,41 @@ async def _run_pass2_recovery_sweep_in_memory(
     return {"enabled": True, "attempted": attempted, "recovered": recovered}
 
 
+def _init_monitor_totals():
+    return {
+        "total_failed": 0,
+        "total_estimated": 0,
+        "total_llm_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+    }
+
+
+def _accumulate_monitor_totals(monitor_totals, monitor):
+    if not monitor:
+        return
+    status = monitor.get("status")
+    if status == "failed":
+        monitor_totals["total_failed"] += 1
+    if status == "estimated_selective":
+        monitor_totals["total_estimated"] += 1
+    monitor_totals["total_llm_calls"] += monitor.get("llm_calls", 0) or 0
+    monitor_totals["total_prompt_tokens"] += monitor.get("prompt_tokens", 0) or 0
+    monitor_totals["total_completion_tokens"] += monitor.get("completion_tokens", 0) or 0
+
+
 def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Path):
-    """Rebuild summaries/monitors in scored.jsonl order after recovery sweep edits."""
+    """Rebuild summaries + compact monitor totals after recovery sweep edits."""
+    monitor_totals = _init_monitor_totals()
     summaries = []
-    monitors = []
     with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm:
         for line_s, line_m in zip(fs, fm):
             sample = json.loads(line_s)
             monitor = json.loads(line_m)
-            monitors.append(monitor)
+            _accumulate_monitor_totals(monitor_totals, monitor)
             if sample.get("value"):
                 summaries.append(_selection_summary_from_sample(sample))
-    return summaries, monitors
+    return summaries, monitor_totals
 
 
 async def _run_pass2_recovery_sweep_chunked(
@@ -1803,20 +1826,34 @@ def _selection_dim_confidence(labels, dim):
     return max(_SELECTION_CONFIDENCE_FLOOR, _dimension_label_confidence(labels, dim))
 
 
-def _selection_summary_from_sample(sample):
-    """Extract the lightweight fields needed for global selection ranking."""
+def _selection_summary_from_sample(sample, config=None):
+    """Extract compact fields needed for global selection ranking."""
     value = sample.get("value") or {}
     selection_view = _selection_view_from_sample(sample)
     metadata = sample.get("metadata") or {}
+    labels = sample.get("labels") or {}
+    selection_features = _infer_selection_features(
+        sample=sample,
+        summary={
+            "selection_view": selection_view,
+            "metadata": {
+                "turn_index": metadata.get("turn_index"),
+                "total_turns": metadata.get("total_turns"),
+            },
+        },
+        config=config,
+    )
+    inferred_domain = _infer_domain_backfill(selection_view, labels)
     return {
-        "labels": sample.get("labels") or {},
+        "labels": labels,
         "complexity_overall": (value.get("complexity") or {}).get("overall"),
         "quality_overall": (value.get("quality") or {}).get("overall"),
         "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
         "rarity_score": (value.get("rarity") or {}).get("score"),
         "value_score": value.get("value_score"),
         "confidence": value.get("confidence"),
-        "selection_view": selection_view,
+        "selection_features": selection_features,
+        "inferred_domain": inferred_domain,
         "metadata": {
             "turn_index": metadata.get("turn_index"),
             "total_turns": metadata.get("total_turns"),
@@ -1923,11 +1960,16 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
     features_list = []
     for summary in summaries:
         labels = copy.deepcopy(summary.get("labels") or {})
-        inferred = _infer_domain_backfill(summary.get("selection_view"), labels)
+        inferred = summary.get("inferred_domain")
+        if not inferred:
+            inferred = _infer_domain_backfill(summary.get("selection_view"), labels)
         if inferred and not labels.get("domain"):
             labels["domain"] = inferred
         normalized_labels.append(labels)
-        features_list.append(_infer_selection_features(summary=summary, config=config))
+        features = summary.get("selection_features")
+        if not isinstance(features, dict):
+            features = _infer_selection_features(summary=summary, config=config)
+        features_list.append(features)
 
     label_confidences = [
         {dim: _selection_dim_confidence(labels, dim) for dim in _SELECTION_DIMS}
@@ -2502,7 +2544,39 @@ def _histogram_bins(values):
     return bins
 
 
-def compute_value_stats(scored_samples, all_monitors):
+def _percentiles_from_histogram_bins(bins, pcts=(10, 25, 50, 75, 90)):
+    """Approximate percentiles from integer-score histogram bins."""
+    if not bins or len(bins) != 10:
+        return {}
+    total = sum(bins)
+    if total <= 0:
+        return {}
+
+    mean = sum((idx + 1) * count for idx, count in enumerate(bins)) / total
+    result = {
+        "mean": round(mean, 2),
+        "std": 0.0,
+        "min": next((idx + 1 for idx, count in enumerate(bins) if count > 0), 0),
+        "max": next((10 - idx for idx, count in enumerate(reversed(bins)) if count > 0), 0),
+    }
+    if total > 1:
+        variance = sum(count * ((idx + 1) - mean) ** 2 for idx, count in enumerate(bins)) / (total - 1)
+        result["std"] = round(variance ** 0.5, 2)
+
+    for pct in pcts:
+        target = min(int(total * pct / 100), total - 1)
+        seen = 0
+        score = 10
+        for idx, count in enumerate(bins):
+            seen += count
+            if seen > target:
+                score = idx + 1
+                break
+        result[f"p{pct}"] = round(float(score), 2)
+    return result
+
+
+def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
     """Compute aggregate statistics for value scoring.
 
     Returns dict matching Pass 2 stats structure.
@@ -2564,8 +2638,7 @@ def compute_value_stats(scored_samples, all_monitors):
     confidence_scores = extract_scores("confidence")
     score_distributions["confidence"] = _percentiles(confidence_scores)
 
-    # Attach raw score arrays for cross-file merging (not serialized to JSON)
-    _raw_scores = {
+    score_arrays = {
         "value_score": extract_scores("value_score"),
         "selection_score": extract_scores("selection_score"),
         "intra_class_rank": extract_scores("intra_class_rank"),
@@ -2576,7 +2649,7 @@ def compute_value_stats(scored_samples, all_monitors):
     }
 
     # Histogram bins (1-10) for dashboard charts
-    histograms = {k: _histogram_bins(v) for k, v in _raw_scores.items()}
+    histograms = {k: _histogram_bins(v) for k, v in score_arrays.items()}
 
     # Sub-score means
     sub_score_means = {
@@ -2707,7 +2780,7 @@ def compute_value_stats(scored_samples, all_monitors):
     total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in all_monitors)
     total_completion_tokens = sum(m.get("completion_tokens", 0) for m in all_monitors)
 
-    return {
+    stats = {
         "total_scored": total_scored,
         "total_failed": total_failed,
         "total_estimated": total_estimated,
@@ -2716,7 +2789,6 @@ def compute_value_stats(scored_samples, all_monitors):
         "total_completion_tokens": total_completion_tokens,
         "total_tokens": total_prompt_tokens + total_completion_tokens,
         "score_distributions": score_distributions,
-        "_raw_scores": _raw_scores,
         "histograms": histograms,
         "sub_score_means": sub_score_means,
         "value_by_tag": value_by_tag,
@@ -2727,6 +2799,9 @@ def compute_value_stats(scored_samples, all_monitors):
         "selection_thresholds": selection_thresholds,
         "coverage_at_thresholds": coverage_at_thresholds,
     }
+    if include_raw_scores:
+        stats["_raw_scores"] = score_arrays
+    return stats
 
 
 # ─────────────────────────────────────────────────────────
@@ -2744,18 +2819,19 @@ def _load_scored_artifact_samples(artifact_dir: Path):
     artifact_dir = Path(artifact_dir)
     json_path = artifact_dir / "scored.json"
     jsonl_path = artifact_dir / "scored.jsonl"
-    if json_path.exists():
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    samples = []
     if jsonl_path.exists():
+        samples = []
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     samples.append(json.loads(line))
-    return samples
+        return samples
+    if json_path.exists():
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    return []
 
 
 def _load_monitor_lookup(path: Path) -> dict[str, dict]:
@@ -3271,8 +3347,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     start_time = time.time()
 
     # Lightweight per-sample summaries for final stats
-    score_summaries = []  # list of dicts: {value_score, complexity, quality, reasoning, rarity, flags, thinking_mode, labels}
-    all_monitors = []
+    score_summaries = []
+    monitor_totals = _init_monitor_totals()
 
     out_scored = open(output_dir / "scored.jsonl", "w", encoding="utf-8")
     out_monitor = open(output_dir / "monitor_value.jsonl", "w", encoding="utf-8")
@@ -3358,18 +3434,24 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
                 return chunk_idx, resumed_in_chunk
 
+            chunk_submission_watermark = max(
+                config.scoring_concurrency,
+                int(config.scoring_concurrency * config.dir_pipeline_watermark),
+            )
+
             def maybe_load_more_scoring():
                 resumed_loaded = 0
                 active_count = sum(1 for c in active_chunks.values()
-                                   if c["done"] < c["total"])
+                                   if not c.get("flushed") and c["done"] < c["total"])
                 while (not gen_exhausted
-                       and len(pending_futures) < int(config.scoring_concurrency * config.dir_pipeline_watermark)
+                       and len(pending_futures) < chunk_submission_watermark
                        and active_count < max_active):
                     chunk_idx, resumed_in_chunk = load_next_scoring_chunk()
                     if chunk_idx is None:
                         break
                     resumed_loaded += resumed_in_chunk
-                    active_count += 1
+                    if active_chunks[chunk_idx]["done"] < active_chunks[chunk_idx]["total"]:
+                        active_count += 1
                 return resumed_loaded
 
             def flush_scoring_chunk(chunk_idx):
@@ -3383,7 +3465,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         sample["value"] = value
                         scored_count += 1
                         # Summary for final stats
-                        summary = _selection_summary_from_sample(sample)
+                        summary = _selection_summary_from_sample(sample, config=config)
                         summary.update({
                             "flags": value.get("flags", []),
                             "thinking_mode": value.get("thinking_mode"),
@@ -3409,7 +3491,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     out_scored.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
                     if monitor:
-                        all_monitors.append(monitor)
+                        _accumulate_monitor_totals(monitor_totals, monitor)
                         out_monitor.write(json.dumps(monitor, ensure_ascii=False) + "\n")
 
                 # Release
@@ -3438,7 +3520,16 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
                 flush_ready_scoring_chunks()
 
-                while pending_futures:
+                while pending_futures or not gen_exhausted:
+                    if not pending_futures:
+                        resumed_loaded = maybe_load_more_scoring()
+                        if resumed_loaded:
+                            progress.update(task, advance=resumed_loaded, info=f"skipped {skipped_count} resumed")
+                        flush_ready_scoring_chunks()
+                        if not pending_futures:
+                            if gen_exhausted:
+                                break
+                            continue
                     done, pending_futures = await asyncio.wait(
                         pending_futures, return_when=asyncio.FIRST_COMPLETED)
 
@@ -3494,7 +3585,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     if sweep and sweep.get("recovered"):
         # After patching scored/monitor files, rebuild summaries/monitors in file order
         # so selection/stats align with the rewritten outputs.
-        score_summaries, all_monitors = _rebuild_chunked_summaries_and_monitors(
+        score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
             output_dir / "scored.jsonl",
             output_dir / "monitor_value.jsonl",
         )
@@ -3538,7 +3629,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     scored_tmp.rename(scored_path)
 
     # ── Compute stats from summaries ──
-    stats = _compute_value_stats_from_summaries(score_summaries, all_monitors, total)
+    stats = _compute_value_stats_from_summaries(score_summaries, monitor_totals, total)
     stats["elapsed_seconds"] = round(elapsed, 1)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(input_path)
@@ -3616,15 +3707,26 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     return stats
 
 
-def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
+def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
     """Compute value stats from lightweight per-sample summaries.
 
     Produces the same structure as compute_value_stats but without needing
     all scored samples in memory.
     """
     total_scored = len(summaries)
-    total_failed = sum(1 for m in all_monitors if m.get("status") == "failed")
-    total_estimated = sum(1 for m in all_monitors if m.get("status") == "estimated_selective")
+    if isinstance(monitor_totals, dict):
+        total_failed = int(monitor_totals.get("total_failed", 0) or 0)
+        total_estimated = int(monitor_totals.get("total_estimated", 0) or 0)
+        total_llm_calls = int(monitor_totals.get("total_llm_calls", 0) or 0)
+        total_prompt_tokens = int(monitor_totals.get("total_prompt_tokens", 0) or 0)
+        total_completion_tokens = int(monitor_totals.get("total_completion_tokens", 0) or 0)
+    else:
+        monitors = monitor_totals or []
+        total_failed = sum(1 for m in monitors if m.get("status") == "failed")
+        total_estimated = sum(1 for m in monitors if m.get("status") == "estimated_selective")
+        total_llm_calls = sum(m.get("llm_calls", 0) for m in monitors)
+        total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in monitors)
+        total_completion_tokens = sum(m.get("completion_tokens", 0) for m in monitors)
 
     # Score distributions
     def _gather(key):
@@ -3723,11 +3825,6 @@ def _compute_value_stats_from_summaries(summaries, all_monitors, total_input):
             t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
             for t, vs in sorted(tag_selections.items(), key=lambda x: -sum(x[1]) / len(x[1]))
         }
-
-    # LLM usage
-    total_llm_calls = sum(m.get("llm_calls", 0) for m in all_monitors)
-    total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in all_monitors)
-    total_completion_tokens = sum(m.get("completion_tokens", 0) for m in all_monitors)
 
     return {
         "total_scored": total_scored,
@@ -4044,21 +4141,42 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
         with _create_progress() as progress:
             task = progress.add_task("Pass 2", total=len(to_score), info="")
+            submission_watermark = max(
+                config.scoring_concurrency,
+                int(config.scoring_concurrency * config.dir_pipeline_watermark),
+            )
+            next_submit_idx = 0
+            pending_tasks = set()
+            inflight_count = 0
 
-            tasks = [asyncio.create_task(score_task(i)) for i in to_score]
-            for coro in asyncio.as_completed(tasks):
-                idx = await coro
-                _info = format_progress_info(
-                    ok_count=scored_count,
-                    fail_count=failed_count,
-                    request_stats=rate_limiter.stats if rate_limiter else None,
+            def submit_more_tasks():
+                nonlocal next_submit_idx, inflight_count
+                while next_submit_idx < len(to_score) and inflight_count < submission_watermark:
+                    sample_idx = to_score[next_submit_idx]
+                    next_submit_idx += 1
+                    pending_tasks.add(asyncio.ensure_future(score_task(sample_idx)))
+                    inflight_count += 1
+
+            submit_more_tasks()
+            while pending_tasks:
+                done, pending_tasks = await asyncio.wait(
+                    pending_tasks, return_when=asyncio.FIRST_COMPLETED
                 )
-                monitor = all_monitors[idx]
-                if llm_progress_cb and monitor:
-                    run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                    if run_info:
-                        _info = f"{_info} • {run_info}"
-                progress.update(task, advance=1, info=_info)
+                inflight_count = max(inflight_count - len(done), 0)
+                for finished in done:
+                    idx = finished.result()
+                    _info = format_progress_info(
+                        ok_count=scored_count,
+                        fail_count=failed_count,
+                        request_stats=rate_limiter.stats if rate_limiter else None,
+                    )
+                    monitor = all_monitors[idx]
+                    if llm_progress_cb and monitor:
+                        run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
+                        if run_info:
+                            _info = f"{_info} • {run_info}"
+                    progress.update(task, advance=1, info=_info)
+                submit_more_tasks()
 
         sweep = await _run_pass2_recovery_sweep_in_memory(
             http_client=client,
@@ -4216,6 +4334,8 @@ class _ScoringFileCollector:
     fail: int = 0
     values: list = field(default_factory=list)
     monitors: list = field(default_factory=list)
+    score_indices: list = field(default_factory=list)
+    submit_cursor: int = 0
     completed: bool = False
 
     def __post_init__(self):
@@ -4318,20 +4438,63 @@ def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
 
 
 def _discover_scored_output_files(root_dir):
-    """Find logical scored outputs in a run tree, preferring JSON over JSONL."""
+    """Find logical scored outputs in a run tree, preferring JSONL over JSON."""
     root_dir = Path(root_dir)
     candidates = []
     for pattern in ("scored*.json", "scored*.jsonl", "**/scored*.json", "**/scored*.jsonl"):
         candidates.extend(root_dir.glob(pattern))
 
+    def _logical_json_family_key(path: Path):
+        name = path.name
+        if name.endswith(".jsonl"):
+            name = name[:-6]
+        elif name.endswith(".json"):
+            name = name[:-5]
+        return path.parent, name
+
     preferred = {}
     for path in sorted(set(candidates)):
-        key = (path.parent, path.stem)
+        key = _logical_json_family_key(path)
         existing = preferred.get(key)
         if existing is None:
             preferred[key] = path
             continue
-        if existing.suffix == ".jsonl" and path.suffix == ".json":
+        if existing.suffix == ".json" and path.suffix == ".jsonl":
+            preferred[key] = path
+
+    return sorted(preferred.values())
+
+
+def _discover_labeled_input_files(input_dir):
+    """Find labeled inputs in a run tree, preferring JSONL when siblings coexist."""
+    input_dir = Path(input_dir)
+    candidates = []
+    for pattern in (
+        "labeled*.json",
+        "labeled*.jsonl",
+        "*/labeled*.json",
+        "*/labeled*.jsonl",
+        "**/labeled*.json",
+        "**/labeled*.jsonl",
+    ):
+        candidates.extend(input_dir.glob(pattern))
+
+    def _logical_json_family_key(path: Path):
+        name = path.name
+        if name.endswith(".jsonl"):
+            name = name[:-6]
+        elif name.endswith(".json"):
+            name = name[:-5]
+        return path.parent, name
+
+    preferred = {}
+    for path in sorted(set(candidates)):
+        key = _logical_json_family_key(path)
+        existing = preferred.get(key)
+        if existing is None:
+            preferred[key] = path
+            continue
+        if existing.suffix == ".json" and path.suffix == ".jsonl":
             preferred[key] = path
 
     return sorted(preferred.values())
@@ -4414,7 +4577,7 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
         scored_count = 0
         for sample in samples:
             if sample.get("value"):
-                summaries.append(_selection_summary_from_sample(sample))
+                summaries.append(_selection_summary_from_sample(sample, config=config))
                 scored_count += 1
         file_entries.append({
             "path": scored_path,
@@ -4442,7 +4605,7 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
         _write_scored_samples(scored_path, samples)
 
         monitors = _load_monitor_records(scored_path.parent)
-        stats = compute_value_stats(samples, monitors)
+        stats = compute_value_stats(samples, monitors, include_raw_scores=False)
         existing_stats = _load_existing_pass2_stats(scored_path.parent)
         for key in (
             "elapsed_seconds",
@@ -4550,7 +4713,7 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     valid_monitors = [m for m in all_monitors if m]
-    stats = compute_value_stats(samples, valid_monitors)
+    stats = compute_value_stats(samples, valid_monitors, include_raw_scores=False)
     stats["model"] = config.scoring_model
     stats["input_file"] = str(collector.labeled_path)
     stats["file"] = file_label or stats.get("file") or collector.labeled_path.name
@@ -4604,6 +4767,10 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
     collector.values = None
     collector.monitors = None
     collector.rarity_results = None
+    collector.score_indices = []
+    collector.submit_cursor = 0
+    collector.idf_map = {}
+    collector.stats_ref_info = None
     collector.completed = True
 
     return stats
@@ -4622,23 +4789,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         output_dir = input_dir
     output_dir = Path(output_dir)
 
-    # Find labeled files (flat, one-level subdirs, or deeply nested)
-    # Try progressively deeper searches; include both .json and .jsonl
-    labeled_files = sorted(input_dir.glob("labeled*.json")) + sorted(input_dir.glob("labeled*.jsonl"))
-    if not labeled_files:
-        labeled_files = sorted(input_dir.glob("*/labeled*.json")) + sorted(input_dir.glob("*/labeled*.jsonl"))
-    if not labeled_files:
-        # Deep nesting: recursive glob
-        labeled_files = sorted(input_dir.glob("**/labeled*.json")) + sorted(input_dir.glob("**/labeled*.jsonl"))
-    # Separate .json and .jsonl: prefer .json if both exist in same dir
-    json_files = [f for f in labeled_files if not f.name.endswith(".jsonl")]
-    jsonl_files = [f for f in labeled_files if f.name.endswith(".jsonl")]
-    # For dirs that only have .jsonl (chunked pipeline output), include them
-    json_dirs = {f.parent for f in json_files}
-    for jl in jsonl_files:
-        if jl.parent not in json_dirs:
-            json_files.append(jl)
-    labeled_files = sorted(json_files)
+    # Find labeled files (flat, nested, recursive). Prefer JSONL siblings.
+    labeled_files = _discover_labeled_input_files(input_dir)
 
     if not labeled_files:
         print(f"No labeled*.json/jsonl files found in {input_dir}")
@@ -4790,7 +4942,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     resident_files = [p for p in labeled_files if p.suffix != ".jsonl"]
 
     concurrency = config.scoring_concurrency
-    watermark = int(concurrency * config.dir_pipeline_watermark)
+    watermark = max(concurrency, int(concurrency * config.dir_pipeline_watermark))
     max_active = config.dir_pipeline_max_files
     runtime = _instantiate_runtime(config, concurrency=concurrency)
     setattr(config, "_adaptive_runtime", runtime)
@@ -4816,8 +4968,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         )
         return file_idx, sample_idx, value, monitor
 
-    # --- Load a file and submit its tasks ---
-    def load_and_submit(file_idx, labeled_path, client, pending_futures):
+    # --- Load a file and prepare its work queue ---
+    def load_and_prepare(file_idx, labeled_path):
         # Load samples
         with open(labeled_path, "r", encoding="utf-8") as f:
             if labeled_path.suffix == ".jsonl":
@@ -4869,7 +5021,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             )
 
         resumed_loaded = 0
-        # Submit scoring tasks
+        # Prepare scoring indices (bounded submission happens separately)
         for i in range(total):
             resumed_value = _existing_resume_value(samples[i], resumed_values)
             if resumed_value is not None:
@@ -4879,28 +5031,61 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 collector.ok += 1
                 resumed_loaded += 1
                 continue
-            fut = asyncio.ensure_future(
-                _tagged_score(client, samples[i], rarity_results[i],
-                              file_idx, i, total)
-            )
-            pending_futures.add(fut)
+            collector.score_indices.append(i)
 
         return collector, resumed_loaded
 
     # --- Try to load more files if below watermark ---
-    def maybe_load_more(pending_futures, collectors, next_to_load, client):
+    def maybe_load_more(pending_futures, collectors, next_to_load):
         active_count = sum(1 for c in collectors.values() if not c.completed)
         resumed_loaded = 0
         while (next_to_load < len(resident_files)
                and len(pending_futures) < watermark
                and active_count < max_active):
             labeled_path = resident_files[next_to_load]
-            c, file_resumed = load_and_submit(next_to_load, labeled_path, client, pending_futures)
+            c, file_resumed = load_and_prepare(next_to_load, labeled_path)
             collectors[c.file_idx] = c
             next_to_load += 1
             active_count += 1
             resumed_loaded += file_resumed
         return next_to_load, resumed_loaded
+
+    def submit_more_tasks(pending_futures, collectors, client):
+        submitted = 0
+        capacity = max(watermark - len(pending_futures), 0)
+        if capacity <= 0:
+            return submitted
+
+        active_collectors = [
+            c for c in sorted(collectors.values(), key=lambda item: item.file_idx)
+            if not c.completed
+        ]
+        while capacity > 0:
+            progressed = False
+            for collector in active_collectors:
+                if collector.submit_cursor >= len(collector.score_indices):
+                    continue
+                sample_idx = collector.score_indices[collector.submit_cursor]
+                collector.submit_cursor += 1
+                fut = asyncio.ensure_future(
+                    _tagged_score(
+                        client,
+                        collector.samples[sample_idx],
+                        collector.rarity_results[sample_idx],
+                        collector.file_idx,
+                        sample_idx,
+                        collector.total,
+                    )
+                )
+                pending_futures.add(fut)
+                submitted += 1
+                capacity -= 1
+                progressed = True
+                if capacity <= 0:
+                    break
+            if not progressed:
+                break
+        return submitted
 
     # --- Main watermark-driven loop ---
     collectors = {}
@@ -4987,13 +5172,25 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
                     # Initial load
                     next_to_load, resumed_loaded = maybe_load_more(
-                        pending_futures, collectors, next_to_load, client
+                        pending_futures, collectors, next_to_load
                     )
+                    submit_more_tasks(pending_futures, collectors, client)
                     if resumed_loaded:
                         progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
                     await flush_completed_collectors()
 
-                    while pending_futures:
+                    while pending_futures or next_to_load < len(resident_files):
+                        if not pending_futures:
+                            next_to_load, resumed_loaded = maybe_load_more(
+                                pending_futures, collectors, next_to_load
+                            )
+                            submit_more_tasks(pending_futures, collectors, client)
+                            if resumed_loaded:
+                                progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
+                            await flush_completed_collectors()
+                            if not pending_futures and next_to_load >= len(resident_files):
+                                break
+
                         done, pending_futures = await asyncio.wait(
                             pending_futures, return_when=asyncio.FIRST_COMPLETED)
 
@@ -5049,8 +5246,9 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
                         # After processing batch, check if we should load more files
                         next_to_load, resumed_loaded = maybe_load_more(
-                            pending_futures, collectors, next_to_load, client
+                            pending_futures, collectors, next_to_load
                         )
+                        submit_more_tasks(pending_futures, collectors, client)
                         if resumed_loaded:
                             progress.update(sample_task, advance=resumed_loaded, info=f"skipped {resumed_loaded} resumed")
                         await flush_completed_collectors()
@@ -5189,7 +5387,20 @@ def _merge_value_stats(file_stats_list):
             # Exact percentiles from raw data
             merged_distributions[key] = _percentiles(all_values)
         else:
-            # Fallback: weighted mean + global min/max (no raw data available)
+            # Fallback without raw arrays: use merged histograms when available.
+            merged_bins = [0] * 10
+            has_bins = False
+            for s in file_stats_list:
+                bins = s.get("histograms", {}).get(key)
+                if isinstance(bins, list) and len(bins) == 10:
+                    has_bins = True
+                    for i, value in enumerate(bins):
+                        merged_bins[i] += value
+            if has_bins and sum(merged_bins) > 0:
+                merged_distributions[key] = _percentiles_from_histogram_bins(merged_bins)
+                continue
+
+            # Last-resort fallback: weighted mean + global min/max.
             total_n = 0
             total_sum = 0.0
             global_min = float("inf")

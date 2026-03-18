@@ -22,6 +22,7 @@ PASS1_STATS_FILE = "stats_labeling.json"
 PASS1_STATS_FILE_LEGACY = "stats.json"
 PASS1_SUMMARY_STATS_FILE = "summary_stats_labeling.json"
 PASS1_SUMMARY_STATS_FILE_LEGACY = "summary_stats.json"
+PASS1_CONVERSATION_STATS_FILE = "conversation_stats_labeling.json"
 PASS1_DASHBOARD_FILE = "dashboard_labeling.html"
 PASS1_DASHBOARD_FILE_LEGACY = "dashboard.html"
 

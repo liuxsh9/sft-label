@@ -34,22 +34,71 @@ _PASS2_TAG_DIMS = ["intent", "difficulty", "domain", "concept", "task", "agentic
 
 
 def load_data_file(path: str | Path | None) -> list[dict]:
+    return list(iter_data_file(path))
+
+
+def iter_data_file(path: str | Path | None):
     if not path:
-        return []
+        return
     data_path = Path(path)
     if not data_path.exists():
-        return []
+        return
     if data_path.suffix == ".jsonl":
-        rows = []
         with open(data_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    rows.append(json.loads(line))
-        return rows
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict):
+                        yield row
+        return
+    decoder = json.JSONDecoder()
+    started = False
+    eof = False
+    buffer = ""
     with open(data_path, encoding="utf-8") as f:
-        payload = json.load(f)
-    return payload if isinstance(payload, list) else []
+        while True:
+            if not eof:
+                chunk = f.read(65536)
+                if chunk:
+                    buffer += chunk
+                else:
+                    eof = True
+
+            while True:
+                buffer = buffer.lstrip()
+                if not buffer:
+                    break
+
+                if not started:
+                    if buffer[0] != "[":
+                        return
+                    started = True
+                    buffer = buffer[1:]
+                    continue
+
+                if buffer[0] == "]":
+                    return
+                if buffer[0] == ",":
+                    buffer = buffer[1:]
+                    continue
+
+                try:
+                    row, consumed = decoder.raw_decode(buffer)
+                except json.JSONDecodeError:
+                    if eof:
+                        return
+                    break
+
+                buffer = buffer[consumed:]
+                if isinstance(row, dict):
+                    yield row
+
+            if eof:
+                return
 
 
 def _collect_unmapped_examples(
@@ -288,6 +337,155 @@ def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
     return units
 
 
+def build_pass1_conversation_units_from_iter(samples_iter) -> list[dict]:
+    units = []
+    grouped: dict[str, dict] = {}
+    group_order: list[str] = []
+
+    def _update_group(state: dict, sample: dict) -> None:
+        labels = sample.get("labels") or {}
+        meta = sample.get("metadata") or {}
+        state["last"] = sample
+
+        merged = state["merged_labels"]
+        for dim, val in labels.items():
+            if dim in {"confidence", "unmapped", "inherited", "inherited_from"}:
+                continue
+            if dim in _SINGLE_SELECT_DIMS:
+                merged[dim] = val
+            elif dim in _MULTI_SELECT_DIMS:
+                existing = merged.setdefault(dim, [])
+                if not isinstance(existing, list):
+                    existing = [existing]
+                if isinstance(val, list):
+                    for item in val:
+                        if item not in existing:
+                            existing.append(item)
+                elif val not in existing:
+                    existing.append(val)
+                merged[dim] = existing
+            else:
+                merged[dim] = val
+
+        if labels.get("inherited"):
+            merged["inherited"] = True
+            if labels.get("inherited_from"):
+                merged["inherited_from"] = labels.get("inherited_from")
+
+        confidence = labels.get("confidence") or {}
+        for dim in DIMENSIONS:
+            score = confidence.get(dim)
+            if not isinstance(score, (int, float)):
+                continue
+            if dim in _SINGLE_SELECT_DIMS:
+                state["single_conf"][dim] = round(float(score), 3)
+                continue
+            value = labels.get(dim)
+            if dim in _MULTI_SELECT_DIMS and not value:
+                continue
+            bucket_name = "fallback" if labels.get("inherited") else "observed"
+            bucket = state["multi_conf"][dim][bucket_name]
+            weight = 0.7 if labels.get("inherited") else 1.0
+            bucket["sum"] += float(score) * weight
+            bucket["weight"] += weight
+
+        for item in labels.get("unmapped") or []:
+            if isinstance(item, dict):
+                dim = str(item.get("dimension", "unknown"))
+                value = str(item.get("value", "?"))
+                key = (dim, value)
+                if key not in state["unmapped_seen"]:
+                    state["unmapped_seen"].add(key)
+                    state["unmapped"].append({"dimension": dim, "value": value})
+            else:
+                value = str(item)
+                key = ("unknown", value)
+                if key not in state["unmapped_seen"]:
+                    state["unmapped_seen"].add(key)
+                    state["unmapped"].append({"dimension": "unknown", "value": value})
+
+        state["meta"] = meta
+
+    for sample in samples_iter:
+        meta = sample.get("metadata") or {}
+        conv_key = build_conversation_key(meta.get("source_id"), meta.get("source_file"))
+        if conv_key and is_conversation_object(meta):
+            if conv_key not in grouped:
+                grouped[conv_key] = {
+                    "merged_labels": {},
+                    "single_conf": {},
+                    "multi_conf": {
+                        dim: {
+                            "observed": {"sum": 0.0, "weight": 0.0},
+                            "fallback": {"sum": 0.0, "weight": 0.0},
+                        }
+                        for dim in DIMENSIONS
+                    },
+                    "unmapped": [],
+                    "unmapped_seen": set(),
+                    "last": None,
+                    "meta": {},
+                }
+                group_order.append(conv_key)
+            _update_group(grouped[conv_key], sample)
+        else:
+            units.append(sample)
+
+    for conv_key in group_order:
+        state = grouped[conv_key]
+        merged_labels = dict(state["merged_labels"])
+        confidence_payload = {}
+        for dim, value in state["single_conf"].items():
+            confidence_payload[dim] = value
+        for dim, buckets in state["multi_conf"].items():
+            primary = buckets["observed"]
+            fallback = buckets["fallback"]
+            chosen = primary if primary["weight"] > 0 else fallback
+            if chosen["weight"] > 0:
+                confidence_payload[dim] = round(chosen["sum"] / chosen["weight"], 3)
+        if confidence_payload:
+            merged_labels["confidence"] = confidence_payload
+        if state["unmapped"]:
+            merged_labels["unmapped"] = state["unmapped"]
+
+        last = state["last"] or {}
+        meta = dict(last.get("metadata") or {})
+        meta["source_id"] = meta.get("source_id") or conv_key
+        meta["conversation_key"] = conv_key
+        units.append(
+            {
+                "id": conv_key,
+                "metadata": meta,
+                "conversations": last.get("conversations") or [],
+                "labels": merged_labels,
+            }
+        )
+
+    return units
+
+
+def build_pass1_conversation_mode(samples: list[dict], stats: dict) -> dict:
+    conversation_units = build_pass1_conversation_units(samples)
+    return _compute_label_mode(
+        conversation_units,
+        conversation_units,
+        stats,
+        mode_id="conversation",
+        unit_label="units",
+    )
+
+
+def build_pass1_conversation_mode_from_iter(samples_iter, stats: dict) -> dict:
+    conversation_units = build_pass1_conversation_units_from_iter(samples_iter)
+    return _compute_label_mode(
+        conversation_units,
+        conversation_units,
+        stats,
+        mode_id="conversation",
+        unit_label="units",
+    )
+
+
 def _compute_label_mode(all_units: list[dict], dist_units: list[dict], stats: dict, *, mode_id: str, unit_label: str) -> dict:
     if not all_units and not dist_units:
         empty = _empty_label_mode(stats)
@@ -388,14 +586,7 @@ def build_pass1_viz(samples: list[dict], stats: dict) -> dict:
         if is_usable_labels(sample.get("labels")) and not (sample.get("labels") or {}).get("inherited")
     ]
     sample_mode = _compute_label_mode(sample_all, sample_dist, stats, mode_id="sample", unit_label="samples")
-    conversation_units = build_pass1_conversation_units(samples)
-    conversation_mode = _compute_label_mode(
-        conversation_units,
-        conversation_units,
-        stats,
-        mode_id="conversation",
-        unit_label="units",
-    )
+    conversation_mode = build_pass1_conversation_mode(samples, stats)
     payload = dict(sample_mode)
     payload["modes"] = {
         "sample": sample_mode,
@@ -546,6 +737,38 @@ def build_pass2_conversation_units(samples: list[dict], conv_records: list[dict]
             "confidence": _score_from_slices(slices, "confidence"),
             "thinking_mode": rec.get("thinking_mode"),
             "flags": sorted({flag for sample in slices for flag in ((sample.get("value") or {}).get("flags") or [])}),
+            "turn_count": rec.get("turn_count"),
+            "source_file": rec.get("source_file"),
+        })
+
+    covered = set(groups)
+    for conv_key, rec in conv_by_key.items():
+        if conv_key in covered:
+            continue
+        detail = rec.get("detail") or {}
+        labels = rec.get("merged_labels")
+        if not isinstance(labels, dict):
+            labels = {}
+        flags = []
+        for key in ("negative_flags", "flags"):
+            raw_flags = detail.get(key)
+            if isinstance(raw_flags, list):
+                flags.extend(str(flag) for flag in raw_flags if flag)
+        confidence = detail.get("score_confidence")
+        if not isinstance(confidence, (int, float)):
+            confidence = rec.get("rarity_confidence")
+        units.append({
+            "id": conv_key,
+            "labels": labels,
+            "value_score": rec.get("conv_value"),
+            "selection_score": rec.get("conv_selection"),
+            "complexity_overall": rec.get("peak_complexity"),
+            "quality_overall": detail.get("quality_overall"),
+            "reasoning_overall": detail.get("reasoning_overall"),
+            "rarity_score": rec.get("conv_rarity"),
+            "confidence": confidence,
+            "thinking_mode": rec.get("thinking_mode"),
+            "flags": sorted(set(flags)),
             "turn_count": rec.get("turn_count"),
             "source_file": rec.get("source_file"),
         })
@@ -809,6 +1032,43 @@ def infer_scope_turn_kind(samples: list[dict]) -> str | None:
             has_multi = True
         if has_single and has_multi:
             return "mixed"
+    if has_multi:
+        return "multi"
+    if has_single:
+        return "single"
+    return None
+
+
+def infer_scope_turn_kind_from_path(path: str | Path | None) -> str | None:
+    has_single = False
+    has_multi = False
+    for sample in iter_data_file(path):
+        source_id = ((sample or {}).get("metadata") or {}).get("source_id")
+        if source_id in (None, ""):
+            has_single = True
+        else:
+            has_multi = True
+        if has_single and has_multi:
+            return "mixed"
+    if has_multi:
+        return "multi"
+    if has_single:
+        return "single"
+    return None
+
+
+def merge_turn_kinds(kinds: list[str | None]) -> str | None:
+    has_single = False
+    has_multi = False
+    for kind in kinds:
+        if kind == "mixed":
+            return "mixed"
+        if kind == "single":
+            has_single = True
+        elif kind == "multi":
+            has_multi = True
+    if has_single and has_multi:
+        return "mixed"
     if has_multi:
         return "multi"
     if has_single:

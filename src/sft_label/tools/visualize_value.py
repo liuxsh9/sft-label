@@ -13,7 +13,14 @@ from sft_label.artifacts import (
     resolve_dashboard_output,
 )
 from sft_label.tools.dashboard_scopes import build_scope_tree
-from sft_label.tools.dashboard_aggregation import build_pass2_viz, build_scope_summary, infer_scope_turn_kind, load_data_file
+from sft_label.tools.dashboard_aggregation import (
+    build_pass2_viz,
+    build_scope_summary,
+    infer_scope_turn_kind,
+    infer_scope_turn_kind_from_path,
+    load_data_file,
+    merge_turn_kinds,
+)
 from sft_label.tools.visualize_labels import (
     _dashboard_subtitle,
     _write_dashboard_bundle,
@@ -284,18 +291,33 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
     )
     scopes = {}
     explorer_sources = []
-    file_sample_cache = {
-        scope_id: load_data_file(raw_scope.get("pass2_data_path"))
+    file_conversations = {
+        scope_id: list(raw_scope.get("raw_conversations") or [])
+        for scope_id, raw_scope in tree["scopes"].items()
+        if raw_scope.get("kind") == "file"
+    }
+    file_turn_kind = {
+        scope_id: infer_scope_turn_kind_from_path(raw_scope.get("pass2_data_path"))
         for scope_id, raw_scope in tree["scopes"].items()
         if raw_scope.get("kind") == "file"
     }
     for scope_id, raw_scope in tree["scopes"].items():
-        samples = []
-        for leaf_path in raw_scope.get("descendant_files", []):
-            samples.extend(file_sample_cache.get(f"file:{leaf_path}", []))
-        pass1 = compute_viz_data(samples, raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
-        pass2 = compute_value_viz_data(samples, raw_scope["raw_pass2"], raw_scope.get("raw_conversations", [])) if raw_scope.get("raw_pass2") else None
-        conversation = _compute_conv_viz_data(raw_scope.get("raw_conversations", []))
+        is_file = raw_scope.get("kind") == "file"
+        if is_file:
+            conv_records = list(file_conversations.get(scope_id, []))
+        else:
+            conv_records = []
+            for leaf_path in raw_scope.get("descendant_files", []):
+                conv_records.extend(file_conversations.get(f"file:{leaf_path}", []))
+        pass1 = compute_viz_data([], raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
+        pass2 = compute_value_viz_data([], raw_scope["raw_pass2"], conv_records) if raw_scope.get("raw_pass2") else None
+        conversation = _compute_conv_viz_data(conv_records)
+        if is_file:
+            turn_kind = file_turn_kind.get(scope_id)
+        else:
+            turn_kind = merge_turn_kinds(
+                [file_turn_kind.get(f"file:{leaf_path}") for leaf_path in raw_scope.get("descendant_files", [])]
+            )
         scopes[scope_id] = {
             "id": raw_scope["id"],
             "label": raw_scope["label"],
@@ -307,7 +329,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             "pass1": pass1,
             "pass2": pass2,
             "conversation": conversation,
-            "turn_kind": infer_scope_turn_kind(samples),
+            "turn_kind": turn_kind,
         }
         scopes[scope_id]["summary"] = _scope_summary(scopes[scope_id])
         if raw_scope.get("kind") == "file" and raw_scope.get("pass2_data_path"):

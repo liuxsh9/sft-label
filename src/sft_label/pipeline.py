@@ -71,6 +71,7 @@ from sft_label.config import (
     PipelineConfig,
 )
 from sft_label.artifacts import (
+    PASS1_CONVERSATION_STATS_FILE,
     PASS1_STATS_FILE,
     PASS1_SUMMARY_STATS_FILE,
     pass1_stats_filename,
@@ -1734,11 +1735,17 @@ class FileCollector:
     labels: list = field(default_factory=list)
     monitors: list = field(default_factory=list)
     completed: bool = False
+    submit_order: list[int] = field(default_factory=list)
+    submit_cursor: int = 0
+    chunked_delegate: bool = False
 
     def __post_init__(self):
         # Pre-allocate result slots
         self.labels = [None] * self.total
         self.monitors = [None] * self.total
+
+    def has_pending_submission(self) -> bool:
+        return self.submit_cursor < len(self.submit_order)
 
 
 @dataclass
@@ -1752,6 +1759,50 @@ class DirectoryWorkloadEstimate:
     baseline_total_llm_calls: int
     initial_estimated_llm_calls: int
     scan_elapsed_seconds: float
+
+
+def _compute_pass1_conversation_mode(labeled_samples: list[dict], stats: dict) -> dict | None:
+    """Compute Pass 1 conversation-mode dashboard stats from labeled samples."""
+    from sft_label.tools.dashboard_aggregation import build_pass1_conversation_mode
+
+    return build_pass1_conversation_mode(labeled_samples, stats)
+
+
+def _write_pass1_conversation_stats(
+    output_dir: Path,
+    labeled_samples: list[dict] | None,
+    stats: dict,
+) -> None:
+    """Persist lightweight Pass 1 conversation-mode stats for dashboard tree views."""
+    conversation_mode = _compute_pass1_conversation_mode(labeled_samples or [], stats)
+    if isinstance(conversation_mode, dict):
+        _write_json_atomic(Path(output_dir) / PASS1_CONVERSATION_STATS_FILE, conversation_mode)
+
+
+def _write_pass1_conversation_stats_from_path(output_dir: Path, labeled_path: Path, stats: dict) -> None:
+    """Persist lightweight Pass 1 conversation-mode stats by streaming final artifacts."""
+    from sft_label.tools.dashboard_aggregation import build_pass1_conversation_mode_from_iter, iter_data_file
+
+    conversation_mode = build_pass1_conversation_mode_from_iter(iter_data_file(labeled_path), stats)
+    if isinstance(conversation_mode, dict):
+        _write_json_atomic(Path(output_dir) / PASS1_CONVERSATION_STATS_FILE, conversation_mode)
+
+
+def _safe_write_pass1_conversation_stats(
+    output_dir: Path,
+    *,
+    labeled_samples: list[dict] | None = None,
+    labeled_path: Path | None = None,
+    stats: dict,
+    pprint=print,
+) -> None:
+    try:
+        if labeled_path is not None:
+            _write_pass1_conversation_stats_from_path(output_dir, labeled_path, stats)
+        else:
+            _write_pass1_conversation_stats(output_dir, labeled_samples, stats)
+    except Exception as exc:
+        pprint(f"  [warn] skipped conversation sidecar: {type(exc).__name__}: {exc}")
 
 
 class RuntimeEtaEstimator:
@@ -1858,18 +1909,30 @@ def estimate_directory_workload(
             files_planned += 1
 
             if str(abs_path).endswith(".jsonl"):
-                row_bundles = list(iter_row_sample_bundles_from_jsonl(abs_path, limit=limit))
-                prepared = prepare_inline_pass1_batch(
-                    row_bundles,
-                    mode=mode,
-                    label_version=label_version,
-                    sparse_kwargs=_sparse_kw,
-                    migration_index=migration_index,
-                )
-                samples = prepared.samples
-                n_raw = len(prepared.bundles)
-                label_indices = prepared.label_indices
-                inherit_map = prepared.inherit_map
+                n_raw = 0
+                samples = []
+                label_indices = []
+                inherit_map = {}
+                total_file_samples = 0
+                total_file_labeled = 0
+                total_file_inherited = 0
+                for row_bundle in iter_row_sample_bundles_from_jsonl(abs_path, limit=limit):
+                    prepared = prepare_inline_pass1_batch(
+                        [row_bundle],
+                        mode=mode,
+                        label_version=label_version,
+                        sparse_kwargs=_sparse_kw,
+                        migration_index=migration_index,
+                    )
+                    n_raw += len(prepared.bundles)
+                    total_file_samples += len(prepared.samples)
+                    total_file_labeled += len(prepared.label_indices)
+                    total_file_inherited += len(prepared.inherit_map)
+                total_raw += n_raw
+                total_samples += total_file_samples
+                total_labeled += total_file_labeled
+                total_inherited += total_file_inherited
+                continue
             else:
                 samples, n_raw = iter_samples_from_file(abs_path, limit=limit, shuffle=shuffle)
                 label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
@@ -1942,6 +2005,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
         _write_json_atomic(output_dir / labeled_json, merge_result.samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
         _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
+        labeled_samples_for_dashboard = merge_result.samples
         if merge_result.failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, merge_result.failed_samples)
     else:
@@ -1954,6 +2018,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
         _write_json_atomic(output_dir / labeled_json, rendered_samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, rendered_samples)
         _write_jsonl_atomic(output_dir / monitor_file, monitor_records)
+        labeled_samples_for_dashboard = rendered_samples
         if failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, failed_samples)
 
@@ -1999,6 +2064,12 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
 
     stats_path = output_dir / stats_file
     _write_json_atomic(stats_path, stats)
+    _safe_write_pass1_conversation_stats(
+        output_dir,
+        labeled_samples=labeled_samples_for_dashboard,
+        stats=stats,
+        pprint=pprint,
+    )
 
     # Per-file dashboard
     try:
@@ -2036,6 +2107,15 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     collector.samples = None
     collector.labels = None
     collector.monitors = None
+    collector.row_bundles = None
+    collector.sample_to_bundle = None
+    collector.inherit_map = {}
+    collector.updated_sample_indices = set()
+    collector.bundle_plans = None
+    collector.plan_stats = {}
+    collector.submit_order = []
+    collector.submit_cursor = 0
+    collector.config = None
     collector.completed = True
 
     return stats
@@ -2430,6 +2510,12 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_ac
     chunk.samples = None
     chunk.labels = None
     chunk.monitors = None
+    chunk.row_bundles = None
+    chunk.sample_to_bundle = None
+    chunk.inherit_map = {}
+    chunk.updated_sample_indices = set()
+    chunk.bundle_plans = None
+    chunk.plan_stats = {}
     chunk.completed = True
 
 
@@ -2457,7 +2543,10 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
     concurrency = config.concurrency if config else DEFAULT_CONCURRENCY
-    watermark = int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK))
+    watermark = max(
+        int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK)),
+        1,
+    )
 
     _sparse_kw = {}
     if config:
@@ -2704,6 +2793,12 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
     stats_path = output_dir / PASS1_STATS_FILE
     _write_json_atomic(stats_path, stats)
+    _safe_write_pass1_conversation_stats(
+        output_dir,
+        labeled_path=output_dir / "labeled.jsonl",
+        stats=stats,
+        pprint=pprint,
+    )
 
     # Dashboard (stats-only mode — no labeled.json)
     try:
@@ -2911,6 +3006,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         _write_json_atomic(output_dir / labeled_json, merge_result.samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
         _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
+        labeled_samples_for_dashboard = merge_result.samples
         if merge_result.failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, merge_result.failed_samples)
     else:
@@ -2923,6 +3019,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         _write_json_atomic(output_dir / labeled_json, rendered_samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, rendered_samples)
         _write_jsonl_atomic(output_dir / monitor_file, monitor_records)
+        labeled_samples_for_dashboard = rendered_samples
         if failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, failed_samples)
 
@@ -2977,6 +3074,12 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     stats_path = output_dir / stats_file
     _write_json_atomic(stats_path, stats)
+    _safe_write_pass1_conversation_stats(
+        output_dir,
+        labeled_samples=labeled_samples_for_dashboard,
+        stats=stats,
+        pprint=pprint,
+    )
 
     # Per-file dashboard
     try:
@@ -3021,6 +3124,48 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         pprint("\n".join(lines))
 
     return stats
+
+
+def _jsonl_exceeds_chunk_threshold(path: Path, *, chunk_size: int, limit: int = 0) -> bool:
+    """Return True when a JSONL file likely benefits from chunked execution."""
+    threshold = max(int(chunk_size), 1)
+    if limit > 0:
+        threshold = min(threshold, int(limit))
+    if threshold <= 0:
+        return False
+
+    seen = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            seen += 1
+            if seen > threshold:
+                return True
+            if limit > 0 and seen >= limit:
+                break
+    return False
+
+
+def _should_delegate_directory_jsonl_to_chunked(
+    abs_path: Path,
+    *,
+    inline_jsonl: bool,
+    config: PipelineConfig | None,
+    limit: int,
+) -> bool:
+    if not inline_jsonl or not str(abs_path).endswith(".jsonl"):
+        return False
+    chunk_size = config.chunk_size if config else CHUNK_SIZE
+    return _jsonl_exceeds_chunk_threshold(abs_path, chunk_size=chunk_size, limit=limit)
+
+
+def _labeled_samples_from_stats(stats: dict) -> int:
+    if "sparse_labeled" in stats:
+        return int(stats.get("sparse_labeled", 0) or 0)
+    total = int(stats.get("total_samples", 0) or 0)
+    inherited = int(stats.get("sparse_inherited", 0) or 0)
+    return max(total - inherited, 0)
 
 
 async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
@@ -3068,12 +3213,26 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     if not pending_files:
         return skipped_stats
 
-    # --- Helper to wrap label_one with file/sample tracking ---
+    # --- Helper to wrap background tasks with source metadata ---
     async def _tagged_label(coro, file_idx, sample_idx):
         _, labels, monitor = await coro
-        return file_idx, sample_idx, labels, monitor
+        return {
+            "kind": "sample",
+            "file_idx": file_idx,
+            "sample_idx": sample_idx,
+            "labels": labels,
+            "monitor": monitor,
+        }
 
-    # --- Load a file into a FileCollector and submit its tasks ---
+    async def _tagged_chunked_file(coro, file_idx):
+        stats = await coro
+        return {
+            "kind": "chunked_file",
+            "file_idx": file_idx,
+            "stats": stats,
+        }
+
+    # --- Load a file into a FileCollector ---
     def load_and_submit(file_entry, pending_futures):
         orig_idx, abs_path, rel_path = file_entry
         str(rel_path)
@@ -3090,6 +3249,63 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                               min_gap=config.sparse_min_gap,
                               max_gap=config.sparse_max_gap,
                               threshold=config.sparse_threshold)
+
+        use_chunked_delegate = _should_delegate_directory_jsonl_to_chunked(
+            abs_path,
+            inline_jsonl=inline_jsonl,
+            config=config,
+            limit=limit,
+        )
+        if use_chunked_delegate:
+            collector = FileCollector(
+                file_idx=orig_idx,
+                abs_path=abs_path,
+                rel_path=rel_path,
+                output_dir=file_out_dir,
+                prefix=rel_path.stem,
+                total=0,
+                samples=[],
+                row_bundles=None,
+                sample_to_bundle=None,
+                dataset_output_path=dataset_output_path,
+                run_failure_log_path=run_failure_log_path,
+                config=config,
+                inline_output=inline_jsonl,
+                label_count=0,
+                inherit_map={},
+                updated_sample_indices=set(),
+                bundle_plans=None,
+                plan_stats={},
+                run_mode=mode,
+                sparse_info="",
+                chunked_delegate=True,
+            )
+            fut = asyncio.ensure_future(
+                _tagged_chunked_file(
+                    _run_one_file_chunked(
+                        abs_path,
+                        file_out_dir,
+                        http_client,
+                        sem,
+                        model,
+                        enable_arbitration=enable_arbitration,
+                        limit=limit,
+                        shuffle=shuffle,
+                        progress=None,
+                        sample_task=None,
+                        config=config,
+                        rate_limiter=rate_limiter,
+                        llm_progress_cb=llm_progress_cb,
+                        dataset_output_path=dataset_output_path,
+                        run_failure_log_path=run_failure_log_path,
+                        mode=mode,
+                        migration_index=migration_index,
+                    ),
+                    orig_idx,
+                )
+            )
+            pending_futures.add(fut)
+            return collector
 
         row_bundles = None
         sample_to_bundle = None
@@ -3108,7 +3324,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             row_bundles = prepared.bundles
             sample_to_bundle = prepared.sample_to_bundle
         else:
-            samples, n_raw = iter_samples_from_file(
+            samples, _ = iter_samples_from_file(
                 abs_path, limit=limit, shuffle=shuffle)
 
         # Sparse sampling
@@ -3140,7 +3356,11 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             bundle_plans=prepared.bundle_plans if prepared else None,
             plan_stats=prepared.stats if prepared else {},
             run_mode=mode,
-            sparse_info=f" ({len(samples)} total, {round(sparse_inherited/len(samples)*100)}% sparse)" if sparse_inherited > 0 else "",
+            sparse_info=(
+                f" ({len(samples)} total, {round(sparse_inherited/len(samples)*100)}% sparse)"
+                if sparse_inherited > 0 and len(samples) > 0
+                else ""
+            ),
         )
         if prepared is not None:
             collector.labels = list(prepared.labels)
@@ -3150,32 +3370,73 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             current_total = progress.tasks[sample_task].total or 0
             progress.update(sample_task, total=current_total + label_count, visible=True)
 
-        # Submit only label_indices (shuffled to avoid convoy effect)
         submit_order = list(label_indices)
         random.shuffle(submit_order)
-        for idx in submit_order:
-            coro = label_one(
-                http_client, samples[idx], model, idx, len(samples), sem,
-                enable_arbitration=enable_arbitration,
-                config=config, rate_limiter=rate_limiter,
-            )
-            fut = asyncio.ensure_future(_tagged_label(coro, orig_idx, idx))
-            pending_futures.add(fut)
+        collector.submit_order = submit_order
+        collector.submit_cursor = 0
 
         return collector
 
-    # --- Try to load more files if below watermark and within memory limit ---
+    def _collector_active_work(c: FileCollector) -> int:
+        if c.completed:
+            return 0
+        if c.chunked_delegate:
+            return max(watermark, 1)
+        return max(c.label_count - c.done, 0)
+
+    # --- Try to load more files if active work is below watermark ---
     def maybe_load_more(pending_futures, collectors, file_queue, next_to_load):
         active_count = sum(1 for c in collectors.values() if not c.completed)
-        while (next_to_load < len(file_queue)
-               and len(pending_futures) < watermark
-               and active_count < max_active):
+        active_work = sum(_collector_active_work(c) for c in collectors.values())
+        while (
+            next_to_load < len(file_queue)
+            and active_count < max_active
+            and active_work < watermark
+        ):
             entry = file_queue[next_to_load]
             next_to_load += 1
             new_c = load_and_submit(entry, pending_futures)
             collectors[new_c.file_idx] = new_c
             active_count += 1
+            active_work += _collector_active_work(new_c)
         return next_to_load
+
+    def top_up_submissions(pending_futures, collectors):
+        if len(pending_futures) >= watermark:
+            return
+        active = [
+            c for c in collectors.values()
+            if not c.completed and not c.chunked_delegate and c.has_pending_submission()
+        ]
+        while len(pending_futures) < watermark and active:
+            submitted = 0
+            for c in active:
+                if len(pending_futures) >= watermark:
+                    break
+                if not c.has_pending_submission():
+                    continue
+                idx = c.submit_order[c.submit_cursor]
+                c.submit_cursor += 1
+                coro = label_one(
+                    http_client,
+                    c.samples[idx],
+                    model,
+                    idx,
+                    c.total,
+                    sem,
+                    enable_arbitration=enable_arbitration,
+                    config=config,
+                    rate_limiter=rate_limiter,
+                )
+                fut = asyncio.ensure_future(_tagged_label(coro, c.file_idx, idx))
+                pending_futures.add(fut)
+                submitted += 1
+            if submitted == 0:
+                break
+            active = [
+                c for c in collectors.values()
+                if not c.completed and not c.chunked_delegate and c.has_pending_submission()
+            ]
 
     # --- Main loop: watermark-driven ---
     collectors = {}  # file_idx -> FileCollector
@@ -3210,6 +3471,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
 
     # Initial load
     next_to_load = maybe_load_more(pending_futures, collectors, file_queue, next_to_load)
+    top_up_submissions(pending_futures, collectors)
 
     if progress and file_task is not None:
         active_names = [str(c.rel_path) for c in collectors.values() if not c.completed]
@@ -3221,63 +3483,127 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             pending_futures, return_when=asyncio.FIRST_COMPLETED)
 
         for fut in done:
-            file_idx, sample_idx, labels, monitor = fut.result()
-            c = collectors[file_idx]
+            result = fut.result()
+            result_kind = result.get("kind")
+            if result_kind == "sample":
+                file_idx = result["file_idx"]
+                sample_idx = result["sample_idx"]
+                labels = result["labels"]
+                monitor = result["monitor"]
+                c = collectors[file_idx]
 
-            if 0 <= sample_idx < c.total:
-                c.labels[sample_idx] = labels
-                c.monitors[sample_idx] = monitor
+                if 0 <= sample_idx < c.total:
+                    c.labels[sample_idx] = labels
+                    c.monitors[sample_idx] = monitor
 
-            c.done += 1
-            if labels:
-                c.ok += 1
-            else:
-                c.fail += 1
+                c.done += 1
+                if labels:
+                    c.ok += 1
+                else:
+                    c.fail += 1
 
-            # Update samples progress bar
-            if progress and sample_task is not None:
-                label = c.rel_path.name
-                if c.sparse_info:
-                    label += c.sparse_info
-                info = format_progress_info(
-                    c.ok,
-                    c.fail,
-                    label=label,
-                    request_stats=rate_limiter.stats if rate_limiter else None,
-                )
-                if llm_progress_cb and monitor:
-                    global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
-                progress.update(sample_task, advance=1, info=info)
-            if eta_tracker:
-                eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
-                if progress and llm_task is not None:
-                    global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
-                    if global_counts:
-                        g_done, g_total = global_counts
+                # Update samples progress bar
+                if progress and sample_task is not None:
+                    label = c.rel_path.name
+                    if c.sparse_info:
+                        label += c.sparse_info
+                    info = format_progress_info(
+                        c.ok,
+                        c.fail,
+                        label=label,
+                        request_stats=rate_limiter.stats if rate_limiter else None,
+                    )
+                    if llm_progress_cb and monitor:
+                        global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                    progress.update(sample_task, advance=1, info=info)
+                if eta_tracker:
+                    eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                    if progress and llm_task is not None:
+                        global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
+                        if global_counts:
+                            g_done, g_total = global_counts
+                            progress.update(
+                                llm_task,
+                                total=max(g_total, 1),
+                                completed=min(g_done, g_total),
+                                info=global_llm_info,
+                            )
+                        else:
+                            progress.update(
+                                llm_task,
+                                total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+                                completed=eta_tracker.calls_done,
+                                info=eta_tracker.info_line(),
+                            )
+
+                # Check if this file is fully done (compare against label_count, not total)
+                if c.done >= c.label_count and not c.completed:
+                    stats = flush_file_output(c, run_dir, checkpoint_path, pprint=pprint)
+                    all_file_stats.append(stats)
+
+                    if progress and file_task is not None:
+                        progress.update(file_task, advance=1)
+                    collectors.pop(file_idx, None)
+            elif result_kind == "chunked_file":
+                file_idx = result["file_idx"]
+                stats = result["stats"]
+                c = collectors.get(file_idx)
+                if c is None:
+                    continue
+
+                c.samples = None
+                c.labels = None
+                c.monitors = None
+                c.row_bundles = None
+                c.sample_to_bundle = None
+                c.bundle_plans = None
+                c.plan_stats = {}
+                c.completed = True
+
+                update_checkpoint(checkpoint_path, str(c.rel_path), success=True)
+                all_file_stats.append(stats)
+
+                labeled_done = _labeled_samples_from_stats(stats)
+                if progress and sample_task is not None and labeled_done > 0:
+                    if workload_estimate is None:
+                        current_total = progress.tasks[sample_task].total or 0
                         progress.update(
-                            llm_task,
-                            total=max(g_total, 1),
-                            completed=min(g_done, g_total),
-                            info=global_llm_info,
+                            sample_task,
+                            total=current_total + labeled_done,
+                            advance=labeled_done,
+                            info=f"{c.rel_path.name} (chunked)",
                         )
                     else:
+                        progress.update(sample_task, advance=labeled_done, info=f"{c.rel_path.name} (chunked)")
+                if eta_tracker:
+                    calls_done = int(stats.get("total_llm_calls", 0) or 0)
+                    eta_tracker.calls_done += max(calls_done, 0)
+                    eta_tracker.samples_done += max(labeled_done, 0)
+                    if eta_tracker.samples_done > 0:
+                        eta_tracker.avg_calls_per_sample = eta_tracker.calls_done / eta_tracker.samples_done
+                    eta_tracker.estimated_total_calls = max(eta_tracker.estimated_total_calls, eta_tracker.calls_done)
+                    elapsed = max(time.time() - eta_tracker._start_time, 1e-6)
+                    instant_cps = eta_tracker.calls_done / elapsed
+                    if eta_tracker._smoothed_cps <= 0:
+                        eta_tracker._smoothed_cps = instant_cps
+                    else:
+                        eta_tracker._smoothed_cps = 0.2 * instant_cps + 0.8 * eta_tracker._smoothed_cps
+                    eta_tracker.calls_per_sec = eta_tracker._smoothed_cps
+                    if progress and llm_task is not None:
                         progress.update(
                             llm_task,
                             total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
                             completed=eta_tracker.calls_done,
                             info=eta_tracker.info_line(),
                         )
-
-            # Check if this file is fully done (compare against label_count, not total)
-            if c.done >= c.label_count and not c.completed:
-                stats = flush_file_output(c, run_dir, checkpoint_path, pprint=pprint)
-                all_file_stats.append(stats)
-
                 if progress and file_task is not None:
                     progress.update(file_task, advance=1)
 
+                collectors.pop(file_idx, None)
+
         # After processing batch of completions, check if we should load more files
         next_to_load = maybe_load_more(pending_futures, collectors, file_queue, next_to_load)
+        top_up_submissions(pending_futures, collectors)
 
         if progress and file_task is not None:
             active_names = [str(cc.rel_path) for cc in collectors.values()
@@ -3285,12 +3611,13 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             progress.update(file_task, info=", ".join(active_names)[:60] if active_names else "done")
 
     # Handle any files with 0 labels to submit (edge case: 0 samples or all inherited)
-    for c in collectors.values():
+    for file_idx, c in list(collectors.items()):
         if not c.completed and c.label_count == 0:
             stats = flush_file_output(c, run_dir, checkpoint_path, pprint=pprint)
             all_file_stats.append(stats)
             if progress and file_task is not None:
                 progress.update(file_task, advance=1)
+            collectors.pop(file_idx, None)
 
     return all_file_stats
 
