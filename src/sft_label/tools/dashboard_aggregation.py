@@ -4,6 +4,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from sft_label.config import FILE_RANKING_KEEP_RATE_THRESHOLD
 from sft_label.conversation import (
     _effective_weights,
     _merge_labels,
@@ -664,6 +665,19 @@ def _sample_pass2_unit(sample: dict) -> dict | None:
     value = sample.get("value") or {}
     if not value:
         return None
+    metadata = sample.get("metadata") or {}
+    total_turns = metadata.get("total_turns")
+    trajectory_turn_count = metadata.get("trajectory_turn_count")
+    conversations = sample.get("conversations") or []
+    turn_count = None
+    for candidate in (total_turns, trajectory_turn_count):
+        if isinstance(candidate, int) and candidate > 0:
+            turn_count = candidate
+            break
+    if turn_count is None and isinstance(conversations, list) and conversations:
+        turn_count = len(conversations)
+    if turn_count is None:
+        turn_count = 1
     return {
         "id": sample.get("id", ""),
         "labels": sample.get("labels") or {},
@@ -676,7 +690,8 @@ def _sample_pass2_unit(sample: dict) -> dict | None:
         "confidence": value.get("confidence"),
         "thinking_mode": value.get("thinking_mode") or (sample.get("metadata") or {}).get("thinking_mode"),
         "flags": value.get("flags") or [],
-        "source_file": (sample.get("metadata") or {}).get("source_file"),
+        "turn_count": turn_count,
+        "source_file": metadata.get("source_file"),
     }
 
 
@@ -978,9 +993,17 @@ def _build_per_file_summary(units: list[dict]) -> list[dict]:
         scored = [unit for unit in bucket if unit.get("value_score") is not None]
         if not scored:
             continue
+
         def _mean(field: str):
             values = [unit.get(field) for unit in scored if isinstance(unit.get(field), (int, float))]
             return round(sum(values) / len(values), 2) if values else 0
+
+        keep_count = sum(
+            1
+            for unit in scored
+            if isinstance(unit.get("selection_score"), (int, float))
+            and unit["selection_score"] >= FILE_RANKING_KEEP_RATE_THRESHOLD
+        )
         summaries.append({
             "file": Path(file_name).name if file_name != "current" else file_name,
             "count": len(scored),
@@ -989,6 +1012,8 @@ def _build_per_file_summary(units: list[dict]) -> list[dict]:
             "mean_quality": _mean("quality_overall"),
             "mean_rarity": _mean("rarity_score"),
             "mean_selection": _mean("selection_score"),
+            "keep_rate_7": round(keep_count / len(scored), 4) if scored else 0,
+            "mean_turns": _mean("turn_count"),
         })
     return summaries
 

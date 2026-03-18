@@ -172,6 +172,8 @@ def merge_scoring_stats(file_stats_list: list[dict]) -> dict | None:
             "mean_quality": stats.get("score_distributions", {}).get("quality_overall", {}).get("mean", 0),
             "mean_rarity": stats.get("score_distributions", {}).get("rarity_score", {}).get("mean", 0),
             "mean_selection": stats.get("score_distributions", {}).get("selection_score", {}).get("mean", 0),
+            "keep_rate_7": stats.get("keep_rate_7", 0),
+            "mean_turns": stats.get("mean_turns", 0),
         }
         for stats in file_stats_list
     ]

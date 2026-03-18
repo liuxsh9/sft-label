@@ -212,6 +212,7 @@ CONV_V2_LOW_QUALITY_THRESHOLD = 5.0       # low-quality turn ratio threshold
 CONV_V2_VALUE_UPLIFT_CAP = 1.5            # guardrail: v2 should not overshoot v1 too aggressively
 CONV_V2_SELECTION_UPLIFT_CAP = 2.0        # guardrail for selection v2 uplift
 CONV_V2_DOWNSIDE_CAP = 0.5                # guardrail: v2 should not drop far below v1
+FILE_RANKING_KEEP_RATE_THRESHOLD = 7.0    # keep-rate column threshold for file ranking
 
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)

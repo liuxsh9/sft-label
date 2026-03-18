@@ -44,6 +44,7 @@ from sft_label.config import (
     SELECTION_SUMMARY_EVIDENCE_BONUS,
     ENABLE_SELECTIVE_SCORING, SELECTIVE_SCORING_POLICY, SELECTIVE_SCORING_MIN_TURNS,
     SELECTIVE_SCORING_DRIFT_INTERVAL, SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP,
+    FILE_RANKING_KEEP_RATE_THRESHOLD,
     PipelineConfig,
 )
 from sft_label.preprocessing import (
@@ -1866,6 +1867,16 @@ def _selection_summary_from_sample(sample, config=None):
     }
 
 
+def _coerce_mean_turn_count(metadata):
+    if not isinstance(metadata, dict):
+        return None
+    for key in ("total_turns", "trajectory_turn_count"):
+        value = metadata.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 def _compute_percentiles(indexed_values):
     """Assign tie-aware percentiles to (idx, value) pairs."""
     if not indexed_values:
@@ -2780,6 +2791,23 @@ def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
             "coverage": round(len(retained_tags) / max(len(all_tags), 1), 3),
         }
 
+    keep_rate_7 = round(
+        sum(
+            1
+            for value in values
+            if isinstance(value.get("selection_score"), (int, float))
+            and value["selection_score"] >= FILE_RANKING_KEEP_RATE_THRESHOLD
+        )
+        / max(total_scored, 1),
+        4,
+    )
+    turn_counts = [
+        turn_count
+        for sample in scored_samples
+        if (turn_count := _coerce_mean_turn_count(sample.get("metadata"))) is not None
+    ]
+    mean_turns = round(sum(turn_counts) / len(turn_counts), 2) if turn_counts else 0
+
     # LLM usage
     total_llm_calls = sum(m.get("llm_calls", 0) for m in all_monitors)
     total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in all_monitors)
@@ -2803,6 +2831,8 @@ def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
         "flag_value_impact": flag_value_impact,
         "selection_thresholds": selection_thresholds,
         "coverage_at_thresholds": coverage_at_thresholds,
+        "keep_rate_7": keep_rate_7,
+        "mean_turns": mean_turns,
     }
     if include_raw_scores:
         stats["_raw_scores"] = score_arrays
@@ -3875,6 +3905,23 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
             for t, vs in sorted(tag_selections.items(), key=lambda x: -sum(x[1]) / len(x[1]))
         }
 
+    keep_rate_7 = round(
+        sum(
+            1
+            for s in summaries
+            if isinstance(s.get("selection_score"), (int, float))
+            and s["selection_score"] >= FILE_RANKING_KEEP_RATE_THRESHOLD
+        )
+        / max(total_scored, 1),
+        4,
+    )
+    turn_counts = [
+        turn_count
+        for s in summaries
+        if (turn_count := _coerce_mean_turn_count((s.get("metadata") or {}))) is not None
+    ]
+    mean_turns = round(sum(turn_counts) / len(turn_counts), 2) if turn_counts else 0
+
     return {
         "total_scored": total_scored,
         "total_failed": total_failed,
@@ -3891,6 +3938,8 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
         "flag_counts": dict(sorted(flag_counts.items(), key=lambda x: -x[1])),
         "flag_value_impact": flag_value_impact,
         "selection_thresholds": selection_thresholds,
+        "keep_rate_7": keep_rate_7,
+        "mean_turns": mean_turns,
     }
 
 
@@ -5506,6 +5555,8 @@ def _merge_value_stats(file_stats_list):
             "mean_quality": s.get("score_distributions", {}).get("quality_overall", {}).get("mean", 0),
             "mean_rarity": s.get("score_distributions", {}).get("rarity_score", {}).get("mean", 0),
             "mean_selection": s.get("score_distributions", {}).get("selection_score", {}).get("mean", 0),
+            "keep_rate_7": s.get("keep_rate_7", 0),
+            "mean_turns": s.get("mean_turns", 0),
         }
         for s in file_stats_list
     ]
@@ -5648,6 +5699,16 @@ def _merge_value_stats(file_stats_list):
                                 key=lambda x: -x[1]["sum"] / max(x[1]["count"], 1))
         }
     merged["selection_by_tag"] = merged_sel_by_tag
+
+    total_scored = merged["total_scored"]
+    merged["keep_rate_7"] = round(
+        sum((s.get("keep_rate_7", 0) or 0) * (s.get("total_scored", 0) or 0) for s in file_stats_list) / max(total_scored, 1),
+        4,
+    )
+    merged["mean_turns"] = round(
+        sum((s.get("mean_turns", 0) or 0) * (s.get("total_scored", 0) or 0) for s in file_stats_list) / max(total_scored, 1),
+        2,
+    )
 
     return merged
 

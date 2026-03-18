@@ -82,6 +82,14 @@ def test_compute_value_viz_data_conversation_mode_counts_multiturn_once():
     assert viz["modes"]["conversation"]["value_by_tag"]["agentic"]["planning"]["n"] == 1
     assert viz["modes"]["conversation"]["value_by_tag"]["agentic"]["file-operations"]["n"] == 1
     assert viz["modes"]["conversation"]["flag_counts"]["has-bug"] == 1
+    sample_summary = viz["modes"]["sample"]["per_file_summary"][0]
+    conversation_summary = viz["modes"]["conversation"]["per_file_summary"][0]
+    assert sample_summary["mean_rarity"] == 5.5
+    assert sample_summary["keep_rate_7"] == 0.5
+    assert sample_summary["mean_turns"] == 2.0
+    assert conversation_summary["mean_rarity"] == 6.4
+    assert conversation_summary["keep_rate_7"] == 1.0
+    assert conversation_summary["mean_turns"] == 2.0
 
 
 def test_compute_value_viz_data_exposes_prompt_mode_budget():

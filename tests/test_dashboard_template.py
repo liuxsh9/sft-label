@@ -92,3 +92,19 @@ def test_dashboard_runtime_has_bilingual_turn_kind_tags_and_english_intent_matri
     assert 'turn_kind_multi: "多"' in js
     assert 'turn_kind_mixed: "混"' in js
     assert 'turnKindLabel(summary.turn_kind)' in js
+
+
+def test_dashboard_runtime_file_ranking_includes_rarity_keep_rate_and_mean_turns() -> None:
+    js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'keep_rate_7' in js
+    assert 'mean_rarity' in js
+    assert 'mean_turns' in js
+    assert 'const KEEP_RATE_7_THRESHOLD = 7' in js
+
+
+def test_dashboard_styles_define_keep_rate_chip() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '.keep-rate-chip {' in css
+    assert '.keep-rate-strong {' in css

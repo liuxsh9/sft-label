@@ -168,6 +168,9 @@ def test_build_scope_tree_deduplicates_inline_artifact_leaf_paths(tmp_path):
     assert file_scopes[0]["conversation_data_path"].endswith("conversation_scores.json")
     assert all(not scope["path"].endswith("labeled.json") for scope in file_scopes)
     assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["file"] == "code/sample.jsonl"
+    assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["mean_rarity"] == 0
+    assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["keep_rate_7"] == 0
+    assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["mean_turns"] == 0
 
 
 def test_build_scope_tree_does_not_duplicate_leaf_conversations_into_parent_scopes(tmp_path):

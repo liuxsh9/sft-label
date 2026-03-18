@@ -227,6 +227,8 @@ const I18N = {
     flags: "Flags",
     file_ranking: "File Ranking",
     sorted_by: "{count} files · sorted by {column}",
+    mean_rarity: "Mean Rarity",
+    keep_rate_7: "Keep ≥7",
     configuration: "Configuration",
     selection_thresholds: "Selection Thresholds",
     band: "Band",
@@ -443,6 +445,8 @@ const I18N = {
     flags: "标记",
     file_ranking: "文件排名",
     sorted_by: "{count} 个文件 · 当前按 {column} 排序",
+    mean_rarity: "平均稀有度",
+    keep_rate_7: "保留率 ≥7",
     configuration: "配置",
     selection_thresholds: "入选分阈值",
     band: "区间",
@@ -646,6 +650,8 @@ const HIST_LABELS = {
   selection_score: "selection",
 };
 
+const KEEP_RATE_7_THRESHOLD = 7;
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -724,6 +730,13 @@ function scoreClass(value) {
   if (value >= 6) return "value-mid";
   if (value >= 4) return "value-warn";
   return "value-low";
+}
+
+function keepRateClass(value) {
+  if (value >= 0.75) return "keep-rate-strong";
+  if (value >= 0.5) return "keep-rate-mid";
+  if (value >= 0.25) return "keep-rate-warn";
+  return "keep-rate-low";
 }
 
 function hexToRgba(hex, alpha) {
@@ -1272,7 +1285,10 @@ const FILE_RANKING_COLUMNS = {
   mean_value: {labelKey: "value", defaultDirection: "desc"},
   mean_complexity: {labelKey: "complexity", defaultDirection: "desc"},
   mean_quality: {labelKey: "quality", defaultDirection: "desc"},
+  mean_rarity: {labelKey: "mean_rarity", defaultDirection: "desc"},
   mean_selection: {labelKey: "selection", defaultDirection: "desc"},
+  keep_rate_7: {labelKey: "keep_rate_7", defaultDirection: "desc"},
+  mean_turns: {labelKey: "mean_turns", defaultDirection: "desc"},
 };
 
 function fileRankingIndicator(key) {
@@ -2056,12 +2072,15 @@ function renderPass2(pass2) {
         <td><span class="${scoreClass(row.mean_value)}">${fmt(row.mean_value, 1)}</span></td>
         <td>${fmt(row.mean_complexity, 1)}</td>
         <td>${fmt(row.mean_quality, 1)}</td>
+        <td>${fmt(row.mean_rarity, 1)}</td>
         <td>${fmt(row.mean_selection, 1)}</td>
+        <td>${row.keep_rate_7 === null || row.keep_rate_7 === undefined ? "-" : `<span class="keep-rate-chip ${keepRateClass(row.keep_rate_7 || 0)}" title="${escapeHtml(`${t("keep_rate_7")} · selection ≥ ${KEEP_RATE_7_THRESHOLD}`)}">${fmt((row.keep_rate_7 || 0) * 100, 0)}%</span>`}</td>
+        <td>${fmt(row.mean_turns, 1)}</td>
       </tr>`).join("");
     sections.push(section(
       t("file_ranking"),
       `<table class="data-table"><thead><tr>${
-        ["file", "count", "mean_value", "mean_complexity", "mean_quality", "mean_selection"]
+        ["file", "count", "mean_value", "mean_complexity", "mean_quality", "mean_rarity", "mean_selection", "keep_rate_7", "mean_turns"]
           .map(renderFileRankingHeader)
           .join("")
       }</tr></thead><tbody>${rows}</tbody></table>`,
