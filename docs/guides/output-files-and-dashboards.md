@@ -128,6 +128,8 @@ uv run sft-label dashboard-service stop --name local
 uv run sft-label dashboard-service set-default --name local
 ```
 
+If `start` or `restart` detects that the configured port is already owned by another process, interactive TTY sessions will show the conflicting PID/command and prompt for a replacement port instead of exiting immediately. When that happens, the service config is updated in place. Direct share URLs such as `http://192.168.1.25:8765` are rewritten to the new port automatically, while custom reverse-proxy URLs such as `https://dash.example.com/base` are preserved as-is.
+
 ## Publish an existing run
 
 ```bash
@@ -161,8 +163,9 @@ The `register-run` command prints primary URLs for each published dashboard.
 If you use `uv run sft-label start` and choose auto-publish:
 
 - the launcher can select a configured service
-- it can start or restart the service before the main job
+- it can start the service before the main job when the configured service is not already running
 - after `run`, `score`, or `regenerate-dashboard`, it publishes the resulting dashboards automatically
+- if the service port is already occupied, it shows the conflicting process and lets you choose a new port before retrying
 
 ## Which URLs are considered primary
 

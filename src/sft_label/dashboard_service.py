@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -95,6 +96,36 @@ class DashboardServiceConfig:
     @property
     def pm2_config_file(self) -> Path:
         return self.service_meta_dir / "pm2.config.json"
+
+
+class DashboardPortConflictError(ValueError):
+    """Raised when a dashboard service cannot bind because another process owns the port."""
+
+    def __init__(
+        self,
+        *,
+        service_name: str,
+        host: str,
+        port: int,
+        owner_pid: int | None,
+        owner_command: str | None,
+        owned_by_service: bool = False,
+    ) -> None:
+        self.service_name = service_name
+        self.host = host
+        self.port = int(port)
+        self.owner_pid = owner_pid
+        self.owner_command = owner_command
+        self.owned_by_service = owned_by_service
+        owner_bits: list[str] = []
+        if owner_pid:
+            owner_bits.append(f"pid={owner_pid}")
+        if owner_command:
+            owner_bits.append(owner_command)
+        owner_desc = " | ".join(owner_bits) if owner_bits else "unknown process"
+        super().__init__(
+            f"Dashboard service '{service_name}' cannot bind {host}:{port}; port is already in use by {owner_desc}."
+        )
 
 
 @dataclass(eq=True)
@@ -198,6 +229,61 @@ def set_default_dashboard_service(
     return store
 
 
+def _rewrite_direct_public_base_url_port(public_base_url: str | None, old_port: int, new_port: int) -> str | None:
+    if not public_base_url:
+        return public_base_url
+    try:
+        parsed = urlsplit(public_base_url)
+    except ValueError:
+        return public_base_url
+    if parsed.scheme not in {"http", "https"}:
+        return public_base_url
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return public_base_url
+    if parsed_port != int(old_port):
+        return public_base_url
+    if (parsed.path or "") not in {"", "/"} or parsed.query or parsed.fragment:
+        return public_base_url
+    hostname = parsed.hostname
+    if not hostname:
+        return public_base_url
+    if ":" in hostname and not hostname.startswith("["):
+        host_part = f"[{hostname}]"
+    else:
+        host_part = hostname
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        auth += "@"
+    netloc = f"{auth}{host_part}:{int(new_port)}"
+    return urlunsplit((parsed.scheme, netloc, "", "", ""))
+
+
+def update_dashboard_service_port(
+    service: DashboardServiceConfig,
+    port: int,
+    *,
+    config_path: str | Path | None = None,
+) -> DashboardServiceConfig:
+    store = load_dashboard_service_store(config_path)
+    existing = store.services.get(service.name)
+    if existing is None:
+        raise ValueError(f"Dashboard service not found: {service.name}")
+    old_port = int(existing.port)
+    existing.port = int(port)
+    existing.public_base_url = _rewrite_direct_public_base_url_port(
+        existing.public_base_url,
+        old_port,
+        int(port),
+    )
+    save_dashboard_service_store(store, config_path)
+    return existing
+
+
 def _pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
@@ -231,6 +317,119 @@ def _http_reachable(service: DashboardServiceConfig, timeout: float = 0.5) -> bo
             return int(getattr(resp, "status", 200)) < 500
     except (URLError, OSError, TimeoutError):
         return False
+
+
+def _command_for_pid(pid: int | None) -> str | None:
+    if not pid:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    command = (result.stdout or "").strip()
+    return command or None
+
+
+def _listening_processes(port: int) -> list[dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return []
+    if result.returncode not in (0, 1):
+        return []
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        rows.append(
+            {
+                "pid": pid,
+                "command": _command_for_pid(pid) or parts[0],
+                "name": " ".join(parts[8:]) if len(parts) > 8 else "",
+            }
+        )
+    return rows
+
+
+def _listener_host(listener_name: str) -> str | None:
+    text = (listener_name or "").strip()
+    if not text:
+        return None
+    match = re.search(r"TCP\s+(.+):\d+\s+\(LISTEN\)", text)
+    if not match:
+        return None
+    host = match.group(1).strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host
+
+
+def _host_patterns_overlap(service_host: str, listener_host: str | None) -> bool:
+    normalized_service = (service_host or "").strip()
+    normalized_listener = (listener_host or "").strip()
+    wildcard_hosts = {"*", "0.0.0.0", "::"}
+    if not normalized_service or normalized_service in wildcard_hosts:
+        return True
+    if not normalized_listener or normalized_listener in wildcard_hosts:
+        return True
+    return normalized_service == normalized_listener
+
+
+def _expected_service_pids(service: DashboardServiceConfig) -> set[int]:
+    pids: set[int] = set()
+    builtin_pid = _read_pid(service)
+    if builtin_pid:
+        pids.add(int(builtin_pid))
+    if service.service_type == "pm2":
+        try:
+            info = _pm2_process_info(service)
+        except ValueError:
+            info = None
+        if info:
+            pid = info.get("pid") or (info.get("monit") or {}).get("pid")
+            if pid:
+                pids.add(int(pid))
+    return pids
+
+
+def _detect_port_conflict(service: DashboardServiceConfig) -> DashboardPortConflictError | None:
+    listeners = _listening_processes(service.port)
+    if not listeners:
+        return None
+    expected_pids = _expected_service_pids(service)
+    for listener in listeners:
+        pid = int(listener.get("pid") or 0) or None
+        if pid is not None and pid in expected_pids:
+            continue
+        if not _host_patterns_overlap(service.host, _listener_host(str(listener.get("name") or ""))):
+            continue
+        return DashboardPortConflictError(
+            service_name=service.name,
+            host=service.host,
+            port=service.port,
+            owner_pid=pid,
+            owner_command=listener.get("command"),
+            owned_by_service=False,
+        )
+    return None
 
 
 def _run_pm2(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -350,6 +549,9 @@ def dashboard_service_status(service: DashboardServiceConfig) -> dict[str, Any]:
 
 
 def start_dashboard_service(service: DashboardServiceConfig, wait_timeout: float = 3.0) -> dict[str, Any]:
+    conflict = _detect_port_conflict(service)
+    if conflict is not None:
+        raise conflict
     if service.service_type == "pm2":
         service.web_root_path.mkdir(parents=True, exist_ok=True)
         config_file = _write_pm2_config(service)
@@ -446,6 +648,9 @@ def stop_dashboard_service(service: DashboardServiceConfig, wait_timeout: float 
 
 
 def restart_dashboard_service(service: DashboardServiceConfig, wait_timeout: float = 3.0) -> dict[str, Any]:
+    conflict = _detect_port_conflict(service)
+    if conflict is not None:
+        raise conflict
     if service.service_type == "pm2":
         service.web_root_path.mkdir(parents=True, exist_ok=True)
         config_file = _write_pm2_config(service)

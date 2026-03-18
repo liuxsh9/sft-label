@@ -190,6 +190,8 @@ uv run sft-label dashboard-service register-run --run-dir <run_dir>
 
 发布后会输出类似：`http://127.0.0.1:8765/runs/<run-id>/dashboard_labeling.html`
 
+如果 `dashboard-service start`、`dashboard-service restart` 或交互式启动器发现配置端口已被占用，现在会先打印占用进程的 PID/命令，并在交互场景里允许你直接输入一个新端口继续。类似 `http://host:port` 这种直接访问地址会自动同步到新端口；自定义反向代理 URL 则保持不变。
+
 生产环境也支持 PM2 模式，详见英文文档：[Output files and dashboards](docs/guides/output-files-and-dashboards.md)。
 
 ## 常见后续操作

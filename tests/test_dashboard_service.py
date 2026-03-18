@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from pathlib import Path
 from urllib.request import urlopen
@@ -8,6 +9,8 @@ from urllib.request import urlopen
 import pytest
 
 from sft_label.dashboard_service import (
+    DashboardPortConflictError,
+    _detect_port_conflict,
     _http_reachable,
     dashboard_service_status,
     DashboardServiceConfig,
@@ -24,6 +27,7 @@ from sft_label.dashboard_service import (
     start_dashboard_service,
     stop_dashboard_service,
     sync_dashboard_service_runtime_assets,
+    update_dashboard_service_port,
 )
 
 
@@ -177,6 +181,75 @@ def test_dashboard_service_lifecycle_helpers(tmp_path, command):
     assert stopped["state"] == "stopped"
 
 
+def test_start_dashboard_service_raises_port_conflict_for_foreign_listener(tmp_path):
+    port = _free_port()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(1)
+    try:
+        service = DashboardServiceConfig(
+            name="default",
+            web_root=str(tmp_path / "web"),
+            host="127.0.0.1",
+            port=port,
+        )
+
+        with pytest.raises(DashboardPortConflictError) as exc:
+            start_dashboard_service(service)
+
+        assert exc.value.port == port
+        assert exc.value.owner_pid == os.getpid()
+        assert exc.value.owner_command
+    finally:
+        listener.close()
+
+
+def test_update_dashboard_service_port_rewrites_only_direct_host_port_urls(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    direct = init_dashboard_service(
+        name="direct",
+        web_root=tmp_path / "direct-web",
+        host="0.0.0.0",
+        port=8765,
+        public_base_url="http://192.168.1.25:8765",
+        config_path=config_path,
+    )
+    custom = init_dashboard_service(
+        name="custom",
+        web_root=tmp_path / "custom-web",
+        host="0.0.0.0",
+        port=8765,
+        public_base_url="https://dash.example.com/base",
+        config_path=config_path,
+        set_default=False,
+    )
+
+    updated_direct = update_dashboard_service_port(direct, 9000, config_path=config_path)
+    updated_custom = update_dashboard_service_port(custom, 9100, config_path=config_path)
+
+    assert updated_direct.port == 9000
+    assert updated_direct.public_base_url == "http://192.168.1.25:9000"
+    assert updated_custom.port == 9100
+    assert updated_custom.public_base_url == "https://dash.example.com/base"
+
+
+def test_detect_port_conflict_ignores_non_overlapping_specific_host_listener(monkeypatch, tmp_path):
+    service = DashboardServiceConfig(
+        name="default",
+        web_root=str(tmp_path / "web"),
+        host="127.0.0.1",
+        port=8765,
+    )
+    monkeypatch.setattr(
+        "sft_label.dashboard_service._listening_processes",
+        lambda port: [{"pid": 555, "command": "python -m http.server", "name": "TCP 192.168.1.25:8765 (LISTEN)"}],
+    )
+    monkeypatch.setattr("sft_label.dashboard_service._expected_service_pids", lambda service: set())
+
+    assert _detect_port_conflict(service) is None
+
+
 def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     config_path = tmp_path / "dashboard_services.json"
     port = _free_port()
@@ -277,6 +350,10 @@ def test_pm2_lifecycle_helpers_use_pm2_commands(monkeypatch, tmp_path):
 
     def _fake_run(cmd, check=False, capture_output=False, text=False):
         calls.append(cmd)
+        if cmd and cmd[0] == "lsof":
+            return _Completed(stdout="")
+        if cmd[:2] == ["ps", "-p"]:
+            return _Completed(stdout="")
         if cmd[:2] == ["pm2", "jlist"]:
             if state["status"] == "running":
                 return _Completed(stdout=json.dumps([{

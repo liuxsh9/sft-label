@@ -10,7 +10,12 @@ from sft_label.launcher import (
     set_language,
     sanitize_prompt_input,
 )
-from sft_label.cli import build_parser, cmd_start
+from sft_label.cli import build_parser, cmd_dashboard_service, cmd_start
+from sft_label.dashboard_service import (
+    DashboardPortConflictError,
+    init_dashboard_service,
+    load_dashboard_service_store,
+)
 
 
 class StubIO:
@@ -27,6 +32,142 @@ class StubIO:
 
     def output(self, text):
         self.outputs.append(text)
+
+
+def test_cmd_dashboard_service_start_prompts_for_new_port_after_conflict(monkeypatch, capsys, tmp_path):
+    parser = build_parser()
+    config_path = tmp_path / "dashboard_services.json"
+    monkeypatch.setenv("SFT_LABEL_DASHBOARD_SERVICE_CONFIG", str(config_path))
+    init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="0.0.0.0",
+        port=8765,
+        public_base_url="http://192.168.1.25:8765",
+        config_path=config_path,
+    )
+
+    prompts = iter(["9000"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(prompts))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    attempts: list[int] = []
+
+    def _fake_start(service):
+        attempts.append(service.port)
+        if service.port == 8765:
+            raise DashboardPortConflictError(
+                service_name=service.name,
+                host=service.host,
+                port=service.port,
+                owner_pid=47920,
+                owner_command="python -m http.server 8765",
+                owned_by_service=False,
+            )
+        return {
+            "name": service.name,
+            "state": "running",
+            "reachable": True,
+            "url": service.base_url(),
+            "public_url": service.share_base_url(),
+        }
+
+    monkeypatch.setattr("sft_label.cli.start_dashboard_service", _fake_start, raising=False)
+
+    args = parser.parse_args(["dashboard-service", "start", "--name", "default"])
+    status = cmd_dashboard_service(args)
+
+    assert attempts == [8765, 9000]
+    assert status["state"] == "running"
+    store = load_dashboard_service_store(config_path)
+    assert store.services["default"].port == 9000
+    assert store.services["default"].public_base_url == "http://192.168.1.25:9000"
+    out = capsys.readouterr().out
+    assert "47920" in out
+    assert "9000" in out
+
+
+def test_cmd_dashboard_service_restart_exits_cleanly_without_tty(monkeypatch, capsys, tmp_path):
+    parser = build_parser()
+    config_path = tmp_path / "dashboard_services.json"
+    monkeypatch.setenv("SFT_LABEL_DASHBOARD_SERVICE_CONFIG", str(config_path))
+    init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="0.0.0.0",
+        port=8765,
+        public_base_url="http://192.168.1.25:8765",
+        config_path=config_path,
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "sft_label.cli.restart_dashboard_service",
+        lambda service: (_ for _ in ()).throw(
+            DashboardPortConflictError(
+                service_name=service.name,
+                host=service.host,
+                port=service.port,
+                owner_pid=47920,
+                owner_command="python -m http.server 8765",
+                owned_by_service=False,
+            )
+        ),
+        raising=False,
+    )
+
+    args = parser.parse_args(["dashboard-service", "restart", "--name", "default"])
+    try:
+        cmd_dashboard_service(args)
+        raise AssertionError("Expected SystemExit")
+    except SystemExit as exc:
+        assert exc.code == 1
+
+    store = load_dashboard_service_store(config_path)
+    assert store.services["default"].port == 8765
+    out = capsys.readouterr().out
+    assert "cannot bind 0.0.0.0:8765" in out
+
+
+def test_cmd_dashboard_service_start_can_cancel_port_retry_with_ctrl_c(monkeypatch, capsys, tmp_path):
+    parser = build_parser()
+    config_path = tmp_path / "dashboard_services.json"
+    monkeypatch.setenv("SFT_LABEL_DASHBOARD_SERVICE_CONFIG", str(config_path))
+    init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="0.0.0.0",
+        port=8765,
+        public_base_url="http://192.168.1.25:8765",
+        config_path=config_path,
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(
+        "sft_label.cli.start_dashboard_service",
+        lambda service: (_ for _ in ()).throw(
+            DashboardPortConflictError(
+                service_name=service.name,
+                host=service.host,
+                port=service.port,
+                owner_pid=47920,
+                owner_command="python -m http.server 8765",
+                owned_by_service=False,
+            )
+        ),
+        raising=False,
+    )
+
+    args = parser.parse_args(["dashboard-service", "start", "--name", "default"])
+    try:
+        cmd_dashboard_service(args)
+        raise AssertionError("Expected SystemExit")
+    except SystemExit as exc:
+        assert exc.code == 130
+
+    store = load_dashboard_service_store(config_path)
+    assert store.services["default"].port == 8765
+    out = capsys.readouterr().out
+    assert "已取消 dashboard 服务启动。" in out
 
 
 def test_build_run_pass1_pass2_semantic_plan():
@@ -881,6 +1022,81 @@ def test_cmd_start_wraps_auto_publish_with_heartbeat(monkeypatch, tmp_path):
     cmd_start(args, parser)
 
     assert any("Publishing dashboards" in message for message in wrapped_messages)
+
+
+def test_cmd_start_dashboard_bootstrap_retries_with_new_port_after_conflict(monkeypatch, tmp_path):
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    config_path = tmp_path / "dashboard_services.json"
+    monkeypatch.setenv("SFT_LABEL_DASHBOARD_SERVICE_CONFIG", str(config_path))
+    init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="0.0.0.0",
+        port=8765,
+        public_base_url="http://192.168.1.25:8765",
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]),
+    )
+
+    answers = iter(["", "y", "", "9000"])  # confirm, auto-publish, start-now, new port
+    monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {
+            "name": svc.name,
+            "state": "stopped",
+            "reachable": False,
+            "url": svc.base_url(),
+            "public_url": svc.share_base_url(),
+        },
+        raising=False,
+    )
+
+    attempts: list[int] = []
+
+    def _fake_start(service):
+        attempts.append(service.port)
+        if service.port == 8765:
+            raise DashboardPortConflictError(
+                service_name=service.name,
+                host=service.host,
+                port=service.port,
+                owner_pid=47920,
+                owner_command="python -m http.server 8765",
+                owned_by_service=False,
+            )
+        return {
+            "name": service.name,
+            "state": "running",
+            "reachable": True,
+            "url": service.base_url(),
+            "public_url": service.share_base_url(),
+        }
+
+    monkeypatch.setattr("sft_label.cli.start_dashboard_service", _fake_start, raising=False)
+    monkeypatch.setattr("sft_label.cli.dispatch_command", lambda args, parser: {"run_dir": str(run_dir)}, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.publish_run_dashboards",
+        lambda svc, run_dir, config_path=None: {"run_id": "demo_run", "dashboards": {}},
+        raising=False,
+    )
+
+    args = parser.parse_args(["start"])
+    cmd_start(args, parser)
+
+    assert attempts == [8765, 9000]
+    store = load_dashboard_service_store(config_path)
+    assert store.services["default"].port == 9000
+    assert store.services["default"].public_base_url == "http://192.168.1.25:9000"
 
 
 def test_cmd_start_auto_publish_bootstraps_lan_service_with_shareable_url(monkeypatch, capsys, tmp_path):

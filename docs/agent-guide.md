@@ -107,6 +107,8 @@ uv run sft-label dashboard-service start
 uv run sft-label dashboard-service register-run --run-dir <run_dir>
 ```
 
+Agent note: dashboard service start/restart now performs a preflight port-conflict check. Interactive flows surface the owning PID/command, persist the updated service config after the user picks a new port, and rewrite simple direct share URLs to the new port; custom reverse-proxy URLs are not rewritten automatically.
+
 ### Semantic clustering commands
 
 ```bash

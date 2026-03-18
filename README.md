@@ -193,6 +193,8 @@ uv run sft-label dashboard-service register-run --run-dir <run_dir>
 
 That command prints stable URLs like `http://127.0.0.1:8765/runs/<run-id>/dashboard_labeling.html`.
 
+If `dashboard-service start`, `dashboard-service restart`, or the interactive launcher finds that the configured port is already occupied, it now prints the owning PID/command and lets interactive users choose a replacement port instead of failing immediately. Simple direct `http://host:port` share URLs are updated to the new port automatically; custom reverse-proxy URLs are left unchanged.
+
 For production-style hosting, there is also a PM2-backed service mode. See [Output files and dashboards](docs/guides/output-files-and-dashboards.md).
 
 ## Common next steps

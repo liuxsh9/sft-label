@@ -30,6 +30,7 @@ import random
 from pathlib import Path
 
 from sft_label.dashboard_service import (
+    DashboardPortConflictError,
     dashboard_service_status,
     init_dashboard_service,
     load_dashboard_service_store,
@@ -39,6 +40,7 @@ from sft_label.dashboard_service import (
     set_default_dashboard_service,
     start_dashboard_service,
     stop_dashboard_service,
+    update_dashboard_service_port,
 )
 from sft_label.progress_heartbeat import run_with_heartbeat
 
@@ -89,6 +91,75 @@ def _dashboard_service_prompt(
     prompt_en: str,
 ) -> str:
     return input_fn(_dashboard_start_msg(lang, prompt_zh, prompt_en))
+
+
+def _default_input(prompt: str) -> str:
+    return input(prompt)
+
+
+def _print_dashboard_port_conflict(error: DashboardPortConflictError, lang: str):
+    owner = []
+    if error.owner_pid:
+        owner.append(f"PID {error.owner_pid}")
+    if error.owner_command:
+        owner.append(error.owner_command)
+    owner_text = " | ".join(owner) if owner else _dashboard_start_msg(lang, "未知进程", "unknown process")
+    print(
+        _dashboard_start_msg(
+            lang,
+            f"Dashboard 端口冲突：{error.host}:{error.port} 已被占用（{owner_text}）",
+            f"Dashboard port conflict: {error.host}:{error.port} is already in use ({owner_text})",
+        )
+    )
+
+
+def _retry_dashboard_service_with_new_port(
+    service,
+    runner,
+    *,
+    lang: str,
+    input_fn=None,
+):
+    prompt_fn = input_fn
+    while True:
+        try:
+            return runner(service)
+        except DashboardPortConflictError as error:
+            _print_dashboard_port_conflict(error, lang)
+            if prompt_fn is None:
+                raise
+            try:
+                raw = _dashboard_service_prompt(
+                    lang,
+                    prompt_fn,
+                    "请输入新的端口继续（Ctrl+C 取消）：",
+                    "Enter a new port to continue (Ctrl+C to cancel): ",
+                ).strip()
+            except KeyboardInterrupt:
+                print(_dashboard_start_msg(lang, "已取消 dashboard 服务启动。", "Cancelled dashboard service start."))
+                raise SystemExit(130) from None
+            if not raw:
+                print(_dashboard_start_msg(lang, "端口不能为空，请重试。", "Port cannot be empty. Please try again."))
+                continue
+            try:
+                new_port = int(raw)
+            except ValueError:
+                print(_dashboard_start_msg(lang, "端口必须是数字。", "Port must be a number."))
+                continue
+            if new_port <= 0 or new_port > 65535:
+                print(_dashboard_start_msg(lang, "端口必须在 1-65535 之间。", "Port must be between 1 and 65535."))
+                continue
+            if new_port == service.port:
+                print(_dashboard_start_msg(lang, "新端口不能与当前端口相同。", "New port must differ from the current port."))
+                continue
+            service = update_dashboard_service_port(service, new_port)
+            print(
+                _dashboard_start_msg(
+                    lang,
+                    f"已更新 dashboard 服务端口为 {service.port}，正在重试。",
+                    f"Updated dashboard service port to {service.port}; retrying.",
+                )
+            )
 
 
 def _guess_local_network_host() -> str | None:
@@ -235,7 +306,12 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             "Service is not running. Start it now? [Y/n]: ",
         ).strip().lower()
         if start_now not in ("n", "no"):
-            status = start_dashboard_service(service)
+            status = _retry_dashboard_service_with_new_port(
+                service,
+                start_dashboard_service,
+                lang=lang,
+                input_fn=input_fn,
+            )
     public_url = status.get("public_url") or service.share_base_url()
     print(
         _dashboard_start_msg(
@@ -1064,11 +1140,29 @@ def cmd_dashboard_service(args):
         )
         return status
     if action == "start":
-        status = start_dashboard_service(service)
+        try:
+            status = _retry_dashboard_service_with_new_port(
+                service,
+                start_dashboard_service,
+                lang="zh",
+                input_fn=_default_input if sys.stdin.isatty() else None,
+            )
+        except DashboardPortConflictError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         print(f"{service.name} | {service.service_type} | {status['state']} | {status['public_url']}")
         return status
     if action == "restart":
-        status = restart_dashboard_service(service)
+        try:
+            status = _retry_dashboard_service_with_new_port(
+                service,
+                restart_dashboard_service,
+                lang="zh",
+                input_fn=_default_input if sys.stdin.isatty() else None,
+            )
+        except DashboardPortConflictError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         print(f"{service.name} | {service.service_type} | {status['state']} | {status['public_url']}")
         return status
     if action == "stop":
