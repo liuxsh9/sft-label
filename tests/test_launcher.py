@@ -203,7 +203,7 @@ schema:
 
 
 def _extension_run_answers(extension_paths: list[str]) -> list[str]:
-    base_answers = ["2", "1", "dataset", "", ""] + [""] * 24
+    base_answers = ["3", "1", "dataset", "", ""] + [""] * 24
     return base_answers[:5] + _extension_manual_flow(extension_paths) + base_answers[5:] + [""]
 
 
@@ -220,7 +220,7 @@ def _extension_manual_flow(extension_paths: list[str]) -> list[str]:
 def test_build_run_pass1_pass2_semantic_plan():
     io = StubIO(
         [
-            "4",          # workflow: pass1+pass2+pass3
+            "5",          # workflow: pass1+pass2+pass3
             "1",          # run mode: new
             "data.json",  # --input
             "",           # --output
@@ -259,7 +259,7 @@ def test_build_run_pass1_pass2_semantic_plan():
 def test_build_run_plan_can_disable_adaptive_runtime_and_recovery_sweep():
     io = StubIO(
         [
-            "2",          # workflow: run-pass1
+            "3",          # workflow: run-pass1
             "1",          # run mode: new
             "data.json",  # --input
             "",           # --output
@@ -295,7 +295,7 @@ def test_build_run_plan_can_disable_adaptive_runtime_and_recovery_sweep():
 def test_build_run_plan_legacy_supports_custom_runtime_values():
     io = StubIO(
         [
-            "2",            # workflow: run-pass1
+            "3",            # workflow: run-pass1
             "1",            # run mode: new
             "data.json",    # --input
             "",             # --output
@@ -334,7 +334,7 @@ def test_build_run_plan_legacy_supports_custom_runtime_values():
 def test_build_score_plan_with_llm_env_override():
     io = StubIO(
         [
-            "3",                      # workflow: score
+            "4",                      # workflow: score
             "labeled.json",           # --input
             "",                       # --tag-stats
             "",                       # rarity mode (default absolute)
@@ -365,7 +365,7 @@ def test_build_score_plan_with_llm_env_override():
 def test_build_score_plan_legacy_supports_custom_runtime_values():
     io = StubIO(
         [
-            "3",            # workflow: score
+            "4",            # workflow: score
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode
@@ -405,7 +405,7 @@ def test_build_smart_resume_plan_routes_to_score_for_labeled_run_dir(tmp_path):
 
     io = StubIO(
         [
-            "16",              # workflow: smart resume
+            "2",               # workflow: smart resume
             str(tmp_path),     # run dir
             "",                # extra flags
         ]
@@ -425,7 +425,7 @@ def test_build_smart_resume_plan_routes_to_resumed_score_when_scored_exists(tmp_
 
     io = StubIO(
         [
-            "16",              # workflow: smart resume
+            "2",               # workflow: smart resume
             str(tmp_path),     # run dir
             "",                # extra flags
         ]
@@ -445,7 +445,7 @@ def test_build_smart_resume_plan_routes_to_run_resume_when_checkpoint_exists(tmp
 
     io = StubIO(
         [
-            "16",              # workflow: smart resume
+            "2",               # workflow: smart resume
             str(tmp_path),     # run dir
             "",                # extra flags
         ]
@@ -465,7 +465,7 @@ def test_build_smart_resume_plan_checkpoint_done_routes_to_score(tmp_path):
 
     io = StubIO(
         [
-            "16",              # workflow: smart resume
+            "2",               # workflow: smart resume
             str(tmp_path),     # run dir
             "",                # extra flags
         ]
@@ -480,7 +480,7 @@ def test_build_smart_resume_plan_checkpoint_done_routes_to_score(tmp_path):
 def test_build_filter_plan_enforces_at_least_one_criterion():
     io = StubIO(
         [
-            "6",            # workflow: filter
+            "7",            # workflow: filter
             "scored.json",  # --input
             "",             # --output
             "",             # --format (scored)
@@ -508,7 +508,7 @@ def test_build_filter_plan_enforces_at_least_one_criterion():
 def test_build_semantic_plan_api_provider_supports_env_override():
     io = StubIO(
         [
-            "5",               # workflow: semantic
+            "6",               # workflow: semantic
             "run_dir",         # --input
             "",                # --output
             "",                # --limit
@@ -556,7 +556,7 @@ def test_build_semantic_plan_api_provider_supports_env_override():
 def test_build_dashboard_service_init_plan():
     io = StubIO(
         [
-            "7",                     # workflow: dashboard maintenance
+            "8",                     # workflow: dashboard maintenance
             "1",                     # action: init
             "",                      # name -> default
             "/srv/sft-label-dashboard",  # web root
@@ -588,7 +588,7 @@ def test_build_dashboard_service_init_plan():
 def test_build_dashboard_service_runs_plan():
     io = StubIO(
         [
-            "7",      # workflow: dashboard maintenance
+            "8",      # workflow: dashboard maintenance
             "7",      # action: runs
             "prod",   # service name
             "",       # extra flags
@@ -674,36 +674,36 @@ def test_all_workflows_generate_parseable_argv(tmp_path):
     workflow_answers = {
         # 1. run-pass1-pass2
         1: ["1", "data.json", "", "", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
-        # 2. run-pass1
-        2: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
-        # 3. score
-        3: ["labeled.json", "", "", "", "", "", "", "", "", "n", ""],
-        # 4. run-pass1-pass2-semantic
-        4: ["1", "data.json", "", "", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
-        # 5. semantic
-        5: ["run_dir", "", "", "", "", "", ""],
-        # 6. filter
-        6: ["scored.json", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-        # 7. dashboard-service maintenance
-        7: ["2", "", ""],  # action=status, name default, extra flags
-        # 8. recompute-stats
-        8: ["run_dir/", "", "", "", ""],
-        # 9. regenerate-dashboard
+        # 2. smart-resume
+        2: [str(smart_resume_dir), ""],
+        # 3. run-pass1
+        3: ["1", "data.json", "", "", "", "", "", "", "", "", "", "n", ""],
+        # 4. score
+        4: ["labeled.json", "", "", "", "", "", "", "", "", "n", ""],
+        # 5. run-pass1-pass2-semantic
+        5: ["1", "data.json", "", "", "", "", "", "", "", "", "", "stats.json", "", "n", ""],
+        # 6. semantic
+        6: ["run_dir", "", "", "", "", "", ""],
+        # 7. filter
+        7: ["scored.json", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        # 8. dashboard-service maintenance
+        8: ["2", "", ""],  # action=status, name default, extra flags
+        # 9. recompute-stats
         9: ["run_dir/", "", "", "", ""],
-        # 10. refresh-rarity
-        10: ["run_dir/", "", "", "", "", ""],
-        # 11. analyze-unmapped
+        # 10. regenerate-dashboard
+        10: ["run_dir/", "", "", "", ""],
+        # 11. refresh-rarity
         11: ["run_dir/", "", "", "", "", ""],
-        # 12. optimize-layout
-        12: ["run_dir/", "", "", "", ""],
-        # 13. validate
-        13: [],
-        # 14. export-semantic
-        14: ["run_dir/", "out.jsonl", "", ""],
-        # 15. export-review
-        15: ["labeled.json", "review.csv", "", "", ""],
-        # 16. smart-resume
-        16: [str(smart_resume_dir), ""],
+        # 12. analyze-unmapped
+        12: ["run_dir/", "", "", "", "", ""],
+        # 13. optimize-layout
+        13: ["run_dir/", "", "", "", ""],
+        # 14. validate
+        14: [],
+        # 15. export-semantic
+        15: ["run_dir/", "out.jsonl", "", ""],
+        # 16. export-review
+        16: ["labeled.json", "review.csv", "", "", ""],
     }
 
     for wf_num, answers in workflow_answers.items():
@@ -720,7 +720,7 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
 
     io = StubIO(
         [
-            "3",            # score
+            "4",            # score
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode (default absolute)
@@ -747,7 +747,7 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
 def test_required_text_prompt_ignores_arrow_key_input(capsys):
     io = StubIO(
         [
-            "2",          # workflow: run-pass1
+            "3",          # workflow: run-pass1
             "1",          # run mode: new
             "\x1b[A",     # arrow key input on required --input field
             "data.json",  # actual --input
@@ -778,7 +778,7 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
 def test_build_run_plan_can_set_migrate_mode():
     io = StubIO(
         [
-            "2",             # workflow: run-pass1
+            "3",             # workflow: run-pass1
             "1",             # run mode: new
             "dataset",       # --input
             "",              # --output
@@ -814,7 +814,7 @@ def test_build_run_plan_can_set_migrate_mode():
 def test_build_run_plan_can_set_recompute_mode():
     io = StubIO(
         [
-            "2",        # workflow: run-pass1
+            "3",        # workflow: run-pass1
             "1",        # run mode: new
             "dataset",  # --input
             "",         # --output
@@ -836,7 +836,7 @@ def test_build_run_plan_can_set_recompute_mode():
 def test_build_run_resume_plan_skips_output_prompt():
     io = StubIO(
         [
-            "2",        # workflow: run-pass1
+            "3",        # workflow: run-pass1
             "2",        # run mode: resume
             "run-dir",  # --resume
             "",         # also set --input? no
@@ -865,10 +865,11 @@ def test_build_run_resume_plan_skips_output_prompt():
     ]
     assert "--output" not in plan.argv
     assert not any("输出目录（可选）" in str(item) for item in io.outputs)
+    assert any("继续指定 run 目录" in str(item) for item in io.outputs)
 
 
 def test_build_launch_plan_can_render_english():
-    io = StubIO(["13"])
+    io = StubIO(["14"])
     try:
         plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="en")
         assert plan is not None
@@ -887,10 +888,21 @@ def test_chinese_prompt_uses_fullwidth_colon_without_english_suffix():
     assert not any("Select workflow number" in str(item) for item in io.outputs)
 
 
+def test_smart_resume_moves_into_pipeline_group():
+    io = StubIO(["0"])
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output, language="zh")
+    assert plan is None
+    output_lines = [str(item) for item in io.outputs]
+    smart_resume_idx = next(i for i, line in enumerate(output_lines) if "智能续跑" in line)
+    data_curation_idx = next(i for i, line in enumerate(output_lines) if "[数据整理" in line)
+    assert smart_resume_idx < data_curation_idx
+    assert not any("[恢复 / Recovery]" in line or "[恢复]" in line for line in output_lines)
+
+
 def test_chinese_llm_override_prompt_keeps_full_key_name():
     io = StubIO(
         [
-            "3",            # workflow: score
+            "4",            # workflow: score
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode (default absolute)
@@ -915,7 +927,7 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
 def test_build_optimize_layout_plan():
     io = StubIO(
         [
-            "12",          # workflow: optimize-layout
+            "13",          # workflow: optimize-layout
             "run_dir",     # --input
             "y",           # --apply
             "y",           # --prune-legacy
@@ -939,7 +951,7 @@ def test_build_optimize_layout_plan():
 def test_build_analyze_unmapped_plan():
     io = StubIO(
         [
-            "11",          # workflow: analyze-unmapped
+            "12",          # workflow: analyze-unmapped
             "run_dir",     # --input
             "task",        # --dimension
             "10",          # --top
@@ -967,7 +979,7 @@ def test_build_analyze_unmapped_plan():
 def test_build_score_plan_can_set_percentile_rarity_mode():
     io = StubIO(
         [
-            "3",            # workflow: score
+            "4",            # workflow: score
             "labeled.json", # --input
             "",             # --tag-stats
             "2",            # rarity mode: percentile
@@ -999,7 +1011,7 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
 def test_build_recompute_plan_can_set_workers():
     io = StubIO(
         [
-            "8",        # workflow: recompute-stats
+            "9",        # workflow: recompute-stats
             "run_dir",  # --input
             "",         # pass selection -> both
             "",         # --output
@@ -1406,7 +1418,7 @@ def test_extension_labeling_prompt_flow_collects_paths(tmp_path):
     assert plan is not None
 
     prompt_log = " ".join(str(item).lower() for item in io.outputs)
-    assert "extension labeling" in prompt_log or "extension 标" in prompt_log
+    assert "extension labeling" in prompt_log or "扩展标注" in prompt_log
     assert "extension" in prompt_log and any(keyword in prompt_log for keyword in ("path", "路径", "spec", "规范"))
 
 
@@ -1515,7 +1527,7 @@ def test_ask_extension_spec_paths_examples_shortcut_uses_builtin_directory(monke
 
 
 def test_export_review_prompt_flow_can_include_extension_columns():
-    io = StubIO(["15", "labeled.json", "review.csv", "", "", "y", ""])
+    io = StubIO(["16", "labeled.json", "review.csv", "", "", "y", ""])
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
 
     assert plan is not None

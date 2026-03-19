@@ -129,6 +129,12 @@ WORKFLOWS = [
         group="流水线 / Pipeline",
     ),
     Workflow(
+        key="smart-resume",
+        label="智能续跑（中断恢复优先） / Smart resume (best first choice for interrupted runs)",
+        description="遇到中断/报错且不确定停在哪一阶段时，优先选这里 / If a run was interrupted and you're unsure which pass failed, start here",
+        group="流水线 / Pipeline",
+    ),
+    Workflow(
         key="run-pass1",
         label="仅一阶段标注 / Pass 1 labeling only",
         description="只产出 taxonomy 标签与一阶段统计 / Produce taxonomy labels and Pass 1 stats only",
@@ -211,12 +217,6 @@ WORKFLOWS = [
         label="校验 taxonomy / Validate taxonomy",
         description="校验 taxonomy 文件与一致性 / Validate taxonomy files and consistency",
         group="维护 / Maintenance",
-    ),
-    Workflow(
-        key="smart-resume",
-        label="智能续跑（中断恢复优先） / Smart resume (best first choice for interrupted runs)",
-        description="遇到中断/报错且不确定停在哪一阶段时，优先选这里 / If a run was interrupted and you're unsure which pass failed, start here",
-        group="恢复 / Recovery",
     ),
 ]
 
@@ -755,7 +755,7 @@ def _build_run_plan(
         "运行模式 / Run mode",
         [
             ("new", "新建运行 / Start new run", "使用 --input，可选 --output / Use --input and optional --output"),
-            ("resume", "续跑已有任务 / Resume existing run", "使用 --resume 继续中断任务 / Use --resume and continue an interrupted run"),
+            ("resume", "继续指定 run 目录 / Resume specific run directory", "已知 run 目录时，使用 --resume 继续中断任务 / Use --resume when you already know the run directory"),
         ],
         default_index=1,
     )
@@ -1236,7 +1236,7 @@ def _build_run_plan_legacy(
         "运行模式 / Run mode",
         [
             ("new", "新建运行 / Start new run", "使用 --input，可选 --output / Use --input and optional --output"),
-            ("resume", "续跑已有任务 / Resume existing run", "使用 --resume 继续中断任务 / Use --resume and continue an interrupted run"),
+            ("resume", "继续指定 run 目录 / Resume specific run directory", "已知 run 目录时，使用 --resume 继续中断任务 / Use --resume when you already know the run directory"),
         ],
         default_index=1,
     )

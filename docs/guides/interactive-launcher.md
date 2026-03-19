@@ -16,6 +16,7 @@ Current workflow groups include:
   - Pass 1 labeling
   - Pass 1 + Pass 2
   - Pass 1 + Pass 2 + Pass 3 semantic clustering
+  - Smart resume
   - Pass 2 scoring only
   - Pass 3 semantic clustering only
 - **Data curation**
@@ -40,6 +41,7 @@ The launcher asks only for the inputs needed by the selected workflow.
 For `run`, it can guide you through:
 
 - new run vs resume
+- when to use “Smart resume” vs “Resume specific run directory”
 - input path and optional output path
 - inline mode (`refresh`, `incremental`, `migrate`, `recompute`)
 - optional extension labeling via:

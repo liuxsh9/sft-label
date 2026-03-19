@@ -101,7 +101,7 @@ flowchart LR
 
 `start` 主要做四件事：
 
-1. **让你选择工作流**：默认推荐 Pass 1 + Pass 2，其次还有只跑 Pass 1、只打分、语义聚类、过滤、维护、导出、dashboard service 管理等。
+1. **让你选择工作流**：默认推荐 Pass 1 + Pass 2；对于中断任务，流水线分组里也把“智能续跑”提前展示，后面再是只跑 Pass 1、只打分、语义聚类、过滤、维护、导出、dashboard service 管理等。
 2. **只询问必要参数**：输入路径、可选输出路径、运行模式、prompt mode、并发等（必要时也会提示 `--adaptive-runtime` / `--recovery-sweep` 等开关）。
 3. **生成准确的 CLI 命令并展示摘要**，执行前可以再确认一次。
 4. **在任务结束后输出 URL**：如果开启 auto-publish，会把 dashboard 发布到已配置服务并打印访问链接。
