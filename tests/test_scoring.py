@@ -3492,6 +3492,48 @@ class TestSelectionScoreQualityComponent:
 # ─────────────────────────────────────────────────────────
 
 class TestBuildScoringMessagesMultiTurn:
+    def test_label_extensions_are_excluded_from_pass2_prompt_tags(self):
+        from sft_label.prompts_value import build_scoring_messages
+
+        truncated = {
+            "current_request": "Analyze this UI data mix",
+            "instruction": "Analyze this UI data mix",
+            "response": "Here is the analysis",
+            "original_prior_context_chars": 0,
+            "original_cot_chars": 0,
+            "original_trajectory_chars": 0,
+            "original_response_chars": 20,
+            "trajectory_turn_count": 0,
+            "trajectory_tool_turns": 0,
+        }
+        labels = {
+            "intent": "analyze",
+            "language": ["typescript"],
+            "task": ["data-analysis"],
+            "difficulty": "advanced",
+            "label_extensions": {
+                "ui_web_analysis_v1": {
+                    "status": "success",
+                    "labels": {"surface": "web", "analysis_goal": "mix-optimization"},
+                }
+            },
+        }
+
+        messages = build_scoring_messages(
+            truncated=truncated,
+            thinking_mode="fast",
+            labels=labels,
+            total_turns=2,
+            code_block_count=0,
+        )
+
+        user_msg = messages[-1]["content"]
+        assert '"intent": "analyze"' in user_msg
+        assert '"task": ["data-analysis"]' in user_msg
+        assert "label_extensions" not in user_msg
+        assert "ui_web_analysis_v1" not in user_msg
+        assert "mix-optimization" not in user_msg
+
     def test_turn_position_added_for_multiturn(self):
         from sft_label.prompts_value import build_scoring_messages
         truncated = {
@@ -3896,3 +3938,254 @@ def test_run_scoring_preserves_label_extensions(tmp_path):
     scored_path = batch_dir / "scored.jsonl"
     scored = json.loads(scored_path.read_text(encoding="utf-8").splitlines()[0])
     assert scored["label_extensions"] == sample["label_extensions"]
+
+
+def _write_extension_rarity_stats(stats_path):
+    stats = {
+        "total_samples": 300,
+        "distribution_total_samples": 300,
+        "tag_distributions": {
+            "intent": {"build": 200},
+            "difficulty": {"intermediate": 220},
+            "language": {"typescript": 180},
+            "domain": {"web-frontend": 160},
+            "task": {"feature-implementation": 190},
+            "concept": {"ui-design": 100},
+            "agentic": {},
+            "constraint": {},
+            "context": {"snippet": 250},
+        },
+        "extension_stats": {
+            "specs": {
+                "ui_fine_labels": {
+                    "spec_version": "v1",
+                    "spec_hash": "sha256:ui-v1",
+                    "config": {
+                        "schema": {
+                            "component_type": {"type": "multi_enum"},
+                            "visual_complexity": {"type": "enum"},
+                        }
+                    },
+                    "baselines": {
+                        "sha256:ui-v1": {
+                            "spec_version": "v1",
+                            "spec_hash": "sha256:ui-v1",
+                            "baseline_total": 300,
+                            "field_value_distributions": {
+                                "component_type": {"form": 220, "modal": 1},
+                                "visual_complexity": {"medium": 180, "high": 2},
+                            },
+                            "field_presence_counts": {
+                                "component_type": 300,
+                                "visual_complexity": 300,
+                            },
+                        }
+                    },
+                }
+            }
+        },
+    }
+    stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_preview_adds_extension_rarity_fields_without_changing_legacy(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    labeled_path = tmp_path / "labeled.json"
+    stats_path = tmp_path / "stats.json"
+    _write_extension_rarity_stats(stats_path)
+    labeled_path.write_text(json.dumps([{
+        "id": "ext-preview",
+        "conversations": [
+            {"from": "human", "value": "Build a complex modal UI in TypeScript."},
+            {"from": "gpt", "value": "Here is the component."},
+        ],
+        "labels": {
+            "intent": "build",
+            "difficulty": "intermediate",
+            "language": ["typescript"],
+            "domain": ["web-frontend"],
+            "task": ["feature-implementation"],
+            "concept": ["ui-design"],
+            "agentic": [],
+            "constraint": [],
+            "context": "snippet",
+            "confidence": {"intent": 0.95, "difficulty": 0.95},
+        },
+        "label_extensions": {
+            "ui_fine_labels": {
+                "status": "success",
+                "matched": True,
+                "spec_version": "v1",
+                "spec_hash": "sha256:ui-v1",
+                "labels": {
+                    "component_type": ["modal"],
+                    "visual_complexity": "high",
+                },
+                "confidence": {
+                    "component_type": 0.9,
+                    "visual_complexity": 0.8,
+                },
+            }
+        },
+    }]), encoding="utf-8")
+
+    async def fake_async_llm_call(*_args, **_kwargs):
+        payload = {
+            "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+            "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+            "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+            "flags": [],
+            "confidence": 0.85,
+        }
+        return payload, json.dumps(payload), {"status_code": 200, "prompt_tokens": 1, "completion_tokens": 1}
+
+    config = PipelineConfig(scoring_concurrency=1, sample_max_retries=1)
+    config.extension_rarity_mode = "preview"
+
+    with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+        await run_scoring(str(labeled_path), tag_stats_path=str(stats_path), config=config)
+
+    scored = json.loads((tmp_path / "scored.json").read_text(encoding="utf-8"))[0]
+    value = scored["value"]
+    assert value["rarity"]["score"] == value["rarity_core"]["score"]
+    assert value["rarity_extension"]["score"] is not None
+    assert value["rarity_extension"]["matched_specs"] == 1
+    assert "rarity_v2" not in value
+    assert "value_score_v2" not in value
+    assert "selection_score_v2" not in value
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_bonus_only_adds_bounded_v2_bonus_with_external_baseline(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    labeled_path = tmp_path / "labeled.json"
+    stats_path = tmp_path / "stats.json"
+    _write_extension_rarity_stats(stats_path)
+    labeled_path.write_text(json.dumps([{
+        "id": "ext-bonus",
+        "conversations": [
+            {"from": "human", "value": "Build a complex modal UI in TypeScript."},
+            {"from": "gpt", "value": "Here is the component."},
+        ],
+        "labels": {
+            "intent": "build",
+            "difficulty": "intermediate",
+            "language": ["typescript"],
+            "domain": ["web-frontend"],
+            "task": ["feature-implementation"],
+            "concept": ["ui-design"],
+            "agentic": [],
+            "constraint": [],
+            "context": "snippet",
+            "confidence": {"intent": 0.95, "difficulty": 0.95},
+        },
+        "label_extensions": {
+            "ui_fine_labels": {
+                "status": "success",
+                "matched": True,
+                "spec_version": "v1",
+                "spec_hash": "sha256:ui-v1",
+                "labels": {
+                    "component_type": ["modal"],
+                    "visual_complexity": "high",
+                },
+                "confidence": {
+                    "component_type": 0.9,
+                    "visual_complexity": 0.8,
+                },
+            }
+        },
+    }]), encoding="utf-8")
+
+    async def fake_async_llm_call(*_args, **_kwargs):
+        payload = {
+            "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+            "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+            "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+            "flags": [],
+            "confidence": 0.85,
+        }
+        return payload, json.dumps(payload), {"status_code": 200, "prompt_tokens": 1, "completion_tokens": 1}
+
+    config = PipelineConfig(scoring_concurrency=1, sample_max_retries=1)
+    config.extension_rarity_mode = "bonus_only"
+
+    with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+        await run_scoring(str(labeled_path), tag_stats_path=str(stats_path), config=config)
+
+    scored = json.loads((tmp_path / "scored.json").read_text(encoding="utf-8"))[0]
+    value = scored["value"]
+    assert value["rarity"]["score"] == value["rarity_core"]["score"]
+    assert value["rarity_v2"]["score"] >= value["rarity_core"]["score"]
+    assert value["rarity_v2"]["extension_bonus"] > 0
+    assert value["rarity_v2"]["extension_bonus"] <= 0.5
+    assert value["value_score_v2"] >= value["value_score"]
+    assert value["selection_score_v2"] >= value["selection_score"]
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_bonus_only_local_extension_baseline_is_diagnostic_only(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    labeled_path = tmp_path / "labeled.json"
+    labeled_path.write_text(json.dumps([{
+        "id": "ext-local",
+        "conversations": [
+            {"from": "human", "value": "Build a rare modal UI in TypeScript."},
+            {"from": "gpt", "value": "Here is the component."},
+        ],
+        "labels": {
+            "intent": "build",
+            "difficulty": "intermediate",
+            "language": ["typescript"],
+            "domain": ["web-frontend"],
+            "task": ["feature-implementation"],
+            "concept": ["ui-design"],
+            "agentic": [],
+            "constraint": [],
+            "context": "snippet",
+            "confidence": {"intent": 0.95, "difficulty": 0.95},
+        },
+        "label_extensions": {
+            "ui_fine_labels": {
+                "status": "success",
+                "matched": True,
+                "spec_version": "v1",
+                "spec_hash": "sha256:ui-v1",
+                "labels": {
+                    "component_type": ["modal"],
+                    "visual_complexity": "high",
+                },
+                "confidence": {
+                    "component_type": 0.9,
+                    "visual_complexity": 0.8,
+                },
+            }
+        },
+    }]), encoding="utf-8")
+
+    async def fake_async_llm_call(*_args, **_kwargs):
+        payload = {
+            "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+            "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+            "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+            "flags": [],
+            "confidence": 0.85,
+        }
+        return payload, json.dumps(payload), {"status_code": 200, "prompt_tokens": 1, "completion_tokens": 1}
+
+    config = PipelineConfig(scoring_concurrency=1, sample_max_retries=1)
+    config.extension_rarity_mode = "bonus_only"
+    config.min_extension_baseline_total = 1
+
+    with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+        await run_scoring(str(labeled_path), config=config)
+
+    scored = json.loads((tmp_path / "scored.json").read_text(encoding="utf-8"))[0]
+    value = scored["value"]
+    assert value["rarity_extension"]["baseline_source"] == "local"
+    assert value["rarity_v2"]["extension_bonus"] == 0.0
+    assert value["rarity_v2"]["score"] == value["rarity_core"]["score"]

@@ -35,6 +35,19 @@ REVIEW_FIELDNAMES = [
     "confidence_min",
 ]
 
+EXTENSION_RARITY_PREVIEW_FIELDNAMES = [
+    "extension_rarity_preview_score",
+    "extension_rarity_preview_confidence",
+    "extension_rarity_preview_matched_specs",
+    "extension_rarity_preview_baseline_source",
+]
+
+EXTENSION_RARITY_V2_FIELDNAMES = [
+    "rarity_v2_score",
+    "value_score_v2",
+    "selection_score_v2",
+]
+
 
 def load_monitor(path):
     """Load monitor JSONL into a dict keyed by sample_id."""
@@ -162,6 +175,46 @@ def _extension_row_payload(sample: dict, specs: dict[str, dict]) -> dict[str, st
     return rows
 
 
+def _extension_rarity_row_payload(sample: dict) -> dict[str, str]:
+    value = sample.get("value") if isinstance(sample.get("value"), dict) else {}
+    rarity_extension = value.get("rarity_extension") if isinstance(value.get("rarity_extension"), dict) else {}
+    rarity_v2 = value.get("rarity_v2") if isinstance(value.get("rarity_v2"), dict) else {}
+
+    return {
+        "extension_rarity_preview_score": (
+            str(rarity_extension.get("score"))
+            if isinstance(rarity_extension.get("score"), (int, float)) else ""
+        ),
+        "extension_rarity_preview_confidence": (
+            str(rarity_extension.get("confidence"))
+            if isinstance(rarity_extension.get("confidence"), (int, float)) else ""
+        ),
+        "extension_rarity_preview_matched_specs": (
+            str(rarity_extension.get("matched_specs"))
+            if isinstance(rarity_extension.get("matched_specs"), (int, float)) else ""
+        ),
+        "extension_rarity_preview_baseline_source": (
+            str(rarity_extension.get("baseline_source", "")) if rarity_extension else ""
+        ),
+        "rarity_v2_score": (
+            str(rarity_v2.get("score"))
+            if isinstance(rarity_v2.get("score"), (int, float)) else ""
+        ),
+        "value_score_v2": (
+            str(value.get("value_score_v2"))
+            if isinstance(value.get("value_score_v2"), (int, float)) else ""
+        ),
+        "selection_score_v2": (
+            str(value.get("selection_score_v2"))
+            if isinstance(value.get("selection_score_v2"), (int, float)) else ""
+        ),
+    }
+
+
+def _rows_have_any_values(rows: list[dict], fieldnames: list[str]) -> bool:
+    return any(str(row.get(name, "")).strip() for row in rows for name in fieldnames)
+
+
 def _load_json_or_jsonl(path: Path):
     """Load samples from one JSON or JSONL file."""
     if path.suffix == ".jsonl":
@@ -287,6 +340,7 @@ def build_review_rows(samples, monitors=None, *, include_extensions: bool = Fals
         }
         if include_extensions and extension_specs:
             row.update(_extension_row_payload(sample, extension_specs))
+            row.update(_extension_rarity_row_payload(sample))
         rows.append(row)
     return rows
 
@@ -314,7 +368,13 @@ def export_review(input_path, output_path, monitor_path="", output_format="csv",
 
     delimiter = "\t" if fmt == "tsv" else ","
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = REVIEW_FIELDNAMES + _extension_fieldnames(extension_specs) if include_extensions else REVIEW_FIELDNAMES
+    fieldnames = REVIEW_FIELDNAMES
+    if include_extensions:
+        fieldnames = fieldnames + _extension_fieldnames(extension_specs)
+        if _rows_have_any_values(rows, EXTENSION_RARITY_PREVIEW_FIELDNAMES):
+            fieldnames = fieldnames + EXTENSION_RARITY_PREVIEW_FIELDNAMES
+        if _rows_have_any_values(rows, EXTENSION_RARITY_V2_FIELDNAMES):
+            fieldnames = fieldnames + EXTENSION_RARITY_V2_FIELDNAMES
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(
             f,

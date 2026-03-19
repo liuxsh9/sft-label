@@ -111,6 +111,59 @@ def test_compute_value_viz_data_exposes_prompt_mode_budget():
     assert viz["modes"]["conversation"]["overview"]["value_truncation_budget"] == 14000
 
 
+def test_compute_value_viz_data_surfaces_extension_rarity_v2_metrics():
+    samples = [
+        {
+            "id": "ext-1",
+            "metadata": {"source_file": "sample.jsonl"},
+            "labels": {"intent": "build", "difficulty": "advanced", "context": "snippet"},
+            "value": {
+                "value_score": 6.5,
+                "selection_score": 6.8,
+                "value_score_v2": 6.9,
+                "selection_score_v2": 7.1,
+                "thinking_mode": "fast",
+                "confidence": 0.8,
+                "quality": {"overall": 6.0},
+                "complexity": {"overall": 5.0},
+                "reasoning": {"overall": 5.0},
+                "rarity": {"score": 4.0},
+                "rarity_extension": {"score": 7.4, "baseline_source": "external"},
+                "rarity_v2": {"score": 4.6, "extension_bonus": 0.3},
+            },
+        }
+    ]
+    stats = {
+        "total_scored": 1,
+        "total_failed": 0,
+        "total_tokens": 10,
+        "extension_rarity_config": {
+            "mode": "bonus_only",
+            "baseline_source": "external",
+            "min_extension_baseline_total": 200,
+        },
+    }
+
+    viz = compute_value_viz_data(samples, stats)
+
+    sample_mode = viz["modes"]["sample"]
+    conversation_mode = viz["modes"]["conversation"]
+    assert sample_mode["score_distributions"]["extension_rarity_score"]["mean"] == 7.4
+    assert sample_mode["score_distributions"]["rarity_v2_score"]["mean"] == 4.6
+    assert sample_mode["score_distributions"]["value_score_v2"]["mean"] == 6.9
+    assert sample_mode["score_distributions"]["selection_score_v2"]["mean"] == 7.1
+    assert sample_mode["overview"]["extension_rarity_mode"] == "bonus_only"
+    assert sample_mode["overview"]["extension_baseline_source"] == "external"
+    assert "extension_rarity_score" not in conversation_mode["score_distributions"]
+    assert "rarity_v2_score" not in conversation_mode["score_distributions"]
+    assert "value_score_v2" not in conversation_mode["histograms"]
+    assert "selection_score_v2" not in conversation_mode["histograms"]
+    assert conversation_mode["overview"]["mean_extension_rarity"] is None
+    assert conversation_mode["overview"]["mean_rarity_v2"] is None
+    assert "mean_extension_rarity" not in conversation_mode["per_file_summary"][0]
+    assert "mean_selection_v2" not in conversation_mode["per_file_summary"][0]
+
+
 def test_compute_value_viz_data_single_turn_defaults_mean_turns_to_one():
     samples = [
         {

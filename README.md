@@ -130,6 +130,8 @@ Extension exports stay optional: add `--include-extensions` when you run `export
 
 From `sft-label start`, you can now either auto-load the repo-root `extensions/` folder, or manually enter a YAML path / directory path. The `extensions/` folder ships with `ui_web_analysis_v1.example.yaml` as a starter example, and the launcher will pick up updates you place there automatically. Keep each spec focused on a single domain/trigger so the dashboards, diagnostics, and review columns for each extension stay interpretable. For detailed workflows, examples, and the refreshed first-run checklist, see [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md).
 
+If you want a faster presentation-style introduction before reading the full guide, see the Marp deck [Pass 1 extension labeling intro](docs/pass1-extension-labeling-intro.md).
+
 ## What a run writes
 
 The exact layout depends on the input mode, but these are the main artifacts most users should expect.
@@ -267,6 +269,21 @@ uv run sft-label export-review \
 ```
 
 When enabled, the review export adds per-spec status/matched metadata, spec version/hash when present, flattened label/confidence columns, and a normalized unmapped summary column for each extension.
+
+If Pass 2 runs with `--extension-rarity-mode preview|bonus_only`, the same opt-in export can also populate additive extension-rarity columns when present:
+
+- `extension_rarity_preview_score`
+- `extension_rarity_preview_confidence`
+- `extension_rarity_preview_matched_specs`
+- `extension_rarity_preview_baseline_source`
+
+Notes:
+
+- `preview` is diagnostic only and does **not** change legacy `rarity / value_score / selection_score`.
+- `preview` can populate only the `extension_rarity_preview_*` columns above.
+- `bonus_only` can additionally populate `rarity_v2_score`, `value_score_v2`, and `selection_score_v2`; legacy ranking fields remain canonical.
+- local fallback baselines are diagnostic-only; `bonus_only` will not grant a non-zero bonus from a local-only extension baseline.
+- The dashboard surfaces these additive extension-rarity/V2 metrics in **sample mode**; conversation mode keeps legacy conversation semantics unchanged for now.
 
 Best practice:
 

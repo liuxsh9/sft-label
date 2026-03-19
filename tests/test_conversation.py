@@ -34,6 +34,8 @@ def _load_collision_fixture() -> list[dict]:
 
 def _slice(source_id, turn_index, total_turns, value_score=6.0,
            complexity=5, quality=6, reasoning=5, rarity=4.0,
+           rarity_v2=None,
+           rarity_extension=None,
            inherited=False, flags=None, labels=None, thinking_mode=None,
            score_confidence=None,
            source_file=None,
@@ -60,6 +62,12 @@ def _slice(source_id, turn_index, total_turns, value_score=6.0,
             "flags": flags or [],
         },
     }
+    if rarity_v2 is not None:
+        s["value"]["rarity_v2"] = rarity_v2 if isinstance(rarity_v2, dict) else {"score": rarity_v2}
+    if rarity_extension is not None:
+        s["value"]["rarity_extension"] = (
+            rarity_extension if isinstance(rarity_extension, dict) else {"score": rarity_extension}
+        )
     if inherited:
         s["labels"]["inherited"] = True
     if thinking_mode:
@@ -704,6 +712,102 @@ class TestComputeConvSelectionScores:
         compute_conv_selection_scores(records)
         assert records[0]["conv_selection_v2"] >= records[0]["conv_selection"]
         assert records[0]["conv_selection_v2"] > records[1]["conv_selection_v2"]
+
+    def test_extension_v2_fields_are_additive_and_do_not_change_legacy_fields(self):
+        records = [
+            aggregate_conversation(
+                "ext-a",
+                [
+                    _slice(
+                        "ext-a", 1, 2, value_score=7.0, quality=7, rarity=5.5,
+                        rarity_extension={"score": 7.6, "support_sufficient": True, "source_eligible": True},
+                        rarity_v2={"score": 5.8, "extension_bonus": 0.3, "blend_mode": "bonus_only"},
+                    ),
+                    _slice(
+                        "ext-a", 2, 2, value_score=7.2, quality=7, rarity=5.8,
+                        rarity_extension={"score": 7.8, "support_sufficient": True, "source_eligible": True},
+                        rarity_v2={"score": 6.1, "extension_bonus": 0.3, "blend_mode": "bonus_only"},
+                    ),
+                ],
+            ),
+            aggregate_conversation(
+                "ext-b",
+                [
+                    _slice("ext-b", 1, 2, value_score=7.0, quality=7, rarity=5.5, rarity_extension=7.9),
+                    _slice("ext-b", 2, 2, value_score=7.2, quality=7, rarity=5.8, rarity_extension=8.1),
+                ],
+            ),
+        ]
+
+        legacy_rarity = records[0]["conv_rarity"]
+        compute_conv_selection_scores(records)
+
+        assert records[0]["conv_rarity"] == legacy_rarity
+        assert records[0]["conv_rarity_extension_v2"] > records[0]["conv_rarity"]
+        assert records[1]["conv_rarity_extension_v2"] is None
+        assert records[0]["conv_selection_extension_v2"] >= records[0]["conv_selection"]
+        assert records[1]["conv_selection_extension_v2"] == records[1]["conv_selection"]
+
+    def test_extension_v2_conversation_fields_stay_flat_when_sample_gate_closed(self):
+        records = [
+            aggregate_conversation(
+                "ext-gated",
+                [
+                    _slice(
+                        "ext-gated", 1, 2, value_score=7.0, quality=7, rarity=5.5,
+                        rarity_extension={"score": 8.5, "support_sufficient": False, "source_eligible": False},
+                        rarity_v2={"score": 5.5, "extension_bonus": 0.0, "blend_mode": "bonus_only"},
+                    ),
+                    _slice(
+                        "ext-gated", 2, 2, value_score=7.2, quality=7, rarity=5.8,
+                        rarity_extension={"score": 8.8, "support_sufficient": False, "source_eligible": False},
+                        rarity_v2={"score": 5.8, "extension_bonus": 0.0, "blend_mode": "bonus_only"},
+                    ),
+                ],
+            ),
+        ]
+
+        legacy_rarity = records[0]["conv_rarity"]
+        compute_conv_selection_scores(records)
+
+        assert records[0]["conv_rarity_extension_v2"] == legacy_rarity
+        assert records[0]["conv_selection_extension_v2"] == records[0]["conv_selection"]
+
+    def test_extension_v2_zero_bonus_slices_dilute_conversation_uplift(self):
+        fully_boosted = aggregate_conversation(
+            "ext-boosted",
+            [
+                _slice(
+                    "ext-boosted", 1, 2, value_score=7.0, quality=7, rarity=5.5,
+                    rarity_extension={"score": 7.6, "support_sufficient": True, "source_eligible": True},
+                    rarity_v2={"score": 5.8, "extension_bonus": 0.3, "blend_mode": "bonus_only"},
+                ),
+                _slice(
+                    "ext-boosted", 2, 2, value_score=7.2, quality=7, rarity=5.8,
+                    rarity_extension={"score": 7.8, "support_sufficient": True, "source_eligible": True},
+                    rarity_v2={"score": 6.1, "extension_bonus": 0.3, "blend_mode": "bonus_only"},
+                ),
+            ],
+        )
+        mixed = aggregate_conversation(
+            "ext-mixed",
+            [
+                _slice(
+                    "ext-mixed", 1, 2, value_score=7.0, quality=7, rarity=5.5,
+                    rarity_extension={"score": 7.6, "support_sufficient": True, "source_eligible": True},
+                    rarity_v2={"score": 5.8, "extension_bonus": 0.3, "blend_mode": "bonus_only"},
+                ),
+                _slice(
+                    "ext-mixed", 2, 2, value_score=7.2, quality=7, rarity=5.8,
+                    rarity_extension={"score": 8.8, "support_sufficient": False, "source_eligible": False},
+                    rarity_v2={"score": 5.8, "extension_bonus": 0.0, "blend_mode": "bonus_only"},
+                ),
+            ],
+        )
+
+        assert fully_boosted["conv_rarity_extension_v2"] > fully_boosted["conv_rarity"]
+        assert mixed["conv_rarity_extension_v2"] > mixed["conv_rarity"]
+        assert mixed["conv_rarity_extension_v2"] < fully_boosted["conv_rarity_extension_v2"]
 
 
 # ── TestAggregateConversations ──

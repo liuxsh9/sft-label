@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from sft_label.config import PipelineConfig
+from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
 from sft_label.label_extensions_schema import load_extension_spec_file
 from sft_label.pipeline import compute_stats, label_one, merge_stats
 
@@ -208,3 +209,128 @@ def test_compute_stats_and_merge_stats_include_extension_stats():
     assert per_file["extension_stats"]["specs"]["ui_fine_labels"]["matched"] == 1
     assert per_file["extension_stats"]["specs"]["ui_fine_labels"]["field_distributions"]["component_type"]["form"] == 1
     assert merged["extension_stats"]["specs"]["ui_fine_labels"]["status_counts"]["success"] == 1
+
+
+def test_compute_stats_extension_baselines_are_keyed_by_spec_hash():
+    def _payload(*, status, matched, spec_hash, labels=None, confidence=None):
+        return {
+            "ui_fine_labels": {
+                "status": status,
+                "matched": matched,
+                "spec_version": "v1",
+                "spec_hash": spec_hash,
+                "labels": labels or {},
+                "confidence": confidence or {},
+                "unmapped": [],
+            }
+        }
+
+    labels = [
+        {"label_extensions": _payload(
+            status="success",
+            matched=True,
+            spec_hash="sha256:ui-v1",
+            labels={"component_type": ["form"], "visual_complexity": "medium"},
+            confidence={"component_type": 0.8, "visual_complexity": 0.6},
+        )},
+        {"label_extensions": _payload(
+            status="success",
+            matched=True,
+            spec_hash="sha256:ui-v1",
+            labels={"component_type": ["modal"], "visual_complexity": "medium"},
+            confidence={"component_type": 0.9},
+        )},
+        {"label_extensions": _payload(
+            status="invalid",
+            matched=True,
+            spec_hash="sha256:ui-v1",
+            labels={"component_type": ["table"]},
+        )},
+        {"label_extensions": _payload(
+            status="failed",
+            matched=True,
+            spec_hash="sha256:ui-v1",
+        )},
+        {"label_extensions": _payload(
+            status="skipped",
+            matched=False,
+            spec_hash="sha256:ui-v1",
+        )},
+        {"label_extensions": _payload(
+            status="success",
+            matched=True,
+            spec_hash="sha256:ui-v2",
+            labels={"component_type": ["table"]},
+            confidence={"component_type": 0.7},
+        )},
+    ]
+    monitors = [
+        {
+            "llm_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "arbitrated": False,
+            "validation_issues": [],
+            "consistency_warnings": [],
+        }
+        for _ in labels
+    ]
+
+    per_file = compute_stats(monitors, labels)
+    merged = merge_stats([per_file])
+
+    spec_stats = per_file["extension_stats"]["specs"]["ui_fine_labels"]
+    assert spec_stats["status_counts"]["success"] == 3
+    assert spec_stats["field_distributions"]["component_type"]["table"] == 2
+
+    baseline_v1 = spec_stats["baselines"]["sha256:ui-v1"]
+    assert baseline_v1["spec_version"] == "v1"
+    assert baseline_v1["spec_hash"] == "sha256:ui-v1"
+    assert baseline_v1["success"] == 2
+    assert baseline_v1["invalid"] == 1
+    assert baseline_v1["failed"] == 1
+    assert baseline_v1["skipped"] == 1
+    assert baseline_v1["baseline_total"] == 2
+    assert baseline_v1["field_value_distributions"]["component_type"] == {"form": 1, "modal": 1}
+    assert baseline_v1["field_presence_counts"] == {"component_type": 2, "visual_complexity": 2}
+
+    baseline_v2 = merged["extension_stats"]["specs"]["ui_fine_labels"]["baselines"]["sha256:ui-v2"]
+    assert baseline_v2["success"] == 1
+    assert baseline_v2["baseline_total"] == 1
+    assert baseline_v2["field_value_distributions"]["component_type"] == {"table": 1}
+
+
+def test_merge_extension_stats_clears_top_level_singletons_for_mixed_hashes():
+    def _sample(*, spec_hash, spec_version, component_type):
+        return {
+            "label_extensions": {
+                "ui_fine_labels": {
+                    "status": "success",
+                    "matched": True,
+                    "spec_version": spec_version,
+                    "spec_hash": spec_hash,
+                    "labels": {"component_type": [component_type]},
+                    "confidence": {"component_type": 0.9},
+                    "unmapped": [],
+                }
+            }
+        }
+
+    merged = merge_extension_stats([
+        {"extension_stats": aggregate_extension_stats([_sample(
+            spec_hash="sha256:ui-v1",
+            spec_version="v1",
+            component_type="form",
+        )])},
+        {"extension_stats": aggregate_extension_stats([_sample(
+            spec_hash="sha256:ui-v2",
+            spec_version="v2",
+            component_type="table",
+        )])},
+    ])
+
+    spec_stats = merged["specs"]["ui_fine_labels"]
+    assert spec_stats["spec_hash"] is None
+    assert spec_stats["spec_version"] is None
+    assert spec_stats["config"] is None
+    assert set(spec_stats["baselines"]) == {"sha256:ui-v1", "sha256:ui-v2"}

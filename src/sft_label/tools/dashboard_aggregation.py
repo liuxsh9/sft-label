@@ -626,25 +626,89 @@ def _histogram_bins(values: list[float]) -> list[int]:
     return bins
 
 
+_PASS2_EXTENSION_ONLY_KEYS = {
+    "extension_rarity_score",
+    "rarity_v2_score",
+    "value_score_v2",
+    "selection_score_v2",
+}
+
+
+def _filter_pass2_extension_only_fields(payload: dict, *, mode_id: str) -> dict:
+    if mode_id == "sample":
+        return payload
+
+    score_distributions = payload.get("score_distributions")
+    if isinstance(score_distributions, dict):
+        payload["score_distributions"] = {
+            key: value for key, value in score_distributions.items() if key not in _PASS2_EXTENSION_ONLY_KEYS
+        }
+
+    histograms = payload.get("histograms")
+    if isinstance(histograms, dict):
+        payload["histograms"] = {
+            key: value for key, value in histograms.items() if key not in _PASS2_EXTENSION_ONLY_KEYS
+        }
+
+    overview = payload.get("overview")
+    if isinstance(overview, dict):
+        for key in (
+            "mean_value_v2",
+            "mean_selection_v2",
+            "mean_extension_rarity",
+            "mean_rarity_v2",
+            "extension_rarity_mode",
+            "extension_baseline_source",
+        ):
+            overview[key] = None
+
+    per_file_summary = payload.get("per_file_summary")
+    if isinstance(per_file_summary, list):
+        scrubbed = []
+        for row in per_file_summary:
+            if not isinstance(row, dict):
+                scrubbed.append(row)
+                continue
+            clean = dict(row)
+            for key in ("mean_extension_rarity", "mean_rarity_v2", "mean_selection_v2"):
+                clean.pop(key, None)
+            scrubbed.append(clean)
+        payload["per_file_summary"] = scrubbed
+
+    return payload
+
+
 def _stats_only_pass2_mode(stats: dict, *, mode_id: str, unit_label: str, per_file_summary: list[dict] | None = None) -> dict:
     score_distributions = {
         key: value
         for key, value in (stats.get("score_distributions") or {}).items()
         if isinstance(value, dict)
     }
+    if mode_id != "sample":
+        for key in _PASS2_EXTENSION_ONLY_KEYS:
+            score_distributions.pop(key, None)
     rarity_distribution = score_distributions.get("rarity_score") or {}
-    return {
+    extension_distribution = score_distributions.get("extension_rarity_score") or {}
+    rarity_v2_distribution = score_distributions.get("rarity_v2_score") or {}
+    extension_enabled = mode_id == "sample"
+    payload = {
         "overview": {
             "total_scored": stats.get("total_scored", 0),
             "total_failed": stats.get("total_failed", 0),
             "input_file": stats.get("input_file") or stats.get("input_path", ""),
             "mean_value": (score_distributions.get("value_score") or {}).get("mean", 0),
             "mean_selection": (score_distributions.get("selection_score") or {}).get("mean", 0),
+            "mean_value_v2": (score_distributions.get("value_score_v2") or {}).get("mean", 0) if extension_enabled else None,
+            "mean_selection_v2": (score_distributions.get("selection_score_v2") or {}).get("mean", 0) if extension_enabled else None,
             "mean_complexity": (score_distributions.get("complexity_overall") or {}).get("mean", 0),
             "mean_quality": (score_distributions.get("quality_overall") or {}).get("mean", 0),
             "median_rarity": rarity_distribution.get("p50", rarity_distribution.get("mean", 0)),
+            "mean_extension_rarity": extension_distribution.get("mean", 0) if extension_enabled else None,
+            "mean_rarity_v2": rarity_v2_distribution.get("mean", 0) if extension_enabled else None,
             "mean_confidence": (score_distributions.get("confidence") or {}).get("mean", 0),
             "total_tokens": stats.get("total_tokens", 0),
+            "extension_rarity_mode": ((stats.get("extension_rarity_config") or {}).get("mode")) if extension_enabled else None,
+            "extension_baseline_source": ((stats.get("extension_rarity_config") or {}).get("baseline_source")) if extension_enabled else None,
         },
         "selection_thresholds": stats.get("selection_thresholds", {}),
         "score_distributions": score_distributions,
@@ -657,12 +721,16 @@ def _stats_only_pass2_mode(stats: dict, *, mode_id: str, unit_label: str, per_fi
         "coverage_at_thresholds": stats.get("coverage_at_thresholds", {}),
         "weights_used": stats.get("weights_used", {}),
         "per_file_summary": per_file_summary or stats.get("per_file_summary", []),
-        "histograms": stats.get("histograms", {}),
+        "histograms": (
+            {key: value for key, value in (stats.get("histograms") or {}).items() if key not in _PASS2_EXTENSION_ONLY_KEYS}
+            if mode_id != "sample" else stats.get("histograms", {})
+        ),
         "confidence_histogram": stats.get("confidence_histogram", [0] * 10),
         "selection_vs_value": stats.get("selection_vs_value", {}),
         "unit_label": unit_label,
         "mode_id": mode_id,
     }
+    return _filter_pass2_extension_only_fields(payload, mode_id=mode_id)
 
 
 def _sample_pass2_unit(sample: dict) -> dict | None:
@@ -687,10 +755,14 @@ def _sample_pass2_unit(sample: dict) -> dict | None:
         "labels": sample.get("labels") or {},
         "value_score": value.get("value_score"),
         "selection_score": value.get("selection_score"),
+        "value_score_v2": value.get("value_score_v2"),
+        "selection_score_v2": value.get("selection_score_v2"),
         "complexity_overall": (value.get("complexity") or {}).get("overall"),
         "quality_overall": (value.get("quality") or {}).get("overall"),
         "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
         "rarity_score": (value.get("rarity") or {}).get("score"),
+        "extension_rarity_score": (value.get("rarity_extension") or {}).get("score"),
+        "rarity_v2_score": (value.get("rarity_v2") or {}).get("score"),
         "confidence": value.get("confidence"),
         "thinking_mode": value.get("thinking_mode") or (sample.get("metadata") or {}).get("thinking_mode"),
         "flags": value.get("flags") or [],
@@ -831,17 +903,33 @@ def _compute_pass2_from_units(units: list[dict], stats: dict, *, mode_id: str, u
     distributions = {
         "value_score": _percentiles(extract("value_score")),
         "selection_score": _percentiles(extract("selection_score")),
+        "value_score_v2": _percentiles(extract("value_score_v2")),
+        "selection_score_v2": _percentiles(extract("selection_score_v2")),
         "complexity_overall": _percentiles(extract("complexity_overall")),
         "quality_overall": _percentiles(extract("quality_overall")),
         "reasoning_overall": _percentiles(extract("reasoning_overall")),
         "rarity_score": _percentiles(extract("rarity_score")),
+        "extension_rarity_score": _percentiles(extract("extension_rarity_score")),
+        "rarity_v2_score": _percentiles(extract("rarity_v2_score")),
         "confidence": _percentiles(extract("confidence")),
     }
 
-    histograms = {
-        key: _histogram_bins(extract(key))
-        for key in ["value_score", "complexity_overall", "quality_overall", "reasoning_overall", "rarity_score", "selection_score"]
-    }
+    histograms = {}
+    for key in [
+        "value_score",
+        "value_score_v2",
+        "complexity_overall",
+        "quality_overall",
+        "reasoning_overall",
+        "rarity_score",
+        "extension_rarity_score",
+        "rarity_v2_score",
+        "selection_score",
+        "selection_score_v2",
+    ]:
+        values = extract(key)
+        if values:
+            histograms[key] = _histogram_bins(values)
 
     sub_score_means = {
         "complexity": {"overall": round(sum(extract("complexity_overall")) / max(len(extract("complexity_overall")), 1), 2)} if extract("complexity_overall") else {},
@@ -951,18 +1039,24 @@ def _compute_pass2_from_units(units: list[dict], stats: dict, *, mode_id: str, u
                 key = f"{max(1, min(int(value_score), 10))}|{max(1, min(int(selection_score), 10))}"
                 selection_vs_value[key] = selection_vs_value.get(key, 0) + 1
 
-    return {
+    payload = {
         "overview": {
             "total_scored": total_scored,
             "total_failed": stats.get("total_failed", 0),
             "input_file": stats.get("input_file") or stats.get("input_path", ""),
             "mean_value": distributions.get("value_score", {}).get("mean", 0),
             "mean_selection": distributions.get("selection_score", {}).get("mean", 0),
+            "mean_value_v2": distributions.get("value_score_v2", {}).get("mean", 0),
+            "mean_selection_v2": distributions.get("selection_score_v2", {}).get("mean", 0),
             "mean_complexity": distributions.get("complexity_overall", {}).get("mean", 0),
             "mean_quality": distributions.get("quality_overall", {}).get("mean", 0),
             "median_rarity": distributions.get("rarity_score", {}).get("p50", distributions.get("rarity_score", {}).get("mean", 0)),
+            "mean_extension_rarity": distributions.get("extension_rarity_score", {}).get("mean", 0),
+            "mean_rarity_v2": distributions.get("rarity_v2_score", {}).get("mean", 0),
             "mean_confidence": distributions.get("confidence", {}).get("mean", 0),
             "total_tokens": stats.get("total_tokens", 0),
+            "extension_rarity_mode": ((stats.get("extension_rarity_config") or {}).get("mode")),
+            "extension_baseline_source": ((stats.get("extension_rarity_config") or {}).get("baseline_source")),
         },
         "selection_thresholds": selection_thresholds,
         "score_distributions": distributions,
@@ -981,6 +1075,7 @@ def _compute_pass2_from_units(units: list[dict], stats: dict, *, mode_id: str, u
         "unit_label": unit_label,
         "mode_id": mode_id,
     }
+    return _filter_pass2_extension_only_fields(payload, mode_id=mode_id)
 
 
 def _group_units_by_source_file(units: list[dict]) -> dict[str, list[dict]]:
@@ -1026,7 +1121,10 @@ def _build_per_file_summary(units: list[dict]) -> list[dict]:
             "mean_complexity": _mean("complexity_overall"),
             "mean_quality": _mean("quality_overall"),
             "mean_rarity": _mean("rarity_score"),
+            "mean_extension_rarity": _mean("extension_rarity_score"),
+            "mean_rarity_v2": _mean("rarity_v2_score"),
             "mean_selection": _mean("selection_score"),
+            "mean_selection_v2": _mean("selection_score_v2"),
             "keep_rates": keep_rates,
             "keep_rate_7": keep_rates.get(f"{FILE_RANKING_KEEP_RATE_THRESHOLD:.1f}", 0),
             "mean_turns": _mean("turn_count"),

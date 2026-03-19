@@ -574,6 +574,20 @@ Updated output format when rationale is enabled:
 SCORING_FEWSHOT_COMPACT = SCORING_FEWSHOT[0:2] + SCORING_FEWSHOT[2:4] + SCORING_FEWSHOT[8:10]
 
 
+def _sanitize_labels_for_scoring_prompt(labels):
+    """Return the Pass 1 tag payload visible to the current Pass 2 prompt.
+
+    Pass 2 prompt semantics remain core-label-only. User-defined extension labels
+    are preserved elsewhere in artifacts/output, but must not implicitly affect
+    the scoring LLM prompt unless a future prompt version opts in explicitly.
+    """
+    if not isinstance(labels, dict):
+        return labels
+    sanitized = dict(labels)
+    sanitized.pop("label_extensions", None)
+    return sanitized
+
+
 def build_scoring_messages(truncated, thinking_mode, labels,
                            total_turns, code_block_count,
                            enable_rationale=False,
@@ -597,6 +611,7 @@ def build_scoring_messages(truncated, thinking_mode, labels,
         slice_position = turn_index
     if slice_count is None and isinstance(total_turns_meta, int):
         slice_count = total_turns_meta
+    prompt_labels = _sanitize_labels_for_scoring_prompt(labels)
     # Build meta block
     meta_parts = [
         f"thinking_mode: {thinking_mode}",
@@ -609,7 +624,7 @@ def build_scoring_messages(truncated, thinking_mode, labels,
         f"trajectory_turn_count: {truncated.get('trajectory_turn_count', 0)}",
         f"trajectory_tool_turns: {truncated.get('trajectory_tool_turns', 0)}",
         f"code_block_count: {code_block_count}",
-        f"tags: {json.dumps(labels, ensure_ascii=False)}",
+        f"tags: {json.dumps(prompt_labels, ensure_ascii=False)}",
     ]
     if slice_position is not None and slice_count is not None and slice_count > 1:
         meta_parts.append(f"turn_position: {slice_position}/{slice_count} (multi-turn slice)")

@@ -31,8 +31,10 @@ _INLINE_CONVERSATION_KEYS = (
     "conv_value_v2",
     "conv_selection",
     "conv_selection_v2",
+    "conv_selection_extension_v2",
     "peak_complexity",
     "conv_rarity",
+    "conv_rarity_extension_v2",
     "trajectory_structure_score",
     "observed_turn_ratio",
     "inherited_turn_ratio",
@@ -94,6 +96,7 @@ _INLINE_CONVERSATION_DETAIL_KEYS = (
     "non_redundancy_score",
     "conv_value_v2_delta",
     "conv_selection_v2_delta",
+    "conv_selection_extension_v2_delta",
 )
 
 
@@ -529,8 +532,10 @@ def clear_pass2_state(data_label: dict, *, timestamp: str | None = None) -> dict
             "conv_value_v2",
             "conv_selection",
             "conv_selection_v2",
+            "conv_selection_extension_v2",
             "peak_complexity",
             "conv_rarity",
+            "conv_rarity_extension_v2",
             "trajectory_structure_score",
             "observed_turn_ratio",
             "inherited_turn_ratio",

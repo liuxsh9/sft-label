@@ -2,6 +2,8 @@
 
 Pass 1 extension labeling lets you attach **additional, domain-specific tags** on top of the core 9-dimension taxonomy. Extensions run **after** the core Pass 1 calls and never change the core taxonomy or Pass 2 semantics.
 
+If you want a quicker presentation-style walkthrough before reading this reference, start with [Pass 1 extension labeling intro](../pass1-extension-labeling-intro.md).
+
 ## When to use it
 
 Use extension labeling when you need extra metadata for a specific subset of samples (e.g., UI-heavy data, Web UI mix analysis, mobile tasks, or domain-specific heuristics).
@@ -134,6 +136,21 @@ uv run sft-label export-review --input run_dir --output review.csv --include-ext
 ```
 
 This keeps the default CSV format unchanged while letting you include extension fields when needed. When enabled, the export includes per-spec status/matched metadata, spec version/hash when present, flattened label/confidence columns, and a normalized unmapped summary column for each extension.
+
+If Pass 2 later runs with `--extension-rarity-mode preview|bonus_only`, the same opt-in export can populate additive extension-rarity columns such as:
+
+- `extension_rarity_preview_score`
+- `extension_rarity_preview_confidence`
+- `extension_rarity_preview_matched_specs`
+- `extension_rarity_preview_baseline_source`
+
+Interpretation:
+
+- `preview` is diagnostic-only and does **not** change legacy `rarity / value_score / selection_score`;
+- `preview` populates only the `extension_rarity_preview_*` columns above;
+- `bonus_only` can additionally write `rarity_v2_score`, `value_score_v2`, and `selection_score_v2`;
+- local-only extension baselines remain diagnostic and do not produce a non-zero bonus.
+- the dashboard shows these additive extension-rarity/V2 metrics in sample mode only for now, so conversation mode keeps the legacy aggregation semantics.
 
 ## Recommended user-side config patterns
 

@@ -587,6 +587,7 @@ def _apply_runtime_overrides(config, args):
         ("request_timeout", "request_timeout"),
         ("max_retries", "max_retries"),
         ("rarity_score_mode", "rarity_mode"),
+        ("extension_rarity_mode", "extension_rarity_mode"),
     ):
         val = getattr(args, arg_name, None)
         if val is not None:
@@ -1175,6 +1176,8 @@ def cmd_refresh_rarity(args):
     config = PipelineConfig()
     if getattr(args, "mode", None):
         config.rarity_score_mode = args.mode
+    if getattr(args, "extension_rarity_mode", None):
+        config.extension_rarity_mode = args.extension_rarity_mode
 
     try:
         written = run_refresh_rarity(
@@ -1619,6 +1622,9 @@ def build_parser():
     run_parser.add_argument("--rarity-mode", type=str, default=None,
                             choices=["absolute", "percentile"],
                             help="Rarity normalization mode for Pass 2 (used with --score)")
+    run_parser.add_argument("--extension-rarity-mode", type=str, default=None,
+                            choices=["off", "preview", "bonus_only"],
+                            help="Extension Rarity V2 mode for Pass 2: off (default, legacy unchanged), preview (compute extension rarity diagnostics only), or bonus_only (experimental V2 bonus fields only).")
     run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
                             default="compact",
                             help="Prompt mode: 'full' or 'compact' (default: compact). Compact uses smaller payloads; for extension labeling, keep each prompt+schema compact-friendly when possible.")
@@ -1666,6 +1672,9 @@ def build_parser():
     score_parser.add_argument("--rarity-mode", type=str, default=None,
                                choices=["absolute", "percentile"],
                                help="Rarity normalization mode override")
+    score_parser.add_argument("--extension-rarity-mode", type=str, default=None,
+                               choices=["off", "preview", "bonus_only"],
+                               help="Extension Rarity V2 mode: off (default, legacy unchanged), preview (compute extension rarity diagnostics only), or bonus_only (experimental V2 bonus fields only).")
     score_parser.add_argument("--limit", type=int, default=0,
                                help="Max samples to score, 0 = all (default: 0)")
     score_parser.add_argument("--resume", action="store_true",
@@ -1809,6 +1818,9 @@ def build_parser():
     refresh_parser.add_argument("--mode", type=str, default=None,
                                 choices=["absolute", "percentile"],
                                 help="Rarity score normalization mode override")
+    refresh_parser.add_argument("--extension-rarity-mode", type=str, default=None,
+                                choices=["off", "preview", "bonus_only"],
+                                help="Extension Rarity V2 mode: off (default, legacy unchanged), preview (compute extension rarity diagnostics only), or bonus_only (experimental V2 bonus fields only).")
     refresh_parser.add_argument("--workers", type=int, default=8,
                                 help="File-level parallel workers in directory mode (default: 8)")
 

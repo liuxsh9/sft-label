@@ -223,8 +223,14 @@ const I18N = {
     thinking_mode: "Thinking Mode",
     mode: "Mode",
     value: "Value",
+    value_score_v2: "Value V2",
     selection: "Selection",
+    selection_v2: "Selection V2",
     reasoning: "Reasoning",
+    extension_rarity_preview: "Extension Rarity (Preview)",
+    rarity_v2: "Rarity V2",
+    extension_rarity_mode: "Extension Rarity Mode",
+    extension_baseline_source: "Extension Rarity Baseline",
     flags: "Flags",
     file_ranking: "File Ranking",
     sorted_by: "{count} files · sorted by {column}",
@@ -468,8 +474,14 @@ const I18N = {
     thinking_mode: "思考模式",
     mode: "模式",
     value: "价值",
+    value_score_v2: "价值 V2",
     selection: "入选分",
+    selection_v2: "入选分 V2",
     reasoning: "推理",
+    extension_rarity_preview: "扩展稀有度（预览）",
+    rarity_v2: "稀有度 V2",
+    extension_rarity_mode: "扩展稀有度模式",
+    extension_baseline_source: "扩展稀有度基线",
     flags: "标记",
     file_ranking: "文件排名",
     sorted_by: "{count} 个文件 · 当前按 {column} 排序",
@@ -689,20 +701,28 @@ const DIM_COLORS = {
 
 const HIST_COLORS = {
   value_score: "#2563eb",
+  value_score_v2: "#1d4ed8",
   complexity_overall: "#c2410c",
   quality_overall: "#15803d",
   reasoning_overall: "#7c3aed",
   rarity_score: "#0f766e",
+  extension_rarity_score: "#0891b2",
+  rarity_v2_score: "#0ea5a4",
   selection_score: "#be185d",
+  selection_score_v2: "#db2777",
 };
 
 const HIST_LABELS = {
   value_score: "value_score",
+  value_score_v2: "value_score_v2",
   complexity_overall: "complexity",
   quality_overall: "quality",
   reasoning_overall: "reasoning",
   rarity_score: "median_rarity",
+  extension_rarity_score: "extension_rarity_preview",
+  rarity_v2_score: "rarity_v2",
   selection_score: "selection",
+  selection_score_v2: "selection_v2",
 };
 
 const KEEP_RATE_THRESHOLDS = ["4.0", "5.0", "6.0", "7.0"];
@@ -2287,12 +2307,18 @@ function renderPass2(pass2) {
     {label: t("scored"), value: overview.total_scored || 0},
     {label: t("failed"), value: overview.total_failed || 0},
     {label: t("mean_value"), value: fmt(overview.mean_value, 1), className: scoreClass(overview.mean_value)},
+    ...(overview.mean_value_v2 ? [{label: t("value_score_v2"), value: fmt(overview.mean_value_v2, 1), className: scoreClass(overview.mean_value_v2)}] : []),
+    ...(overview.mean_selection_v2 ? [{label: t("selection_v2"), value: fmt(overview.mean_selection_v2, 1), className: scoreClass(overview.mean_selection_v2)}] : []),
     {label: t("complexity"), value: fmt(overview.mean_complexity, 1), className: scoreClass(overview.mean_complexity)},
     {label: t("quality"), value: fmt(overview.mean_quality, 1), className: scoreClass(overview.mean_quality)},
     {label: t("median_rarity"), value: fmt(overview.median_rarity, 1), className: scoreClass(overview.median_rarity)},
+    ...(overview.mean_extension_rarity ? [{label: t("extension_rarity_preview"), value: fmt(overview.mean_extension_rarity, 1), className: scoreClass(overview.mean_extension_rarity)}] : []),
+    ...(overview.mean_rarity_v2 ? [{label: t("rarity_v2"), value: fmt(overview.mean_rarity_v2, 1), className: scoreClass(overview.mean_rarity_v2)}] : []),
     {label: t("confidence"), value: fmt(overview.mean_confidence, 2)},
     {label: t("tokens"), value: Number(overview.total_tokens || 0).toLocaleString()},
     {label: "Prompt Mode", value: overview.prompt_mode || (overview.compact_prompt ? "compact" : "full")},
+    ...(overview.extension_rarity_mode ? [{label: t("extension_rarity_mode"), value: overview.extension_rarity_mode}] : []),
+    ...(overview.extension_baseline_source ? [{label: t("extension_baseline_source"), value: overview.extension_baseline_source}] : []),
   ];
   if (overview.value_truncation_budget) cards.push({label: "Budget", value: Number(overview.value_truncation_budget || 0).toLocaleString()});
   sections.push(section(t("scoring_overview"), renderCards(cards), `${overview.total_scored || 0} ${aggregationUnitLabel(pass2, "samples")}`, true));
@@ -2672,8 +2698,12 @@ function renderExplorerDrawer() {
     });
     const cards = [
       [t("value"), value.value_score],
+      [t("value_score_v2"), value.value_score_v2],
       [t("quality"), (value.quality || {}).overall],
       [t("selection"), value.selection_score],
+      [t("selection_v2"), value.selection_score_v2],
+      [t("extension_rarity_preview"), ((value.rarity_extension || {}).score)],
+      [t("rarity_v2"), ((value.rarity_v2 || {}).score)],
       [t("conv_value"), (detail.conversation || {}).conv_value],
       [t("conv_sel"), (detail.conversation || {}).conv_selection],
       [t("conv_rarity"), (detail.conversation || {}).conv_rarity],

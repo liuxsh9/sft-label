@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
 
@@ -102,6 +103,58 @@ def _merge_unmapped(unmapped: list[dict] | None) -> list[dict]:
         seen.add(key)
         merged.append({"dimension": dim, "value": value})
     return merged
+
+
+def _canonicalize_config(config: dict | None) -> str | None:
+    if not isinstance(config, dict):
+        return None
+    return json.dumps(config, ensure_ascii=False, sort_keys=True)
+
+
+def _seed_spec_singleton_state(spec_stats: dict) -> None:
+    spec_version = spec_stats.get("spec_version")
+    spec_hash = spec_stats.get("spec_hash")
+    config = spec_stats.get("config")
+    spec_stats["_seen_spec_versions"] = (
+        {str(spec_version)} if spec_version not in (None, "") else set()
+    )
+    spec_stats["_seen_spec_hashes"] = (
+        {str(spec_hash)} if spec_hash not in (None, "") else set()
+    )
+    spec_stats["_seen_configs"] = (
+        {_canonicalize_config(config)} if _canonicalize_config(config) else set()
+    )
+
+
+def _update_spec_singletons(spec_stats: dict, *, spec_version=None, spec_hash=None, config=None) -> None:
+    if "_seen_spec_versions" not in spec_stats:
+        _seed_spec_singleton_state(spec_stats)
+
+    if spec_version not in (None, ""):
+        spec_stats["_seen_spec_versions"].add(str(spec_version))
+    if spec_hash not in (None, ""):
+        spec_stats["_seen_spec_hashes"].add(str(spec_hash))
+    config_key = _canonicalize_config(config)
+    if config_key:
+        spec_stats["_seen_configs"].add(config_key)
+
+    seen_versions = spec_stats["_seen_spec_versions"]
+    seen_hashes = spec_stats["_seen_spec_hashes"]
+    seen_configs = spec_stats["_seen_configs"]
+
+    spec_stats["spec_version"] = next(iter(seen_versions)) if len(seen_versions) == 1 else None
+    spec_stats["spec_hash"] = next(iter(seen_hashes)) if len(seen_hashes) == 1 else None
+    if len(seen_hashes) > 1 or len(seen_configs) != 1:
+        spec_stats["config"] = None
+    elif config_key and isinstance(config, dict):
+        spec_stats["config"] = config
+
+
+def _finalize_spec_singletons(specs: dict[str, dict]) -> None:
+    for spec_stats in specs.values():
+        spec_stats.pop("_seen_spec_versions", None)
+        spec_stats.pop("_seen_spec_hashes", None)
+        spec_stats.pop("_seen_configs", None)
 
 
 def _merge_extension_payloads(slices: list[dict]) -> dict[str, dict]:
@@ -241,9 +294,52 @@ def _finalize_confidence_stats(acc: dict) -> dict[str, dict]:
     return finalized
 
 
+def _new_extension_baseline(spec_version: str | None, spec_hash: str) -> dict:
+    return {
+        "spec_version": spec_version,
+        "spec_hash": spec_hash,
+        "total": 0,
+        "matched": 0,
+        "success": 0,
+        "invalid": 0,
+        "failed": 0,
+        "skipped": 0,
+        "baseline_total": 0,
+        "field_value_distributions": {},
+        "field_presence_counts": {},
+        "confidence_stats": {},
+    }
+
+
+def _iter_present_values(value) -> list:
+    if isinstance(value, list):
+        return [item for item in value if item not in (None, "")]
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _accumulate_field_value_stats(
+    value_distributions: dict,
+    presence_counts: dict,
+    labels: dict,
+) -> None:
+    if not isinstance(labels, dict):
+        return
+    for field, value in labels.items():
+        present_values = _iter_present_values(value)
+        if not present_values:
+            continue
+        presence_counts[field] = presence_counts.get(field, 0) + 1
+        dist = value_distributions.setdefault(field, {})
+        for item in present_values:
+            dist[item] = dist.get(item, 0) + 1
+
+
 def aggregate_extension_stats(samples: list[dict], extension_specs: list["ExtensionSpec"] | None = None) -> dict | None:
     specs: dict[str, dict] = {}
     confidence_acc: dict[str, dict] = {}
+    baseline_confidence_acc: dict[tuple[str, str], dict] = {}
     config_map = _extension_config_map(extension_specs)
 
     for sample in samples:
@@ -263,14 +359,17 @@ def aggregate_extension_stats(samples: list[dict], extension_specs: list["Extens
                     "matched": 0,
                     "status_counts": {},
                     "field_distributions": {},
+                    "baselines": {},
                     "confidence_stats": {},
                     "unmapped_counts": {},
                 },
             )
-            if not spec_stats.get("spec_version") and payload.get("spec_version"):
-                spec_stats["spec_version"] = payload.get("spec_version")
-            if not spec_stats.get("spec_hash") and payload.get("spec_hash"):
-                spec_stats["spec_hash"] = payload.get("spec_hash")
+            _update_spec_singletons(
+                spec_stats,
+                spec_version=payload.get("spec_version"),
+                spec_hash=payload.get("spec_hash"),
+                config=config_map.get(spec_id),
+            )
 
             spec_stats["total"] += 1
             if payload.get("matched") is True:
@@ -297,6 +396,32 @@ def aggregate_extension_stats(samples: list[dict], extension_specs: list["Extens
                     if isinstance(score, (int, float)):
                         _accumulate_confidence_stat(spec_conf_acc, field, float(score))
 
+            spec_hash = payload.get("spec_hash")
+            if spec_hash:
+                baseline = spec_stats["baselines"].setdefault(
+                    str(spec_hash),
+                    _new_extension_baseline(payload.get("spec_version"), str(spec_hash)),
+                )
+                if not baseline.get("spec_version") and payload.get("spec_version"):
+                    baseline["spec_version"] = payload.get("spec_version")
+                baseline["total"] += 1
+                if payload.get("matched") is True:
+                    baseline["matched"] += 1
+                if status in {"success", "invalid", "failed", "skipped"}:
+                    baseline[status] += 1
+                if status == "success" and payload.get("matched") is True:
+                    baseline["baseline_total"] += 1
+                    _accumulate_field_value_stats(
+                        baseline["field_value_distributions"],
+                        baseline["field_presence_counts"],
+                        labels,
+                    )
+                    if isinstance(confidence, dict):
+                        baseline_conf_acc = baseline_confidence_acc.setdefault((str(spec_id), str(spec_hash)), {})
+                        for field, score in confidence.items():
+                            if isinstance(score, (int, float)):
+                                _accumulate_confidence_stat(baseline_conf_acc, field, float(score))
+
             unmapped = payload.get("unmapped") or []
             if isinstance(unmapped, list):
                 for item in unmapped:
@@ -310,15 +435,19 @@ def aggregate_extension_stats(samples: list[dict], extension_specs: list["Extens
 
     for spec_id, acc in confidence_acc.items():
         specs[spec_id]["confidence_stats"] = _finalize_confidence_stats(acc)
+    for (spec_id, spec_hash), acc in baseline_confidence_acc.items():
+        specs[spec_id]["baselines"][spec_hash]["confidence_stats"] = _finalize_confidence_stats(acc)
 
     if not specs:
         return None
+    _finalize_spec_singletons(specs)
     return {"specs": specs}
 
 
 def merge_extension_stats(stats_list: list[dict]) -> dict | None:
     specs: dict[str, dict] = {}
     confidence_acc: dict[str, dict] = {}
+    baseline_confidence_acc: dict[tuple[str, str], dict] = {}
 
     for stats in stats_list:
         extension_stats = stats.get("extension_stats") or {}
@@ -335,16 +464,17 @@ def merge_extension_stats(stats_list: list[dict]) -> dict | None:
                     "matched": 0,
                     "status_counts": {},
                     "field_distributions": {},
+                    "baselines": {},
                     "confidence_stats": {},
                     "unmapped_counts": {},
                 },
             )
-            if not merged.get("spec_version") and spec.get("spec_version"):
-                merged["spec_version"] = spec.get("spec_version")
-            if not merged.get("spec_hash") and spec.get("spec_hash"):
-                merged["spec_hash"] = spec.get("spec_hash")
-            if not merged.get("config") and spec.get("config"):
-                merged["config"] = spec.get("config")
+            _update_spec_singletons(
+                merged,
+                spec_version=spec.get("spec_version"),
+                spec_hash=spec.get("spec_hash"),
+                config=spec.get("config"),
+            )
 
             merged["total"] += int(spec.get("total", 0) or 0)
             merged["matched"] += int(spec.get("matched", 0) or 0)
@@ -379,11 +509,63 @@ def merge_extension_stats(stats_list: list[dict]) -> dict | None:
                     max_val=max_val,
                 )
 
+            for spec_hash, baseline in (spec.get("baselines") or {}).items():
+                if not isinstance(baseline, dict):
+                    continue
+                merged_baseline = merged["baselines"].setdefault(
+                    str(spec_hash),
+                    _new_extension_baseline(
+                        baseline.get("spec_version"),
+                        str(baseline.get("spec_hash") or spec_hash),
+                    ),
+                )
+                if not merged_baseline.get("spec_version") and baseline.get("spec_version"):
+                    merged_baseline["spec_version"] = baseline.get("spec_version")
+                merged_baseline["total"] += int(baseline.get("total", 0) or 0)
+                merged_baseline["matched"] += int(baseline.get("matched", 0) or 0)
+                merged_baseline["success"] += int(baseline.get("success", 0) or 0)
+                merged_baseline["invalid"] += int(baseline.get("invalid", 0) or 0)
+                merged_baseline["failed"] += int(baseline.get("failed", 0) or 0)
+                merged_baseline["skipped"] += int(baseline.get("skipped", 0) or 0)
+                merged_baseline["baseline_total"] += int(baseline.get("baseline_total", 0) or 0)
+
+                for field, dist in (baseline.get("field_value_distributions") or {}).items():
+                    merged_dist = merged_baseline["field_value_distributions"].setdefault(field, {})
+                    for value, count in (dist or {}).items():
+                        merged_dist[value] = merged_dist.get(value, 0) + int(count or 0)
+
+                for field, count in (baseline.get("field_presence_counts") or {}).items():
+                    merged_baseline["field_presence_counts"][field] = (
+                        merged_baseline["field_presence_counts"].get(field, 0) + int(count or 0)
+                    )
+
+                for field, conf in (baseline.get("confidence_stats") or {}).items():
+                    if not isinstance(conf, dict):
+                        continue
+                    count = int(conf.get("count", 0) or 0)
+                    if count <= 0:
+                        continue
+                    mean = float(conf.get("mean", 0.0) or 0.0)
+                    min_val = float(conf.get("min", mean))
+                    max_val = float(conf.get("max", mean))
+                    baseline_acc = baseline_confidence_acc.setdefault((str(spec_id), str(spec_hash)), {})
+                    _accumulate_confidence_bulk(
+                        baseline_acc,
+                        field,
+                        mean=mean,
+                        count=count,
+                        min_val=min_val,
+                        max_val=max_val,
+                    )
+
     for spec_id, acc in confidence_acc.items():
         specs[spec_id]["confidence_stats"] = _finalize_confidence_stats(acc)
+    for (spec_id, spec_hash), acc in baseline_confidence_acc.items():
+        specs[spec_id]["baselines"][spec_hash]["confidence_stats"] = _finalize_confidence_stats(acc)
 
     if not specs:
         return None
+    _finalize_spec_singletons(specs)
     return {"specs": specs}
 
 

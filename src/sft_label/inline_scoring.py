@@ -344,8 +344,10 @@ def _single_turn_conversation_update(sample: dict) -> dict:
         "conv_value_v2": value.get("value_score"),
         "conv_selection": value.get("selection_score"),
         "conv_selection_v2": value.get("selection_score"),
+        "conv_selection_extension_v2": value.get("selection_score_v2") or value.get("selection_score"),
         "peak_complexity": (value.get("complexity") or {}).get("overall"),
         "conv_rarity": ((value.get("rarity") or {}).get("score")),
+        "conv_rarity_extension_v2": ((value.get("rarity_extension") or {}).get("score")),
         "trajectory_structure_score": None,
         "thinking_mode": value.get("thinking_mode") or metadata.get("thinking_mode"),
     }
