@@ -113,13 +113,22 @@ def _print_extension_followup(stats: dict | None, run_dir: str | None) -> None:
     for ext_id, spec in sorted(specs.items()):
         total = int((spec or {}).get("total", 0) or 0)
         matched = int((spec or {}).get("matched", 0) or 0)
+        status_counts = (spec or {}).get("status_counts") or {}
         statuses = ", ".join(
             f"{key} ({int(value or 0)})"
-            for key, value in sorted(((spec or {}).get("status_counts") or {}).items())
+            for key, value in sorted(status_counts.items())
             if int(value or 0) > 0
         ) or "none"
         unmapped_total = sum(int(value or 0) for value in (((spec or {}).get("unmapped_counts") or {}).values()))
         print(f"  - {ext_id}: matched {matched} / {total} | statuses: {statuses} | unmapped={unmapped_total}")
+        if total >= 5 and matched == 0:
+            print("    advisory: trigger scope may be too narrow, or the core-label routing may not match the subset you intended.")
+        elif total >= 5 and matched == total:
+            print("    advisory: this extension matched every processed sample; verify the trigger is not too broad for this dataset.")
+        if int(status_counts.get("failed", 0) or 0) > 0 or int(status_counts.get("invalid", 0) or 0) > 0:
+            print("    advisory: inspect failed/invalid samples in the dashboard drawer before scaling up.")
+        if unmapped_total > 0:
+            print("    advisory: review unmapped values in the dashboard or export-review --include-extensions before widening the rollout.")
     if run_dir:
         print(f"Open the dashboard and inspect extension panels under: {run_dir}")
         print(f"Review export with extensions: uv run sft-label export-review --input {run_dir} --include-extensions")

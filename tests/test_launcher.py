@@ -174,7 +174,7 @@ def test_cmd_dashboard_service_start_can_cancel_port_retry_with_ctrl_c(monkeypat
     assert "已取消 dashboard 服务启动。" in out
 
 
-def _write_extension_spec(path, *, prompt_text="Label UI data.", options=None, trigger=True):
+def _write_extension_spec(path, *, prompt_text="Label UI data.", options=None, trigger=True, spec_id="ui_fine_labels"):
     options = options or ["form", "modal"]
     trigger_block = """
 trigger:
@@ -183,7 +183,7 @@ trigger:
     path.write_text(
         (
             f"""
-id: ui_fine_labels
+id: {spec_id}
 spec_version: v1
 display_name: UI Fine Labels
 description: Fine-grained UI labels.
@@ -1247,7 +1247,7 @@ def test_cmd_start_auto_publish_bootstraps_lan_service_with_shareable_url(monkey
 def test_extension_labeling_prompt_flow_collects_paths(tmp_path):
     extension_paths = [str(tmp_path / "ui.yaml"), str(tmp_path / "mobile.yaml")]
     _write_extension_spec(Path(extension_paths[0]), prompt_text="Label UI data.")
-    _write_extension_spec(Path(extension_paths[1]), prompt_text="Label mobile data.")
+    _write_extension_spec(Path(extension_paths[1]), prompt_text="Label mobile data.", spec_id="mobile_fine_labels")
     io = StubIO(_extension_run_answers(extension_paths))
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
     assert plan is not None
@@ -1260,7 +1260,7 @@ def test_extension_labeling_prompt_flow_collects_paths(tmp_path):
 def test_extension_labeling_plan_includes_repeated_flags(tmp_path):
     extension_paths = [str(tmp_path / "ui.yaml"), str(tmp_path / "mobile.yaml")]
     _write_extension_spec(Path(extension_paths[0]), prompt_text="Label UI data.")
-    _write_extension_spec(Path(extension_paths[1]), prompt_text="Label mobile data.")
+    _write_extension_spec(Path(extension_paths[1]), prompt_text="Label mobile data.", spec_id="mobile_fine_labels")
     io = StubIO(_extension_run_answers(extension_paths))
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
     assert plan is not None
@@ -1285,6 +1285,37 @@ def test_extension_labeling_prompt_flow_shows_spec_summary_and_compact_guidance(
     assert any(keyword in joined.lower() for keyword in ["prompt", "schema", "compact"])
 
 
+def test_ask_extension_spec_paths_reprompts_on_duplicate_extension_id(tmp_path):
+    first_path = tmp_path / "first.yaml"
+    duplicate_id_path = tmp_path / "duplicate.yaml"
+    unique_path = tmp_path / "unique.yaml"
+    _write_extension_spec(first_path, spec_id="ui_fine_labels")
+    _write_extension_spec(duplicate_id_path, spec_id="ui_fine_labels", prompt_text="Label duplicate UI data.")
+    _write_extension_spec(unique_path, spec_id="mobile_fine_labels", prompt_text="Label mobile data.")
+
+    io = StubIO(["y", str(first_path), "y", str(duplicate_id_path), str(unique_path), "n"])
+    paths = _ask_extension_spec_paths(io.input, io.output)
+
+    assert paths == [str(first_path), str(unique_path)]
+    joined = "\n".join(str(item) for item in io.outputs)
+    assert "duplicate extension id" in joined.lower() or "重复" in joined
+
+
+def test_ask_extension_spec_paths_prints_final_next_steps(tmp_path):
+    first_path = tmp_path / "first.yaml"
+    second_path = tmp_path / "second.yaml"
+    _write_extension_spec(first_path, spec_id="ui_fine_labels")
+    _write_extension_spec(second_path, spec_id="mobile_fine_labels", prompt_text="Label mobile data.")
+
+    io = StubIO(["y", str(first_path), "y", str(second_path), "n"])
+    paths = _ask_extension_spec_paths(io.input, io.output)
+
+    assert paths == [str(first_path), str(second_path)]
+    joined = "\n".join(str(item) for item in io.outputs)
+    assert "2" in joined
+    assert "include-extensions" in joined or "dashboard" in joined.lower()
+
+
 def test_ask_extension_spec_paths_reprompts_until_valid_spec(tmp_path):
     invalid_path = tmp_path / "missing.yaml"
     valid_path = tmp_path / "valid.yaml"
@@ -1296,6 +1327,21 @@ def test_ask_extension_spec_paths_reprompts_until_valid_spec(tmp_path):
     assert paths == [str(valid_path)]
     joined = "\n".join(str(item) for item in io.outputs)
     assert "does not exist" in joined or "不存在" in joined
+
+
+def test_export_review_prompt_flow_can_include_extension_columns():
+    io = StubIO(["15", "labeled.json", "review.csv", "", "", "y", ""])
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "export-review",
+        "--input",
+        "labeled.json",
+        "--output",
+        "review.csv",
+        "--include-extensions",
+    ]
 
 
 def test_cmd_start_dry_run_shows_label_extension_flags(monkeypatch, capsys):

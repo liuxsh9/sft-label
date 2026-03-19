@@ -6,6 +6,8 @@ from typing import TypedDict
 from sft_label.label_extensions_schema import ExtensionSpec
 
 COMPACT_EXTENSION_RECOMMENDED_CHARS = 2000
+EXTENSION_RECOMMENDED_MAX_FIELDS = 5
+EXTENSION_RECOMMENDED_MAX_OPTIONS_PER_FIELD = 20
 
 
 class ExtensionGuidanceSummary(TypedDict):
@@ -40,6 +42,10 @@ def summarize_extension_spec(spec: ExtensionSpec) -> ExtensionGuidanceSummary:
         warnings.append("triggerless")
     if prompt_schema_chars > COMPACT_EXTENSION_RECOMMENDED_CHARS:
         warnings.append("compact_over_budget")
+    if len(spec.schema) > EXTENSION_RECOMMENDED_MAX_FIELDS:
+        warnings.append("too_many_fields")
+    if any(len(field.options) > EXTENSION_RECOMMENDED_MAX_OPTIONS_PER_FIELD for field in spec.schema.values()):
+        warnings.append("too_many_options")
     return {
         "id": spec.id,
         "display_name": spec.display_name,
@@ -61,6 +67,8 @@ def summarize_extension_specs(specs: list[ExtensionSpec]) -> list[ExtensionGuida
 
 __all__ = [
     "COMPACT_EXTENSION_RECOMMENDED_CHARS",
+    "EXTENSION_RECOMMENDED_MAX_FIELDS",
+    "EXTENSION_RECOMMENDED_MAX_OPTIONS_PER_FIELD",
     "ExtensionGuidanceSummary",
     "summarize_extension_spec",
     "summarize_extension_specs",

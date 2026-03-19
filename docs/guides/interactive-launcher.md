@@ -70,6 +70,12 @@ Before anything runs, the launcher prints:
 
 That means the launcher is a safe way to discover the plain CLI command you want to save in scripts later.
 
+### Extension diagnostics and review exports
+
+If you enable Pass 1 extensions via `start`, the launcher now surfaces the same diagnostics block that the CLI prints: a preflight summary showing each spec’s trigger presence plus prompt/schema warnings so you can catch oversized or triggerless specs before the run starts. After the job finishes, a follow-up diagnostics section highlights match counts, validation warnings, low-confidence fields, and unmapped rows per spec so you can decide whether to revisit prompts, schema options, or trigger rules before scaling.
+
+When you need to inspect the extension columns in export form, run the generated `export-review` command with `--include-extensions` (`uv run sft-label export-review --input <run_dir> --output review.csv --include-extensions`). That flag keeps the default review CSV unchanged unless you opt in, while letting downstream reviewers see the additional extension fields.
+
 ## Auto-publishing dashboards from `start`
 
 When the generated workflow is `run`, `score`, or `regenerate-dashboard`, the launcher can ask:

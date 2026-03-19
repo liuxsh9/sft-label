@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from sft_label import label_extensions_guidance as guidance
 from sft_label import label_extensions_schema as schema
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "extensions"
@@ -215,3 +216,51 @@ def test_multiple_extensions_can_match(extension_specs: list[schema.ExtensionSpe
     matched_ids = [spec.id for spec in schema.match_extension_specs(extension_specs, labels)]
 
     assert matched_ids == ["ui_fine_labels", "mobile_fine_labels"]
+
+
+def test_invalid_trigger_key_is_rejected_at_load_time(tmp_path: Path) -> None:
+    raw = _load_raw_spec(UI_SPEC_PATH)
+    raw["trigger"] = {"domain_only": ["web-frontend"]}
+    bad_path = _write_temp_spec(tmp_path, raw, "invalid-trigger.yaml")
+
+    with pytest.raises(ValueError, match="unsupported trigger key"):
+        schema.load_extension_spec_file(bad_path)
+
+
+def test_blank_schema_field_name_is_rejected(tmp_path: Path) -> None:
+    raw = _load_raw_spec(UI_SPEC_PATH)
+    field = raw["schema"].pop("component_type")
+    raw["schema"]["   "] = field
+    bad_path = _write_temp_spec(tmp_path, raw, "blank-field-name.yaml")
+
+    with pytest.raises(ValueError, match="schema field name"):
+        schema.load_extension_spec_file(bad_path)
+
+
+def test_blank_option_value_is_rejected(tmp_path: Path) -> None:
+    raw = _load_raw_spec(UI_SPEC_PATH)
+    raw["schema"]["component_type"]["options"].append("   ")
+    bad_path = _write_temp_spec(tmp_path, raw, "blank-option.yaml")
+
+    with pytest.raises(ValueError, match="blank option"):
+        schema.load_extension_spec_file(bad_path)
+
+
+def test_guidance_summary_emits_size_warnings(tmp_path: Path) -> None:
+    raw = _load_raw_spec(UI_SPEC_PATH)
+    raw.pop("trigger", None)
+    raw["prompt"] = ("Label UI data with detailed heuristics. " * 120).strip()
+    for idx in range(6):
+        raw["schema"][f"extra_field_{idx}"] = {
+            "type": "multi_enum",
+            "options": [f"option_{n}" for n in range(21)],
+        }
+    path = _write_temp_spec(tmp_path, raw, "warning-heavy.yaml")
+
+    spec = schema.load_extension_spec_file(path)
+    summary = guidance.summarize_extension_spec(spec)
+
+    assert "triggerless" in summary["warnings"]
+    assert "compact_over_budget" in summary["warnings"]
+    assert "too_many_fields" in summary["warnings"]
+    assert "too_many_options" in summary["warnings"]

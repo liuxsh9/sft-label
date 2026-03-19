@@ -77,6 +77,14 @@ You can pass multiple `--label-extension` specs in a single run. Each spec is ev
 - If it does not match, the extension is recorded as `skipped`.
 - Failures and invalid outputs are isolated to the specific spec.
 
+### Extension diagnostics and follow-up guidance
+
+Before the first extension call, the CLI now prints a compact preflight summary that lists every registered spec, whether it has a trigger, and the prompt/schema warnings that matter before you spend tokens. That block is your first checkpoint for new extensions: confirm the spec looks focused, note any triggerless or oversized prompts, and split or tighten the schema before scaling up.
+
+After the run completes, a follow-up diagnostics section highlights match counts, validation warnings, low-confidence fields, or unmapped rows per spec, along with sample counts that help you prioritize drilling into the dashboard or review CSV.
+
+Both diagnostics sections reference the same metadata that ends up in `stats_labeling.json` so you can quickly trace a warning back to the dashboard or the `runtime_events` log for deeper investigation.
+
 ## Inline (mirrored JSONL) behavior
 
 When you run in mirrored inline mode, extension payloads are embedded under:
@@ -111,7 +119,7 @@ extension_stats.specs.<spec_id>
 uv run sft-label export-review --input run_dir --output review.csv --include-extensions
 ```
 
-This keeps the default CSV format unchanged while letting you include extension fields when needed.
+This keeps the default CSV format unchanged while letting you include extension fields when needed. When enabled, the export includes per-spec status/matched metadata, spec version/hash when present, flattened label/confidence columns, and a normalized unmapped summary column for each extension.
 
 ## Recommended user-side config patterns
 
@@ -167,6 +175,8 @@ Each extension:
 4.  Export that subset via `uv run sft-label export-review --include-extensions` to see exactly which columns downstream reviewers will consume.
 5.  Once the minimal flow is stable, add richer fields or a second extension spec.
 
+6.  Keep an eye on the preflight diagnostics block when you run or `start`; if the follow-up diagnostics highlight validation warnings, fix them before scaling the extension to more data.
+
 ### Recommended spec size
 
 - Aim for about 5 fields per extension so manual review stays reasonable.
@@ -189,7 +199,9 @@ Before trusting an extension rollout, verify the following:
 - Drill-down samples actually match the positions you care about so you can spot-check 10–20 cases manually.
 - Exported review CSV with `--include-extensions` shows the right columns.
 
-### When to split into multiple extensions
+- Keep each spec focused on a single domain or intent so the runtime diagnostics remain easy to interpret.
+- Prefer separate specs instead of one oversize schema when a new trigger, monitoring, or follow-up workflow is needed.
+- Mount each extension behind a specific trigger rather than bundling multiple unrelated domains into the same file. That keeps the dashboard, export stats, and follow-up diagnostics per spec clean.
 
 - The domains are different enough that one prompt/schema would be overloaded (web vs. mobile vs. infrastructure).
 - A single spec would exceed ~5 fields, contain dozens of option values, or produce a prompt+schema near the 2,000-character guideline.

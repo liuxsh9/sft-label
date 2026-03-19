@@ -157,6 +157,37 @@ class TestExportReview:
         assert rows[0]["turn_index"] == "1"
         assert rows[1]["turn_index"] == "2"
 
+    def test_export_review_includes_extension_spec_metadata_and_normalized_unmapped(self, tmp_path):
+        sample = _legacy_sample("legacy-3")
+        sample["labels"]["label_extensions"] = {
+            "ui_fine_labels": {
+                "status": "invalid",
+                "matched": True,
+                "spec_version": "v2",
+                "spec_hash": "sha256:ui-v2",
+                "labels": {"component_type": ["modal"]},
+                "confidence": {"component_type": 0.61},
+                "unmapped": [
+                    {"dimension": "component_type", "value": "sheet"},
+                    {"dimension": "component_type", "value": "sheet"},
+                    {"dimension": "visual_complexity", "value": "very-high"},
+                ],
+            }
+        }
+        input_file = tmp_path / "labeled.json"
+        input_file.write_text(json.dumps([sample]), encoding="utf-8")
+        output_file = tmp_path / "review.csv"
+
+        export_review(str(input_file), str(output_file), include_extensions=True)
+
+        with open(output_file, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        row = rows[0]
+        assert row["ext_ui_fine_labels_spec_version"] == "v2"
+        assert row["ext_ui_fine_labels_spec_hash"] == "sha256:ui-v2"
+        assert row["ext_ui_fine_labels_unmapped"] == "component_type:sheet, visual_complexity:very-high"
+
+
     def test_export_review_can_include_extension_columns(self, tmp_path):
         input_file = tmp_path / "labeled.json"
         input_file.write_text(json.dumps([_legacy_sample_with_extension("legacy-2")]), encoding="utf-8")
