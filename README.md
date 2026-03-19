@@ -128,7 +128,7 @@ When you turn on one or more `--label-extension` specs through the launcher, `st
 
 Extension exports stay optional: add `--include-extensions` when you run `export-review` to add extension columns to the CSV (`uv run sft-label export-review --input <run_dir> --output review.csv --include-extensions`). That mode keeps the default CSV format untouched unless you explicitly opt in, so you can let downstream reviewers see the new columns without affecting existing exports.
 
-From `sft-label start`, you can now enter either a single YAML path, a directory path (then choose one or more YAML specs), or `examples` to browse the built-in extension examples. Keep each spec focused on a single domain/trigger so the dashboards, diagnostics, and review columns for each extension stay interpretable. For detailed workflows, examples, and the refreshed first-run checklist, see [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md).
+From `sft-label start`, you can now either auto-load the repo-root `extensions/` folder, or manually enter a YAML path / directory path. The `extensions/` folder ships with `ui_web_analysis_v1.example.yaml` as a starter example, and the launcher will pick up updates you place there automatically. Keep each spec focused on a single domain/trigger so the dashboards, diagnostics, and review columns for each extension stay interpretable. For detailed workflows, examples, and the refreshed first-run checklist, see [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md).
 
 ## What a run writes
 
@@ -224,7 +224,12 @@ Recommended rollout:
 3. **Then add richer fields** — expand schema granularity only after the first version is stable.
 4. **Keep multiple extensions separate** — use repeated `--label-extension` flags instead of overloading one spec.
 
-Bundled examples:
+Starter locations:
+
+- Default launcher starter (auto-loaded by `sft-label start`): `extensions/ui_web_analysis_v1.example.yaml`
+- Reference example specs for direct CLI / copying: `docs/examples/extensions/...`
+
+Reference example specs:
 
 - Minimal starter: `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
 - Richer UI example: `docs/examples/extensions/ui_fine_labels_v1.yaml`
@@ -272,7 +277,7 @@ Best practice:
 
 ### First run checklist
 
-1.  Run one minimal spec (e.g., `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`) against a small sample and confirm the extension appears in the dashboard.
+1.  Start with one small spec on a sample (`extensions/ui_web_analysis_v1.example.yaml` from `start`, or a copied reference YAML under `docs/examples/extensions/`) and confirm the extension appears in the dashboard.
 2.  Check that only the intended rows match the trigger so you can trust `matched` counts.
 3.  Inspect `label_extensions.<spec_id>` payload for a few samples in the drawer to make sure the JSON is valid and fields align with the schema.
 4.  Rerun `uv run sft-label export-review --include-extensions` on that subset to see the columns you plan to publish.
@@ -309,7 +314,7 @@ Before trusting the extension results, confirm:
 
 ### Web UI dataset analysis guidance
 
-“UI SFT data” refers to the subset of your dataset that explicitly targets Web / desktop browser UI surfaces (dashboards, landing pages, data explorers, builders, admin consoles, component work, and interactive panels). The new Web-only analysis example (`docs/examples/extensions/ui_web_analysis_v1.yaml`) adds labels that surface:
+“UI SFT data” refers to the subset of your dataset that explicitly targets Web / desktop browser UI surfaces (dashboards, landing pages, data explorers, builders, admin consoles, component work, and interactive panels). The default Web-only analysis starter (`extensions/ui_web_analysis_v1.example.yaml`, with the matching reference copy under `docs/examples/extensions/ui_web_analysis_v1.yaml`) adds labels that surface:
 
 - **Surface coverage** (`ui_surface_type`) so you can see whether the dataset is stuck in one UI family.
 - **Interaction mix** (`interaction_pattern`) so you can detect overconcentration in CRUD/forms versus search/explore or builder/editing work.

@@ -45,9 +45,8 @@ For `run`, it can guide you through:
 - input path and optional output path
 - inline mode (`refresh`, `incremental`, `migrate`, `recompute`)
 - optional extension labeling via:
-  - one YAML file path,
-  - one directory path with **one-or-more** YAML selections,
-  - or the shortcut `examples` for built-in extension examples
+  - auto-loading the repo-root `extensions/` folder,
+  - or manually entering one YAML path / one directory path with **one-or-more** YAML selections
 - whether to chain Pass 2 scoring
 - optional rarity stats
 - prompt mode
@@ -57,6 +56,11 @@ For `run`, it can guide you through:
 - one-off environment overrides for `LITELLM_BASE` / `LITELLM_KEY`
 
 Concurrency caps default to 200 across `run`, `score`, and smart-resume flows, but you can quickly pick one of the 25 / 50 / 150 / 200 / 300 presets or type a custom value. The RPS max limit prompt likewise accepts a free-form numeric entry if you need to cap request rate yourself.
+
+Briefly:
+
+- **Adaptive runtime** automatically slows submission / backs off under provider pressure or instability.
+- **Recovery sweep** does one conservative end-of-phase retry pass for infra-style failures before finalizing.
 
 ## Useful flags
 
@@ -82,11 +86,11 @@ That means the launcher is a safe way to discover the plain CLI command you want
 
 When `start` asks for extension specs, you can now:
 
-- paste a single extension YAML path,
-- paste a directory path and choose one or more `.yaml` / `.yml` files,
-- or type `examples` to browse the built-in `docs/examples/extensions/` directory.
+- auto-load the repo-root `extensions/` directory,
+- or manually enter a single extension YAML path,
+- or manually enter a directory path and choose one or more `.yaml` / `.yml` files.
 
-This keeps the flow simple for first-time users while still supporting multiple extensions in one run.
+The `extensions/` directory now ships with `ui_web_analysis_v1.example.yaml` as a reference example. You can edit or replace files in that folder, and `start` will pick up the latest contents automatically.
 
 If you enable Pass 1 extensions via `start`, the launcher now surfaces the same diagnostics block that the CLI prints: a preflight summary showing each spec’s trigger presence plus prompt/schema warnings so you can catch oversized or triggerless specs before the run starts. After the job finishes, a follow-up diagnostics section highlights match counts, failed/invalid statuses, and unmapped rows per spec so you can decide whether to revisit prompts, schema options, or trigger rules before scaling. For low-confidence fields, inspect the dashboard drawer or `export-review --include-extensions` output on a small sample.
 
@@ -96,7 +100,7 @@ Important: every enabled extension adds extra extension-labeling calls for match
 
 ### Web UI dataset analysis guidance
 
-If you want to inspect “UI SFT data” (samples that explicitly target Web/desktop UI surfaces such as dashboards, landing pages, interactive panels, admin consoles, builders, and configuration tools), enable the Web-only analysis example (`docs/examples/extensions/ui_web_analysis_v1.yaml`). It surfaces coverage/distribution signals: surface categories, interaction mix, state/data complexity, engineering constraints, and ecosystem shape. These labels help you spot whether your dataset is overconcentrated in CRUD/forms or missing richer workflows before you narrow or rebalance the mix.
+If you want to inspect “UI SFT data” (samples that explicitly target Web/desktop UI surfaces such as dashboards, landing pages, interactive panels, admin consoles, builders, and configuration tools), enable the Web-only analysis example (`extensions/ui_web_analysis_v1.example.yaml` in the default folder, or the matching YAML wherever you keep your specs). It surfaces coverage/distribution signals: surface categories, interaction mix, state/data complexity, engineering constraints, and ecosystem shape. These labels help you spot whether your dataset is overconcentrated in CRUD/forms or missing richer workflows before you narrow or rebalance the mix.
 
 That example intentionally keeps only `domain_any_of` active by default. The other trigger dimensions are left empty in the YAML as visible placeholders. If you later fill them in, you are explicitly choosing to trust core Pass 1 routing quality enough to use those labels as hard preconditions for the extension.
 

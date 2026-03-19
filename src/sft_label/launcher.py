@@ -45,7 +45,7 @@ BACK_TOKENS = {
 }
 
 
-BUILTIN_EXTENSION_SPECS_DIR = Path(__file__).resolve().parents[2] / "docs" / "examples" / "extensions"
+DEFAULT_EXTENSION_SPECS_DIR = Path(__file__).resolve().parents[2] / "extensions"
 
 
 class BackRequested(Exception):
@@ -913,7 +913,7 @@ def _build_run_plan(
         ),
         SwitchField(
             key="adaptive_runtime",
-            label="自适应运行时 / Adaptive runtime",
+            label="自适应运行时（高压时自动降速/退让） / Adaptive runtime (auto-throttle under pressure)",
             options=[
                 SwitchOption("on", "开启（默认） / On (default)"),
                 SwitchOption("off", "关闭 / Off"),
@@ -1122,7 +1122,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
             ),
             SwitchField(
                 key="adaptive_runtime",
-                label="自适应运行时 / Adaptive runtime",
+                label="自适应运行时（高压时自动降速/退让） / Adaptive runtime (auto-throttle under pressure)",
                 options=[
                     SwitchOption("on", "开启（默认） / On (default)"),
                     SwitchOption("off", "关闭 / Off"),
@@ -1320,7 +1320,7 @@ def _build_run_plan_legacy(
         argv.extend(["--rps-limit", rps_limit])
 
     _section(output_fn, "模型与推理 / Model and inference")
-    if not _ask_yes_no(input_fn, "启用自适应运行时 / Enable adaptive runtime", default=True):
+    if not _ask_yes_no(input_fn, "启用自适应运行时（高压时自动降速/退让） / Enable adaptive runtime (auto-throttle under pressure)", default=True):
         argv.append("--no-adaptive-runtime")
     if not _ask_yes_no(input_fn, "阶段收尾执行恢复补跑 / Run end-of-phase recovery sweep", default=True):
         argv.append("--no-recovery-sweep")
@@ -1432,7 +1432,7 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
     if rps_limit != "":
         argv.extend(["--rps-limit", rps_limit])
 
-    if not _ask_yes_no(input_fn, "启用自适应运行时 / Enable adaptive runtime", default=True):
+    if not _ask_yes_no(input_fn, "启用自适应运行时（高压时自动降速/退让） / Enable adaptive runtime (auto-throttle under pressure)", default=True):
         argv.append("--no-adaptive-runtime")
     if not _ask_yes_no(input_fn, "阶段收尾执行恢复补跑 / Run end-of-phase recovery sweep", default=True):
         argv.append("--no-recovery-sweep")
@@ -2126,26 +2126,23 @@ def _ask_extra_flags(input_fn: InputFn) -> list[str]:
 
 
 def _extension_example_hint() -> str:
-    return "docs/examples/extensions/ui_fine_labels_minimal_v1.yaml"
+    return "extensions/ui_web_analysis_v1.example.yaml"
 
 
-def _builtin_extension_examples_dir() -> Path:
-    return BUILTIN_EXTENSION_SPECS_DIR
+def _default_extension_specs_dir() -> Path:
+    return DEFAULT_EXTENSION_SPECS_DIR
 
 
 def _resolve_extension_input_path(raw: str) -> Path:
-    candidate = str(raw).strip()
-    if candidate.lower() == "examples":
-        return _builtin_extension_examples_dir()
-    return Path(candidate).expanduser()
+    return Path(str(raw).strip()).expanduser()
 
 
 def _say_extension_first_run_guidance(output_fn: OutputFn) -> None:
     _say(
         output_fn,
         _msg(
-            f"首次建议从最小样例开始：{_extension_example_hint()}，先在 limit=10/50 的小样本上验证。",
-            f"First run recommendation: start from the minimal example at {_extension_example_hint()} and validate on a small sample first (limit=10/50).",
+            f"默认会读取仓库根目录的 extensions/；其中自带示例：{_extension_example_hint()}。先在 limit=10/50 的小样本上验证。",
+            f"By default the launcher can read the repo-root extensions/ folder; it ships with {_extension_example_hint()} as an example. Validate on a small sample first (limit=10/50).",
         ),
     )
     _say(
@@ -2158,8 +2155,8 @@ def _say_extension_first_run_guidance(output_fn: OutputFn) -> None:
     _say(
         output_fn,
         _msg(
-            "你可以输入单个 YAML 路径；也可以输入目录路径（或 examples）列出其中的 YAML 并一次选择多个。",
-            "You can enter a single YAML path, or enter a directory path (or `examples`) to list YAML files and choose multiple specs at once.",
+            "你可以自动读取默认 extensions/ 目录；也可以手动指定单个 YAML 路径或目录路径，并一次选择多个。",
+            "You can auto-load the default extensions/ folder, or manually enter a single YAML path or a directory and choose multiple specs at once.",
         ),
     )
     _say(
@@ -2320,15 +2317,37 @@ def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[st
     seen_ids: dict[str, str] = {}
     while True:
         while True:
-            path = _ask_required_text(input_fn, "扩展规范路径或目录 / Extension spec path or directory")
-            candidate = _resolve_extension_input_path(path)
+            source_mode = _ask_choice(
+                input_fn,
+                output_fn,
+                "扩展加载方式 / Extension source",
+                [
+                    (
+                        "default-dir",
+                        "默认目录 extensions/（推荐） / Default extensions/ folder (recommended)",
+                        f"自动读取 {_default_extension_specs_dir()} 中的 YAML；里面自带 example，可直接更新 / Auto-load YAML files from {_default_extension_specs_dir()}, which includes an example you can update",
+                    ),
+                    (
+                        "manual",
+                        "手动指定 YAML 或目录 / Manually enter YAML or directory",
+                        "自行输入单个 YAML 路径，或输入目录后多选 / Enter one YAML path, or a directory and choose multiple files",
+                    ),
+                ],
+                default_index=1,
+            )
+
+            if source_mode == "default-dir":
+                candidate = _default_extension_specs_dir()
+            else:
+                path = _ask_required_text(input_fn, "扩展规范路径或目录 / Extension spec path or directory")
+                candidate = _resolve_extension_input_path(path)
             selected_previews: list[tuple[str, str]]
             if candidate.is_dir():
                 selected_previews = _choose_extension_specs_from_directory(input_fn, output_fn, candidate)
                 if not selected_previews:
                     continue
             else:
-                preview = _maybe_preview_extension_spec(path, output_fn)
+                preview = _maybe_preview_extension_spec(str(candidate), output_fn)
                 if preview is None:
                     continue
                 selected_previews = [preview]
@@ -2370,7 +2389,7 @@ def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[st
         if not _ask_yes_no(
             input_fn,
             "添加另一个扩展规范路径 / Add another extension spec path",
-            default=True,
+            default=False,
         ):
             break
     if specs:
