@@ -50,6 +50,8 @@ For `run`, it can guide you through:
 - adaptive runtime / recovery sweep toggles
 - one-off environment overrides for `LITELLM_BASE` / `LITELLM_KEY`
 
+Concurrency caps default to 200 across `run`, `score`, and smart-resume flows, but you can quickly pick one of the 25 / 50 / 150 / 200 / 300 presets or type a custom value. The RPS max limit prompt likewise accepts a free-form numeric entry if you need to cap request rate yourself.
+
 ## Useful flags
 
 ```bash
@@ -76,11 +78,15 @@ If you enable Pass 1 extensions via `start`, the launcher now surfaces the same 
 
 When you need to inspect the extension columns in export form, run the generated `export-review` command with `--include-extensions` (`uv run sft-label export-review --input <run_dir> --output review.csv --include-extensions`). That flag keeps the default review CSV unchanged unless you opt in, while letting downstream reviewers see the additional extension fields.
 
+After the dashboard decisions (auto-publish, service exposure, etc.) are settled, the launcher now prints a richer execution overview—command recap, concurrency / RPS caps, dashboard service state, and auto-publish choices—before asking for final confirmation to run the job.
+
 ## Auto-publishing dashboards from `start`
 
 When the generated workflow is `run`, `score`, or `regenerate-dashboard`, the launcher can ask:
 
 > Auto-publish dashboards to the static service after completion?
+
+This prompt now defaults to **Yes**, so the recommended path is to publish dashboards when the service is configured.
 
 If you answer yes:
 

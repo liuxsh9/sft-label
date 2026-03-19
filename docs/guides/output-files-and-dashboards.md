@@ -167,6 +167,8 @@ The `register-run` command prints primary URLs for each published dashboard.
 
 If you use `uv run sft-label start` and choose auto-publish:
 
+The launcher now defaults this question to **Yes** so publication is the recommended path, and once you resolve the auto-publish/exposure choices it prints the execution overview described earlier before asking for final confirmation.
+
 - the launcher can select a configured service
 - it can start the service before the main job when the configured service is not already running
 - after `run`, `score`, or `regenerate-dashboard`, it publishes the resulting dashboards automatically

@@ -46,8 +46,8 @@ export LITELLM_KEY="your-key"
 uv run sft-label start
 # 默认路径：
 # - 选择 “Pass 1 + Pass 2”
-# - 大多数问题保持默认
-# - 询问时开启 auto-publish
+# - 大多数问题保持默认（并发默认 200，提供 25 / 50 / 150 / 200 / 300 预设及自定义输入，RPS 最大值也支持自由填写）
+# - auto-publish 提示默认是 **Yes**
 # - 结束后直接拿到 dashboard URL
 ```
 
@@ -89,13 +89,15 @@ flowchart LR
 一般情况下：
 
 - 选择 **Pass 1 + Pass 2**
-- 大多数提示保持默认
-- auto-publish 回答 **yes**
+- 大多数提示保持默认（并发默认 200，提供 25 / 50 / 150 / 200 / 300 预设及自定义输入，RPS 最大值也支持自由填写）
+- auto-publish 提示默认是 **Yes**
 - 如果还没有 dashboard service，`start` 可以直接初始化、启动并输出稳定的 dashboard URL
 - 首次配置只需选一次访问方式：
   - **local** → `127.0.0.1`
   - **LAN** → `0.0.0.0`，供局域网访问
   - **public** → `0.0.0.0`，再补上反向代理 / 对外访问 URL
+
+完成 auto-publish/服务暴露等决策后，启动器会展示更丰富的执行概览，并在你确认后再执行。
 
 `start` 主要做四件事：
 

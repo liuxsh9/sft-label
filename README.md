@@ -48,7 +48,7 @@ uv run sft-label start
 # default path:
 # - choose "Pass 1 + Pass 2"
 # - keep most prompts at their defaults
-# - enable auto-publish when asked
+# - auto-publish prompt defaults to **Yes**
 # - finish with dashboard URLs
 ```
 
@@ -90,8 +90,8 @@ flowchart LR
 In the common case:
 
 - choose **Pass 1 + Pass 2**
-- keep most prompts unchanged
-- answer **yes** to auto-publish
+- keep most prompts unchanged (concurrency defaults to 200 with presets 25/50/150/200/300 plus a custom value, and the RPS max limit prompt also accepts a custom entry)
+- auto-publish prompts default to **Yes**
 - if no dashboard service exists yet, `start` can initialize one, start it, and print stable dashboard URLs
 - pick one dashboard exposure mode once:
   - **local** → `127.0.0.1`
@@ -104,6 +104,8 @@ What `start` does:
 2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options (including `--adaptive-runtime` / `--recovery-sweep` toggles when relevant).
 3. **Builds the exact CLI command for you** and shows a launch summary before execution.
 4. **Can finish the run with URLs** by auto-publishing dashboards to your configured service.
+
+After the launcher captures your dashboard service/auto-publish choices and any needed exposure details, it prints a richer execution overview—command, concurrency/RPS caps, dashboard status, and auto-publish decisions—before asking whether to execute.
 
 Two dashboard-service quality-of-life details:
 

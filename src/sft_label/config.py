@@ -48,7 +48,7 @@ RECOVERY_SWEEP_DISABLE_ARBITRATION = True
 # ═══════════════════════════════════════════════════════════
 
 DEFAULT_LABELING_MODEL = "gpt-4o-mini"
-DEFAULT_CONCURRENCY = 100
+DEFAULT_CONCURRENCY = 200
 CONFIDENCE_THRESHOLD = 0.60
 
 # ─── Conversation Truncation (Pass 1) ───────────────────

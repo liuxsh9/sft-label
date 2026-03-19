@@ -57,6 +57,8 @@ Why start here?
 - it previews the exact command before execution
 - it can auto-publish dashboards after the run
 
+The launcher also defaults concurrency to 200 (with quick presets 25 / 50 / 150 / 200 / 300 plus a custom entry) and lets you set a custom RPS max limit, so you can often leave those prompts untouched. The auto-publish question now defaults to **Yes**, and once the dashboard decisions are settled it prints the command and a richer execution overview before asking whether to execute.
+
 If you want to inspect the generated command without running it:
 
 ```bash
