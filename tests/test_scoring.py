@@ -2249,6 +2249,142 @@ class TestResumeScoringFile:
         assert by_id["b-high"] > by_id["a-high"]
         assert by_id["b-low"] > by_id["a-high"]
 
+    def test_chunked_first_failure_logs_single_compact_line(self, tmp_path, capsys):
+        from sft_label.scoring import _run_scoring_file_chunked
+        from unittest.mock import patch
+
+        labeled_path = tmp_path / "labeled.jsonl"
+        labeled_path.write_text(
+            json.dumps({
+                "id": "sample-1",
+                "conversations": [
+                    {"from": "human", "value": "Q"},
+                    {"from": "gpt", "value": "A"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        async def failing_score_one(http_client, sample, model, rarity_result,
+                                    sample_idx, total, sem, config=None, rate_limiter=None):
+            return None, {
+                "sample_id": sample["id"],
+                "status": "failed",
+                "attempts": 1,
+                "http_status": 502,
+                "error": "HTTP 502 Bad Gateway",
+                "error_response": "<html><body><h1>Bad Gateway</h1><p>upstream timeout</p></body></html>",
+                "llm_calls": 1,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "validation_issues": [],
+            }
+
+        with patch("sft_label.scoring.score_one", side_effect=failing_score_one):
+            asyncio.run(
+                _run_scoring_file_chunked(
+                    labeled_path,
+                    tmp_path,
+                    None,
+                    0,
+                    PipelineConfig(
+                        scoring_concurrency=1,
+                        sample_max_retries=1,
+                        enable_adaptive_runtime=False,
+                        enable_stage_recovery_sweep=False,
+                    ),
+                    show_progress=False,
+                    print_summary=False,
+                    quiet=True,
+                )
+            )
+
+        output = capsys.readouterr().out
+        first_failure_lines = [line for line in output.splitlines() if "First failure" in line]
+        assert len(first_failure_lines) == 1
+        assert "http=502" in first_failure_lines[0]
+        assert "response=" not in output
+        assert "<html" not in output.lower()
+
+    def test_directory_scoring_delays_per_file_dashboards_until_global_recompute(self, tmp_path):
+        from sft_label.scoring import run_scoring, _rewrite_directory_global_selection
+        from unittest.mock import patch
+
+        for file_idx in range(2):
+            batch_dir = tmp_path / f"batch_{file_idx}"
+            batch_dir.mkdir()
+            (batch_dir / "labeled.json").write_text(
+                json.dumps([
+                    {
+                        "id": f"sample-{file_idx}",
+                        "conversations": [
+                            {"from": "human", "value": "Q"},
+                            {"from": "gpt", "value": "A"},
+                        ],
+                        "labels": {"intent": "build", "difficulty": "intermediate"},
+                    }
+                ]),
+                encoding="utf-8",
+            )
+
+        async def successful_score_one(http_client, sample, model, rarity_result,
+                                       sample_idx, total, sem, config=None, rate_limiter=None):
+            value = {
+                "complexity": {"instruction": 5, "analytical_depth": 5, "implementation": 5, "overall": 5},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }
+            monitor = {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+            return value, monitor
+
+        recompute_started = False
+        per_file_dashboard_calls = 0
+
+        def wrapped_rewrite(*args, **kwargs):
+            nonlocal recompute_started
+            recompute_started = True
+            return _rewrite_directory_global_selection(*args, **kwargs)
+
+        def fake_generate_value_dashboard(output_dir, scored_file=None, stats_file=None, output_file=None, quiet=False):
+            nonlocal per_file_dashboard_calls
+            output_dir = Path(output_dir)
+            dashboard_name = output_file or PASS2_DASHBOARD_FILE
+            (output_dir / dashboard_name).write_text("<html></html>", encoding="utf-8")
+            if dashboard_name == PASS2_DASHBOARD_FILE:
+                per_file_dashboard_calls += 1
+                assert recompute_started, "Per-file dashboards should be generated only during/after global recompute"
+                assert quiet is True, "Per-file dashboards should stay quiet during global recompute"
+
+        with patch("sft_label.scoring.score_one", side_effect=successful_score_one), \
+                patch("sft_label.scoring._rewrite_directory_global_selection", side_effect=wrapped_rewrite), \
+                patch("sft_label.tools.visualize_value.generate_value_dashboard", side_effect=fake_generate_value_dashboard):
+            asyncio.run(
+                run_scoring(
+                    str(tmp_path),
+                    config=PipelineConfig(
+                        scoring_concurrency=1,
+                        enable_adaptive_runtime=False,
+                    ),
+                )
+            )
+
+        assert recompute_started is True
+        assert per_file_dashboard_calls == 2
+
     def test_resume_skips_prescored(self, tmp_path):
         """Partially scored.jsonl should let resume skip those samples."""
         from sft_label.scoring import _run_scoring_file

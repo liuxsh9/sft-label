@@ -265,6 +265,31 @@ def _is_timeout_error(raw: str | None, usage: dict | None) -> bool:
     return any(token in blob for token in ("timeout", "readtimeout", "connecttimeout", "timeouterror"))
 
 
+def _looks_like_html_response(text: str | None) -> bool:
+    blob = str(text or "").lstrip().lower()
+    return blob.startswith("<!doctype html") or blob.startswith("<html")
+
+
+def _summarize_first_failure(monitor: dict | None) -> str | None:
+    if not monitor:
+        return None
+    sample_id = monitor.get("sample_id") or "unknown"
+    attempts = monitor.get("attempts")
+    err = str(monitor.get("error") or "unknown").strip()
+    http_status = monitor.get("http_status") or _extract_http_status(err, monitor)
+    parts = [f"  [!] First failure: sample={sample_id}"]
+    if attempts not in (None, ""):
+        parts.append(f"attempts={attempts}")
+    if http_status is not None:
+        parts.append(f"http={http_status}")
+    if err:
+        compact_err = " ".join(err.split())
+        parts.append(f"err={compact_err[:200]}")
+    if _looks_like_html_response(monitor.get("error_response")):
+        parts.append("html_response")
+    return " ".join(parts)
+
+
 def _classify_pass2_attempt(
     parsed,
     raw,
@@ -3280,6 +3305,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                      shared_runtime=None,
                                      progress_hook=None,
                                      print_summary=True,
+                                     generate_dashboard=True,
                                      quiet=False):
     """Score a JSONL labeled file in chunks to bound memory.
 
@@ -3664,12 +3690,9 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         chunk_data["done"] += 1
 
                         if not value and not first_error_logged and monitor:
-                            err = monitor.get("error", "unknown")
-                            err_resp = monitor.get("error_response", "")
-                            print(f"  [!] First failure: sample={monitor.get('sample_id')} "
-                                  f"attempts={monitor.get('attempts')} err={err[:200]}")
-                            if err_resp and err_resp != err:
-                                print(f"      response={err_resp[:200]}")
+                            summary = _summarize_first_failure(monitor)
+                            if summary:
+                                print(summary)
                             first_error_logged = True
 
                         _info = format_progress_info(
@@ -3826,19 +3849,21 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         print(f"  Warning: conversation aggregation failed: {e}")
 
     # Dashboard
-    try:
-        from sft_label.tools.visualize_value import generate_value_dashboard
-        run_with_heartbeat(
-            "Generating scoring dashboard",
-            lambda: generate_value_dashboard(
-                output_dir,
-                scored_file="scored.jsonl",
-                stats_file=PASS2_STATS_FILE,
-                output_file=PASS2_DASHBOARD_FILE,
-            ),
-        )
-    except Exception as e:
-        print(f"  Warning: dashboard generation failed: {e}")
+    if generate_dashboard:
+        try:
+            from sft_label.tools.visualize_value import generate_value_dashboard
+            run_with_heartbeat(
+                "Generating scoring dashboard",
+                lambda: generate_value_dashboard(
+                    output_dir,
+                    scored_file="scored.jsonl",
+                    stats_file=PASS2_STATS_FILE,
+                    output_file=PASS2_DASHBOARD_FILE,
+                    quiet=quiet,
+                ),
+            )
+        except Exception as e:
+            print(f"  Warning: dashboard generation failed: {e}")
 
     if print_summary:
         print_scoring_summary(stats, output_dir)
@@ -4100,7 +4125,7 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
 
 
 async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=False,
-                            llm_progress_cb=None, file_label=None):
+                            llm_progress_cb=None, file_label=None, generate_dashboard=True):
     """Score a single labeled file."""
     input_path = Path(input_path)
 
@@ -4111,6 +4136,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             resume=resume,
             llm_progress_cb=llm_progress_cb,
             file_label=file_label,
+            generate_dashboard=generate_dashboard,
         )
 
     if output_dir is None:
@@ -4281,12 +4307,9 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             else:
                 failed_count += 1
                 if not first_error_logged and monitor:
-                    err = monitor.get("error", "unknown")
-                    err_resp = monitor.get("error_response", "")
-                    print(f"  [!] First failure: sample={monitor.get('sample_id')} "
-                          f"attempts={monitor.get('attempts')} err={err[:200]}")
-                    if err_resp and err_resp != err:
-                        print(f"      response={err_resp[:200]}")
+                    summary = _summarize_first_failure(monitor)
+                    if summary:
+                        print(summary)
                     first_error_logged = True
             return idx
 
@@ -4847,6 +4870,7 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
                 scored_file="scored.json" if (scored_path.parent / "scored.json").exists() else "scored.jsonl",
                 stats_file=PASS2_STATS_FILE,
                 output_file=PASS2_DASHBOARD_FILE,
+                quiet=True,
             )
         except Exception:
             pass
@@ -4855,7 +4879,7 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
     return updated_stats
 
 
-def _flush_scoring_file(collector, config, pprint=print, file_label=None):
+def _flush_scoring_file(collector, config, pprint=print, file_label=None, generate_dashboard=True):
     """Write all scoring outputs for a completed file and release memory.
 
     Returns the stats dict.
@@ -4963,14 +4987,15 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None):
     except Exception:
         pass
 
-    try:
-        from sft_label.tools.visualize_value import generate_value_dashboard
-        generate_value_dashboard(output_dir, scored_file="scored.json",
-                                 stats_file=PASS2_STATS_FILE,
-                                 output_file=PASS2_DASHBOARD_FILE,
-                                 quiet=True)
-    except Exception:
-        pass
+    if generate_dashboard:
+        try:
+            from sft_label.tools.visualize_value import generate_value_dashboard
+            generate_value_dashboard(output_dir, scored_file="scored.json",
+                                     stats_file=PASS2_STATS_FILE,
+                                     output_file=PASS2_DASHBOARD_FILE,
+                                     quiet=True)
+        except Exception:
+            pass
 
     # Release memory
     collector.samples = None
@@ -5412,6 +5437,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                             config,
                             pprint=pprint,
                             file_label=_relative_file_label(collector.labeled_path, input_dir),
+                            generate_dashboard=False,
                         )
                         stats["file"] = stats.get("file") or _relative_file_label(collector.labeled_path, input_dir)
                         all_file_stats.append(stats)
@@ -5449,6 +5475,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         shared_runtime=runtime,
                         progress_hook=_streaming_progress_hook,
                         print_summary=False,
+                        generate_dashboard=False,
                         quiet=True,
                     )
                     stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
@@ -5543,11 +5570,9 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         else:
                             c.fail += 1
                             if not first_error_logged and monitor:
-                                err = monitor.get("error", "unknown")
-                                err_resp = monitor.get("error_response", "")
-                                pprint(f"  [!] First failure: {monitor.get('sample_id')} err={err[:200]}")
-                                if err_resp and err_resp != err:
-                                    pprint(f"      response={err_resp[:200]}")
+                                summary = _summarize_first_failure(monitor)
+                                if summary:
+                                    pprint(summary)
                                 first_error_logged = True
 
                         _update_sample_progress(

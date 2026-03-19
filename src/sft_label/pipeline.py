@@ -2155,7 +2155,8 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         generate_dashboard(output_dir, labeled_file=labeled_json,
-                           stats_file=stats_file, output_file=dashboard_file)
+                           stats_file=stats_file, output_file=dashboard_file,
+                           quiet=True)
     except Exception:
         pass
 
@@ -3850,6 +3851,7 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
                 labeled_file=None,
                 stats_file=PASS1_SUMMARY_STATS_FILE,
                 output_file=str(dashboard_output),
+                quiet=True,
             ),
         )
         print(f"\nGlobal dashboard generated: {generated_output}")

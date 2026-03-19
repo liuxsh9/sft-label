@@ -488,6 +488,7 @@ def _write_dashboard_bundle(
 
 def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                        stats_file=PASS1_STATS_FILE, output_file="dashboard_labeling.html",
+                       quiet: bool = False,
                        static_base_url: str | None = None) -> Path:
     """Generate an interactive Pass 1 dashboard."""
     run_dir = Path(run_dir)
@@ -496,7 +497,8 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
 
     if labeled_file is None:
         if stats_file == PASS1_SUMMARY_STATS_FILE:
-            print("  Labeling dashboard: building scope tree")
+            if not quiet:
+                print("  Labeling dashboard: building scope tree")
             payload, explorer_sources = _tree_payload(run_dir)
         else:
             samples = []
@@ -543,7 +545,8 @@ def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                 }
             )
 
-    print("  Labeling dashboard: writing dashboard bundle")
+    if not quiet:
+        print("  Labeling dashboard: writing dashboard bundle")
     _write_dashboard_bundle(
         output_path,
         payload,

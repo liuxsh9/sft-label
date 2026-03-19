@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE
+from sft_label import pipeline as pipeline_module
 from sft_label.tools import visualize_labels as visualize_labels_module
 from sft_label.tools.dashboard_aggregation import infer_scope_turn_kind, infer_scope_turn_kind_from_path
 from sft_label.label_extensions_stats import build_extension_conversation_units
@@ -668,6 +670,111 @@ def test_generate_dashboard_tree_payload_logs_global_build_phases(tmp_path, caps
     out = capsys.readouterr().out
     assert "Labeling dashboard: building scope tree" in out
     assert "Labeling dashboard: writing dashboard bundle" in out
+
+
+def test_generate_dashboard_quiet_suppresses_global_build_phase_logs(tmp_path, capsys):
+    stats = {
+        "input_path": "dataset",
+        "total_samples": 1,
+        "success_rate": 1.0,
+        "total_tokens": 10,
+        "arbitrated_rate": 0.0,
+        "unmapped_unique_count": 0,
+        "tag_distributions": {},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+    (tmp_path / PASS1_SUMMARY_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+
+    generate_dashboard(tmp_path, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE, quiet=True)
+
+    assert "Labeling dashboard:" not in capsys.readouterr().out
+
+
+def test_flush_file_output_uses_quiet_dashboard_generation(tmp_path, monkeypatch):
+    sample = _sample_with_unmapped(
+        "sample-1",
+        "Add WebGPU rendering support to this pipeline.",
+        [{"dimension": "task", "value": "gpu-porting"}],
+    )
+    collector = pipeline_module.FileCollector(
+        file_idx=0,
+        abs_path=tmp_path / "input.json",
+        rel_path=Path("input.json"),
+        output_dir=tmp_path / "out",
+        prefix="input",
+        total=1,
+        samples=[sample],
+        label_count=1,
+    )
+    collector.labels[0] = sample["labels"]
+    collector.monitors[0] = {"status": "success", "sample_attempt": 0}
+
+    called = {}
+
+    def _fake_generate_dashboard(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+        return tmp_path / "out" / "dashboard_labeling_input.html"
+
+    monkeypatch.setattr(visualize_labels_module, "generate_dashboard", _fake_generate_dashboard)
+    monkeypatch.setattr(
+        pipeline_module,
+        "compute_stats",
+        lambda *args, **kwargs: {
+            "total_samples": 1,
+            "distribution_total_samples": 1,
+            "success": 1,
+            "failed": 0,
+            "success_rate": 1.0,
+            "total_llm_calls": 2,
+            "total_tokens": 0,
+            "arbitrated_count": 0,
+            "arbitrated_rate": 0.0,
+            "unmapped_unique_count": 0,
+            "canonicalization_total_count": 0,
+            "canonicalization_unique_count": 0,
+            "tag_distributions": {},
+            "unmapped_tags": {},
+            "canonicalization_counts": {},
+            "confidence_stats": {},
+            "cross_matrix": {},
+        },
+    )
+    monkeypatch.setattr(pipeline_module, "_safe_write_pass1_conversation_stats", lambda *args, **kwargs: None)
+
+    pipeline_module.flush_file_output(collector, run_dir=tmp_path, checkpoint_path=None)
+
+    assert called["kwargs"].get("quiet") is True
+
+
+def test_write_global_summary_uses_quiet_dashboard_generation(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    called = {}
+
+    def _fake_generate_dashboard(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+        return run_dir / "dashboard_labeling_dataset.html"
+
+    monkeypatch.setattr(visualize_labels_module, "generate_dashboard", _fake_generate_dashboard)
+    monkeypatch.setattr(pipeline_module, "run_with_heartbeat", lambda _label, fn: fn())
+
+    pipeline_module._write_global_summary(
+        all_file_stats=[],
+        run_dir=run_dir,
+        input_path=input_dir,
+        model="test-model",
+        concurrency=2,
+        batch_start=time.time(),
+        config=None,
+    )
+
+    assert called["kwargs"].get("quiet") is True
 
 
 def test_generate_dashboard_tree_payload_uses_stats_without_loading_leaf_samples(tmp_path, monkeypatch):
