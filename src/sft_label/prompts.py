@@ -308,8 +308,8 @@ Return ONLY valid JSON (no markdown, no explanation):
   "unmapped": []
 }
 
-Rules: All tags lowercase kebab-case from lists above. Multi-select = arrays. Single-select = strings. confidence: 0.0-1.0. unmapped: [{"dimension":"...","value":"..."}] or [].
-Ignore XML tags, diff markers, or formatting tokens — evaluate semantic content only."""
+Rules: Use lowercase kebab-case IDs only. Multi-select=[] when none; single-select="" when none; never use "none". confidence: 0.0-1.0. unmapped: [{"dimension":"...","value":"..."}] or [].
+Ignore XML/diff/formatting tokens; evaluate semantic content only."""
 
 
 CALL1_FEWSHOT = [
@@ -1027,7 +1027,7 @@ CALL1_FEWSHOT_COMPACT = [
     {
         "role": "user",
         "content": """<conversation>
-[{"from":"human","value":"解释一下 Python 列表推导式，并给个过滤偶数的例子"},{"from":"gpt","value":"列表推导式用于一行生成列表，例如 `[x for x in nums if x % 2 == 0]` 会筛出偶数。"}]
+[{"from":"human","value":"代码输出什么？\\n```python\\nnums=[1,2,3]\\nprint([x*2 for x in nums if x%2])\\n```"},{"from":"gpt","value":"输出 `[2,6]`。"}]
 </conversation>
 
 <preprocessed_signals>

@@ -994,13 +994,30 @@ def sanitize_conversations_for_content_filter(conversations):
 def _candidate_tag_values(value):
     """Return raw + alias-resolved candidates for rescue checks."""
     raw = "" if value is None else str(value).strip()
-    if not raw:
+    if not raw or _is_empty_sentinel(raw):
         return []
     candidates = [raw]
     alias = TAG_ALIASES.get(raw)
     if alias and alias not in candidates:
         candidates.append(alias)
     return candidates
+
+
+def _is_empty_sentinel(value):
+    """Return True for placeholder outputs that should mean empty."""
+    if value is None:
+        return True
+    return str(value).strip().lower() in {"", "none"}
+
+
+def _normalize_optional_single_value(value):
+    """Normalize explicit empty sentinels to the empty-string shape."""
+    return "" if _is_empty_sentinel(value) else value
+
+
+def _normalize_optional_multi_values(values):
+    """Drop explicit empty sentinels from multi-select outputs."""
+    return [value for value in values if not _is_empty_sentinel(value)]
 
 
 def _find_cross_dim_tag(value, exclude_dim=None):
@@ -1052,7 +1069,7 @@ def _normalize_unmapped_items(items):
         else:
             dim = "?"
             value = str(item or "").strip()
-        if value:
+        if value and not _is_empty_sentinel(value):
             normalized.append({"dimension": dim, "value": value})
     return normalized
 
@@ -1093,7 +1110,7 @@ def validate_tags(result, call_name="call1"):
 
         pool = TAG_POOLS.get(dim, set())
         if dim in SINGLE_SELECT:
-            raw_val = result[dim]
+            raw_val = _normalize_optional_single_value(result[dim])
             if raw_val is None:
                 raw_val = ""
             elif isinstance(raw_val, (list, dict, set, tuple)):
@@ -1112,6 +1129,7 @@ def validate_tags(result, call_name="call1"):
                 cleaned[dim] = val
         else:
             raw = result[dim] if isinstance(result[dim], list) else [result[dim]]
+            raw = _normalize_optional_multi_values(raw)
             resolved = _resolve_aliases(dim, raw, canonicalized=canonicalized)
             valid = []
             for v in resolved:
