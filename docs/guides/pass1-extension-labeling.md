@@ -13,19 +13,19 @@ Use `--label-extension` once per extension spec file:
 ```bash
 uv run sft-label run \
   --input data.jsonl \
-  --label-extension extensions/ui_fine_labels.yaml \
-  --label-extension extensions/mobile_fine_labels.yaml
+  --label-extension extensions/my_web_extension.yaml \
+  --label-extension extensions/my_mobile_extension.yaml
 ```
 
 The flag is repeatable, and **each spec must have a unique `id`**. Specs that do not match a sample’s trigger are recorded as `status=skipped` and `matched=false`.
 
 If you use the interactive launcher (`uv run sft-label start`), extension selection now supports:
 
+- auto-loading the repo-root `extensions/` directory,
 - a single YAML path,
-- a directory path (lists `.yaml` / `.yml` files and lets you select **one or more**),
-- the shortcut `examples` (opens the built-in `docs/examples/extensions/` directory).
+- or a directory path (lists `.yaml` / `.yml` files and lets you select **one or more**).
 
-The launcher also prints a strong cost reminder: **each enabled extension adds extra extension-labeling calls for matched samples**, so do not turn on highly domain-specific extensions across the full dataset unless you first filter or sample it down.
+The repo-root `extensions/` directory now ships with `ui_web_analysis_v1.example.yaml` as a starter example. You can keep your own specs there and the launcher will pick up the latest files automatically. The launcher also prints a strong cost reminder: **each enabled extension adds extra extension-labeling calls for matched samples**, so do not turn on highly domain-specific extensions across the full dataset unless you first filter or sample it down.
 
 ## Extension spec files
 
@@ -59,7 +59,12 @@ output:
   allow_unmapped: true
 ```
 
-Bundled example specs:
+Starter locations:
+
+- Default launcher starter in repo-root `extensions/`: `extensions/ui_web_analysis_v1.example.yaml`
+- Reference example specs for direct CLI / copying: `docs/examples/extensions/...`
+
+Reference example specs:
 
 - Minimal starter: `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
 - Richer UI variant: `docs/examples/extensions/ui_fine_labels_v1.yaml`
@@ -134,7 +139,7 @@ This keeps the default CSV format unchanged while letting you include extension 
 
 ### 1) Minimal / safe first rollout
 
-Use the bundled minimal example directly:
+Use a small reference example directly (or copy it into your own `extensions/` folder first):
 
 ```bash
 uv run sft-label run \
@@ -160,12 +165,12 @@ uv run sft-label run \
 
 ### 3) Web UI dataset analysis / distribution optimization
 
-Use the Web-only analysis example when you want to understand **dataset mix**, not answer quality:
+Use the Web-only analysis starter when you want to understand **dataset mix**, not answer quality:
 
 ```bash
 uv run sft-label run \
   --input filtered_web_ui_data.jsonl \
-  --label-extension docs/examples/extensions/ui_web_analysis_v1.yaml
+  --label-extension extensions/ui_web_analysis_v1.example.yaml
 ```
 
 This example is useful when you want to answer questions like:
@@ -196,7 +201,7 @@ This example also assumes the input is already mostly a **Web UI subset**. If yo
 
 #### How to turn this example into your own extension
 
-1. Copy `docs/examples/extensions/ui_web_analysis_v1.yaml` to a new file with a new `id`.
+1. Copy `extensions/ui_web_analysis_v1.example.yaml` to a new file with a new `id`.
 2. Keep the schema to roughly **3-5 fields** unless you have a strong reason to expand it.
 3. Start with only the broadest trigger active (usually `domain_any_of`) so you can inspect recall first.
 4. Run a small filtered sample, then inspect `matched/skipped`, dashboard distributions, and `export-review --include-extensions`.
@@ -231,8 +236,8 @@ You can enable several domain-specific extensions at once:
 ```bash
 uv run sft-label run \
   --input data.jsonl \
-  --label-extension docs/examples/extensions/ui_fine_labels_minimal_v1.yaml \
-  --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+  --label-extension extensions/my_web_extension.yaml \
+  --label-extension extensions/my_mobile_extension.yaml
 ```
 
 Each extension:
@@ -244,7 +249,7 @@ Each extension:
 
 ### First-run checklist
 
-1.  Start with the minimal spec (`docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`) on a small input and make sure the extension shows up in the dashboard and review exports.
+1.  Start with one small spec (`extensions/ui_web_analysis_v1.example.yaml` from the default launcher folder, or a copied reference spec) on a small input and make sure the extension shows up in the dashboard and review exports.
 2.  Confirm the trigger matches roughly the expected samples (`matched` vs. `skipped` counts should align with your domain).
 3.  Drill down into a handful of matched samples and read `label_extensions.<spec_id>` in the drawer, checking field values, confidence, and unmapped arrays.
 4.  Export that subset via `uv run sft-label export-review --include-extensions` to see exactly which columns downstream reviewers will consume.
@@ -287,7 +292,7 @@ Before trusting an extension rollout, verify the following:
 
 “UI SFT data” refers to the subset of samples where the assistant is working on explicit **Web / desktop browser UI surfaces**—pages, dashboards, admin consoles, interactive panels, builders, settings flows, or component/design-system work—so you can reason about coverage, complexity, and engineering constraints as you curate a training mix.
 
-The new Web-only analysis example (`docs/examples/extensions/ui_web_analysis_v1.yaml`) adds labels for:
+The default Web-only analysis starter (`extensions/ui_web_analysis_v1.example.yaml`, with a matching reference copy under `docs/examples/extensions/ui_web_analysis_v1.yaml`) adds labels for:
 
 - **`ui_surface_type`** — which Web surface family the sample belongs to, so you can spot over-concentration in one kind of UI.
 - **`interaction_pattern`** — whether the sample is mostly display, form/config, search/filter/explore, CRUD-heavy, or builder/editing oriented.

@@ -125,12 +125,14 @@ uv run sft-label start --lang zh
 
 在 `sft-label start` 输出的命令中，多个 `--label-extension` 规范可以同时启用；每个扩展都会单独呈现 dashboard、导出列和统计，因此建议：
 
-- 先用 `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml` 做小规模验证，确认 `matched` / `skipped` 比例合乎预期；
+- 先用一份小而稳的 spec 做小规模验证（例如 `start` 自动读取的 `extensions/ui_web_analysis_v1.example.yaml`，或你自己复制后的 YAML），确认 `matched` / `skipped` 比例合乎预期；
 - 观察启动器/CLI 的**扩展预检诊断**块，那里会列出每个规范是否带 trigger、prompt/schema 长度告警，以及运行后提示的 matched、failed/invalid、unmapped 等信息；
 - 诊断日志也会指向 `stats_labeling.json` 中的 `extension_stats.specs` 节，你可以直接从仪表盘或 `export-review --include-extensions` 中追查对应警告；
 - 需要更多域或触发规则时，优先为每个意图写一个独立的扩展，而不是把所有字段塞进同一个 schema，这样才能保持每份诊断报告可读并降低上下游配置复杂度。
 
-`sft-label start` 现在还支持三种扩展输入方式：单个 YAML 路径、一个目录（随后选择一个或多个 YAML）、或直接输入 `examples` 浏览内置样例目录。详细的扩展配置、初次运行清单和多扩展最佳实践见：[Pass 1 扩展标注指南](docs/guides/pass1-extension-labeling.md)。
+`sft-label start` 现在支持两类扩展输入方式：自动读取仓库根目录下的 `extensions/`，或手动指定单个 YAML / 一个目录（随后选择一个或多个 YAML）。`extensions/` 目录里默认带有 `ui_web_analysis_v1.example.yaml` 示例文件；你把自己的 spec 放进去并更新后，launcher 下次会自动读取最新内容。详细的扩展配置、初次运行清单和多扩展最佳实践见：[Pass 1 扩展标注指南](docs/guides/pass1-extension-labeling.md)。
+
+关于交互式里的“自适应运行时”：它的作用很简单——当模型服务出现压力、限速或波动时，自动放慢提交节奏、做更稳妥的退让；一般建议保持开启。
 
 ## 一次 run 会输出什么
 
@@ -224,7 +226,12 @@ uv run sft-label dashboard-service register-run --run-dir <run_dir>
 3. **稳定后再加细粒度字段**：先把第一版跑稳，再逐步丰富。
 4. **多个 extension 分开维护**：通过重复 `--label-extension` 并存，不要把所有需求塞进一个 spec。
 
-仓库内置样例：
+起步位置：
+
+- `sft-label start` 默认自动读取：`extensions/ui_web_analysis_v1.example.yaml`
+- CLI 直跑 / 复制参考：`docs/examples/extensions/...`
+
+参考样例：
 
 - 最小起步版：`docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
 - 更丰富的 UI 版：`docs/examples/extensions/ui_fine_labels_v1.yaml`
@@ -272,7 +279,7 @@ uv run sft-label export-review \
 
 ### 首次运行清单
 
-1.  先用 `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml` 等最小样例跑一小批数据并确认 dashboard 里出现该 extension。
+1.  先用一份小样例跑一小批数据（例如 `extensions/ui_web_analysis_v1.example.yaml`，或你复制到自己目录下的 YAML），并确认 dashboard 里出现该 extension。
 2.  核对 `matched/skipped` 数据，确认 extension 只命中期待范围。
 3.  打开样本详情，把 `label_extensions.<id>` JSON 看一遍，确保字段值、confidence、unmapped 结构可读。
 4.  用 `uv run sft-label export-review --include-extensions` 导出几条样本，验收列名和内容。
@@ -308,7 +315,7 @@ uv run sft-label export-review \
 
 ### Web UI 数据集分析指南
 
-“UI SFT 数据” 是指明确针对 Web / 桌面浏览器 UI 表面（仪表盘、登录页、数据探索、构建工具、管理控制台、组件实现等交互式界面）的样本。新提供的 Web 专用分析示例（`docs/examples/extensions/ui_web_analysis_v1.yaml`）增加了如下信号，帮助你识别数据集是否被 CRUD/表单类样本过度占据，并分析分布是否均衡：
+“UI SFT 数据” 是指明确针对 Web / 桌面浏览器 UI 表面（仪表盘、登录页、数据探索、构建工具、管理控制台、组件实现等交互式界面）的样本。默认提供的 Web 专用分析起步样例（`extensions/ui_web_analysis_v1.example.yaml`，对应参考副本见 `docs/examples/extensions/ui_web_analysis_v1.yaml`）增加了如下信号，帮助你识别数据集是否被 CRUD/表单类样本过度占据，并分析分布是否均衡：
 
 - **`ui_surface_type`**：当前样本主要属于哪类 Web UI 表面，便于发现数据是否集中在单一界面类型。
 - **`interaction_pattern`**：主交互模式是展示、表单配置、搜索过滤、CRUD 密集，还是 builder / rich editing。
@@ -330,7 +337,7 @@ uv run sft-label export-review \
 
 如果你想从这个案例快速克隆出自己的 extension，建议顺序是：
 
-1. 复制 `ui_web_analysis_v1.yaml` 到新文件
+1. 复制 `extensions/ui_web_analysis_v1.example.yaml` 到新文件
 2. 先改 `id`、`display_name`
 3. 把 schema 控制在 3~5 个字段
 4. 第一版只保留最宽 trigger（通常只开 `domain_any_of`）

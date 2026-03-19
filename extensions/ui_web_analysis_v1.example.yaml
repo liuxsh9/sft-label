@@ -1,0 +1,60 @@
+# Example extension spec.
+# Safe starting point for Web UI dataset analysis / mix optimization.
+# Copy this file, give it a new `id`, then adapt the prompt / schema / trigger
+# for your own domain.
+
+id: ui_web_analysis_example
+spec_version: v1
+display_name: Web UI Analysis Labels (Example)
+enabled: true
+description: Example extension for auditing Web UI SFT dataset mix and balancing opportunities.
+
+trigger:
+  # Analysis-oriented default: keep only the broad Web domain trigger active.
+  # Fill the empty lists only if you want stricter routing based on core Pass 1.
+  domain_any_of: [web-frontend]
+  language_any_of: []
+  intent_any_of: []
+  task_any_of: []
+  context_any_of: []
+  difficulty_any_of: []
+
+prompt: |
+  你是 Web UI SFT 数据分析标注器。
+  这些标签只用于数据覆盖/配比分析，不用于评价回答质量。
+  只分析用户可见的 Web / desktop browser UI；如果样本不是明确的 UI surface，不要硬猜，不确定字段留空。
+  请基于 conversation、preprocessed_signals、以及 core labels，严格按 schema 输出 JSON，不要输出解释。
+
+schema:
+  ui_surface_type:
+    type: enum
+    options: [marketing-or-content-page, app-shell-or-settings, workflow-tool-or-admin-console, data-dense-dashboard, component-or-design-system]
+    description: Choose by the main user-facing page purpose. Use component-or-design-system only for explicit component/system work; use data-dense-dashboard only when metrics/charts/data panels are central.
+
+  interaction_pattern:
+    type: enum
+    options: [read-mostly-display, form-or-configuration-flow, search-filter-explore, dense-crud-operations, builder-or-rich-editing]
+    description: Use search-filter-explore when the main path is find/view/filter/compare; use dense-crud-operations when create/update/delete or record management dominates.
+
+  state_data_complexity:
+    type: enum
+    options: [static-or-mock-data, local-ui-state, remote-data-binding, validation-or-form-state-heavy, multi-source-state-coordination]
+    description: "Priority order: multi-source-state-coordination > validation-or-form-state-heavy > remote-data-binding > local-ui-state > static-or-mock-data. If validation/form coordination is the main difficulty, prefer validation-or-form-state-heavy even when remote data exists."
+
+  ui_constraint_focus:
+    type: multi_enum
+    options: [design-system-consistency, responsive-layout, accessibility-semantics, dense-data-layout, performance-sensitive-ui]
+    description: Important UI engineering constraints explicitly required or strongly implied by the sample.
+
+  frontend_stack_shape:
+    type: enum
+    options: [html-css-js, react-next-ecosystem, vue-nuxt-ecosystem, mixed-web-admin-stack]
+    description: Prefer explicit framework signals; do not over-infer from weak hints.
+
+output:
+  include_confidence: true
+  allow_unmapped: true
+
+dashboard:
+  group: ui
+  priority: 12

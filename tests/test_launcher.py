@@ -208,12 +208,10 @@ def _extension_run_answers(extension_paths: list[str]) -> list[str]:
 
 
 def _extension_manual_flow(extension_paths: list[str]) -> list[str]:
-    flow = ["y", "1"]
-    for path in extension_paths:
-        flow.append(path)
-        flow.append("y")
-    if flow:
-        flow[-1] = "n"
+    flow = ["y"]
+    for index, path in enumerate(extension_paths):
+        flow.extend(["2", path])
+        flow.append("n" if index == len(extension_paths) - 1 else "y")
     return flow
 
 
@@ -1458,7 +1456,7 @@ def test_ask_extension_spec_paths_reprompts_on_duplicate_extension_id(tmp_path):
     _write_extension_spec(duplicate_id_path, spec_id="ui_fine_labels", prompt_text="Label duplicate UI data.")
     _write_extension_spec(unique_path, spec_id="mobile_fine_labels", prompt_text="Label mobile data.")
 
-    io = StubIO(["y", str(first_path), "y", str(duplicate_id_path), str(unique_path), "n"])
+    io = StubIO(["y", "2", str(first_path), "y", "2", str(duplicate_id_path), "2", str(unique_path), "n"])
     paths = _ask_extension_spec_paths(io.input, io.output)
 
     assert paths == [str(first_path), str(unique_path)]
@@ -1472,7 +1470,7 @@ def test_ask_extension_spec_paths_prints_final_next_steps(tmp_path):
     _write_extension_spec(first_path, spec_id="ui_fine_labels")
     _write_extension_spec(second_path, spec_id="mobile_fine_labels", prompt_text="Label mobile data.")
 
-    io = StubIO(["y", str(first_path), "y", str(second_path), "n"])
+    io = StubIO(["y", "2", str(first_path), "y", "2", str(second_path), "n"])
     paths = _ask_extension_spec_paths(io.input, io.output)
 
     assert paths == [str(first_path), str(second_path)]
@@ -1481,12 +1479,22 @@ def test_ask_extension_spec_paths_prints_final_next_steps(tmp_path):
     assert "include-extensions" in joined or "dashboard" in joined.lower()
 
 
+def test_ask_extension_spec_paths_add_another_defaults_to_no(tmp_path):
+    valid_path = tmp_path / "valid.yaml"
+    _write_extension_spec(valid_path)
+
+    io = StubIO(["y", "2", str(valid_path), ""])
+    paths = _ask_extension_spec_paths(io.input, io.output)
+
+    assert paths == [str(valid_path)]
+
+
 def test_ask_extension_spec_paths_reprompts_until_valid_spec(tmp_path):
     invalid_path = tmp_path / "missing.yaml"
     valid_path = tmp_path / "valid.yaml"
     _write_extension_spec(valid_path)
 
-    io = StubIO(["y", str(invalid_path), str(valid_path), "n"])
+    io = StubIO(["y", "2", str(invalid_path), "2", str(valid_path), "n"])
     paths = _ask_extension_spec_paths(io.input, io.output)
 
     assert paths == [str(valid_path)]
@@ -1502,7 +1510,7 @@ def test_ask_extension_spec_paths_can_select_multiple_specs_from_directory(tmp_p
     _write_extension_spec(first_path, spec_id="ui_fine_labels")
     _write_extension_spec(second_path, spec_id="mobile_fine_labels", prompt_text="Label mobile data.")
 
-    io = StubIO(["y", str(spec_dir), "1,2", "n"])
+    io = StubIO(["y", "2", str(spec_dir), "1,2", "n"])
     paths = _ask_extension_spec_paths(io.input, io.output)
 
     assert paths == [str(first_path.resolve()), str(second_path.resolve())]
@@ -1511,19 +1519,19 @@ def test_ask_extension_spec_paths_can_select_multiple_specs_from_directory(tmp_p
     assert "extra" in joined or "额外" in joined
 
 
-def test_ask_extension_spec_paths_examples_shortcut_uses_builtin_directory(monkeypatch, tmp_path):
-    builtin_dir = tmp_path / "builtin"
-    builtin_dir.mkdir()
-    spec_path = builtin_dir / "ui-analysis.yaml"
+def test_ask_extension_spec_paths_default_folder_option_uses_default_directory(monkeypatch, tmp_path):
+    default_dir = tmp_path / "extensions"
+    default_dir.mkdir()
+    spec_path = default_dir / "ui-analysis.example.yaml"
     _write_extension_spec(spec_path, spec_id="ui_web_analysis")
-    monkeypatch.setattr("sft_label.launcher._builtin_extension_examples_dir", lambda: builtin_dir)
+    monkeypatch.setattr("sft_label.launcher._default_extension_specs_dir", lambda: default_dir)
 
-    io = StubIO(["y", "examples", "1", "n"])
+    io = StubIO(["y", "1", "1", "n"])
     paths = _ask_extension_spec_paths(io.input, io.output)
 
     assert paths == [str(spec_path.resolve())]
     joined = "\n".join(str(item) for item in io.outputs).lower()
-    assert "examples" in joined
+    assert "extensions" in joined
 
 
 def test_export_review_prompt_flow_can_include_extension_columns():
