@@ -119,6 +119,17 @@ uv run sft-label start --lang zh
 
 更详细说明见英文文档：[Interactive launcher guide](docs/guides/interactive-launcher.md)。
 
+### Pass 1 扩展与诊断建议
+
+在 `sft-label start` 输出的命令中，多个 `--label-extension` 规范可以同时启用；每个扩展都会单独呈现 dashboard、导出列和统计，因此建议：
+
+- 先用 `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml` 做小规模验证，确认 `matched` / `skipped` 比例合乎预期；
+- 观察启动器/CLI 的**扩展预检诊断**块，那里会列出每个规范的触发比率、覆盖率告警，以及运行后提示的验证/低信心/未映射项；
+- 诊断日志也会指向 `stats_labeling.json` 中的 `extension_stats.specs` 节，你可以直接从仪表盘或 `export-review --include-extensions` 中追查对应警告；
+- 需要更多域或触发规则时，优先为每个意图写一个独立的扩展，而不是把所有字段塞进同一个 schema，这样才能保持每份诊断报告可读并降低上下游配置复杂度。
+
+详细的扩展配置、初次运行清单和多扩展最佳实践见：[Pass 1 扩展标注指南](docs/guides/pass1-extension-labeling.md)。
+
 ## 一次 run 会输出什么
 
 具体布局取决于输入模式，但大多数用户最关心的是下面这些产物。
@@ -241,6 +252,8 @@ uv run sft-label export-review \
   --output review.csv \
   --include-extensions
 ```
+
+开启后，review 导出会为每个 extension 增加 status/matched 元数据、存在时的 spec version/hash、扁平化后的 labels/confidence 列，以及归一化后的 unmapped 汇总列。
 
 实践建议：
 

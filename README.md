@@ -120,6 +120,14 @@ uv run sft-label start --lang zh
 
 A fuller walkthrough is in [Interactive launcher guide](docs/guides/interactive-launcher.md).
 
+### Pass 1 extension diagnostics
+
+When you turn on one or more `--label-extension` specs through the launcher, `start` prints a compact preflight block that lists every registered spec, whether it has a trigger, and the prompt/schema size warnings you should care about before the run starts. Treat that block as your first checkpoint: confirm the spec shape looks right, note any triggerless or oversized prompts, and tighten the schema before scaling up. After the run completes, a follow-up diagnostics section highlights per-spec match counts, validation issues, low-confidence fields, and unmapped rows, with pointers to `stats_labeling.json` → `extension_stats.specs` so you can trace warnings into dashboards or the `runtime_events` logs.
+
+Extension exports stay optional: add `--include-extensions` when you run `export-review` to add extension columns to the CSV (`uv run sft-label export-review --input <run_dir> --output review.csv --include-extensions`). That mode keeps the default CSV format untouched unless you explicitly opt in, so you can let downstream reviewers see the new columns without affecting existing exports.
+
+Keep each spec focused on a single domain/trigger so the dashboards, diagnostics, and review columns for each extension stay interpretable. For detailed workflows, examples, and the refreshed first-run checklist, see [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md).
+
 ## What a run writes
 
 The exact layout depends on the input mode, but these are the main artifacts most users should expect.
@@ -244,6 +252,8 @@ uv run sft-label export-review \
   --output review.csv \
   --include-extensions
 ```
+
+When enabled, the review export adds per-spec status/matched metadata, spec version/hash when present, flattened label/confidence columns, and a normalized unmapped summary column for each extension.
 
 Best practice:
 

@@ -95,13 +95,17 @@ def _collect_extension_specs(samples: list[dict]) -> dict[str, dict]:
         for spec_id, payload in payloads.items():
             if not isinstance(payload, dict):
                 continue
-            spec = specs.setdefault(spec_id, {"labels": set(), "confidence": set()})
+            spec = specs.setdefault(spec_id, {"labels": set(), "confidence": set(), "has_spec_version": False, "has_spec_hash": False})
             labels = payload.get("labels") or {}
             if isinstance(labels, dict):
                 spec["labels"].update(labels.keys())
             confidence = payload.get("confidence") or {}
             if isinstance(confidence, dict):
                 spec["confidence"].update(confidence.keys())
+            if payload.get("spec_version") not in (None, ""):
+                spec["has_spec_version"] = True
+            if payload.get("spec_hash") not in (None, ""):
+                spec["has_spec_hash"] = True
     return specs
 
 
@@ -110,6 +114,10 @@ def _extension_fieldnames(specs: dict[str, dict]) -> list[str]:
     for spec_id in sorted(specs):
         fieldnames.append(f"ext_{spec_id}_status")
         fieldnames.append(f"ext_{spec_id}_matched")
+        if specs[spec_id].get("has_spec_version"):
+            fieldnames.append(f"ext_{spec_id}_spec_version")
+        if specs[spec_id].get("has_spec_hash"):
+            fieldnames.append(f"ext_{spec_id}_spec_hash")
         for field in sorted(specs[spec_id]["labels"]):
             fieldnames.append(f"ext_{spec_id}_labels_{field}")
         for field in sorted(specs[spec_id]["confidence"]):
@@ -126,6 +134,10 @@ def _extension_row_payload(sample: dict, specs: dict[str, dict]) -> dict[str, st
         rows[f"ext_{spec_id}_status"] = payload.get("status", "") if isinstance(payload, dict) else ""
         matched = payload.get("matched") if isinstance(payload, dict) else None
         rows[f"ext_{spec_id}_matched"] = str(matched) if matched is not None else ""
+        if specs[spec_id].get("has_spec_version"):
+            rows[f"ext_{spec_id}_spec_version"] = payload.get("spec_version", "") if isinstance(payload, dict) else ""
+        if specs[spec_id].get("has_spec_hash"):
+            rows[f"ext_{spec_id}_spec_hash"] = payload.get("spec_hash", "") if isinstance(payload, dict) else ""
         labels = payload.get("labels") if isinstance(payload, dict) else None
         confidence = payload.get("confidence") if isinstance(payload, dict) else None
         for field in sorted(specs[spec_id]["labels"]):
@@ -136,15 +148,15 @@ def _extension_row_payload(sample: dict, specs: dict[str, dict]) -> dict[str, st
             rows[f"ext_{spec_id}_confidence_{field}"] = str(score) if isinstance(score, (int, float)) else ""
         unmapped = payload.get("unmapped") if isinstance(payload, dict) else None
         if isinstance(unmapped, list):
-            tokens = []
+            tokens = set()
             for item in unmapped:
                 if isinstance(item, dict):
                     dim = str(item.get("dimension", "unknown"))
-                    value = str(item.get("value", "?"))
-                    tokens.append(f"{dim}:{value}")
+                    value = str(item.get("value", "?")).strip()
+                    tokens.add(f"{dim}:{value}")
                 else:
-                    tokens.append(str(item))
-            rows[f"ext_{spec_id}_unmapped"] = ", ".join(tokens)
+                    tokens.add(str(item))
+            rows[f"ext_{spec_id}_unmapped"] = ", ".join(sorted(tokens))
         else:
             rows[f"ext_{spec_id}_unmapped"] = ""
     return rows

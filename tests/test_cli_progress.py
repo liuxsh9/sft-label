@@ -278,6 +278,108 @@ trigger:
     assert "--include-extensions" in out
 
 
+def test_cmd_run_extension_followup_warns_when_match_rate_is_zero(monkeypatch, tmp_path, capsys):
+    spec_path = tmp_path / "ui-extension.yaml"
+    spec_path.write_text(
+        """
+id: ui_fine_labels
+spec_version: v1
+prompt: |
+  Label UI data.
+schema:
+  component_type:
+    type: multi_enum
+    options: [form, modal]
+trigger:
+  domain_any_of: [web-frontend]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    async def _fake_run(*args, **kwargs):
+        return {
+            "run_dir": "/tmp/fake-run",
+            "extension_stats": {
+                "specs": {
+                    "ui_fine_labels": {
+                        "total": 12,
+                        "matched": 0,
+                        "status_counts": {"skipped": 12},
+                        "unmapped_counts": {},
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "run",
+        "--input",
+        "input.json",
+        "--label-extension",
+        str(spec_path),
+    ])
+    cmd_run(args)
+
+    out = capsys.readouterr().out.lower()
+    assert "matched 0 / 12" in out
+    assert "trigger" in out
+
+
+def test_cmd_run_extension_followup_warns_when_everything_matches(monkeypatch, tmp_path, capsys):
+    spec_path = tmp_path / "ui-extension.yaml"
+    spec_path.write_text(
+        """
+id: ui_fine_labels
+spec_version: v1
+prompt: |
+  Label UI data.
+schema:
+  component_type:
+    type: multi_enum
+    options: [form, modal]
+trigger:
+  domain_any_of: [web-frontend]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    async def _fake_run(*args, **kwargs):
+        return {
+            "run_dir": "/tmp/fake-run",
+            "extension_stats": {
+                "specs": {
+                    "ui_fine_labels": {
+                        "total": 8,
+                        "matched": 8,
+                        "status_counts": {"success": 8},
+                        "unmapped_counts": {},
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "run",
+        "--input",
+        "input.json",
+        "--label-extension",
+        str(spec_path),
+    ])
+    cmd_run(args)
+
+    out = capsys.readouterr().out.lower()
+    assert "matched 8 / 8" in out
+    assert "broad" in out or "过宽" in out
+
+
 def test_run_parser_help_mentions_repeatable_extension_guidance():
     parser = build_parser()
     subparsers_action = next(item for item in parser._actions if item.dest == "command")

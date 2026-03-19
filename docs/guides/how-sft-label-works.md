@@ -21,6 +21,8 @@ Main steps:
    - runs only when `--label-extension` specs are provided
    - uses the core labels + conversation context
    - writes `label_extensions` payloads per turn
+   - surface diagnostics before the first extension call (trigger presence, prompt/schema warnings) and after the run (match counts, validation warnings, low-confidence fields, unmapped rows) so you can confirm the spec behavior before scaling
+   - keep each extension focused on a single domain/trigger when you need multiple schemas; that keeps the dashboards, exports, and diagnostics clear for each intent
 5. **Validation**
    - checks labels against the taxonomy pools
    - applies consistency rules

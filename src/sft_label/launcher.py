@@ -1796,6 +1796,20 @@ def _build_export_review_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchP
     if fmt:
         argv.extend(["--format", fmt])
 
+    if _ask_yes_no(
+        input_fn,
+        "包含 extension 列 / Include extension columns",
+        default=False,
+    ):
+        argv.append("--include-extensions")
+        _say(
+            output_fn,
+            _msg(
+                "  提醒：导出后可结合 dashboard 抽查 extension 列是否符合预期。",
+                "  Advisory: after export, cross-check the extension columns against the dashboard.",
+            ),
+        )
+
     argv.extend(_ask_extra_flags(input_fn))
     return LaunchPlan(argv=argv)
 
@@ -2110,8 +2124,8 @@ def _say_extension_spec_summary(output_fn: OutputFn, path: str, summary: dict) -
         )
 
 
-def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> bool:
-    spec_path = Path(path)
+def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> tuple[str, str] | None:
+    spec_path = Path(path).expanduser()
     if not spec_path.exists():
         _say(
             output_fn,
@@ -2120,7 +2134,7 @@ def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> bool:
                 f"Extension spec does not exist: {path}. Please enter a valid path.",
             ),
         )
-        return False
+        return None
     try:
         spec = load_extension_spec_file(spec_path)
     except Exception as exc:
@@ -2131,10 +2145,10 @@ def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> bool:
                 f"Extension preview failed: {path} ({exc}). Please fix the spec and try again.",
             ),
         )
-        return False
+        return None
     summary = summarize_extension_specs([spec])[0]
-    _say_extension_spec_summary(output_fn, path, summary)
-    return True
+    _say_extension_spec_summary(output_fn, str(spec_path), summary)
+    return str(spec_path.resolve()), str(spec.id)
 
 
 
@@ -2151,18 +2165,58 @@ def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[st
     _section(output_fn, "扩展标注 / Extension labeling")
     _say_extension_first_run_guidance(output_fn)
     specs: list[str] = []
+    seen_paths: set[str] = set()
+    seen_ids: dict[str, str] = {}
     while True:
         while True:
             path = _ask_required_text(input_fn, "扩展规范路径 / Extension spec path")
-            if _maybe_preview_extension_spec(path, output_fn):
-                specs.append(path)
-                break
+            preview = _maybe_preview_extension_spec(path, output_fn)
+            if preview is None:
+                continue
+            resolved_path, spec_id = preview
+            if resolved_path in seen_paths:
+                _say(
+                    output_fn,
+                    _msg(
+                        f"  提醒：{resolved_path} 已添加过，换一个 extension spec。",
+                        f"  Advisory: {resolved_path} is already added. Choose a different extension spec.",
+                    ),
+                )
+                continue
+            if spec_id in seen_ids:
+                _say(
+                    output_fn,
+                    _msg(
+                        f"  提醒：extension id '{spec_id}' 已由 {seen_ids[spec_id]} 使用；请换一个 id 唯一的 spec。",
+                        f"  Advisory: duplicate extension id '{spec_id}' already used by {seen_ids[spec_id]}; choose a spec with a unique id.",
+                    ),
+                )
+                continue
+            specs.append(resolved_path)
+            seen_paths.add(resolved_path)
+            seen_ids[spec_id] = resolved_path
+            _say(
+                output_fn,
+                _msg(
+                    f"当前已添加 {len(specs)} 个 extension spec。",
+                    f"Currently added {len(specs)} extension spec(s).",
+                ),
+            )
+            break
         if not _ask_yes_no(
             input_fn,
             "添加另一个扩展规范路径 / Add another extension spec path",
             default=True,
         ):
             break
+    if specs:
+        _say(
+            output_fn,
+            _msg(
+                f"扩展配置完成：共 {len(specs)} 个 spec。建议先跑小样本，并在 dashboard 与 export-review --include-extensions 中抽查 matched/skipped/invalid/unmapped。",
+                f"Extension setup complete: {len(specs)} spec(s). Start with a small run, then inspect matched/skipped/invalid/unmapped in the dashboard and export-review --include-extensions.",
+            ),
+        )
     return specs
 
 def _ask_required_text(input_fn: InputFn, prompt: str) -> str:

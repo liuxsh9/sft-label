@@ -18,6 +18,7 @@ _TRIGGER_SUFFIXES = {
     "_all_of": "all",
 }
 _SUPPORTED_FIELD_TYPES = {"enum", "multi_enum"}
+_SUPPORTED_TRIGGER_LABELS = {"domain", "language", "intent", "task", "context", "difficulty"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,7 +50,9 @@ class SchemaField:
         for entry in options:
             if entry is None:
                 continue
-            option = str(entry)
+            option = str(entry).strip()
+            if not option:
+                raise ValueError("blank option is not allowed in schema field")
             if option in seen:
                 raise ValueError(f"duplicate option '{option}' in schema field")
             seen.add(option)
@@ -99,7 +102,12 @@ class ExtensionSpec:
 
         schema: dict[str, SchemaField] = {}
         for field_name, field_value in schema_raw.items():
-            schema[field_name] = SchemaField.from_dict(field_value)  # type: ignore[arg-type]
+            normalized_field_name = str(field_name).strip()
+            if not normalized_field_name:
+                raise ValueError("schema field name must be a non-empty string")
+            if normalized_field_name in schema:
+                raise ValueError(f"duplicate schema field name '{normalized_field_name}'")
+            schema[normalized_field_name] = SchemaField.from_dict(field_value)  # type: ignore[arg-type]
 
         enabled_raw = raw.get("enabled")
         enabled = True if enabled_raw is None else bool(enabled_raw)
@@ -210,9 +218,13 @@ def _normalize_trigger(raw: object | None) -> dict[str, tuple[str, ...]]:
 
     normalized: dict[str, tuple[str, ...]] = {}
     for key, value in raw.items():
+        trigger_key = str(key).strip()
+        label_name, _mode = _split_trigger_key(trigger_key)
+        if label_name not in _SUPPORTED_TRIGGER_LABELS:
+            raise ValueError(f"unsupported trigger key '{trigger_key}'")
         values = _sequence_to_tuple(value)
         if values:
-            normalized[key] = values
+            normalized[trigger_key] = values
     return normalized
 
 
