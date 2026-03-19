@@ -132,6 +132,23 @@ class TestAliasResolution:
         }]
         assert len(issues) == 0
 
+    def test_none_sentinel_in_call1_multiselects_is_treated_as_empty(self):
+        result = {
+            "intent": "build",
+            "language": ["python", "none"],
+            "domain": ["none"],
+            "task": ["feature-implementation", "none"],
+            "difficulty": "intermediate",
+            "confidence": {},
+            "unmapped": [{"dimension": "domain", "value": "none"}],
+        }
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["language"] == ["python"]
+        assert cleaned["domain"] == []
+        assert cleaned["task"] == ["feature-implementation"]
+        assert cleaned["unmapped"] == []
+        assert len(issues) == 0
+
     def test_domain_alias_security_to_cybersecurity(self):
         result = {"intent": "build", "language": ["python"],
                   "domain": ["security"], "task": ["feature-implementation"],
