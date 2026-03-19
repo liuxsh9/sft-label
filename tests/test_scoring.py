@@ -1078,6 +1078,24 @@ class TestComputeValueStats:
         stats = compute_value_stats(scored, monitors)
         assert stats["total_failed"] == 1
 
+    def test_single_turn_samples_default_mean_turns_to_one(self):
+        monitors = [{"status": "success", "llm_calls": 1, "prompt_tokens": 0, "completion_tokens": 0}]
+        scored = [{
+            "metadata": {"source_file": "single.jsonl"},
+            "value": {
+                "value_score": 5,
+                "selection_score": 5.2,
+                "complexity": {"overall": 5},
+                "quality": {"overall": 5},
+                "reasoning": {"overall": 5},
+                "rarity": {"score": 4.0},
+                "flags": [],
+                "thinking_mode": "fast",
+            },
+        }]
+        stats = compute_value_stats(scored, monitors)
+        assert stats["mean_turns"] == 1
+
     def test_distribution_warnings_generated(self):
         """P1-2: detect quality.overall distribution bias."""
         # All quality scores clustered at 9-10 → over-represented top bucket

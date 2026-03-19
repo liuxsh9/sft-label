@@ -170,6 +170,7 @@ def test_build_scope_tree_deduplicates_inline_artifact_leaf_paths(tmp_path):
     assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["file"] == "code/sample.jsonl"
     assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["mean_rarity"] == 0
     assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["keep_rate_7"] == 0
+    assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["keep_rates"] == {"4.0": 0, "5.0": 0, "6.0": 0, "7.0": 0}
     assert tree["scopes"]["global"]["raw_pass2"]["per_file_summary"][0]["mean_turns"] == 0
 
 

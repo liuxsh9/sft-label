@@ -97,10 +97,11 @@ def test_dashboard_runtime_has_bilingual_turn_kind_tags_and_english_intent_matri
 def test_dashboard_runtime_file_ranking_includes_rarity_keep_rate_and_mean_turns() -> None:
     js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
 
-    assert 'keep_rate_7' in js
+    assert 'keep_rates' in js
     assert 'mean_rarity' in js
     assert 'mean_turns' in js
-    assert 'const KEEP_RATE_7_THRESHOLD = 7' in js
+    assert 'const KEEP_RATE_THRESHOLDS = ["4.0", "5.0", "6.0", "7.0"]' in js
+    assert 'data-keep-rate-threshold' in js
 
 
 def test_dashboard_styles_define_keep_rate_chip() -> None:

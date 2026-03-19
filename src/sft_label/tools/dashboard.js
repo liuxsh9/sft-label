@@ -80,6 +80,7 @@ const STATE = {
   sidebarCollapsed: false,
   aggregationMode: "sample",
   tagBarMode: "relative",
+  keepRateThreshold: "7.0",
   fileRankingSort: { key: "mean_value", direction: "desc" },
   explorer: {
     runId: 0,
@@ -229,6 +230,7 @@ const I18N = {
     sorted_by: "{count} files · sorted by {column}",
     mean_rarity: "Mean Rarity",
     keep_rate_7: "Keep ≥7",
+    keep_rate_threshold: "Keep Rate",
     configuration: "Configuration",
     selection_thresholds: "Selection Thresholds",
     band: "Band",
@@ -473,6 +475,7 @@ const I18N = {
     sorted_by: "{count} 个文件 · 当前按 {column} 排序",
     mean_rarity: "平均稀有度",
     keep_rate_7: "保留率 ≥7",
+    keep_rate_threshold: "保留率",
     configuration: "配置",
     selection_thresholds: "入选分阈值",
     band: "区间",
@@ -702,7 +705,7 @@ const HIST_LABELS = {
   selection_score: "selection",
 };
 
-const KEEP_RATE_7_THRESHOLD = 7;
+const KEEP_RATE_THRESHOLDS = ["4.0", "5.0", "6.0", "7.0"];
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -789,6 +792,27 @@ function keepRateClass(value) {
   if (value >= 0.5) return "keep-rate-mid";
   if (value >= 0.25) return "keep-rate-warn";
   return "keep-rate-low";
+}
+
+function normalizedKeepRateThreshold(value) {
+  const text = String(value || "");
+  return KEEP_RATE_THRESHOLDS.includes(text) ? text : "7.0";
+}
+
+function fileKeepRateValue(row, threshold = STATE.keepRateThreshold) {
+  const key = normalizedKeepRateThreshold(threshold);
+  if (row && row.keep_rates && Object.prototype.hasOwnProperty.call(row.keep_rates, key)) {
+    return Number(row.keep_rates[key]) || 0;
+  }
+  if (key === "7.0" && row && row.keep_rate_7 !== undefined && row.keep_rate_7 !== null) {
+    return Number(row.keep_rate_7) || 0;
+  }
+  return 0;
+}
+
+function keepRateLabel(threshold = STATE.keepRateThreshold) {
+  const value = normalizedKeepRateThreshold(threshold);
+  return `${t("keep_rate_threshold")} ≥${Number(value).toFixed(0)}`;
 }
 
 function hexToRgba(hex, alpha) {
@@ -901,6 +925,7 @@ function persistDashboardState() {
       locale: STATE.locale,
       tagBarMode: STATE.tagBarMode,
       aggregationMode: STATE.aggregationMode,
+      keepRateThreshold: STATE.keepRateThreshold,
       explorer: {
         sort: STATE.explorer.sort,
         query: STATE.explorer.queryModel,
@@ -932,6 +957,9 @@ function restoreDashboardState() {
     }
     if (payload.aggregationMode && ["sample", "conversation"].includes(payload.aggregationMode)) {
       STATE.aggregationMode = payload.aggregationMode;
+    }
+    if (payload.keepRateThreshold) {
+      STATE.keepRateThreshold = normalizedKeepRateThreshold(payload.keepRateThreshold);
     }
     if (payload.explorer && typeof payload.explorer === "object") {
       if (payload.explorer.sort) STATE.explorer.sort = payload.explorer.sort;
@@ -1371,7 +1399,7 @@ const FILE_RANKING_COLUMNS = {
   mean_quality: {labelKey: "quality", defaultDirection: "desc"},
   mean_rarity: {labelKey: "mean_rarity", defaultDirection: "desc"},
   mean_selection: {labelKey: "selection", defaultDirection: "desc"},
-  keep_rate_7: {labelKey: "keep_rate_7", defaultDirection: "desc"},
+  keep_rate_dynamic: {labelKey: "keep_rate_7", defaultDirection: "desc"},
   mean_turns: {labelKey: "mean_turns", defaultDirection: "desc"},
 };
 
@@ -1383,8 +1411,9 @@ function fileRankingIndicator(key) {
 function renderFileRankingHeader(key) {
   const column = FILE_RANKING_COLUMNS[key];
   const active = STATE.fileRankingSort.key === key;
+  const label = key === "keep_rate_dynamic" ? keepRateLabel() : t(column.labelKey);
   return `<th><button class="th-sort-btn ${active ? "active" : ""}" data-file-sort="${escapeHtml(key)}" type="button">
-    <span>${escapeHtml(t(column.labelKey))}</span>
+    <span>${escapeHtml(label)}</span>
     <span class="sort-indicator">${fileRankingIndicator(key)}</span>
   </button></th>`;
 }
@@ -1399,6 +1428,9 @@ function sortPerFileSummary(rows) {
         sensitivity: "base",
       });
       if (cmp !== 0) return cmp * factor;
+    } else if (key === "keep_rate_dynamic") {
+      const delta = fileKeepRateValue(left) - fileKeepRateValue(right);
+      if (delta !== 0) return delta * factor;
     } else {
       const delta = (Number(left[key]) || 0) - (Number(right[key]) || 0);
       if (delta !== 0) return delta * factor;
@@ -2350,6 +2382,9 @@ function renderPass2(pass2) {
   const perFile = pass2View.per_file_summary || [];
   if (perFile.length > 1) {
     const sortColumn = FILE_RANKING_COLUMNS[STATE.fileRankingSort.key] || FILE_RANKING_COLUMNS.mean_value;
+    const keepRateButtons = KEEP_RATE_THRESHOLDS.map((threshold) => (
+      `<button class="segmented-btn ${STATE.keepRateThreshold === threshold ? "active" : ""}" type="button" data-keep-rate-threshold="${escapeHtml(threshold)}">≥${escapeHtml(Number(threshold).toFixed(0))}</button>`
+    )).join("");
     const rows = sortPerFileSummary(perFile)
       .map((row) => `<tr>
         <td><button class="link-btn" type="button" data-explorer-patch="${escapeAttrJson({ sourcePath: row.file, sort: "quality_asc" })}">${escapeHtml(row.file)}</button></td>
@@ -2359,17 +2394,17 @@ function renderPass2(pass2) {
         <td>${fmt(row.mean_quality, 1)}</td>
         <td>${fmt(row.mean_rarity, 1)}</td>
         <td>${fmt(row.mean_selection, 1)}</td>
-        <td>${row.keep_rate_7 === null || row.keep_rate_7 === undefined ? "-" : `<span class="keep-rate-chip ${keepRateClass(row.keep_rate_7 || 0)}" title="${escapeHtml(`${t("keep_rate_7")} · selection ≥ ${KEEP_RATE_7_THRESHOLD}`)}">${fmt((row.keep_rate_7 || 0) * 100, 0)}%</span>`}</td>
+        <td><span class="keep-rate-chip ${keepRateClass(fileKeepRateValue(row))}" title="${escapeHtml(`${keepRateLabel()} · selection ≥ ${Number(STATE.keepRateThreshold).toFixed(0)}`)}">${fmt(fileKeepRateValue(row) * 100, 0)}%</span></td>
         <td>${fmt(row.mean_turns, 1)}</td>
       </tr>`).join("");
     sections.push(section(
       t("file_ranking"),
-      `<table class="data-table"><thead><tr>${
-        ["file", "count", "mean_value", "mean_complexity", "mean_quality", "mean_rarity", "mean_selection", "keep_rate_7", "mean_turns"]
+      `<div class="file-ranking-controls"><div class="toolbar-inline-copy">${escapeHtml(t("keep_rate_threshold"))}</div><div class="segmented">${keepRateButtons}</div></div><table class="data-table"><thead><tr>${
+        ["file", "count", "mean_value", "mean_complexity", "mean_quality", "mean_rarity", "mean_selection", "keep_rate_dynamic", "mean_turns"]
           .map(renderFileRankingHeader)
           .join("")
       }</tr></thead><tbody>${rows}</tbody></table>`,
-      t("sorted_by", { count: perFile.length, column: t(sortColumn.labelKey) }),
+      t("sorted_by", { count: perFile.length, column: STATE.fileRankingSort.key === "keep_rate_dynamic" ? keepRateLabel() : t(sortColumn.labelKey) }),
       true,
     ));
   }
@@ -2788,6 +2823,13 @@ async function renderScope() {
   });
   document.querySelectorAll("[data-file-sort]").forEach((node) => {
     node.addEventListener("click", () => toggleFileRankingSort(node.getAttribute("data-file-sort")));
+  });
+  document.querySelectorAll("[data-keep-rate-threshold]").forEach((node) => {
+    node.addEventListener("click", () => {
+      STATE.keepRateThreshold = normalizedKeepRateThreshold(node.getAttribute("data-keep-rate-threshold"));
+      persistDashboardState();
+      renderScope();
+    });
   });
   document.querySelectorAll("[data-tag-bar-mode]").forEach((node) => {
     node.addEventListener("click", () => {

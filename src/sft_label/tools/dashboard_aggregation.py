@@ -4,7 +4,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from sft_label.config import FILE_RANKING_KEEP_RATE_THRESHOLD
+from sft_label.config import FILE_RANKING_KEEP_RATE_THRESHOLD, FILE_RANKING_KEEP_RATE_THRESHOLDS
 from sft_label.conversation import (
     _effective_weights,
     _merge_labels,
@@ -991,6 +991,22 @@ def _group_units_by_source_file(units: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def _compute_keep_rates_from_units(units: list[dict]) -> dict[str, float]:
+    scored = [
+        unit.get("selection_score")
+        for unit in units
+        if isinstance(unit.get("selection_score"), (int, float))
+    ]
+    total = len(scored)
+    return {
+        f"{float(threshold):.1f}": (
+            round(sum(1 for score in scored if score >= float(threshold)) / total, 4)
+            if total else 0
+        )
+        for threshold in FILE_RANKING_KEEP_RATE_THRESHOLDS
+    }
+
+
 def _build_per_file_summary(units: list[dict]) -> list[dict]:
     summaries = []
     for file_name, bucket in sorted(_group_units_by_source_file(units).items()):
@@ -1002,12 +1018,7 @@ def _build_per_file_summary(units: list[dict]) -> list[dict]:
             values = [unit.get(field) for unit in scored if isinstance(unit.get(field), (int, float))]
             return round(sum(values) / len(values), 2) if values else 0
 
-        keep_count = sum(
-            1
-            for unit in scored
-            if isinstance(unit.get("selection_score"), (int, float))
-            and unit["selection_score"] >= FILE_RANKING_KEEP_RATE_THRESHOLD
-        )
+        keep_rates = _compute_keep_rates_from_units(scored)
         summaries.append({
             "file": Path(file_name).name if file_name != "current" else file_name,
             "count": len(scored),
@@ -1016,7 +1027,8 @@ def _build_per_file_summary(units: list[dict]) -> list[dict]:
             "mean_quality": _mean("quality_overall"),
             "mean_rarity": _mean("rarity_score"),
             "mean_selection": _mean("selection_score"),
-            "keep_rate_7": round(keep_count / len(scored), 4) if scored else 0,
+            "keep_rates": keep_rates,
+            "keep_rate_7": keep_rates.get(f"{FILE_RANKING_KEEP_RATE_THRESHOLD:.1f}", 0),
             "mean_turns": _mean("turn_count"),
         })
     return summaries

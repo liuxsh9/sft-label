@@ -213,6 +213,7 @@ CONV_V2_VALUE_UPLIFT_CAP = 1.5            # guardrail: v2 should not overshoot v
 CONV_V2_SELECTION_UPLIFT_CAP = 2.0        # guardrail for selection v2 uplift
 CONV_V2_DOWNSIDE_CAP = 0.5                # guardrail: v2 should not drop far below v1
 FILE_RANKING_KEEP_RATE_THRESHOLD = 7.0    # keep-rate column threshold for file ranking
+FILE_RANKING_KEEP_RATE_THRESHOLDS = (4.0, 5.0, 6.0, 7.0)  # common keep-rate thresholds exposed in dashboard
 
 # ─── Rationale (exploratory, default off) ──────────────
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)

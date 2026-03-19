@@ -12,6 +12,7 @@ from sft_label.artifacts import (
     PASS2_STATS_FILE,
     PASS2_SUMMARY_STATS_FILE,
 )
+from sft_label.config import FILE_RANKING_KEEP_RATE_THRESHOLDS
 from sft_label.run_layout import FILE_ARTIFACTS_DIRNAME
 
 
@@ -172,6 +173,10 @@ def merge_scoring_stats(file_stats_list: list[dict]) -> dict | None:
             "mean_quality": stats.get("score_distributions", {}).get("quality_overall", {}).get("mean", 0),
             "mean_rarity": stats.get("score_distributions", {}).get("rarity_score", {}).get("mean", 0),
             "mean_selection": stats.get("score_distributions", {}).get("selection_score", {}).get("mean", 0),
+            "keep_rates": dict(stats.get("keep_rates") or {
+                f"{float(threshold):.1f}": 0
+                for threshold in FILE_RANKING_KEEP_RATE_THRESHOLDS
+            }),
             "keep_rate_7": stats.get("keep_rate_7", 0),
             "mean_turns": stats.get("mean_turns", 0),
         }

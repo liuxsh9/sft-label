@@ -86,9 +86,11 @@ def test_compute_value_viz_data_conversation_mode_counts_multiturn_once():
     conversation_summary = viz["modes"]["conversation"]["per_file_summary"][0]
     assert sample_summary["mean_rarity"] == 5.5
     assert sample_summary["keep_rate_7"] == 0.5
+    assert sample_summary["keep_rates"] == {"4.0": 1.0, "5.0": 1.0, "6.0": 0.5, "7.0": 0.5}
     assert sample_summary["mean_turns"] == 2.0
     assert conversation_summary["mean_rarity"] == 6.4
     assert conversation_summary["keep_rate_7"] == 1.0
+    assert conversation_summary["keep_rates"] == {"4.0": 1.0, "5.0": 1.0, "6.0": 1.0, "7.0": 1.0}
     assert conversation_summary["mean_turns"] == 2.0
 
 
@@ -107,6 +109,31 @@ def test_compute_value_viz_data_exposes_prompt_mode_budget():
     assert viz["overview"]["value_truncation_budget"] == 14000
     assert viz["modes"]["sample"]["overview"]["prompt_mode"] == "compact"
     assert viz["modes"]["conversation"]["overview"]["value_truncation_budget"] == 14000
+
+
+def test_compute_value_viz_data_single_turn_defaults_mean_turns_to_one():
+    samples = [
+        {
+            "id": "single-1",
+            "metadata": {"source_file": "single.jsonl"},
+            "labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
+            "value": {
+                "value_score": 6.0,
+                "selection_score": 6.4,
+                "thinking_mode": "fast",
+                "confidence": 0.8,
+                "quality": {"overall": 6.0},
+                "complexity": {"overall": 5.0},
+                "reasoning": {"overall": 5.0},
+                "rarity": {"score": 4.0},
+            },
+        }
+    ]
+
+    viz = compute_value_viz_data(samples, {"total_scored": 1, "total_failed": 0, "total_tokens": 10})
+
+    sample_summary = viz["modes"]["sample"]["per_file_summary"][0]
+    assert sample_summary["mean_turns"] == 1.0
 
 
 def test_compute_conv_viz_data_aggregates_new_diagnostics():

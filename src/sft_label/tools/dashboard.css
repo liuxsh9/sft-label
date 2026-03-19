@@ -127,6 +127,7 @@ body { min-height: 100vh; }
 .rank-tag-link, .rank-tag-text { display: block; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .metric-cell { white-space: nowrap; text-align: right; }
 .link-btn { border: none; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
+.file-ranking-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .keep-rate-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 50px; padding: 2px 8px; border-radius: 999px; font-weight: 700; font-size: 0.76rem; line-height: 1.5; border: 1px solid transparent; }
 .keep-rate-strong { color: #166534; background: rgba(22, 101, 52, 0.10); border-color: rgba(22, 101, 52, 0.16); }
 .keep-rate-mid { color: #1d4ed8; background: rgba(29, 78, 216, 0.10); border-color: rgba(29, 78, 216, 0.16); }
