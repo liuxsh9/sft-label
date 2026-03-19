@@ -28,7 +28,17 @@ import sys
 import time
 import random
 from pathlib import Path
+from dataclasses import dataclass
 
+from sft_label.config import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_RPS_LIMIT,
+    DEFAULT_RPS_WARMUP,
+    ENABLE_ADAPTIVE_RUNTIME,
+    ENABLE_STAGE_RECOVERY_SWEEP,
+    MAX_RETRIES,
+    REQUEST_TIMEOUT,
+)
 from sft_label.dashboard_service import (
     DashboardPortConflictError,
     dashboard_service_status,
@@ -256,27 +266,32 @@ def _suggest_dashboard_share_base_url(exposure: str, port: int) -> str | None:
         return None
     return f"http://{host}:{int(port)}"
 
+@dataclass
+class DashboardPublishPlan:
+    enabled: bool
+    service_name: str | None = None
+    service_type: str | None = None
+    state: str | None = None
+    public_url: str | None = None
+    start_now: bool = False
+    bootstrap_kwargs: dict | None = None
 
-def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
+
+def _collect_dashboard_publish_plan(launched_args, lang: str, input_fn) -> DashboardPublishPlan:
     if launched_args.command not in {"run", "score", "regenerate-dashboard"}:
-        return None
+        return DashboardPublishPlan(enabled=False)
 
     raw = _dashboard_service_prompt(
         lang,
         input_fn,
-        "任务完成后自动发布 dashboard 到静态服务？ [y/N]: ",
-        "Auto-publish dashboards to the static service after completion? [y/N]: ",
+        "任务完成后自动发布 dashboard 到静态服务？ [Y/n]: ",
+        "Auto-publish dashboards to the static service after completion? [Y/n]: ",
     ).strip().lower()
-    if raw not in ("y", "yes"):
-        return None
+    if raw in ("n", "no"):
+        return DashboardPublishPlan(enabled=False)
 
     store = load_dashboard_service_store()
     if not store.services:
-        print(_dashboard_start_msg(
-            lang,
-            "当前没有已配置的 dashboard 静态服务，开始初始化默认服务。",
-            "No dashboard service is configured yet. Initializing a default service.",
-        ))
         default_root = str((Path.home() / "sft-label-dashboard").resolve())
         name = (
             _dashboard_service_prompt(
@@ -343,16 +358,65 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
                 public_base_url = public_base_url_raw
             else:
                 public_base_url = suggested_share_url
-        service = init_dashboard_service(
-            name=name,
-            web_root=web_root,
-            host=host,
-            port=int(port_raw),
+        start_now = _dashboard_service_prompt(
+            lang,
+            input_fn,
+            "服务初始化后是否立即启动？ [Y/n]: ",
+            "Start the service after initialization? [Y/n]: ",
+        ).strip().lower()
+        return DashboardPublishPlan(
+            enabled=True,
+            service_name=name,
             service_type="pm2",
-            public_base_url=public_base_url,
+            state="not-configured",
+            public_url=public_base_url,
+            start_now=start_now not in ("n", "no"),
+            bootstrap_kwargs={
+                "name": name,
+                "web_root": web_root,
+                "host": host,
+                "port": int(port_raw),
+                "service_type": "pm2",
+                "public_base_url": public_base_url,
+            },
         )
+
+    service = _resolve_dashboard_service(store)
+    status = dashboard_service_status(service)
+    public_url = status.get("public_url") or service.share_base_url()
+    start_now = False
+    if status["state"] not in {"running", "starting"}:
+        start_now = _dashboard_service_prompt(
+            lang,
+            input_fn,
+            "服务未运行，是否现在启动？ [Y/n]: ",
+            "Service is not running. Start it now? [Y/n]: ",
+        ).strip().lower()
+    return DashboardPublishPlan(
+        enabled=True,
+        service_name=service.name,
+        service_type=service.service_type,
+        state=status["state"],
+        public_url=public_url,
+        start_now=start_now not in ("n", "no"),
+        bootstrap_kwargs=None,
+    )
+
+
+def _materialize_dashboard_publish_plan(dashboard_plan: DashboardPublishPlan | None, lang: str, input_fn):
+    if dashboard_plan is None or not dashboard_plan.enabled:
+        return None
+
+    if dashboard_plan.bootstrap_kwargs:
+        print(_dashboard_start_msg(
+            lang,
+            "当前没有已配置的 dashboard 静态服务，开始初始化默认服务。",
+            "No dashboard service is configured yet. Initializing a default service.",
+        ))
+        service = init_dashboard_service(**dashboard_plan.bootstrap_kwargs)
     else:
-        service = _resolve_dashboard_service(store)
+        store = load_dashboard_service_store()
+        service = _resolve_dashboard_service(store, dashboard_plan.service_name)
 
     status = dashboard_service_status(service)
     public_url = status.get("public_url") or service.share_base_url()
@@ -363,22 +427,14 @@ def _prepare_dashboard_service_for_start(launched_args, lang: str, input_fn):
             f"Dashboard service: {service.name} | {service.service_type} | {status['state']} | {public_url}",
         )
     )
-    if status["state"] in {"running", "starting"}:
-        pass
-    else:
-        start_now = _dashboard_service_prompt(
-            lang,
-            input_fn,
-            "服务未运行，是否现在启动？ [Y/n]: ",
-            "Service is not running. Start it now? [Y/n]: ",
-        ).strip().lower()
-        if start_now not in ("n", "no"):
-            status = _retry_dashboard_service_with_new_port(
-                service,
-                start_dashboard_service,
-                lang=lang,
-                input_fn=input_fn,
-            )
+
+    if dashboard_plan.start_now and status["state"] not in {"running", "starting"}:
+        status = _retry_dashboard_service_with_new_port(
+            service,
+            start_dashboard_service,
+            lang=lang,
+            input_fn=input_fn,
+        )
     public_url = status.get("public_url") or service.share_base_url()
     print(
         _dashboard_start_msg(
@@ -411,12 +467,54 @@ def _print_published_dashboard_urls(published, lang: str):
             print(f"  [{key}] {url}")
 
 
-def _print_start_plan_summary(plan, lang: str):
+def _runtime_summary_values(launched_args) -> dict[str, object]:
+    return {
+        "concurrency": getattr(launched_args, "concurrency", None) or DEFAULT_CONCURRENCY,
+        "rps_limit": getattr(launched_args, "rps_limit", None),
+        "rps_warmup": getattr(launched_args, "rps_warmup", None) or DEFAULT_RPS_WARMUP,
+        "request_timeout": getattr(launched_args, "request_timeout", None) or REQUEST_TIMEOUT,
+        "max_retries": getattr(launched_args, "max_retries", None) or MAX_RETRIES,
+        "adaptive_runtime": ENABLE_ADAPTIVE_RUNTIME if getattr(launched_args, "adaptive_runtime", None) is None else bool(getattr(launched_args, "adaptive_runtime")),
+        "recovery_sweep": ENABLE_STAGE_RECOVERY_SWEEP if getattr(launched_args, "recovery_sweep", None) is None else bool(getattr(launched_args, "recovery_sweep")),
+    }
+
+
+def _print_start_plan_summary(plan, lang: str, *, launched_args=None, dashboard_plan: DashboardPublishPlan | None = None):
     from sft_label.launcher import format_command
 
     cmd_preview = format_command(plan.argv)
     print(f"\n{_start_msg(lang, '执行确认', 'Launch summary')}")
     print("-" * 56)
+    if launched_args is not None:
+        runtime = _runtime_summary_values(launched_args)
+        print(_start_msg(lang, "执行总览：", "Execution overview:"))
+        print(f"  {_start_msg(lang, '工作流', 'Workflow')}: {launched_args.command}")
+        print(f"  {_start_msg(lang, '并发上限', 'Concurrency cap')}: {runtime['concurrency']}")
+        rps_limit = runtime["rps_limit"]
+        rps_shown = _start_msg(lang, "默认", "default") if rps_limit is None else rps_limit
+        if rps_limit is None:
+            rps_shown = DEFAULT_RPS_LIMIT
+        print(f"  {_start_msg(lang, 'RPS 上限', 'RPS cap')}: {rps_shown}")
+        print(f"  {_start_msg(lang, 'RPS 预热秒数', 'RPS warmup seconds')}: {runtime['rps_warmup']}")
+        print(f"  {_start_msg(lang, '请求超时秒数', 'Request timeout seconds')}: {runtime['request_timeout']}")
+        print(f"  {_start_msg(lang, '最大重试次数', 'Max retries')}: {runtime['max_retries']}")
+        print(f"  {_start_msg(lang, '自适应运行时', 'Adaptive runtime')}: {'on' if runtime['adaptive_runtime'] else 'off'}")
+        print(f"  {_start_msg(lang, '恢复补跑', 'Recovery sweep')}: {'on' if runtime['recovery_sweep'] else 'off'}")
+        if dashboard_plan is not None:
+            print(_start_msg(lang, "Dashboard 计划：", "Dashboard plan:"))
+            if not dashboard_plan.enabled:
+                print(f"  {_start_msg(lang, '自动发布', 'Auto-publish')}: no")
+            else:
+                print(f"  {_start_msg(lang, '自动发布', 'Auto-publish')}: yes")
+                if dashboard_plan.service_name:
+                    print(f"  {_start_msg(lang, '服务', 'Service')}: {dashboard_plan.service_name}")
+                if dashboard_plan.service_type:
+                    print(f"  {_start_msg(lang, '类型', 'Type')}: {dashboard_plan.service_type}")
+                if dashboard_plan.state:
+                    print(f"  {_start_msg(lang, '状态', 'State')}: {dashboard_plan.state}")
+                if dashboard_plan.public_url:
+                    print(f"  {_start_msg(lang, '访问地址', 'URL')}: {dashboard_plan.public_url}")
+                print(f"  {_start_msg(lang, '确认后立即启动服务', 'Start service after confirm')}: {'yes' if dashboard_plan.start_now else 'no'}")
     print(_start_msg(lang, "命令：", "Command:"))
     print(f"  {cmd_preview}")
     if plan.env_overrides:
@@ -1306,7 +1404,47 @@ def cmd_start(args, parser):
         print(_start_msg(lang, "已取消启动。", "Launch cancelled."))
         return
 
-    _print_start_plan_summary(plan, lang)
+    if getattr(plan, "workflow_key", None) == "dashboard-service":
+        _print_start_plan_summary(plan, lang)
+        if args.dry_run:
+            print(f"\n{_start_msg(lang, '仅预览模式，未执行命令。', 'Dry run mode: command not executed.')}")
+            return
+        confirm_raw = interactive_input(
+            _start_msg(lang, "立即执行？ [Y/b/n]: ", "Execute now? [Y/b/n]: ")
+        )
+        confirm, had_control = sanitize_prompt_input(confirm_raw)
+        if had_control:
+            print(_start_msg(lang, "检测到方向键/控制字符输入，已忽略。", "Detected arrow/control key input and ignored."))
+        if is_back_token(confirm):
+            print(_start_msg(lang, "已取消执行。", "Launch aborted."))
+            return
+        confirm = confirm.lower()
+        if confirm in ("n", "no"):
+            print(_start_msg(lang, "已取消执行。", "Launch aborted."))
+            return
+        for key, value in plan.env_overrides.items():
+            os.environ[key] = value
+        return _run_dashboard_service_maintenance_session(
+            parser=parser,
+            lang=lang,
+            input_fn=interactive_input,
+            build_dashboard_service_plan_fn=build_dashboard_service_plan,
+            initial_plan=plan,
+        )
+
+    launched_args = _parse_launch_plan_args(plan, parser, lang)
+    if launched_args is None:
+        return
+
+    dashboard_plan = None
+    if not args.dry_run:
+        dashboard_plan = _collect_dashboard_publish_plan(
+            launched_args,
+            lang,
+            interactive_input,
+        )
+
+    _print_start_plan_summary(plan, lang, launched_args=launched_args, dashboard_plan=dashboard_plan)
 
     if args.dry_run:
         print(f"\n{_start_msg(lang, '仅预览模式，未执行命令。', 'Dry run mode: command not executed.')}")
@@ -1329,21 +1467,8 @@ def cmd_start(args, parser):
     for key, value in plan.env_overrides.items():
         os.environ[key] = value
 
-    if getattr(plan, "workflow_key", None) == "dashboard-service":
-        return _run_dashboard_service_maintenance_session(
-            parser=parser,
-            lang=lang,
-            input_fn=interactive_input,
-            build_dashboard_service_plan_fn=build_dashboard_service_plan,
-            initial_plan=plan,
-        )
-
-    launched_args = _parse_launch_plan_args(plan, parser, lang)
-    if launched_args is None:
-        return
-
-    dashboard_service = _prepare_dashboard_service_for_start(
-        launched_args,
+    dashboard_service = _materialize_dashboard_publish_plan(
+        dashboard_plan,
         lang,
         interactive_input,
     )

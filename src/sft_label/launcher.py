@@ -36,6 +36,9 @@ SECTION_DIVIDER = "-" * 56
 INTERACTIVE_DEFAULT_PROMPT_MODE = "compact"
 DEFAULT_MAINTENANCE_WORKERS = 8
 MAINTENANCE_WORKER_CHOICES = (1, 4, 8, 16, 32)
+CUSTOM_CHOICE_VALUE = "__custom__"
+LAUNCHER_CONCURRENCY_PRESETS = ("25", "50", "150", "200", "300")
+LAUNCHER_RPS_LIMIT_PRESETS = ("0", "10", "20", "30", "50", "100")
 BACK_TOKENS = {
     "b", "back", "/b", ":b",
     "返回", "上一步", "上一级",
@@ -112,6 +115,10 @@ def _format_default_value(value: int | float | str) -> str:
     else:
         v = str(value)
     return f"{v}（默认） / {v} (default)"
+
+
+def _custom_choice_label() -> str:
+    return _msg("自定义… / Custom...", "Custom...")
 
 
 WORKFLOWS = [
@@ -866,32 +873,26 @@ def _build_run_plan(
             key="concurrency",
             label="LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
             options=[
-                SwitchOption("", _format_default_value(DEFAULT_CONCURRENCY)),
-                SwitchOption("0", "0"),
+                SwitchOption(str(DEFAULT_CONCURRENCY), _format_default_value(DEFAULT_CONCURRENCY)),
+                SwitchOption("25", "25"),
                 SwitchOption("50", "50"),
-                SwitchOption("100", "100"),
                 SwitchOption("150", "150"),
-                SwitchOption("200", "200"),
-                SwitchOption("250", "250"),
                 SwitchOption("300", "300"),
-                SwitchOption("400", "400"),
-                SwitchOption("500", "500"),
+                SwitchOption(CUSTOM_CHOICE_VALUE, _custom_choice_label()),
             ],
-            default_value="",
+            default_value=str(DEFAULT_CONCURRENCY),
         ),
         SwitchField(
             key="rps_limit",
             label="RPS 最大上限 / Max RPS cap",
             options=[
                 SwitchOption("", _format_default_value(DEFAULT_RPS_LIMIT)),
-                SwitchOption("0", "0"),
                 SwitchOption("10", "10"),
                 SwitchOption("20", "20"),
                 SwitchOption("30", "30"),
-                SwitchOption("40", "40"),
                 SwitchOption("50", "50"),
-                SwitchOption("75", "75"),
                 SwitchOption("100", "100"),
+                SwitchOption(CUSTOM_CHOICE_VALUE, _custom_choice_label()),
             ],
             default_value="",
         ),
@@ -976,6 +977,7 @@ def _build_run_plan(
         "运行配置（上下选择，左右切值） / Run config (Up/Down select, Left/Right switch)",
         switch_fields,
     )
+    switch_values = _resolve_switch_custom_numeric_values(input_fn, switch_values)
 
     if switch_values["prompt_mode"] != "full":
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
@@ -1080,31 +1082,26 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
                 key="concurrency",
                 label="LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
                 options=[
-                    SwitchOption("100", _format_default_value(DEFAULT_CONCURRENCY)),
-                    SwitchOption("0", "0"),
+                    SwitchOption(str(DEFAULT_CONCURRENCY), _format_default_value(DEFAULT_CONCURRENCY)),
+                    SwitchOption("25", "25"),
                     SwitchOption("50", "50"),
                     SwitchOption("150", "150"),
-                    SwitchOption("200", "200"),
-                    SwitchOption("250", "250"),
                     SwitchOption("300", "300"),
-                    SwitchOption("400", "400"),
-                    SwitchOption("500", "500"),
+                    SwitchOption(CUSTOM_CHOICE_VALUE, _custom_choice_label()),
                 ],
-                default_value="100",
+                default_value=str(DEFAULT_CONCURRENCY),
             ),
             SwitchField(
                 key="rps_limit",
                 label="RPS 最大上限 / Max RPS cap",
                 options=[
                     SwitchOption("", _format_default_value(DEFAULT_RPS_LIMIT)),
-                    SwitchOption("0", "0"),
                     SwitchOption("10", "10"),
                     SwitchOption("20", "20"),
                     SwitchOption("30", "30"),
-                    SwitchOption("40", "40"),
                     SwitchOption("50", "50"),
-                    SwitchOption("75", "75"),
                     SwitchOption("100", "100"),
+                    SwitchOption(CUSTOM_CHOICE_VALUE, _custom_choice_label()),
                 ],
                 default_value="",
             ),
@@ -1184,6 +1181,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
             ),
         ],
     )
+    switch_values = _resolve_switch_custom_numeric_values(input_fn, switch_values)
     if switch_values["prompt_mode"] != "full":
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
     if switch_values["resume"] == "on":
@@ -1296,6 +1294,31 @@ def _build_run_plan_legacy(
     if not _ask_yes_no(input_fn, "启用仲裁补跑 / Enable arbitration pass", default=True):
         argv.append("--no-arbitration")
 
+    concurrency = _ask_numeric_choice_or_custom(
+        input_fn,
+        output_fn,
+        "LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
+        default_return_value=str(DEFAULT_CONCURRENCY),
+        default_label_value=DEFAULT_CONCURRENCY,
+        preset_values=LAUNCHER_CONCURRENCY_PRESETS,
+        custom_prompt="输入 LLM 最大并发上限（正整数） / Enter max LLM concurrency (positive integer)",
+        kind="int",
+    )
+    argv.extend(["--concurrency", concurrency])
+
+    rps_limit = _ask_numeric_choice_or_custom(
+        input_fn,
+        output_fn,
+        "RPS 最大上限 / Max RPS cap",
+        default_return_value="",
+        default_label_value=DEFAULT_RPS_LIMIT,
+        preset_values=LAUNCHER_RPS_LIMIT_PRESETS,
+        custom_prompt="输入 RPS 最大上限（支持小数；0=不限） / Enter max RPS cap (decimals allowed; 0 = unlimited)",
+        kind="float",
+    )
+    if rps_limit != "":
+        argv.extend(["--rps-limit", rps_limit])
+
     _section(output_fn, "模型与推理 / Model and inference")
     if not _ask_yes_no(input_fn, "启用自适应运行时 / Enable adaptive runtime", default=True):
         argv.append("--no-adaptive-runtime")
@@ -1352,7 +1375,7 @@ def _build_run_plan_legacy(
 
 
 def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
-    argv = ["score", "--concurrency", str(DEFAULT_CONCURRENCY)]
+    argv = ["score"]
     env_overrides: dict[str, str] = {}
 
     _section(output_fn, "基础输入 / Basic input")
@@ -1383,6 +1406,31 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
 
     if _ask_yes_no(input_fn, "续跑评分并跳过已存在样本 / Resume scoring and skip existing samples", default=False):
         argv.append("--resume")
+
+    concurrency = _ask_numeric_choice_or_custom(
+        input_fn,
+        output_fn,
+        "LLM 最大并发上限（阶段一/二共用） / Shared max LLM concurrency cap (pass1/pass2)",
+        default_return_value=str(DEFAULT_CONCURRENCY),
+        default_label_value=DEFAULT_CONCURRENCY,
+        preset_values=LAUNCHER_CONCURRENCY_PRESETS,
+        custom_prompt="输入 LLM 最大并发上限（正整数） / Enter max LLM concurrency (positive integer)",
+        kind="int",
+    )
+    argv.extend(["--concurrency", concurrency])
+
+    rps_limit = _ask_numeric_choice_or_custom(
+        input_fn,
+        output_fn,
+        "RPS 最大上限 / Max RPS cap",
+        default_return_value="",
+        default_label_value=DEFAULT_RPS_LIMIT,
+        preset_values=LAUNCHER_RPS_LIMIT_PRESETS,
+        custom_prompt="输入 RPS 最大上限（支持小数；0=不限） / Enter max RPS cap (decimals allowed; 0 = unlimited)",
+        kind="float",
+    )
+    if rps_limit != "":
+        argv.extend(["--rps-limit", rps_limit])
 
     if not _ask_yes_no(input_fn, "启用自适应运行时 / Enable adaptive runtime", default=True):
         argv.append("--no-adaptive-runtime")
@@ -2409,6 +2457,83 @@ def _ask_optional_float(input_fn: InputFn, prompt: str) -> float | None:
             return float(raw)
         except ValueError:
             print(_msg("请输入数字，或留空。", "Enter a number or leave blank."))
+
+
+def _ask_custom_int(input_fn: InputFn, prompt: str, *, minimum: int = 1) -> str:
+    while True:
+        value = _ask_int(input_fn, prompt, default=minimum)
+        if value < minimum:
+            print(_msg(f"请输入大于等于 {minimum} 的整数。", f"Enter an integer >= {minimum}."))
+            continue
+        return str(value)
+
+
+def _ask_custom_float(input_fn: InputFn, prompt: str, *, minimum: float = 0.0) -> str:
+    while True:
+        value = _ask_float(input_fn, prompt, default=minimum)
+        if value < minimum:
+            print(_msg(f"请输入大于等于 {minimum} 的数字。", f"Enter a number >= {minimum}."))
+            continue
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+
+
+def _ask_numeric_choice_or_custom(
+    input_fn: InputFn,
+    output_fn: OutputFn,
+    title: str,
+    *,
+    default_return_value: str,
+    default_label_value: int | float | str,
+    preset_values: list[str] | tuple[str, ...],
+    custom_prompt: str,
+    kind: str,
+) -> str:
+    options: list[tuple[str, str, str]] = [
+        (default_return_value, _format_default_value(default_label_value), ""),
+    ]
+    seen = {default_return_value}
+    for value in preset_values:
+        if value in seen:
+            continue
+        seen.add(value)
+        options.append((value, value, ""))
+    options.append((CUSTOM_CHOICE_VALUE, _custom_choice_label(), ""))
+    choice = _ask_choice(
+        input_fn,
+        output_fn,
+        title,
+        options,
+        default_index=1,
+    )
+    if choice != CUSTOM_CHOICE_VALUE:
+        return choice
+    if kind == "int":
+        return _ask_custom_int(input_fn, custom_prompt, minimum=1)
+    if kind == "float":
+        return _ask_custom_float(input_fn, custom_prompt, minimum=0.0)
+    raise ValueError(f"Unsupported numeric choice kind: {kind}")
+
+
+def _resolve_switch_custom_numeric_values(
+    input_fn: InputFn,
+    switch_values: dict[str, str],
+) -> dict[str, str]:
+    resolved = dict(switch_values)
+    if resolved.get("concurrency") == CUSTOM_CHOICE_VALUE:
+        resolved["concurrency"] = _ask_custom_int(
+            input_fn,
+            "输入 LLM 最大并发上限（正整数） / Enter max LLM concurrency (positive integer)",
+            minimum=1,
+        )
+    if resolved.get("rps_limit") == CUSTOM_CHOICE_VALUE:
+        resolved["rps_limit"] = _ask_custom_float(
+            input_fn,
+            "输入 RPS 最大上限（支持小数；0=不限） / Enter max RPS cap (decimals allowed; 0 = unlimited)",
+            minimum=0.0,
+        )
+    return resolved
 
 
 def _ask_yes_no(input_fn: InputFn, prompt: str, *, default: bool) -> bool:

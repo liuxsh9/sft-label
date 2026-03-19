@@ -229,6 +229,8 @@ def test_build_run_pass1_pass2_semantic_plan():
             "",           # --limit (default 0)
             "",           # shuffle (default no)
             "",           # arbitration (default yes)
+            "",           # concurrency (default 200)
+            "",           # rps-limit (default)
             "",           # adaptive runtime (default yes)
             "",           # recovery sweep (default yes)
             "",           # prompt mode (full)
@@ -246,6 +248,8 @@ def test_build_run_pass1_pass2_semantic_plan():
         "run",
         "--input",
         "data.json",
+        "--concurrency",
+        "200",
         "--score",
         "--semantic-cluster",
     ]
@@ -264,6 +268,8 @@ def test_build_run_plan_can_disable_adaptive_runtime_and_recovery_sweep():
             "",           # --limit (default 0)
             "",           # shuffle (default no)
             "",           # arbitration (default yes)
+            "",           # concurrency (default 200)
+            "",           # rps-limit (default)
             "n",          # adaptive runtime (disable)
             "n",          # recovery sweep (disable)
             "",           # prompt mode (full)
@@ -279,8 +285,49 @@ def test_build_run_plan_can_disable_adaptive_runtime_and_recovery_sweep():
         "run",
         "--input",
         "data.json",
+        "--concurrency",
+        "200",
         "--no-adaptive-runtime",
         "--no-recovery-sweep",
+    ]
+
+
+def test_build_run_plan_legacy_supports_custom_runtime_values():
+    io = StubIO(
+        [
+            "2",            # workflow: run-pass1
+            "1",            # run mode: new
+            "data.json",    # --input
+            "",             # --output
+            "",             # inline mode (refresh)
+            "",             # extension labeling prompt (default no)
+            "",             # --limit
+            "",             # shuffle
+            "",             # arbitration
+            "6",            # concurrency -> custom
+            "260",          # custom concurrency
+            "8",            # rps-limit -> custom
+            "88.5",         # custom rps-limit
+            "",             # adaptive runtime
+            "",             # recovery sweep
+            "",             # prompt mode
+            "",             # model
+            "n",            # env override
+            "",             # extra flags
+        ]
+    )
+
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "run",
+        "--input",
+        "data.json",
+        "--concurrency",
+        "260",
+        "--rps-limit",
+        "88.5",
     ]
 
 
@@ -293,6 +340,8 @@ def test_build_score_plan_with_llm_env_override():
             "",                       # rarity mode (default absolute)
             "",                       # --limit
             "",                       # --resume
+            "",                       # concurrency (default 200)
+            "",                       # rps-limit (default)
             "",                       # adaptive runtime (default yes)
             "",                       # recovery sweep (default yes)
             "",                       # prompt mode
@@ -306,11 +355,47 @@ def test_build_score_plan_with_llm_env_override():
     plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
 
     assert plan is not None
-    assert plan.argv == ["score", "--concurrency", "100", "--input", "labeled.json"]
+    assert plan.argv == ["score", "--input", "labeled.json", "--concurrency", "200"]
     assert plan.env_overrides == {
         "LITELLM_BASE": "http://proxy/v1",
         "LITELLM_KEY": "secret",
     }
+
+
+def test_build_score_plan_legacy_supports_custom_runtime_values():
+    io = StubIO(
+        [
+            "3",            # workflow: score
+            "labeled.json", # --input
+            "",             # --tag-stats
+            "",             # rarity mode
+            "",             # --limit
+            "",             # --resume
+            "6",            # concurrency -> custom
+            "260",          # custom concurrency value
+            "8",            # rps-limit -> custom
+            "123.5",        # custom rps-limit value
+            "",             # adaptive runtime
+            "",             # recovery sweep
+            "",             # prompt mode
+            "",             # model
+            "n",            # env override
+            "",             # extra flags
+        ]
+    )
+
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "score",
+        "--input",
+        "labeled.json",
+        "--concurrency",
+        "260",
+        "--rps-limit",
+        "123.5",
+    ]
 
 
 def test_build_smart_resume_plan_routes_to_score_for_labeled_run_dir(tmp_path):
@@ -329,7 +414,7 @@ def test_build_smart_resume_plan_routes_to_score_for_labeled_run_dir(tmp_path):
 
     assert plan is not None
     assert plan.workflow_key == "smart-resume"
-    assert plan.argv == ["score", "--concurrency", "100", "--input", str(tmp_path)]
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path)]
 
 
 def test_build_smart_resume_plan_routes_to_resumed_score_when_scored_exists(tmp_path):
@@ -349,7 +434,7 @@ def test_build_smart_resume_plan_routes_to_resumed_score_when_scored_exists(tmp_
 
     assert plan is not None
     assert plan.workflow_key == "smart-resume"
-    assert plan.argv == ["score", "--concurrency", "100", "--input", str(tmp_path), "--resume"]
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
 
 
 def test_build_smart_resume_plan_routes_to_run_resume_when_checkpoint_exists(tmp_path):
@@ -389,7 +474,7 @@ def test_build_smart_resume_plan_checkpoint_done_routes_to_score(tmp_path):
 
     assert plan is not None
     assert plan.workflow_key == "smart-resume"
-    assert plan.argv == ["score", "--concurrency", "100", "--input", str(tmp_path)]
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path)]
 
 
 def test_build_filter_plan_enforces_at_least_one_criterion():
@@ -641,6 +726,8 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
             "",             # rarity mode (default absolute)
             "",             # --limit
             "",             # --resume
+            "",             # concurrency (default 200)
+            "",             # rps-limit (default)
             "",             # adaptive runtime (default yes)
             "",             # recovery sweep (default yes)
             "",             # prompt mode
@@ -670,6 +757,8 @@ def test_required_text_prompt_ignores_arrow_key_input(capsys):
             "",           # --limit
             "",           # --shuffle
             "",           # --arbitration
+            "",           # concurrency (default 200)
+            "",           # rps-limit (default)
             "",           # adaptive runtime (default yes)
             "",           # recovery sweep (default yes)
             "",           # --prompt mode
@@ -699,6 +788,8 @@ def test_build_run_plan_can_set_migrate_mode():
             "",              # --limit
             "",              # --shuffle
             "",              # --arbitration
+            "",              # concurrency (default 200)
+            "",              # rps-limit (default)
             "",              # adaptive runtime (default yes)
             "",              # recovery sweep (default yes)
             "",              # --prompt mode
@@ -753,6 +844,8 @@ def test_build_run_resume_plan_skips_output_prompt():
             "",         # --limit
             "",         # --shuffle
             "",         # --arbitration
+            "",         # concurrency (default 200)
+            "",         # rps-limit (default)
             "",         # adaptive runtime (default yes)
             "",         # recovery sweep (default yes)
             "",         # --prompt mode
@@ -767,6 +860,8 @@ def test_build_run_resume_plan_skips_output_prompt():
         "run",
         "--resume",
         "run-dir",
+        "--concurrency",
+        "200",
     ]
     assert "--output" not in plan.argv
     assert not any("输出目录（可选）" in str(item) for item in io.outputs)
@@ -801,6 +896,8 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
             "",             # rarity mode (default absolute)
             "",             # --limit
             "",             # --resume
+            "",             # concurrency (default 200)
+            "",             # rps-limit (default)
             "",             # adaptive runtime (default yes)
             "",             # recovery sweep (default yes)
             "",             # prompt mode
@@ -876,6 +973,8 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
             "2",            # rarity mode: percentile
             "",             # --limit
             "",             # --resume
+            "",             # concurrency (default 200)
+            "",             # rps-limit (default)
             "",             # adaptive runtime (default yes)
             "",             # recovery sweep (default yes)
             "",             # prompt mode
@@ -888,12 +987,12 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
     assert plan is not None
     assert plan.argv == [
         "score",
-        "--concurrency",
-        "100",
         "--input",
         "labeled.json",
         "--rarity-mode",
         "percentile",
+        "--concurrency",
+        "200",
     ]
 
 
@@ -954,6 +1053,56 @@ def test_cmd_start_can_auto_publish_dashboard(monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "dashboard_labeling_demo.html" in out
     assert "dashboard_scoring_demo.html" in out
+
+
+def test_cmd_start_blank_dashboard_confirmation_defaults_to_yes_before_execute(monkeypatch, capsys, tmp_path):
+    from sft_label.launcher import LaunchPlan
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json", "--concurrency", "200"]),
+    )
+
+    prompts: list[str] = []
+
+    def _fake_input(prompt: str):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("sft_label.launcher.interactive_input", _fake_input, raising=False)
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url(), "public_url": svc.share_base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(service, run_dir, config_path=None):
+        publish_calls["count"] += 1
+        return {"run_id": "demo_run", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr("sft_label.cli.dispatch_command", lambda args, parser: {"run_dir": str(run_dir)}, raising=False)
+
+    args = parser.parse_args(["start"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    auto_idx = next(i for i, prompt in enumerate(prompts) if "dashboard" in prompt.lower())
+    execute_idx = next(i for i, prompt in enumerate(prompts) if "execute now" in prompt.lower() or "立即执行" in prompt)
+    assert auto_idx < execute_idx
+    assert publish_calls["count"] == 1
+    assert "Dashboard plan" in out or "Dashboard 计划" in out
 
 
 def test_cmd_start_auto_publish_uses_default_dashboard_service_without_prompt(monkeypatch, capsys, tmp_path):
@@ -1048,7 +1197,7 @@ def test_cmd_start_wraps_auto_publish_with_heartbeat(monkeypatch, tmp_path):
 
     monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]))
 
-    answers = iter(["", "y", ""])  # confirm, auto-publish yes, restart=no(default)
+    answers = iter(["", "", ""])  # auto-publish default yes, final confirm yes, restart=no(default)
     monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
 
     service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
@@ -1099,7 +1248,7 @@ def test_cmd_start_dashboard_bootstrap_retries_with_new_port_after_conflict(monk
         lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]),
     )
 
-    answers = iter(["", "y", "", "9000"])  # confirm, auto-publish, start-now, new port
+    answers = iter(["", "", "", "9000"])  # auto-publish default yes, start-now, final confirm, new port
     monkeypatch.setattr("sft_label.launcher.interactive_input", lambda prompt: next(answers), raising=False)
     monkeypatch.setattr(
         "sft_label.cli.dashboard_service_status",
@@ -1165,14 +1314,14 @@ def test_cmd_start_auto_publish_bootstraps_lan_service_with_shareable_url(monkey
     )
 
     answers = iter([
-        "",   # confirm execution
-        "y",  # auto-publish yes
+        "",   # auto-publish default yes
         "",   # service name -> default
         "",   # web root -> default
         "2",  # exposure: LAN
         "",   # port -> default
         "",   # share URL -> accept guessed default
         "",   # start service now -> default yes
+        "",   # final confirm execution
     ])
     monkeypatch.setattr(
         "sft_label.launcher.interactive_input",
