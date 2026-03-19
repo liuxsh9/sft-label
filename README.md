@@ -100,7 +100,7 @@ In the common case:
 
 What `start` does:
 
-1. **Lets you choose a workflow**: Pass 1 + Pass 2 is the default recommendation, followed by Pass 1 only, scoring only, semantic clustering, filtering, maintenance, export, and dashboard-service workflows.
+1. **Lets you choose a workflow**: Pass 1 + Pass 2 is the default recommendation, and the Pipeline section now also surfaces Smart resume near the top for interrupted runs before the rest of the Pass 1 / scoring / semantic / filtering / maintenance / export / dashboard-service workflows.
 2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options (including `--adaptive-runtime` / `--recovery-sweep` toggles when relevant).
 3. **Builds the exact CLI command for you** and shows a launch summary before execution.
 4. **Can finish the run with URLs** by auto-publishing dashboards to your configured service.
