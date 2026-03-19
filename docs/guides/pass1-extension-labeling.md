@@ -4,7 +4,7 @@ Pass 1 extension labeling lets you attach **additional, domain-specific tags** o
 
 ## When to use it
 
-Use extension labeling when you need extra metadata for a specific subset of samples (e.g., UI-heavy data, mobile tasks, domain-specific heuristics).
+Use extension labeling when you need extra metadata for a specific subset of samples (e.g., UI-heavy data, Web UI mix analysis, mobile tasks, or domain-specific heuristics).
 
 ## Enabling extension labeling
 
@@ -18,6 +18,14 @@ uv run sft-label run \
 ```
 
 The flag is repeatable, and **each spec must have a unique `id`**. Specs that do not match a sample’s trigger are recorded as `status=skipped` and `matched=false`.
+
+If you use the interactive launcher (`uv run sft-label start`), extension selection now supports:
+
+- a single YAML path,
+- a directory path (lists `.yaml` / `.yml` files and lets you select **one or more**),
+- the shortcut `examples` (opens the built-in `docs/examples/extensions/` directory).
+
+The launcher also prints a strong cost reminder: **each enabled extension adds extra extension-labeling calls for matched samples**, so do not turn on highly domain-specific extensions across the full dataset unless you first filter or sample it down.
 
 ## Extension spec files
 
@@ -55,6 +63,7 @@ Bundled example specs:
 
 - Minimal starter: `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
 - Richer UI variant: `docs/examples/extensions/ui_fine_labels_v1.yaml`
+- Web UI analysis / mix-optimization example: `docs/examples/extensions/ui_web_analysis_v1.yaml`
 
 Recommended rollout:
 
@@ -79,9 +88,9 @@ You can pass multiple `--label-extension` specs in a single run. Each spec is ev
 
 ### Extension diagnostics and follow-up guidance
 
-Before the first extension call, the CLI now prints a compact preflight summary that lists every registered spec, whether it has a trigger, and the prompt/schema warnings that matter before you spend tokens. That block is your first checkpoint for new extensions: confirm the spec looks focused, note any triggerless or oversized prompts, and split or tighten the schema before scaling up.
+Before the first extension call, the CLI prints a compact preflight summary that lists every registered spec, whether it has a trigger, and the prompt/schema warnings that matter before you spend tokens. That block is your first checkpoint for new extensions: confirm the spec looks focused, note any triggerless or oversized prompts, and split or tighten the schema before scaling up.
 
-After the run completes, a follow-up diagnostics section highlights match counts, validation warnings, low-confidence fields, or unmapped rows per spec, along with sample counts that help you prioritize drilling into the dashboard or review CSV.
+After the run completes, a follow-up diagnostics section highlights per-spec match counts, failed/invalid statuses, and unmapped rows. Use that together with the dashboard drawer and `export-review --include-extensions` to inspect low-confidence fields or suspicious value distributions before widening the rollout.
 
 Both diagnostics sections reference the same metadata that ends up in `stats_labeling.json` so you can quickly trace a warning back to the dashboard or the `runtime_events` log for deeper investigation.
 
@@ -135,7 +144,7 @@ uv run sft-label run \
 
 This is the best first step when you want to validate:
 
-- trigger hit rate,
+- trigger scope,
 - prompt/schema contract quality,
 - extension visibility in dashboard + review CSV.
 
@@ -149,7 +158,73 @@ uv run sft-label run \
   --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
 ```
 
-### 3) Multiple extension configs coexisting
+### 3) Web UI dataset analysis / distribution optimization
+
+Use the Web-only analysis example when you want to understand **dataset mix**, not answer quality:
+
+```bash
+uv run sft-label run \
+  --input filtered_web_ui_data.jsonl \
+  --label-extension docs/examples/extensions/ui_web_analysis_v1.yaml
+```
+
+This example is useful when you want to answer questions like:
+
+- Are we over-concentrated in CRUD/forms and under-covered in dashboards, builders, or admin workflows?
+- Do we mostly have low-state UI rows, while missing multi-source async/state-coordination samples?
+- How much of the Web UI subset actually exercises design-system, responsive, accessibility, or dense-data constraints?
+- Are we overly concentrated in one framework ecosystem?
+
+This example intentionally keeps only `domain_any_of: [web-frontend]` active. The other trigger keys can stay in the YAML as empty placeholders so users can see which routing dimensions exist without narrowing recall by default.
+
+Interpret it this way:
+
+- **Analysis-oriented default:** only the broad domain trigger is active, so more Web UI rows are included in the audit.
+- **Stricter trigger mode:** if you later fill in `language_any_of`, `intent_any_of`, `task_any_of`, `context_any_of`, or `difficulty_any_of`, you are explicitly saying that you trust core Pass 1 enough to use those labels as hard extension-routing gates.
+
+Trigger semantics for this example:
+
+- empty list `[]` = this trigger dimension does **not** participate in filtering
+- non-empty `*_any_of` = that dimension becomes a **hard precondition**
+- values inside one `*_any_of` list are matched with **OR**
+- different trigger dimensions combine with **AND**
+- if the trigger does not match, the extension is recorded as `status=skipped` and `matched=false`
+
+Keep this example **Web-only**. If you also need mobile analysis, create a separate mobile extension so the prompt, trigger, stats, and cost profile remain interpretable.
+
+This example also assumes the input is already mostly a **Web UI subset**. If your data still contains routing/config/build-only frontend tasks or non-visual web work, filter first or tighten the trigger before you trust the resulting distributions.
+
+#### How to turn this example into your own extension
+
+1. Copy `docs/examples/extensions/ui_web_analysis_v1.yaml` to a new file with a new `id`.
+2. Keep the schema to roughly **3-5 fields** unless you have a strong reason to expand it.
+3. Start with only the broadest trigger active (usually `domain_any_of`) so you can inspect recall first.
+4. Run a small filtered sample, then inspect `matched/skipped`, dashboard distributions, and `export-review --include-extensions`.
+5. Only after that, tighten triggers or split into a second extension if you need stricter routing or a different domain.
+
+What to change first:
+
+- **must change:** `id`, `display_name`, and the schema/prompt so they match your own analysis target
+- **usually keep first:** `output.include_confidence`, `output.allow_unmapped`
+- **change later if needed:** `dashboard.group`, `dashboard.priority`, and stricter trigger dimensions
+
+Example output shape:
+
+```json
+{
+  "ui_surface_type": "data-dense-dashboard",
+  "interaction_pattern": "search-filter-explore",
+  "state_data_complexity": "remote-data-binding",
+  "ui_constraint_focus": ["responsive-layout", "dense-data-layout"],
+  "frontend_stack_shape": "react-next-ecosystem",
+  "confidence": {
+    "ui_surface_type": 0.92,
+    "interaction_pattern": 0.88
+  }
+}
+```
+
+### 4) Multiple extension configs coexisting
 
 You can enable several domain-specific extensions at once:
 
@@ -174,8 +249,7 @@ Each extension:
 3.  Drill down into a handful of matched samples and read `label_extensions.<spec_id>` in the drawer, checking field values, confidence, and unmapped arrays.
 4.  Export that subset via `uv run sft-label export-review --include-extensions` to see exactly which columns downstream reviewers will consume.
 5.  Once the minimal flow is stable, add richer fields or a second extension spec.
-
-6.  Keep an eye on the preflight diagnostics block when you run or `start`; if the follow-up diagnostics highlight validation warnings, fix them before scaling the extension to more data.
+6.  Keep an eye on the preflight diagnostics block when you run or `start`; if the follow-up diagnostics highlight failed/invalid or unmapped issues, fix them before scaling the extension to more data.
 
 ### Recommended spec size
 
@@ -193,17 +267,42 @@ Each extension:
 ### Validation checklist
 
 Before trusting an extension rollout, verify the following:
-- Trigger hit rate looks sane; there should be a meaningful difference between `matched` and `skipped`.
+- Trigger scope looks sane; `matched` / `skipped` should align with the subset you intended.
 - Value distributions per field are not degenerate; you should see multiple reasonable options, not a single dominant label.
 - Low-confidence entries and unmapped rows stay within your domain’s tolerance.
 - Drill-down samples actually match the positions you care about so you can spot-check 10–20 cases manually.
 - Exported review CSV with `--include-extensions` shows the right columns.
 
+### When to split into multiple extensions
+
 - Keep each spec focused on a single domain or intent so the runtime diagnostics remain easy to interpret.
 - Prefer separate specs instead of one oversize schema when a new trigger, monitoring, or follow-up workflow is needed.
 - Mount each extension behind a specific trigger rather than bundling multiple unrelated domains into the same file. That keeps the dashboard, export stats, and follow-up diagnostics per spec clean.
-
 - The domains are different enough that one prompt/schema would be overloaded (web vs. mobile vs. infrastructure).
 - A single spec would exceed ~5 fields, contain dozens of option values, or produce a prompt+schema near the 2,000-character guideline.
 - You need separate trigger rules, enablement, or monitoring per intent.
 - You want isolated stats per schema so you can make independent stability decisions.
+
+### Web UI dataset analysis & distribution optimization
+
+“UI SFT data” refers to the subset of samples where the assistant is working on explicit **Web / desktop browser UI surfaces**—pages, dashboards, admin consoles, interactive panels, builders, settings flows, or component/design-system work—so you can reason about coverage, complexity, and engineering constraints as you curate a training mix.
+
+The new Web-only analysis example (`docs/examples/extensions/ui_web_analysis_v1.yaml`) adds labels for:
+
+- **`ui_surface_type`** — which Web surface family the sample belongs to, so you can spot over-concentration in one kind of UI.
+- **`interaction_pattern`** — whether the sample is mostly display, form/config, search/filter/explore, CRUD-heavy, or builder/editing oriented.
+- For `interaction_pattern`, treat dashboards and analytics surfaces with filters/exploration as `search-filter-explore`; reserve `dense-crud-operations` for row-level management workflows where create/update/delete is the dominant interaction.
+- **`state_data_complexity`** — whether the work is static, local-state only, async-data driven, validation-heavy, or requires multi-source coordination.
+- **`ui_constraint_focus`** — whether the sample meaningfully exercises design-system consistency, responsive layout, accessibility semantics, dense data layout, or UI performance.
+- **`frontend_stack_shape`** — which Web ecosystem shape the sample belongs to, so framework skew is visible during analysis.
+
+Those labels exist to help you analyze coverage gaps and optimize dataset ratios, not to create more instructions for every sample. Each enabled extension fires an extra extension-labeling call for every matching sample, so **do not enable domain-personalized or mobile-specific extensions across your entire dataset** unless you first narrow the inputs with filters, smaller subsets, or targeted sampling. Mobile surfaces should live in a separate extension because the signals, triggers, prompt wording, and responsiveness constraints differ; mixing them would dilute both the Web-focused dashboard view and the analysis prompts.
+
+For this analysis-oriented Web example, the recommended default is to keep only `domain_any_of` active and leave the other trigger dimensions empty. If you later fill them in, treat that as a deliberate tradeoff: you are tightening recall in exchange for trusting core Pass 1 routing precision more aggressively.
+
+### Cost / risk quick check
+
+- Extra extension calls ≈ `matched_samples × enabled_extension_specs`
+- Broader triggers increase recall, but also increase extra calls, latency, and review surface
+- Stricter triggers reduce cost, but increase the risk of silent skips caused by imperfect Pass 1 routing
+- Start with filtering, sampling, or `--limit`, then validate on roughly **20-100 rows** before widening

@@ -42,6 +42,9 @@ BACK_TOKENS = {
 }
 
 
+BUILTIN_EXTENSION_SPECS_DIR = Path(__file__).resolve().parents[2] / "docs" / "examples" / "extensions"
+
+
 class BackRequested(Exception):
     """Raised when user asks to return to previous level."""
 
@@ -2078,6 +2081,17 @@ def _extension_example_hint() -> str:
     return "docs/examples/extensions/ui_fine_labels_minimal_v1.yaml"
 
 
+def _builtin_extension_examples_dir() -> Path:
+    return BUILTIN_EXTENSION_SPECS_DIR
+
+
+def _resolve_extension_input_path(raw: str) -> Path:
+    candidate = str(raw).strip()
+    if candidate.lower() == "examples":
+        return _builtin_extension_examples_dir()
+    return Path(candidate).expanduser()
+
+
 def _say_extension_first_run_guidance(output_fn: OutputFn) -> None:
     _say(
         output_fn,
@@ -2091,6 +2105,20 @@ def _say_extension_first_run_guidance(output_fn: OutputFn) -> None:
         _msg(
             "建议一个 extension 只覆盖一个领域；多个领域请拆成多个 spec。",
             "Prefer one domain per extension; split into multiple specs when domains diverge.",
+        ),
+    )
+    _say(
+        output_fn,
+        _msg(
+            "你可以输入单个 YAML 路径；也可以输入目录路径（或 examples）列出其中的 YAML 并一次选择多个。",
+            "You can enter a single YAML path, or enter a directory path (or `examples`) to list YAML files and choose multiple specs at once.",
+        ),
+    )
+    _say(
+        output_fn,
+        _msg(
+            "重要：每启用一个 extension，都会为命中的样本增加额外 extension 调用。不要把强领域个性化 extension 直接跑在全量数据上。",
+            "Important: each enabled extension adds extra extension-labeling calls for matched samples. Do not run heavily domain-specific extensions across the full dataset.",
         ),
     )
 
@@ -2125,7 +2153,7 @@ def _say_extension_spec_summary(output_fn: OutputFn, path: str, summary: dict) -
 
 
 def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> tuple[str, str] | None:
-    spec_path = Path(path).expanduser()
+    spec_path = _resolve_extension_input_path(path)
     if not spec_path.exists():
         _say(
             output_fn,
@@ -2151,6 +2179,81 @@ def _maybe_preview_extension_spec(path: str, output_fn: OutputFn) -> tuple[str, 
     return str(spec_path.resolve()), str(spec.id)
 
 
+def _choose_extension_specs_from_directory(
+    input_fn: InputFn,
+    output_fn: OutputFn,
+    directory: Path,
+) -> list[tuple[str, str]]:
+    files = sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}
+    )
+    if not files:
+        _say(
+            output_fn,
+            _msg(
+                f"目录 {directory} 中没有可用的 YAML 扩展规范。",
+                f"No YAML extension specs found in {directory}.",
+            ),
+        )
+        return []
+
+    _say(
+        output_fn,
+        _msg(
+            f"从目录读取扩展规范：{directory}",
+            f"Loading extension specs from directory: {directory}",
+        ),
+    )
+    _say(
+        output_fn,
+        _msg(
+            "提醒：这里每多选一个 extension，都可能为命中样本增加额外 extension 调用；强领域 extension 不要直接对全量数据启用。",
+            "Advisory: every extra extension selected here can add extra extension-labeling calls for matched samples; avoid enabling highly domain-specific extensions over full datasets.",
+        ),
+    )
+    previews: list[tuple[int, str, str, str]] = []
+    for idx, file_path in enumerate(files, start=1):
+        preview = _maybe_preview_extension_spec(str(file_path), output_fn)
+        if preview is None:
+            continue
+        resolved_path, spec_id = preview
+        previews.append((idx, resolved_path, spec_id, file_path.name))
+        _say(output_fn, _msg(f"  {idx}. {file_path.name}", f"  {idx}. {file_path.name}"))
+
+    if not previews:
+        return []
+
+    while True:
+        raw = _read_input(
+            input_fn,
+            _msg(
+                "选择一个或多个扩展编号（逗号分隔，例如 1,3）：",
+                "Select one or more extension numbers (comma-separated, e.g. 1,3): ",
+            ),
+        )
+        selected_tokens = [token.strip() for token in raw.split(",") if token.strip()]
+        if not selected_tokens:
+            _say(output_fn, _msg("请输入至少一个编号。", "Enter at least one number."))
+            continue
+        if not all(token.isdigit() for token in selected_tokens):
+            _say(output_fn, _msg("请输入逗号分隔的数字编号。", "Enter comma-separated numeric choices."))
+            continue
+        wanted = [int(token) for token in selected_tokens]
+        preview_map = {idx: (resolved_path, spec_id) for idx, resolved_path, spec_id, _name in previews}
+        if any(idx not in preview_map for idx in wanted):
+            _say(output_fn, _msg("选择超出范围。", "Selection out of range."))
+            continue
+        ordered_unique: list[tuple[str, str]] = []
+        seen: set[int] = set()
+        for idx in wanted:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            ordered_unique.append(preview_map[idx])
+        return ordered_unique
+
+
 
 def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[str]:
     """Collect extension spec paths when the user opts in."""
@@ -2169,32 +2272,45 @@ def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[st
     seen_ids: dict[str, str] = {}
     while True:
         while True:
-            path = _ask_required_text(input_fn, "扩展规范路径 / Extension spec path")
-            preview = _maybe_preview_extension_spec(path, output_fn)
-            if preview is None:
+            path = _ask_required_text(input_fn, "扩展规范路径或目录 / Extension spec path or directory")
+            candidate = _resolve_extension_input_path(path)
+            selected_previews: list[tuple[str, str]]
+            if candidate.is_dir():
+                selected_previews = _choose_extension_specs_from_directory(input_fn, output_fn, candidate)
+                if not selected_previews:
+                    continue
+            else:
+                preview = _maybe_preview_extension_spec(path, output_fn)
+                if preview is None:
+                    continue
+                selected_previews = [preview]
+
+            added_any = False
+            for resolved_path, spec_id in selected_previews:
+                if resolved_path in seen_paths:
+                    _say(
+                        output_fn,
+                        _msg(
+                            f"  提醒：{resolved_path} 已添加过，换一个 extension spec。",
+                            f"  Advisory: {resolved_path} is already added. Choose a different extension spec.",
+                        ),
+                    )
+                    continue
+                if spec_id in seen_ids:
+                    _say(
+                        output_fn,
+                        _msg(
+                            f"  提醒：extension id '{spec_id}' 已由 {seen_ids[spec_id]} 使用；请换一个 id 唯一的 spec。",
+                            f"  Advisory: duplicate extension id '{spec_id}' already used by {seen_ids[spec_id]}; choose a spec with a unique id.",
+                        ),
+                    )
+                    continue
+                specs.append(resolved_path)
+                seen_paths.add(resolved_path)
+                seen_ids[spec_id] = resolved_path
+                added_any = True
+            if not added_any:
                 continue
-            resolved_path, spec_id = preview
-            if resolved_path in seen_paths:
-                _say(
-                    output_fn,
-                    _msg(
-                        f"  提醒：{resolved_path} 已添加过，换一个 extension spec。",
-                        f"  Advisory: {resolved_path} is already added. Choose a different extension spec.",
-                    ),
-                )
-                continue
-            if spec_id in seen_ids:
-                _say(
-                    output_fn,
-                    _msg(
-                        f"  提醒：extension id '{spec_id}' 已由 {seen_ids[spec_id]} 使用；请换一个 id 唯一的 spec。",
-                        f"  Advisory: duplicate extension id '{spec_id}' already used by {seen_ids[spec_id]}; choose a spec with a unique id.",
-                    ),
-                )
-                continue
-            specs.append(resolved_path)
-            seen_paths.add(resolved_path)
-            seen_ids[spec_id] = resolved_path
             _say(
                 output_fn,
                 _msg(

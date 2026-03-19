@@ -204,13 +204,17 @@ schema:
 
 def _extension_run_answers(extension_paths: list[str]) -> list[str]:
     base_answers = ["2", "1", "dataset", "", ""] + [""] * 24
-    extension_flow = ["y"]
+    return base_answers[:5] + _extension_manual_flow(extension_paths) + base_answers[5:] + [""]
+
+
+def _extension_manual_flow(extension_paths: list[str]) -> list[str]:
+    flow = ["y", "1"]
     for path in extension_paths:
-        extension_flow.append(path)
-        extension_flow.append("y")
-    if extension_flow:
-        extension_flow[-1] = "n"
-    return base_answers[:5] + extension_flow + base_answers[5:] + [""]
+        flow.append(path)
+        flow.append("y")
+    if flow:
+        flow[-1] = "n"
+    return flow
 
 
 def test_build_run_pass1_pass2_semantic_plan():
@@ -1327,6 +1331,38 @@ def test_ask_extension_spec_paths_reprompts_until_valid_spec(tmp_path):
     assert paths == [str(valid_path)]
     joined = "\n".join(str(item) for item in io.outputs)
     assert "does not exist" in joined or "不存在" in joined
+
+
+def test_ask_extension_spec_paths_can_select_multiple_specs_from_directory(tmp_path):
+    spec_dir = tmp_path / "extensions"
+    spec_dir.mkdir()
+    first_path = spec_dir / "01-ui.yaml"
+    second_path = spec_dir / "02-mobile.yaml"
+    _write_extension_spec(first_path, spec_id="ui_fine_labels")
+    _write_extension_spec(second_path, spec_id="mobile_fine_labels", prompt_text="Label mobile data.")
+
+    io = StubIO(["y", str(spec_dir), "1,2", "n"])
+    paths = _ask_extension_spec_paths(io.input, io.output)
+
+    assert paths == [str(first_path.resolve()), str(second_path.resolve())]
+    joined = "\n".join(str(item) for item in io.outputs).lower()
+    assert "directory" in joined or "目录" in joined
+    assert "extra" in joined or "额外" in joined
+
+
+def test_ask_extension_spec_paths_examples_shortcut_uses_builtin_directory(monkeypatch, tmp_path):
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    spec_path = builtin_dir / "ui-analysis.yaml"
+    _write_extension_spec(spec_path, spec_id="ui_web_analysis")
+    monkeypatch.setattr("sft_label.launcher._builtin_extension_examples_dir", lambda: builtin_dir)
+
+    io = StubIO(["y", "examples", "1", "n"])
+    paths = _ask_extension_spec_paths(io.input, io.output)
+
+    assert paths == [str(spec_path.resolve())]
+    joined = "\n".join(str(item) for item in io.outputs).lower()
+    assert "examples" in joined
 
 
 def test_export_review_prompt_flow_can_include_extension_columns():

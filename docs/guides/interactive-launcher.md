@@ -15,9 +15,9 @@ Current workflow groups include:
 - **Pipeline**
   - Pass 1 labeling
   - Pass 1 + Pass 2
-  - Pass 1 + Pass 2 + Pass 4 semantic clustering
+  - Pass 1 + Pass 2 + Pass 3 semantic clustering
   - Pass 2 scoring only
-  - Pass 4 semantic clustering only
+  - Pass 3 semantic clustering only
 - **Data curation**
   - filtering
 - **Maintenance**
@@ -42,6 +42,10 @@ For `run`, it can guide you through:
 - new run vs resume
 - input path and optional output path
 - inline mode (`refresh`, `incremental`, `migrate`, `recompute`)
+- optional extension labeling via:
+  - one YAML file path,
+  - one directory path with **one-or-more** YAML selections,
+  - or the shortcut `examples` for built-in extension examples
 - whether to chain Pass 2 scoring
 - optional rarity stats
 - prompt mode
@@ -72,9 +76,29 @@ That means the launcher is a safe way to discover the plain CLI command you want
 
 ### Extension diagnostics and review exports
 
-If you enable Pass 1 extensions via `start`, the launcher now surfaces the same diagnostics block that the CLI prints: a preflight summary showing each spec’s trigger presence plus prompt/schema warnings so you can catch oversized or triggerless specs before the run starts. After the job finishes, a follow-up diagnostics section highlights match counts, validation warnings, low-confidence fields, and unmapped rows per spec so you can decide whether to revisit prompts, schema options, or trigger rules before scaling.
+When `start` asks for extension specs, you can now:
+
+- paste a single extension YAML path,
+- paste a directory path and choose one or more `.yaml` / `.yml` files,
+- or type `examples` to browse the built-in `docs/examples/extensions/` directory.
+
+This keeps the flow simple for first-time users while still supporting multiple extensions in one run.
+
+If you enable Pass 1 extensions via `start`, the launcher now surfaces the same diagnostics block that the CLI prints: a preflight summary showing each spec’s trigger presence plus prompt/schema warnings so you can catch oversized or triggerless specs before the run starts. After the job finishes, a follow-up diagnostics section highlights match counts, failed/invalid statuses, and unmapped rows per spec so you can decide whether to revisit prompts, schema options, or trigger rules before scaling. For low-confidence fields, inspect the dashboard drawer or `export-review --include-extensions` output on a small sample.
 
 When you need to inspect the extension columns in export form, run the generated `export-review` command with `--include-extensions` (`uv run sft-label export-review --input <run_dir> --output review.csv --include-extensions`). That flag keeps the default review CSV unchanged unless you opt in, while letting downstream reviewers see the additional extension fields.
+
+Important: every enabled extension adds extra extension-labeling calls for matched samples. Avoid turning on strongly domain-specific extensions for the full dataset; filter or sample first, especially for personalized domain labels. If you need mobile analysis, create a separate mobile extension rather than mixing mobile and Web labels into one spec.
+
+### Web UI dataset analysis guidance
+
+If you want to inspect “UI SFT data” (samples that explicitly target Web/desktop UI surfaces such as dashboards, landing pages, interactive panels, admin consoles, builders, and configuration tools), enable the Web-only analysis example (`docs/examples/extensions/ui_web_analysis_v1.yaml`). It surfaces coverage/distribution signals: surface categories, interaction mix, state/data complexity, engineering constraints, and ecosystem shape. These labels help you spot whether your dataset is overconcentrated in CRUD/forms or missing richer workflows before you narrow or rebalance the mix.
+
+That example intentionally keeps only `domain_any_of` active by default. The other trigger dimensions are left empty in the YAML as visible placeholders. If you later fill them in, you are explicitly choosing to trust core Pass 1 routing quality enough to use those labels as hard preconditions for the extension.
+
+In this example, empty trigger lists mean “do not filter on this dimension.” If you make a trigger list non-empty, that dimension becomes a hard gate. Within one `*_any_of` list the values are OR'ed together; across different trigger dimensions the conditions combine with AND. If the trigger misses, the extension shows up as `status=skipped` and `matched=false`.
+
+Each enabled extension fires an extra extension-labeling call per sample, so **don’t enable domain-personalized or mobile-specific extensions across your entire dataset without pre-filtering or sampling**. Mobile surfaces belong in their own extension because their prompts, triggers, and responsiveness requirements differ; mixing them dilutes the Web-specific analysis while multiplying per-sample costs.
 
 ## Auto-publishing dashboards from `start`
 

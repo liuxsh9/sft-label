@@ -124,11 +124,11 @@ uv run sft-label start --lang zh
 在 `sft-label start` 输出的命令中，多个 `--label-extension` 规范可以同时启用；每个扩展都会单独呈现 dashboard、导出列和统计，因此建议：
 
 - 先用 `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml` 做小规模验证，确认 `matched` / `skipped` 比例合乎预期；
-- 观察启动器/CLI 的**扩展预检诊断**块，那里会列出每个规范的触发比率、覆盖率告警，以及运行后提示的验证/低信心/未映射项；
+- 观察启动器/CLI 的**扩展预检诊断**块，那里会列出每个规范是否带 trigger、prompt/schema 长度告警，以及运行后提示的 matched、failed/invalid、unmapped 等信息；
 - 诊断日志也会指向 `stats_labeling.json` 中的 `extension_stats.specs` 节，你可以直接从仪表盘或 `export-review --include-extensions` 中追查对应警告；
 - 需要更多域或触发规则时，优先为每个意图写一个独立的扩展，而不是把所有字段塞进同一个 schema，这样才能保持每份诊断报告可读并降低上下游配置复杂度。
 
-详细的扩展配置、初次运行清单和多扩展最佳实践见：[Pass 1 扩展标注指南](docs/guides/pass1-extension-labeling.md)。
+`sft-label start` 现在还支持三种扩展输入方式：单个 YAML 路径、一个目录（随后选择一个或多个 YAML）、或直接输入 `examples` 浏览内置样例目录。详细的扩展配置、初次运行清单和多扩展最佳实践见：[Pass 1 扩展标注指南](docs/guides/pass1-extension-labeling.md)。
 
 ## 一次 run 会输出什么
 
@@ -226,6 +226,7 @@ uv run sft-label dashboard-service register-run --run-dir <run_dir>
 
 - 最小起步版：`docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
 - 更丰富的 UI 版：`docs/examples/extensions/ui_fine_labels_v1.yaml`
+- Web UI 数据分析 / 配比优化版：`docs/examples/extensions/ui_web_analysis_v1.yaml`
 
 典型命令：
 
@@ -239,6 +240,11 @@ uv run sft-label run \
 uv run sft-label run \
   --input data.jsonl \
   --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+
+# Web-only UI 数据配比分析
+uv run sft-label run \
+  --input filtered_web_ui_data.jsonl \
+  --label-extension docs/examples/extensions/ui_web_analysis_v1.yaml
 
 # 多个 extension 并存
 uv run sft-label run \
@@ -297,6 +303,47 @@ uv run sft-label export-review \
 - 一个 spec 的字段数 > 5、选项太多、提示文本太长，接近/超过建议的 2000 字。
 - 需要按 trigger、启用状态或数据源来分别控制逻辑。
 - 想单独观察某个 schema 的命中率、unmapped 情况或重跑效果。
+
+### Web UI 数据集分析指南
+
+“UI SFT 数据” 是指明确针对 Web / 桌面浏览器 UI 表面（仪表盘、登录页、数据探索、构建工具、管理控制台、组件实现等交互式界面）的样本。新提供的 Web 专用分析示例（`docs/examples/extensions/ui_web_analysis_v1.yaml`）增加了如下信号，帮助你识别数据集是否被 CRUD/表单类样本过度占据，并分析分布是否均衡：
+
+- **`ui_surface_type`**：当前样本主要属于哪类 Web UI 表面，便于发现数据是否集中在单一界面类型。
+- **`interaction_pattern`**：主交互模式是展示、表单配置、搜索过滤、CRUD 密集，还是 builder / rich editing。
+- **`state_data_complexity`**：状态/数据复杂度是静态、本地状态、远程数据驱动、验证密集，还是多数据源协同。
+- **`ui_constraint_focus`**：是否明显涉及 design system、一致性、响应式、无障碍、dense-data 或性能敏感 UI。
+- **`frontend_stack_shape`**：样本主要落在哪类 Web 前端生态，便于识别框架分布偏斜。
+
+只在 Web-only 的子集上运行此扩展，避免直接在全量数据上启用。每启用一个扩展，每条匹配样本都会多一次扩展标注调用，因此**请务必别在整个数据集上打开领域化或移动端扩展，除非你已经先行缩小输入（例如过滤、小批量或采样）**。移动端内容应放在独立的扩展中：它们的 prompt、trigger、信号和响应式权衡不同，混在一起会让 Web 分析变得模糊，并拉高每条样本的成本。
+
+这个示例刻意只启用 `domain_any_of`。其余 trigger key 仍然保留在 YAML 里，但约束留空，目的是让用户看见可用的路由维度，同时默认保持更高召回。如果你后续把这些列表填成非空，就意味着你愿意更严格地相信核心 Pass 1 的 language / intent / task / context / difficulty 精度，并把它们作为 extension 的硬前置条件。
+
+可以把它理解成：
+
+- `[]` = 这个 trigger 维度**不参与过滤**
+- 非空 `*_any_of` = 这个维度变成**硬前置条件**
+- 同一维度内多个值按 **OR** 匹配
+- 不同 trigger 维度之间按 **AND** 组合
+- 未命中时会显示为 `status=skipped`、`matched=false`
+
+如果你想从这个案例快速克隆出自己的 extension，建议顺序是：
+
+1. 复制 `ui_web_analysis_v1.yaml` 到新文件
+2. 先改 `id`、`display_name`
+3. 把 schema 控制在 3~5 个字段
+4. 第一版只保留最宽 trigger（通常只开 `domain_any_of`）
+5. 先用过滤后子集、小批量或 `--limit 20/50` 跑
+6. 再看 `matched/skipped`、dashboard 和 `export-review --include-extensions`
+
+成本/风险上，可以先用这条简单规则估算：**额外 extension 调用数 ≈ 命中样本数 × 启用的 extension 数**。宽 trigger 召回更高，但调用、时延、复核成本也更高；严 trigger 成本更低，但会增加因 Pass 1 路由误差造成的静默跳过。
+
+如果你要从这个样例直接克隆自己的 extension，可以继续看英文指南 [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md) 里的 “How to turn this example into your own extension” 小节。
+
+如果只想记最短版本，可以按这个顺序做：
+
+- **必须先改**：`id`、`display_name`、`prompt`、`schema`
+- **第一版通常先保留**：`output.include_confidence`、`output.allow_unmapped`
+- **后面再决定要不要改严**：更多 trigger 维度、`dashboard.group`、`dashboard.priority`
 
 ## 常见后续操作
 

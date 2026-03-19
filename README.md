@@ -122,11 +122,11 @@ A fuller walkthrough is in [Interactive launcher guide](docs/guides/interactive-
 
 ### Pass 1 extension diagnostics
 
-When you turn on one or more `--label-extension` specs through the launcher, `start` prints a compact preflight block that lists every registered spec, whether it has a trigger, and the prompt/schema size warnings you should care about before the run starts. Treat that block as your first checkpoint: confirm the spec shape looks right, note any triggerless or oversized prompts, and tighten the schema before scaling up. After the run completes, a follow-up diagnostics section highlights per-spec match counts, validation issues, low-confidence fields, and unmapped rows, with pointers to `stats_labeling.json` → `extension_stats.specs` so you can trace warnings into dashboards or the `runtime_events` logs.
+When you turn on one or more `--label-extension` specs through the launcher, `start` prints a compact preflight block that lists every registered spec, whether it has a trigger, and the prompt/schema size warnings you should care about before the run starts. Treat that block as your first checkpoint: confirm the spec shape looks right, note any triggerless or oversized prompts, and tighten the schema before scaling up. After the run completes, a follow-up diagnostics section highlights per-spec match counts, failed/invalid issues, and unmapped rows, with pointers to `stats_labeling.json` → `extension_stats.specs` so you can trace warnings into dashboards or the `runtime_events` logs.
 
 Extension exports stay optional: add `--include-extensions` when you run `export-review` to add extension columns to the CSV (`uv run sft-label export-review --input <run_dir> --output review.csv --include-extensions`). That mode keeps the default CSV format untouched unless you explicitly opt in, so you can let downstream reviewers see the new columns without affecting existing exports.
 
-Keep each spec focused on a single domain/trigger so the dashboards, diagnostics, and review columns for each extension stay interpretable. For detailed workflows, examples, and the refreshed first-run checklist, see [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md).
+From `sft-label start`, you can now enter either a single YAML path, a directory path (then choose one or more YAML specs), or `examples` to browse the built-in extension examples. Keep each spec focused on a single domain/trigger so the dashboards, diagnostics, and review columns for each extension stay interpretable. For detailed workflows, examples, and the refreshed first-run checklist, see [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md).
 
 ## What a run writes
 
@@ -226,6 +226,7 @@ Bundled examples:
 
 - Minimal starter: `docs/examples/extensions/ui_fine_labels_minimal_v1.yaml`
 - Richer UI example: `docs/examples/extensions/ui_fine_labels_v1.yaml`
+- Web UI analysis / mix-optimization example: `docs/examples/extensions/ui_web_analysis_v1.yaml`
 
 Typical commands:
 
@@ -239,6 +240,11 @@ uv run sft-label run \
 uv run sft-label run \
   --input data.jsonl \
   --label-extension docs/examples/extensions/ui_fine_labels_v1.yaml
+
+# web-only UI mix analysis
+uv run sft-label run \
+  --input filtered_web_ui_data.jsonl \
+  --label-extension docs/examples/extensions/ui_web_analysis_v1.yaml
 
 # multiple extensions side by side
 uv run sft-label run \
@@ -298,6 +304,22 @@ Before trusting the extension results, confirm:
 - One spec would otherwise contain more than ~5 fields, >20 options per field, or a prompt that would exceed the recommended prompt+schema length.
 - You want different trigger rules or sampling strategies per extension so you can enable/disable them independently.
 - You need to measure adoption per schema; separate specs keep stats isolated.
+
+### Web UI dataset analysis guidance
+
+“UI SFT data” refers to the subset of your dataset that explicitly targets Web / desktop browser UI surfaces (dashboards, landing pages, data explorers, builders, admin consoles, component work, and interactive panels). The new Web-only analysis example (`docs/examples/extensions/ui_web_analysis_v1.yaml`) adds labels that surface:
+
+- **Surface coverage** (`ui_surface_type`) so you can see whether the dataset is stuck in one UI family.
+- **Interaction mix** (`interaction_pattern`) so you can detect overconcentration in CRUD/forms versus search/explore or builder/editing work.
+- **State/data complexity** (`state_data_complexity`) so thin local-state samples do not crowd out remote-data or multi-source coordination cases.
+- **Engineering constraints** (`ui_constraint_focus`) so design-system, responsive, accessibility, dense-data, and performance-sensitive work remain visible during curation.
+- **Ecosystem shape** (`frontend_stack_shape`) so framework skew is visible when rebalancing the subset.
+
+Use this example on targeted subsets when you are optimizing dataset mix—run it over filtered Web-only data rather than enabling it blindly across the full input. Each enabled extension adds an extra extension-labeling call for every sample it touches, so **do not turn on domain-personalized or mobile-specific extensions over your entire dataset** unless you have trimmed the inputs first. Mobile surfaces belong in their own extension: the prompts, triggers, signals, and responsiveness choices are different, and mixing them would dilute the Web-focused analysis while inflating per-sample costs.
+
+This example intentionally keeps only `domain_any_of` active. The other trigger keys remain in the YAML with empty constraints so users can see the available routing dimensions without narrowing recall by default. If you later make those trigger lists non-empty, that means you are deliberately trusting core Pass 1 precision enough to use language / intent / task / context / difficulty as hard extension-routing gates.
+
+If you want to clone this example into your own extension, the short recipe lives in [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md) under “How to turn this example into your own extension”.
 
 ## Common next steps
 
