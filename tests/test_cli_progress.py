@@ -12,7 +12,9 @@ from sft_label.cli import (
     _estimate_end_to_end_llm_calls,
     build_parser,
     cmd_export_review,
+    cmd_refresh_rarity,
     cmd_run,
+    cmd_score,
 )
 from sft_label.config import PipelineConfig
 from sft_label.progress_heartbeat import HeartbeatFrames, run_with_heartbeat
@@ -396,6 +398,126 @@ def test_run_and_score_parser_default_prompt_mode_is_compact():
 
     assert args_run.prompt_mode == "compact"
     assert args_score.prompt_mode == "compact"
+    assert args_run.extension_rarity_mode is None
+    assert args_score.extension_rarity_mode is None
+
+
+def test_run_score_and_refresh_parser_accept_extension_rarity_modes():
+    parser = build_parser()
+    args_run = parser.parse_args([
+        "run",
+        "--input",
+        "input.json",
+        "--extension-rarity-mode",
+        "preview",
+    ])
+    args_score = parser.parse_args([
+        "score",
+        "--input",
+        "labeled.json",
+        "--extension-rarity-mode",
+        "bonus_only",
+    ])
+    args_refresh = parser.parse_args([
+        "refresh-rarity",
+        "--input",
+        "scored.json",
+        "--extension-rarity-mode",
+        "preview",
+    ])
+
+    assert args_run.extension_rarity_mode == "preview"
+    assert args_score.extension_rarity_mode == "bonus_only"
+    assert args_refresh.extension_rarity_mode == "preview"
+
+
+def test_cmd_run_forwards_default_extension_rarity_mode_off(monkeypatch):
+    captured = {}
+
+    async def _fake_run(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+        return {"run_dir": "/tmp/fake-run"}
+
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+
+    parser = build_parser()
+    args = parser.parse_args(["run", "--input", "input.json"])
+    result = cmd_run(args)
+
+    assert result["run_dir"] == "/tmp/fake-run"
+    assert captured["config"].extension_rarity_mode == "off"
+
+
+def test_cmd_score_forwards_explicit_extension_rarity_mode(monkeypatch):
+    captured = {}
+
+    async def _fake_run_scoring(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+        return {"run_dir": "/tmp/fake-run"}
+
+    monkeypatch.setitem(sys.modules, "sft_label.scoring", SimpleNamespace(run_scoring=_fake_run_scoring))
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "score",
+        "--input",
+        "labeled.json",
+        "--extension-rarity-mode",
+        "bonus_only",
+    ])
+    result = cmd_score(args)
+
+    assert result["run_dir"] == "/tmp/fake-run"
+    assert captured["config"].extension_rarity_mode == "bonus_only"
+
+
+def test_apply_runtime_overrides_preserves_preconfigured_extension_rarity_mode_when_omitted():
+    from sft_label.cli import _apply_runtime_overrides
+    from sft_label.config import PipelineConfig
+
+    config = PipelineConfig(extension_rarity_mode="preview")
+    args = SimpleNamespace(
+        concurrency=None,
+        scoring_concurrency=None,
+        rps_limit=None,
+        rps_warmup=None,
+        request_timeout=None,
+        max_retries=None,
+        rarity_mode=None,
+        extension_rarity_mode=None,
+        adaptive_runtime=None,
+        recovery_sweep=None,
+    )
+
+    _apply_runtime_overrides(config, args)
+
+    assert config.extension_rarity_mode == "preview"
+
+
+def test_cmd_refresh_rarity_forwards_explicit_extension_rarity_mode(monkeypatch):
+    captured = {}
+
+    def _fake_run_refresh_rarity(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+        return {"rarity_refreshed_samples": "3"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sft_label.tools.recompute",
+        SimpleNamespace(run_refresh_rarity=_fake_run_refresh_rarity),
+    )
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "refresh-rarity",
+        "--input",
+        "scored.json",
+        "--extension-rarity-mode",
+        "preview",
+    ])
+    cmd_refresh_rarity(args)
+
+    assert captured["config"].extension_rarity_mode == "preview"
 
 
 def test_semantic_progress_printer_shows_progress_without_spam(capsys):

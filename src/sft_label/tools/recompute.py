@@ -35,6 +35,10 @@ from sft_label.inline_scoring import (
     write_inline_pass1_cache,
     write_inline_scored_cache,
 )
+from sft_label.label_extensions_stats import (
+    aggregate_extension_stats as _shared_aggregate_extension_stats,
+    merge_extension_stats as _shared_merge_extension_stats,
+)
 
 
 # ─── Sample loading ──────────────────────────────────────
@@ -277,144 +281,11 @@ def _finalize_confidence_stats(acc: dict) -> dict[str, dict]:
 
 
 def _aggregate_extension_stats(samples: list[dict]) -> dict | None:
-    specs: dict[str, dict] = {}
-    confidence_acc: dict[str, dict] = {}
-
-    for sample in samples:
-        payloads = _extract_extension_payloads(sample)
-        if not payloads:
-            continue
-        for spec_id, payload in payloads.items():
-            if not isinstance(payload, dict):
-                continue
-            spec_stats = specs.setdefault(
-                spec_id,
-                {
-                    "spec_version": payload.get("spec_version"),
-                    "spec_hash": payload.get("spec_hash"),
-                    "total": 0,
-                    "matched": 0,
-                    "status_counts": {},
-                    "field_distributions": {},
-                    "confidence_stats": {},
-                    "unmapped_counts": {},
-                },
-            )
-            if not spec_stats.get("spec_version") and payload.get("spec_version"):
-                spec_stats["spec_version"] = payload.get("spec_version")
-            if not spec_stats.get("spec_hash") and payload.get("spec_hash"):
-                spec_stats["spec_hash"] = payload.get("spec_hash")
-
-            spec_stats["total"] += 1
-            if payload.get("matched") is True:
-                spec_stats["matched"] += 1
-
-            status = payload.get("status") or "unknown"
-            spec_stats["status_counts"][status] = spec_stats["status_counts"].get(status, 0) + 1
-
-            labels = payload.get("labels") or {}
-            if isinstance(labels, dict):
-                for field, value in labels.items():
-                    dist = spec_stats["field_distributions"].setdefault(field, {})
-                    if isinstance(value, list):
-                        for item in value:
-                            if item:
-                                dist[item] = dist.get(item, 0) + 1
-                    elif value:
-                        dist[value] = dist.get(value, 0) + 1
-
-            confidence = payload.get("confidence") or {}
-            if isinstance(confidence, dict):
-                spec_conf_acc = confidence_acc.setdefault(spec_id, {})
-                for field, score in confidence.items():
-                    if isinstance(score, (int, float)):
-                        _accumulate_confidence_stat(spec_conf_acc, field, float(score))
-
-            unmapped = payload.get("unmapped") or []
-            if isinstance(unmapped, list):
-                for item in unmapped:
-                    if isinstance(item, dict):
-                        dim = str(item.get("dimension", "unknown"))
-                        value = str(item.get("value", "?"))
-                        key = f"{dim}:{value}"
-                    else:
-                        key = str(item)
-                    spec_stats["unmapped_counts"][key] = spec_stats["unmapped_counts"].get(key, 0) + 1
-
-    for spec_id, acc in confidence_acc.items():
-        specs[spec_id]["confidence_stats"] = _finalize_confidence_stats(acc)
-
-    if not specs:
-        return None
-    return {"specs": specs}
+    return _shared_aggregate_extension_stats(samples)
 
 
 def _merge_extension_stats(stats_list: list[dict]) -> dict | None:
-    specs: dict[str, dict] = {}
-    confidence_acc: dict[str, dict] = {}
-
-    for stats in stats_list:
-        extension_stats = stats.get("extension_stats") or {}
-        for spec_id, spec in (extension_stats.get("specs") or {}).items():
-            if not isinstance(spec, dict):
-                continue
-            merged = specs.setdefault(
-                spec_id,
-                {
-                    "spec_version": spec.get("spec_version"),
-                    "spec_hash": spec.get("spec_hash"),
-                    "total": 0,
-                    "matched": 0,
-                    "status_counts": {},
-                    "field_distributions": {},
-                    "confidence_stats": {},
-                    "unmapped_counts": {},
-                },
-            )
-            if not merged.get("spec_version") and spec.get("spec_version"):
-                merged["spec_version"] = spec.get("spec_version")
-            if not merged.get("spec_hash") and spec.get("spec_hash"):
-                merged["spec_hash"] = spec.get("spec_hash")
-
-            merged["total"] += int(spec.get("total", 0) or 0)
-            merged["matched"] += int(spec.get("matched", 0) or 0)
-
-            for status, count in (spec.get("status_counts") or {}).items():
-                merged["status_counts"][status] = merged["status_counts"].get(status, 0) + int(count or 0)
-
-            for field, dist in (spec.get("field_distributions") or {}).items():
-                merged_dist = merged["field_distributions"].setdefault(field, {})
-                for value, count in (dist or {}).items():
-                    merged_dist[value] = merged_dist.get(value, 0) + int(count or 0)
-
-            for key, count in (spec.get("unmapped_counts") or {}).items():
-                merged["unmapped_counts"][key] = merged["unmapped_counts"].get(key, 0) + int(count or 0)
-
-            for field, conf in (spec.get("confidence_stats") or {}).items():
-                if not isinstance(conf, dict):
-                    continue
-                count = int(conf.get("count", 0) or 0)
-                if count <= 0:
-                    continue
-                mean = float(conf.get("mean", 0.0) or 0.0)
-                min_val = float(conf.get("min", mean))
-                max_val = float(conf.get("max", mean))
-                spec_conf_acc = confidence_acc.setdefault(spec_id, {})
-                _accumulate_confidence_bulk(
-                    spec_conf_acc,
-                    field,
-                    mean=mean,
-                    count=count,
-                    min_val=min_val,
-                    max_val=max_val,
-                )
-
-    for spec_id, acc in confidence_acc.items():
-        specs[spec_id]["confidence_stats"] = _finalize_confidence_stats(acc)
-
-    if not specs:
-        return None
-    return {"specs": specs}
+    return _shared_merge_extension_stats(stats_list)
 
 
 def recompute_stats_from_labeled(samples):
@@ -477,12 +348,13 @@ def recompute_value_stats_from_scored(samples):
 
     Returns a dict matching Pass 2 stats structure.
     """
-    from sft_label.scoring import compute_value_stats, compute_selection_scores
+    from sft_label.scoring import compute_value_stats, compute_selection_scores, apply_v2_scores
 
     # Recompute selection scores in-place (needed for accurate stats)
     scored = [s for s in samples if s.get("value")]
     if scored:
         compute_selection_scores(scored)
+        apply_v2_scores(scored)
 
     all_monitors = [_synthesize_value_monitor(s) for s in samples]
     stats = compute_value_stats(samples, all_monitors)
@@ -692,6 +564,8 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
         build_combo_counts, normalize_rarity_scores, resolve_rarity_mode,
         build_tag_distributions, compute_value_score, compute_selection_scores,
         merge_value_stats,
+        augment_rarity_result, _refresh_augmented_rarity_after_core_normalization,
+        apply_v2_scores, _attach_augmented_rarity_fields, _clear_augmented_rarity_fields,
     )
 
     if config is None:
@@ -784,6 +658,8 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
     stats_timestamp = None
     stats_source_str = None
     baseline_combo_counts = None
+    extension_stats = None
+    extension_baseline_source = "external"
     combo_mode = "disabled"
 
     if stats_source_path:
@@ -795,6 +671,7 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
             stats_timestamp = ts
             stats_source_str = str(stats_source_path)
             baseline_combo_counts = meta.get("combo_counts")
+            extension_stats = meta.get("extension_stats")
             if baseline_combo_counts:
                 combo_mode = "external"
             else:
@@ -825,6 +702,7 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
         agg_distributions = {}
         agg_total = 0
         agg_combo_counts = {}
+        agg_extension_stats = []
         rw = config.rarity_weights or RARITY_WEIGHTS
         _log_refresh_rarity(
             f"Building local rarity baseline from {len(scored_files)} scored file(s)"
@@ -850,12 +728,17 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
                 _merge_distributions(agg_distributions, local_dist)
             agg_total += local_total
             _merge_combo_counts(agg_combo_counts, build_combo_counts(samples))
+            local_extension_stats = _aggregate_extension_stats(samples)
+            if local_extension_stats:
+                agg_extension_stats.append({"extension_stats": local_extension_stats})
         if agg_distributions and agg_total > 0:
             distributions = agg_distributions
             total_stats_samples = agg_total
             stats_timestamp = datetime.now().isoformat()
             stats_source_str = f"{in_path}#local"
             baseline_combo_counts = agg_combo_counts
+            extension_stats = _merge_extension_stats(agg_extension_stats)
+            extension_baseline_source = "local"
             combo_mode = "local"
             _log_refresh_rarity(f"Using local rarity baseline ({agg_total} samples)")
         else:
@@ -888,7 +771,7 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
         )
         for index, s in enumerate(samples, start=1):
             labels = s.get("labels") or {}
-            rarity = compute_sample_rarity(
+            core_rarity = compute_sample_rarity(
                 labels,
                 idf_map,
                 total_stats_samples,
@@ -896,6 +779,13 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
                 combo_alpha=config.rarity_combo_alpha,
                 combo_counts=combo_counts,
                 stats_ref_info=stats_ref_info,
+            )
+            rarity = augment_rarity_result(
+                core_rarity,
+                s,
+                extension_stats=extension_stats,
+                config=config,
+                baseline_source=extension_baseline_source,
             )
             rarity_results.append(rarity)
             if progress_interval and (
@@ -911,6 +801,8 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
             mode=rarity_mode,
             total_samples=total_stats_samples,
         )
+        for rarity in rarity_results:
+            _refresh_augmented_rarity_after_core_normalization(rarity)
 
         weights = config.value_weights or VALUE_WEIGHTS
         refreshed = 0
@@ -920,12 +812,19 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
             if not isinstance(value, dict):
                 continue
             rarity = rarity_results[i]
+            extension_mode = getattr(config, "extension_rarity_mode", "off")
+            _clear_augmented_rarity_fields(
+                value,
+                keep_preview=str(extension_mode).strip().lower() == "preview",
+            )
             value["rarity"] = rarity
+            _attach_augmented_rarity_fields(value, rarity)
             value["value_score"] = compute_value_score(value, rarity, weights=weights)
             refreshed += 1
 
         _log_refresh_rarity(f"{phase}: recomputing selection scores")
         compute_selection_scores(samples, config=config)
+        apply_v2_scores(samples, config=config)
         _log_refresh_rarity(f"{phase}: recomputing pass2 statistics")
         stats = recompute_value_stats_from_scored(samples)
         stats["rarity_config"] = {
@@ -935,6 +834,13 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
             "combo_alpha": config.rarity_combo_alpha,
             "combo_mode": combo_mode,
             "score_mode": rarity_mode,
+            "extension_rarity_mode": getattr(config, "extension_rarity_mode", "off"),
+            "extension_baseline_source": extension_baseline_source,
+        }
+        stats["extension_rarity_config"] = {
+            "mode": getattr(config, "extension_rarity_mode", "off"),
+            "baseline_source": extension_baseline_source,
+            "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
         }
         _log_refresh_rarity(f"{phase}: refreshed {refreshed} scored sample(s)")
         return refreshed, stats
@@ -1056,6 +962,13 @@ def _run_refresh_rarity_legacy(input_path, tag_stats_path=None, output_dir=None,
             "combo_alpha": config.rarity_combo_alpha,
             "combo_mode": combo_mode,
             "score_mode": rarity_mode,
+            "extension_rarity_mode": getattr(config, "extension_rarity_mode", "off"),
+            "extension_baseline_source": extension_baseline_source,
+        }
+        summary["extension_rarity_config"] = {
+            "mode": getattr(config, "extension_rarity_mode", "off"),
+            "baseline_source": extension_baseline_source,
+            "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
         }
         summary_path = out_root / PASS2_SUMMARY_STATS_FILE
         _write_json(summary_path, summary)

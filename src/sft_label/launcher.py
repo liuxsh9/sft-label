@@ -822,6 +822,9 @@ def _build_run_plan(
         )
         if rarity_mode != "absolute":
             argv.extend(["--rarity-mode", rarity_mode])
+        extension_rarity_mode = _ask_extension_rarity_mode(input_fn, output_fn)
+        if extension_rarity_mode != "off":
+            argv.extend(["--extension-rarity-mode", extension_rarity_mode])
 
     if chain_semantic:
         _section(output_fn, "三阶段联动 / Pass 3 chaining")
@@ -1031,6 +1034,9 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     tag_stats = _ask_optional_text(input_fn, "稀有度统计文件路径（可选） / Tag stats path for rarity (optional)")
     if tag_stats:
         argv.extend(["--tag-stats", tag_stats])
+    extension_rarity_mode = _ask_extension_rarity_mode(input_fn, output_fn)
+    if extension_rarity_mode != "off":
+        argv.extend(["--extension-rarity-mode", extension_rarity_mode])
 
     switch_values = _ask_switch_panel(
         input_fn,
@@ -1361,6 +1367,9 @@ def _build_run_plan_legacy(
         )
         if rarity_mode != "absolute":
             argv.extend(["--rarity-mode", rarity_mode])
+        extension_rarity_mode = _ask_extension_rarity_mode(input_fn, output_fn)
+        if extension_rarity_mode != "off":
+            argv.extend(["--extension-rarity-mode", extension_rarity_mode])
 
     if chain_semantic:
         _section(output_fn, "三阶段联动 / Pass 3 chaining")
@@ -1399,6 +1408,9 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
     )
     if rarity_mode != "absolute":
         argv.extend(["--rarity-mode", rarity_mode])
+    extension_rarity_mode = _ask_extension_rarity_mode(input_fn, output_fn)
+    if extension_rarity_mode != "off":
+        argv.extend(["--extension-rarity-mode", extension_rarity_mode])
 
     limit = _ask_int(input_fn, "采样上限（0=全部） / Sample limit (0 = all)", default=0)
     if limit:
@@ -1726,6 +1738,10 @@ def _build_refresh_rarity_plan(input_fn: InputFn, output_fn: OutputFn) -> Launch
     )
     if mode != "absolute":
         argv.extend(["--mode", mode])
+
+    extension_rarity_mode = _ask_extension_rarity_mode(input_fn, output_fn)
+    if extension_rarity_mode != "off":
+        argv.extend(["--extension-rarity-mode", extension_rarity_mode])
 
     output_dir = _ask_optional_text(input_fn, "输出目录覆盖（可选） / Output directory override (optional)")
     if output_dir:
@@ -2401,6 +2417,33 @@ def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[st
             ),
         )
     return specs
+
+
+def _ask_extension_rarity_mode(input_fn: InputFn, output_fn: OutputFn) -> str:
+    """Choose whether extension labels participate in the new V2 rarity path."""
+    return _ask_choice(
+        input_fn,
+        output_fn,
+        "扩展稀有度模式 / Extension rarity mode",
+        [
+            (
+                "off",
+                "off（默认） / off (default)",
+                "保持当前 core rarity / value / selection 语义不变 / Keep current core rarity, value, and selection semantics unchanged",
+            ),
+            (
+                "preview",
+                "preview",
+                "只计算 extension rarity 诊断信息，不改任何现有分数 / Compute extension rarity diagnostics only; do not change any existing scores",
+            ),
+            (
+                "bonus_only",
+                "bonus_only（实验） / bonus_only (experimental)",
+                "只写新的 V2 bonus 字段，旧分数字段保持不变 / Write new V2 bonus fields only; legacy score fields stay unchanged",
+            ),
+        ],
+        default_index=1,
+    )
 
 def _ask_required_text(input_fn: InputFn, prompt: str) -> str:
     return _ask_text(input_fn, prompt, required=True)

@@ -132,6 +132,8 @@ uv run sft-label start --lang zh
 
 `sft-label start` 现在支持两类扩展输入方式：自动读取仓库根目录下的 `extensions/`，或手动指定单个 YAML / 一个目录（随后选择一个或多个 YAML）。`extensions/` 目录里默认带有 `ui_web_analysis_v1.example.yaml` 示例文件；你把自己的 spec 放进去并更新后，launcher 下次会自动读取最新内容。详细的扩展配置、初次运行清单和多扩展最佳实践见：[Pass 1 扩展标注指南](docs/guides/pass1-extension-labeling.md)。
 
+如果你想先用更快的“讲解版”材料理解这个功能、读懂 example、再动手写自己的 spec，可以先看 Marp 文档：[Pass 1 extension labeling intro](docs/pass1-extension-labeling-intro.md)。
+
 关于交互式里的“自适应运行时”：它的作用很简单——当模型服务出现压力、限速或波动时，自动放慢提交节奏、做更稳妥的退让；一般建议保持开启。
 
 ## 一次 run 会输出什么
@@ -269,6 +271,21 @@ uv run sft-label export-review \
 ```
 
 开启后，review 导出会为每个 extension 增加 status/matched 元数据、存在时的 spec version/hash、扁平化后的 labels/confidence 列，以及归一化后的 unmapped 汇总列。
+
+如果 Pass 2 启用了 `--extension-rarity-mode preview|bonus_only`，同一个 `export-review --include-extensions` 还可以在有值时额外填充这些扩展稀有度列：
+
+- `extension_rarity_preview_score`
+- `extension_rarity_preview_confidence`
+- `extension_rarity_preview_matched_specs`
+- `extension_rarity_preview_baseline_source`
+
+说明：
+
+- `preview` 只是诊断预览，**不会**改写原有 `rarity / value_score / selection_score`。
+- `preview` 只会补充上面的 `extension_rarity_preview_*` 列。
+- `bonus_only` 才会进一步新增 `rarity_v2_score`、`value_score_v2`、`selection_score_v2`；旧分数字段仍然是主语义。
+- 如果扩展稀有度只能从本地回退基线计算，系统只保留诊断信息，不会给 `bonus_only` 写入非零 bonus。
+- dashboard 里的这些 additive extension-rarity / V2 指标当前只在 **sample mode** 展示；conversation mode 仍保持旧语义。
 
 实践建议：
 

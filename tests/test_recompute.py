@@ -95,6 +95,93 @@ def _make_scored_sample(sample_id, value_score=7.0, quality=7, complexity=6,
     return sample
 
 
+def _attach_extension_payload(
+    sample: dict,
+    *,
+    spec_id: str = "ui_web_analysis_example",
+    spec_version: str = "v1",
+    spec_hash: str = "sha256:ui-v1",
+    status: str = "success",
+    matched: bool = True,
+    labels: dict | None = None,
+    confidence: dict | None = None,
+) -> dict:
+    sample["label_extensions"] = {
+        spec_id: {
+            "status": status,
+            "matched": matched,
+            "spec_version": spec_version,
+            "spec_hash": spec_hash,
+            "labels": labels or {
+                "component_type": "dashboard",
+                "analysis_focus": ["data-density"],
+            },
+            "confidence": confidence or {
+                "component_type": 0.9,
+                "analysis_focus": 0.85,
+            },
+            "unmapped": [],
+        }
+    }
+    return sample
+
+
+def _make_extension_stats_payload(
+    *,
+    spec_id: str = "ui_web_analysis_example",
+    spec_version: str = "v1",
+    spec_hash: str = "sha256:ui-v1",
+) -> dict:
+    return {
+        "specs": {
+            spec_id: {
+                "spec_version": spec_version,
+                "spec_hash": spec_hash,
+                "config": {
+                    "schema": {
+                        "component_type": {"type": "enum", "options": ["dashboard", "table"]},
+                        "analysis_focus": {"type": "multi_enum", "options": ["data-density", "chart-reading"]},
+                    }
+                },
+                "total": 12,
+                "matched": 12,
+                "status_counts": {"success": 12},
+                "field_distributions": {
+                    "component_type": {"dashboard": 11, "table": 1},
+                    "analysis_focus": {"data-density": 11, "chart-reading": 1},
+                },
+                "baselines": {
+                    spec_hash: {
+                        "spec_version": spec_version,
+                        "spec_hash": spec_hash,
+                        "total": 12,
+                        "matched": 12,
+                        "success": 12,
+                        "invalid": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                        "baseline_total": 12,
+                        "field_value_distributions": {
+                            "component_type": {"dashboard": 11, "table": 1},
+                            "analysis_focus": {"data-density": 11, "chart-reading": 1},
+                        },
+                        "field_presence_counts": {
+                            "component_type": 12,
+                            "analysis_focus": 12,
+                        },
+                        "confidence_stats": {
+                            "component_type": {"count": 12, "mean": 0.9, "min": 0.8, "max": 0.95},
+                            "analysis_focus": {"count": 12, "mean": 0.85, "min": 0.8, "max": 0.9},
+                        },
+                    }
+                },
+                "confidence_stats": {},
+                "unmapped_counts": {},
+            }
+        }
+    }
+
+
 def _make_multiturn_scored_samples(source_id, n_turns=3):
     """Create a set of multi-turn slices for conversation testing."""
     samples = []
@@ -402,6 +489,12 @@ class TestRecomputePass1Stats:
         assert spec_stats["field_distributions"]["visual_complexity"]["high"] == 1
         assert spec_stats["confidence_stats"]["component_type"]["count"] == 1
         assert spec_stats["unmapped_counts"]["component_type:unknown"] == 1
+        baseline = spec_stats["baselines"]["sha256:ui-v1"]
+        assert baseline["success"] == 1
+        assert baseline["skipped"] == 1
+        assert baseline["baseline_total"] == 1
+        assert baseline["field_value_distributions"]["component_type"]["form"] == 1
+        assert baseline["field_presence_counts"]["component_type"] == 1
 
 
 # ─── Test recompute_value_stats_from_scored ──────────────
@@ -914,6 +1007,219 @@ class TestRefreshRarity:
                 output_dir=str(tmp_path / "elsewhere"),
                 config=PipelineConfig(rarity_score_mode="absolute"),
             )
+
+    def test_refresh_rarity_preview_adds_extension_diagnostics_from_persisted_baseline(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        sample = _attach_extension_payload(
+            _make_scored_sample("ui-rare-preview", intent="debug", difficulty="expert"),
+            labels={
+                "component_type": "table",
+                "analysis_focus": ["chart-reading"],
+            },
+            confidence={
+                "component_type": 0.95,
+                "analysis_focus": 0.9,
+            },
+        )
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps([sample]), encoding="utf-8")
+
+        stats = {
+            "total_samples": 1000,
+            "tag_distributions": {
+                "intent": {"build": 600, "debug": 40},
+                "difficulty": {"beginner": 700, "expert": 20},
+                "language": {"python": 500},
+            },
+            "extension_stats": _make_extension_stats_payload(),
+        }
+        stats_path = tmp_path / "stats.json"
+        stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+        run_refresh_rarity(
+            str(path),
+            tag_stats_path=str(stats_path),
+            config=PipelineConfig(
+                rarity_score_mode="absolute",
+                extension_rarity_mode="preview",
+                min_extension_baseline_total=1,
+            ),
+        )
+
+        refreshed = json.loads(path.read_text(encoding="utf-8"))
+        value = refreshed[0]["value"]
+        assert value["rarity_extension"]["score"] is not None
+        assert value["rarity_extension"]["baseline_source"] == "external"
+        assert value["rarity_extension"]["matched_specs"] == 1
+        assert "rarity_v2" not in value
+        assert "value_score_v2" not in value
+        assert "selection_score_v2" not in value
+
+    def test_refresh_rarity_bonus_only_uses_persisted_extension_baseline(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        sample = _attach_extension_payload(
+            _make_scored_sample("ui-rare-bonus", intent="debug", difficulty="expert"),
+            labels={
+                "component_type": "table",
+                "analysis_focus": ["chart-reading"],
+            },
+            confidence={
+                "component_type": 0.95,
+                "analysis_focus": 0.9,
+            },
+        )
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps([sample]), encoding="utf-8")
+
+        stats = {
+            "total_samples": 1000,
+            "tag_distributions": {
+                "intent": {"build": 600, "debug": 40},
+                "difficulty": {"beginner": 700, "expert": 20},
+                "language": {"python": 500},
+            },
+            "extension_stats": _make_extension_stats_payload(),
+        }
+        stats_path = tmp_path / "stats.json"
+        stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+        run_refresh_rarity(
+            str(path),
+            tag_stats_path=str(stats_path),
+            config=PipelineConfig(
+                rarity_score_mode="absolute",
+                extension_rarity_mode="bonus_only",
+                min_extension_baseline_total=1,
+            ),
+        )
+
+        refreshed = json.loads(path.read_text(encoding="utf-8"))
+        value = refreshed[0]["value"]
+        assert value["rarity_extension"]["baseline_source"] == "external"
+        assert value["rarity_v2"]["score"] >= value["rarity_core"]["score"]
+        assert value["rarity_v2"]["extension_bonus"] > 0.0
+        assert value["value_score_v2"] >= value["value_score"]
+        assert value["selection_score_v2"] >= value["selection_score"]
+
+    def test_refresh_rarity_bonus_only_keeps_local_extension_baseline_diagnostic_only(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        samples = [
+            _attach_extension_payload(
+                _make_scored_sample("ui-common", intent="build", difficulty="beginner"),
+                labels={
+                    "component_type": "dashboard",
+                    "analysis_focus": ["data-density"],
+                },
+            ),
+            _attach_extension_payload(
+                _make_scored_sample("ui-rare", intent="debug", difficulty="expert"),
+                labels={
+                    "component_type": "table",
+                    "analysis_focus": ["chart-reading"],
+                },
+                confidence={
+                    "component_type": 0.95,
+                    "analysis_focus": 0.9,
+                },
+            ),
+        ]
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps(samples), encoding="utf-8")
+
+        run_refresh_rarity(
+            str(path),
+            config=PipelineConfig(
+                rarity_score_mode="absolute",
+                extension_rarity_mode="bonus_only",
+                min_extension_baseline_total=1,
+            ),
+        )
+
+        refreshed = json.loads(path.read_text(encoding="utf-8"))
+        rare_value = next(sample["value"] for sample in refreshed if sample["id"] == "ui-rare")
+        assert rare_value["rarity_extension"]["baseline_source"] == "local"
+        assert rare_value["rarity_v2"]["extension_bonus"] == 0.0
+        assert rare_value["rarity_v2"]["score"] == rare_value["rarity_core"]["score"]
+        assert rare_value["value_score_v2"] == rare_value["value_score"]
+        assert rare_value["selection_score_v2"] == rare_value["selection_score"]
+
+    def test_refresh_rarity_preview_scrubs_stale_bonus_only_fields(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        sample = _attach_extension_payload(
+            _make_scored_sample("ui-stale-preview", intent="debug", difficulty="expert"),
+            labels={
+                "component_type": "table",
+                "analysis_focus": ["chart-reading"],
+            },
+        )
+        sample["value"]["rarity_core"] = {"score": 6.0}
+        sample["value"]["rarity_extension"] = {"score": 8.0}
+        sample["value"]["rarity_v2"] = {"score": 6.4, "extension_bonus": 0.4}
+        sample["value"]["value_score_v2"] = 7.8
+        sample["value"]["selection_score_v2"] = 7.7
+
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps([sample]), encoding="utf-8")
+
+        stats = {
+            "total_samples": 1000,
+            "tag_distributions": {
+                "intent": {"build": 600, "debug": 40},
+                "difficulty": {"beginner": 700, "expert": 20},
+                "language": {"python": 500},
+            },
+            "extension_stats": _make_extension_stats_payload(),
+        }
+        stats_path = tmp_path / "stats.json"
+        stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+        run_refresh_rarity(
+            str(path),
+            tag_stats_path=str(stats_path),
+            config=PipelineConfig(
+                rarity_score_mode="absolute",
+                extension_rarity_mode="preview",
+                min_extension_baseline_total=1,
+            ),
+        )
+
+        refreshed = json.loads(path.read_text(encoding="utf-8"))
+        value = refreshed[0]["value"]
+        assert "rarity_core" in value
+        assert "rarity_extension" in value
+        assert "rarity_v2" not in value
+        assert "value_score_v2" not in value
+        assert "selection_score_v2" not in value
+
+    def test_refresh_rarity_off_scrubs_all_extension_v2_fields(self, tmp_path):
+        from sft_label.config import PipelineConfig
+
+        sample = _attach_extension_payload(_make_scored_sample("ui-stale-off"))
+        sample["value"]["rarity_core"] = {"score": 6.0}
+        sample["value"]["rarity_extension"] = {"score": 8.0}
+        sample["value"]["rarity_v2"] = {"score": 6.4, "extension_bonus": 0.4}
+        sample["value"]["value_score_v2"] = 7.8
+        sample["value"]["selection_score_v2"] = 7.7
+
+        path = tmp_path / "scored.json"
+        path.write_text(json.dumps([sample]), encoding="utf-8")
+
+        run_refresh_rarity(
+            str(path),
+            config=PipelineConfig(rarity_score_mode="absolute", extension_rarity_mode="off"),
+        )
+
+        refreshed = json.loads(path.read_text(encoding="utf-8"))
+        value = refreshed[0]["value"]
+        assert "rarity_core" not in value
+        assert "rarity_extension" not in value
+        assert "rarity_v2" not in value
+        assert "value_score_v2" not in value
+        assert "selection_score_v2" not in value
 
 
 # ─── Test run_regenerate_dashboard ───────────────────────

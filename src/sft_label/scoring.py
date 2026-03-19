@@ -76,6 +76,7 @@ from sft_label.inline_scoring import (
     write_inline_labeled_cache,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
+from sft_label.label_extensions_stats import aggregate_extension_stats
 from sft_label.score_confidence import apply_score_confidence, score_confidence
 
 try:
@@ -809,6 +810,7 @@ def load_tag_stats_context(stats_path):
         "stats_total_samples": stats_total_samples,
         "distribution_total_samples": distribution_total_samples,
         "combo_counts": combo_counts,
+        "extension_stats": stats.get("extension_stats") or None,
     }
 
 
@@ -828,6 +830,8 @@ _RARITY_DEFAULT_CONFIDENCE = 0.75
 _RARITY_INHERITED_CONFIDENCE_PENALTY = 0.65
 _RARITY_MULTI_TAG_MAX_BLEND = 0.60
 _SELECTION_CONFIDENCE_FLOOR = 0.25
+_EXTENSION_RARITY_BLEND_WEIGHT = 0.10
+_EXTENSION_RARITY_BONUS_CAP = 0.50
 
 
 def _coerce_unit_float(value, default):
@@ -912,6 +916,346 @@ def compute_tag_idf(distributions, total_samples):
             idf_map[dim][tag] = max(0.0, math.log2(total_samples / (count + 1)))
 
     return idf_map
+
+
+def compute_extension_field_idf(value_counts, baseline_total):
+    """Compute IDF map for one extension field from successful matched baselines."""
+    baseline_total = _coerce_positive_int(baseline_total)
+    if not isinstance(value_counts, dict) or baseline_total <= 0:
+        return {}
+
+    idf_map = {}
+    for value, count in value_counts.items():
+        if value in (None, ""):
+            continue
+        count = _coerce_positive_int(count)
+        idf_map[value] = max(0.0, math.log2(baseline_total / (count + 1)))
+    return idf_map
+
+
+def compute_extension_field_idf_map(field_value_distributions, baseline_total):
+    """Compute per-field extension IDF maps."""
+    if not isinstance(field_value_distributions, dict):
+        return {}
+    idf_map = {}
+    for field, value_counts in field_value_distributions.items():
+        field_idfs = compute_extension_field_idf(value_counts, baseline_total)
+        if field_idfs:
+            idf_map[field] = field_idfs
+    return idf_map
+
+
+def _extension_field_names(spec_payload, baseline):
+    config_schema = ((baseline or {}).get("config") or {}).get("schema")
+    if isinstance(config_schema, dict) and config_schema:
+        return list(config_schema.keys())
+
+    names = []
+    for source in (
+        ((baseline or {}).get("field_value_distributions") or {}),
+        ((baseline or {}).get("field_presence_counts") or {}),
+        ((spec_payload or {}).get("labels") or {}),
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in source.keys():
+            if key not in names:
+                names.append(key)
+    return names
+
+
+def _extension_field_prior(field_idfs):
+    return _dimension_rarity_prior(field_idfs)
+
+
+def compute_extension_field_rarity(value, field_idfs, confidence=_RARITY_DEFAULT_CONFIDENCE):
+    """Compute one extension field rarity with confidence shrinkage to the field prior."""
+    if not isinstance(field_idfs, dict) or not field_idfs:
+        return 0.0
+
+    prior = _extension_field_prior(field_idfs)
+    confidence = _coerce_unit_float(confidence, _RARITY_DEFAULT_CONFIDENCE)
+
+    if isinstance(value, list):
+        observed_values = [
+            field_idfs.get(item, prior)
+            for item in value
+            if item not in (None, "")
+        ]
+        if not observed_values:
+            return 0.0
+        observed_rarity = _aggregate_multi_tag_rarity(observed_values)
+    else:
+        if value in (None, ""):
+            return 0.0
+        observed_rarity = field_idfs.get(value, prior)
+
+    return confidence * observed_rarity + (1.0 - confidence) * prior
+
+
+def normalize_extension_rarity_score(raw_score, baseline_total, mode="absolute", raw_population=None):
+    """Normalize one extension rarity score onto the shared 1-10 scale."""
+    if raw_score is None:
+        return None
+
+    mode = str(mode or "absolute").strip().lower()
+    if mode == "percentile" and raw_population:
+        values = sorted(float(value) for value in raw_population if isinstance(value, (int, float)))
+        if values:
+            rank = 0
+            for i, value in enumerate(values):
+                if value >= raw_score:
+                    rank = i
+                    break
+            else:
+                rank = len(values) - 1
+            percentile = rank / max(len(values) - 1, 1)
+            return round(1 + percentile * 9, 1)
+
+    ceiling = max(math.log2(max(_coerce_positive_int(baseline_total), 2)), 1e-9)
+    raw = max(0.0, min(float(raw_score), ceiling))
+    return round(1 + (raw / ceiling) * 9, 1)
+
+
+def resolve_extension_rarity_mode(config):
+    """Resolve extension rarity mode from config with safe fallback."""
+    mode = getattr(config, "extension_rarity_mode", "off") if config is not None else "off"
+    mode = str(mode or "off").strip().lower()
+    if mode not in {"off", "preview", "bonus_only"}:
+        return "off"
+    return mode
+
+
+def _extract_sample_extension_payloads(sample):
+    if not isinstance(sample, dict):
+        return {}
+    payload = sample.get("label_extensions")
+    if isinstance(payload, dict) and payload:
+        return payload
+    labels = sample.get("labels") or {}
+    payload = labels.get("label_extensions")
+    if isinstance(payload, dict) and payload:
+        return payload
+    return {}
+
+
+def compute_extension_spec_rarity(spec_payload, baseline, *, normalization_mode="absolute", default_confidence=_RARITY_DEFAULT_CONFIDENCE):
+    """Compute extension rarity for one spec from persisted spec-local baseline data."""
+    payload = spec_payload if isinstance(spec_payload, dict) else {}
+    baseline = baseline if isinstance(baseline, dict) else {}
+    status = payload.get("status")
+    matched = bool(payload.get("matched"))
+    spec_hash = payload.get("spec_hash") or baseline.get("spec_hash")
+    baseline_total = _coerce_positive_int(baseline.get("baseline_total", 0))
+
+    result = {
+        "status": status,
+        "matched": matched,
+        "spec_version": payload.get("spec_version") or baseline.get("spec_version"),
+        "spec_hash": spec_hash,
+        "baseline_total": baseline_total,
+        "raw_score": None,
+        "score": None,
+        "confidence": 0.0,
+    }
+
+    if status != "success" or not matched or baseline_total <= 0:
+        return result
+
+    labels = payload.get("labels") if isinstance(payload.get("labels"), dict) else {}
+    confidence_map = payload.get("confidence") if isinstance(payload.get("confidence"), dict) else {}
+    field_idf_map = compute_extension_field_idf_map(
+        baseline.get("field_value_distributions"),
+        baseline_total,
+    )
+    field_names = _extension_field_names(payload, baseline)
+    if not field_names:
+        field_names = list(field_idf_map.keys())
+
+    field_rarities = []
+    populated_confidences = []
+    populated_fields = 0
+
+    for field in field_names:
+        value = labels.get(field)
+        if value in (None, "") or (isinstance(value, list) and not [item for item in value if item not in (None, "")]):
+            continue
+        field_idfs = field_idf_map.get(field)
+        if not field_idfs:
+            continue
+        field_confidence = _coerce_unit_float(confidence_map.get(field), default_confidence)
+        field_rarity = compute_extension_field_rarity(value, field_idfs, confidence=field_confidence)
+        field_rarities.append(field_rarity)
+        populated_confidences.append(field_confidence)
+        populated_fields += 1
+
+    if not field_rarities:
+        return result
+
+    raw_score = sum(field_rarities) / len(field_rarities)
+    denominator = max(len(field_names), 1)
+    populated_ratio = populated_fields / denominator
+    spec_confidence = (sum(populated_confidences) / len(populated_confidences)) * populated_ratio
+
+    result["raw_score"] = round(raw_score, 4)
+    result["score"] = normalize_extension_rarity_score(
+        raw_score,
+        baseline_total=baseline_total,
+        mode=normalization_mode,
+    )
+    result["confidence"] = round(spec_confidence, 3)
+    return result
+
+
+def compute_sample_extension_rarity(sample, extension_stats, *, config=None, baseline_source="external"):
+    """Compute aggregate extension rarity for one sample from spec-local baselines."""
+    mode = resolve_extension_rarity_mode(config)
+    payloads = _extract_sample_extension_payloads(sample)
+    specs = (extension_stats or {}).get("specs") or {}
+    min_baseline_total = _coerce_positive_int(
+        getattr(config, "min_extension_baseline_total", 0) if config is not None else 0
+    )
+
+    result = {
+        "mode": mode,
+        "score": None,
+        "confidence": 0.0,
+        "matched_specs": 0,
+        "baseline_source": baseline_source,
+        "source_eligible": baseline_source != "local",
+        "support_sufficient": False,
+        "specs": {},
+    }
+    if mode == "off" or not payloads:
+        return result
+
+    weighted_score_sum = 0.0
+    weight_total = 0.0
+    confidence_sum = 0.0
+    confidence_count = 0
+
+    for spec_id, payload in payloads.items():
+        if not isinstance(payload, dict):
+            continue
+        spec_stats = specs.get(spec_id) or {}
+        spec_hash = str(payload.get("spec_hash") or spec_stats.get("spec_hash") or "")
+        baseline = copy.deepcopy(((spec_stats.get("baselines") or {}).get(spec_hash)) or {})
+        if spec_stats.get("config") and "config" not in baseline:
+            baseline["config"] = spec_stats.get("config")
+
+        spec_result = compute_extension_spec_rarity(
+            payload,
+            baseline,
+            normalization_mode=resolve_rarity_mode(config),
+        )
+        support_sufficient = spec_result["baseline_total"] >= min_baseline_total
+        spec_result["support_sufficient"] = support_sufficient
+        spec_result["source_eligible"] = baseline_source != "local"
+        result["specs"][spec_id] = spec_result
+
+        if spec_result["matched"]:
+            result["matched_specs"] += 1
+        if spec_result["score"] is None:
+            continue
+        if not support_sufficient:
+            continue
+
+        spec_confidence = _coerce_unit_float(spec_result.get("confidence"), 0.0)
+        confidence_sum += spec_confidence
+        confidence_count += 1
+        weighted_score_sum += spec_result["score"] * max(spec_confidence, 1e-9)
+        weight_total += max(spec_confidence, 1e-9)
+        result["support_sufficient"] = result["support_sufficient"] or support_sufficient
+
+    if weight_total > 0:
+        result["score"] = round(weighted_score_sum / weight_total, 1)
+    if confidence_count > 0:
+        result["confidence"] = round(confidence_sum / confidence_count, 3)
+
+    return result
+
+
+def augment_rarity_result(core_rarity, sample, *, extension_stats=None, config=None, baseline_source="external"):
+    """Additive rarity V2 wrapper that preserves legacy core rarity semantics."""
+    mode = resolve_extension_rarity_mode(config)
+    if mode == "off":
+        return core_rarity
+
+    core_copy = copy.deepcopy(core_rarity) if isinstance(core_rarity, dict) else {"score": None}
+    result = copy.deepcopy(core_copy)
+    result["rarity_core"] = copy.deepcopy(core_copy)
+
+    extension_rarity = compute_sample_extension_rarity(
+        sample,
+        extension_stats,
+        config=config,
+        baseline_source=baseline_source,
+    )
+    result["rarity_extension"] = extension_rarity
+
+    if mode == "bonus_only":
+        core_score = core_copy.get("score")
+        extension_score = extension_rarity.get("score")
+        extension_gate = 0.0
+        if (
+            isinstance(extension_score, (int, float))
+            and extension_rarity.get("support_sufficient")
+            and extension_rarity.get("source_eligible")
+        ):
+            extension_gate = _coerce_unit_float(extension_rarity.get("confidence"), 0.0)
+        extension_bonus = 0.0
+        if isinstance(extension_score, (int, float)):
+            extension_bonus = _EXTENSION_RARITY_BLEND_WEIGHT * extension_gate * max(0.0, extension_score - 5.0)
+            extension_bonus = min(max(extension_bonus, 0.0), _EXTENSION_RARITY_BONUS_CAP)
+        rarity_v2_score = core_score
+        if isinstance(core_score, (int, float)):
+            rarity_v2_score = round(max(1.0, min(10.0, core_score + extension_bonus)), 1)
+        result["rarity_v2"] = {
+            "score": rarity_v2_score,
+            "core_score": core_score,
+            "extension_bonus": round(extension_bonus, 3),
+            "blend_mode": "bonus_only",
+            "extension_gate": round(extension_gate, 3),
+        }
+
+    return result
+
+
+def _refresh_augmented_rarity_after_core_normalization(rarity_result):
+    """Sync additive V2 rarity fields after legacy core score normalization."""
+    if not isinstance(rarity_result, dict):
+        return rarity_result
+
+    core_view = {
+        key: value
+        for key, value in rarity_result.items()
+        if key not in {"rarity_core", "rarity_extension", "rarity_v2"}
+    }
+    if isinstance(rarity_result.get("rarity_core"), dict):
+        rarity_result["rarity_core"] = copy.deepcopy(core_view)
+
+    rarity_v2 = rarity_result.get("rarity_v2")
+    extension_rarity = rarity_result.get("rarity_extension") or {}
+    if isinstance(rarity_v2, dict):
+        core_score = core_view.get("score")
+        extension_score = extension_rarity.get("score")
+        extension_gate = 0.0
+        if (
+            isinstance(extension_score, (int, float))
+            and extension_rarity.get("support_sufficient")
+            and extension_rarity.get("source_eligible")
+        ):
+            extension_gate = _coerce_unit_float(extension_rarity.get("confidence"), 0.0)
+        extension_bonus = 0.0
+        if isinstance(extension_score, (int, float)):
+            extension_bonus = _EXTENSION_RARITY_BLEND_WEIGHT * extension_gate * max(0.0, extension_score - 5.0)
+            extension_bonus = min(max(extension_bonus, 0.0), _EXTENSION_RARITY_BONUS_CAP)
+        rarity_v2["core_score"] = core_score
+        rarity_v2["extension_bonus"] = round(extension_bonus, 3)
+        rarity_v2["extension_gate"] = round(extension_gate, 3)
+        if isinstance(core_score, (int, float)):
+            rarity_v2["score"] = round(max(1.0, min(10.0, core_score + extension_bonus)), 1)
+    return rarity_result
 
 
 def compute_sample_rarity(sample_labels, idf_map, total_samples,
@@ -1467,6 +1811,32 @@ def compute_value_score(score_result, rarity_result, weights=None):
     return round(max(1.0, min(10.0, value)), 1)
 
 
+def _attach_augmented_rarity_fields(value_payload, rarity_result):
+    """Persist additive rarity V2 fields onto a value payload without changing legacy keys."""
+    if not isinstance(value_payload, dict) or not isinstance(rarity_result, dict):
+        return value_payload
+    if isinstance(rarity_result.get("rarity_core"), dict):
+        value_payload["rarity_core"] = copy.deepcopy(rarity_result["rarity_core"])
+    if isinstance(rarity_result.get("rarity_extension"), dict):
+        value_payload["rarity_extension"] = copy.deepcopy(rarity_result["rarity_extension"])
+    if isinstance(rarity_result.get("rarity_v2"), dict):
+        value_payload["rarity_v2"] = copy.deepcopy(rarity_result["rarity_v2"])
+    return value_payload
+
+
+def _clear_augmented_rarity_fields(value_payload, *, keep_preview=False):
+    """Remove additive extension/V2 rarity fields from a value payload."""
+    if not isinstance(value_payload, dict):
+        return value_payload
+    if not keep_preview:
+        value_payload.pop("rarity_core", None)
+        value_payload.pop("rarity_extension", None)
+    value_payload.pop("rarity_v2", None)
+    value_payload.pop("value_score_v2", None)
+    value_payload.pop("selection_score_v2", None)
+    return value_payload
+
+
 # ─────────────────────────────────────────────────────────
 # Selection score (intra-class quality ranking)
 # ─────────────────────────────────────────────────────────
@@ -1886,8 +2256,12 @@ def _selection_summary_from_sample(sample, config=None):
         "quality_overall": (value.get("quality") or {}).get("overall"),
         "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
         "rarity_score": (value.get("rarity") or {}).get("score"),
+        "extension_rarity_score": (value.get("rarity_extension") or {}).get("score"),
+        "rarity_v2_score": (value.get("rarity_v2") or {}).get("score"),
         "value_score": value.get("value_score"),
+        "value_score_v2": value.get("value_score_v2"),
         "confidence": value.get("confidence"),
+        "selection_score_v2": value.get("selection_score_v2"),
         "selection_features": selection_features,
         "inferred_domain": inferred_domain,
         "metadata": {
@@ -1987,6 +2361,48 @@ def compute_selection_scores(samples, rarity_weights=None,
             continue
         value["selection_score"] = result["selection_score"]
         value["intra_class_rank"] = result["intra_class_rank"]
+
+
+def apply_v2_scores(samples, config=None):
+    """Add bonus-only V2 value/selection fields without changing legacy outputs."""
+    if resolve_extension_rarity_mode(config) != "bonus_only":
+        return
+
+    weights = config.value_weights if config and config.value_weights else VALUE_WEIGHTS
+    quality_weights = _selection_quality_weights(config)
+
+    for sample in samples:
+        value = sample.get("value")
+        if not isinstance(value, dict):
+            continue
+        rarity_v2 = value.get("rarity_v2")
+        if not isinstance(rarity_v2, dict):
+            continue
+
+        score_result = {
+            "complexity": value.get("complexity"),
+            "quality": value.get("quality"),
+            "reasoning": value.get("reasoning"),
+            "confidence": value.get("confidence"),
+        }
+        value_score_v2 = compute_value_score(score_result, rarity_v2, weights)
+        summary = _selection_summary_from_sample(sample, config=config)
+        features = summary.get("selection_features") or {}
+        value_score_v2 = _apply_value_stability(value_score_v2, features, config=config)
+        if value_score_v2 is not None:
+            value["value_score_v2"] = value_score_v2
+
+        pq_scaled = _extract_pure_quality(value, quality_weights)
+        selection_score_v2 = _compose_selection_score(
+            value.get("intra_class_rank"),
+            pq_scaled,
+            rarity_v2.get("score"),
+            value_score_v2,
+            features,
+            config=config,
+        )
+        if selection_score_v2 is not None:
+            value["selection_score_v2"] = selection_score_v2
 
 
 def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
@@ -2322,7 +2738,7 @@ def _build_selective_estimate_score(sample, rarity_result, decision, config=None
     features = _infer_selection_features(sample=sample, config=config)
     value_score = _apply_value_stability(value_score, features, config=config)
 
-    return {
+    value = {
         "complexity": estimated_score["complexity"],
         "quality": estimated_score["quality"],
         "reasoning": estimated_score["reasoning"],
@@ -2338,6 +2754,7 @@ def _build_selective_estimate_score(sample, rarity_result, decision, config=None
             "uncertainty": round(1.0 - confidence, 2),
         },
     }
+    return _attach_augmented_rarity_fields(value, rarity_result)
 
 
 async def score_one(http_client, sample, model, rarity_result,
@@ -2566,7 +2983,7 @@ async def score_one(http_client, sample, model, rarity_result,
             "confidence": score_result.get("confidence", 0.5),
         }
         monitor["status"] = "success"
-        return value, monitor
+        return _attach_augmented_rarity_fields(value, rarity_result), monitor
 
     # All retries exhausted
     monitor["status"] = "failed"
@@ -2667,6 +3084,10 @@ def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
         "quality_overall": _percentiles(extract_scores("quality.overall")),
         "reasoning_overall": _percentiles(extract_scores("reasoning.overall")),
         "rarity_score": _percentiles(extract_scores("rarity.score")),
+        "extension_rarity_score": _percentiles(extract_scores("rarity_extension.score")),
+        "rarity_v2_score": _percentiles(extract_scores("rarity_v2.score")),
+        "value_score_v2": _percentiles(extract_scores("value_score_v2")),
+        "selection_score_v2": _percentiles(extract_scores("selection_score_v2")),
     }
 
     # Distribution bias detection (quality.overall)
@@ -2705,6 +3126,10 @@ def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
         "quality_overall": extract_scores("quality.overall"),
         "reasoning_overall": extract_scores("reasoning.overall"),
         "rarity_score": extract_scores("rarity.score"),
+        "extension_rarity_score": extract_scores("rarity_extension.score"),
+        "rarity_v2_score": extract_scores("rarity_v2.score"),
+        "value_score_v2": extract_scores("value_score_v2"),
+        "selection_score_v2": extract_scores("selection_score_v2"),
     }
 
     # Histogram bins (1-10) for dashboard charts
@@ -3330,12 +3755,15 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     # ── Load tag stats for rarity ──
     rarity_mode = resolve_rarity_mode(config)
+    extension_rarity_mode = resolve_extension_rarity_mode(config)
     stats_ref_info = None
     idf_map = {}
     total_stats_samples = 0
     combo_counts = None
     combo_mode = "disabled"
     baseline_combo_counts = None
+    extension_stats_context = None
+    extension_baseline_source = "unavailable"
 
     if tag_stats_path is None:
         candidate = input_path.parent / PASS1_STATS_FILE
@@ -3348,6 +3776,9 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         if distributions:
             idf_map = compute_tag_idf(distributions, total_stats_samples)
             baseline_combo_counts = meta.get("combo_counts")
+            extension_stats_context = meta.get("extension_stats")
+            if extension_stats_context:
+                extension_baseline_source = "external"
             stats_ref_info = {
                 "source": str(stats_source),
                 "total_samples": total_stats_samples,
@@ -3368,6 +3799,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     # ── Pass A: Compute rarity (stream, no LLM) ──
     raw_rarities = []
     local_combo_counts = {}
+    extension_baseline_samples = [] if extension_rarity_mode != "off" and not extension_stats_context else None
     processed_count = 0
     usable_count = 0
     local_dims = list((config.rarity_weights or RARITY_WEIGHTS).keys())
@@ -3383,6 +3815,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             if _update_distributions_from_labels(local_distributions, labels, local_dims):
                 usable_count += 1
             _update_combo_counts_from_labels(local_combo_counts, labels)
+            if extension_baseline_samples is not None:
+                extension_payloads = _extract_sample_extension_payloads(sample)
+                if extension_payloads:
+                    extension_baseline_samples.append({"label_extensions": copy.deepcopy(extension_payloads)})
             processed_count += 1
             del sample
             if limit > 0 and processed_count >= limit:
@@ -3416,6 +3852,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
     if not idf_map:
         print("  Warning: rarity unavailable (no valid tag distributions)")
+    if extension_rarity_mode != "off" and not extension_stats_context and extension_baseline_samples:
+        extension_stats_context = aggregate_extension_stats(extension_baseline_samples)
+        if extension_stats_context:
+            extension_baseline_source = "local"
 
     # Second lightweight pass to compute per-sample rarity (needs combo_counts)
     sample_idx = 0
@@ -3434,6 +3874,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 combo_counts=combo_counts,
                 stats_ref_info=stats_ref_info,
             )
+            rarity = augment_rarity_result(
+                rarity,
+                sample,
+                extension_stats=extension_stats_context,
+                config=config,
+                baseline_source=extension_baseline_source,
+            )
             raw_rarities.append(rarity)
             del sample
             sample_idx += 1
@@ -3445,6 +3892,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         mode=rarity_mode,
         total_samples=total_stats_samples,
     )
+    for rarity in raw_rarities:
+        _refresh_augmented_rarity_after_core_normalization(rarity)
     total = len(raw_rarities)
 
     # ── Pass B: Chunked LLM scoring ──
@@ -3785,6 +4234,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 if scored_idx < len(selection_results):
                     sample["value"]["selection_score"] = selection_results[scored_idx]["selection_score"]
                     sample["value"]["intra_class_rank"] = selection_results[scored_idx]["intra_class_rank"]
+                    apply_v2_scores([sample], config=config)
                     scored_idx += 1
             fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
     scored_tmp.rename(scored_path)
@@ -3812,6 +4262,11 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         "combo_alpha": config.rarity_combo_alpha,
         "combo_mode": combo_mode,
         "score_mode": rarity_mode,
+    }
+    stats["extension_rarity_config"] = {
+        "mode": resolve_extension_rarity_mode(config),
+        "baseline_source": "external" if stats_source else "local",
+        "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
     }
     stats["chunked"] = True
     _annotate_scoring_prompt_stats(stats, config)
@@ -3904,12 +4359,17 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
         "quality_overall": _percentiles(_gather("quality_overall")),
         "reasoning_overall": _percentiles(_gather("reasoning_overall")),
         "rarity_score": _percentiles(_gather("rarity_score")),
+        "extension_rarity_score": _percentiles(_gather("extension_rarity_score")),
+        "rarity_v2_score": _percentiles(_gather("rarity_v2_score")),
+        "value_score_v2": _percentiles(_gather("value_score_v2")),
+        "selection_score_v2": _percentiles(_gather("selection_score_v2")),
     }
 
     # Histogram bins (1-10) for dashboard charts
     _hist_keys = ["value_score", "selection_score", "intra_class_rank",
                   "complexity_overall", "quality_overall", "reasoning_overall",
-                  "rarity_score"]
+                  "rarity_score", "extension_rarity_score", "rarity_v2_score",
+                  "value_score_v2", "selection_score_v2"]
     histograms = {k: _histogram_bins(_gather(k)) for k in _hist_keys}
 
     # Thinking mode stats
@@ -4162,12 +4622,15 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     # Load tag stats for rarity
     rarity_mode = resolve_rarity_mode(config)
+    extension_rarity_mode = resolve_extension_rarity_mode(config)
     stats_ref_info = None
     idf_map = {}
     total_stats_samples = 0
     combo_counts = None
     combo_mode = "disabled"
     baseline_combo_counts = None
+    extension_stats_context = None
+    extension_baseline_source = "unavailable"
 
     if tag_stats_path:
         stats_source = tag_stats_path
@@ -4181,6 +4644,9 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         if distributions:
             idf_map = compute_tag_idf(distributions, total_stats_samples)
             baseline_combo_counts = meta.get("combo_counts")
+            extension_stats_context = meta.get("extension_stats")
+            if extension_stats_context:
+                extension_baseline_source = "external"
             stats_ref_info = {
                 "source": str(stats_source),
                 "total_samples": total_stats_samples,
@@ -4228,6 +4694,12 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         combo_counts = baseline_combo_counts
         combo_mode = "external"
 
+    if extension_rarity_mode != "off" and not extension_stats_context:
+        local_extension_stats = aggregate_extension_stats(samples)
+        if local_extension_stats:
+            extension_stats_context = local_extension_stats
+            extension_baseline_source = "local"
+
     if not idf_map:
         print("  Warning: rarity unavailable (no valid tag distributions)")
 
@@ -4242,6 +4714,13 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             combo_counts=combo_counts,
             stats_ref_info=stats_ref_info,
         )
+        rarity = augment_rarity_result(
+            rarity,
+            s,
+            extension_stats=extension_stats_context,
+            config=config,
+            baseline_source=extension_baseline_source,
+        )
         rarity_results.append(rarity)
 
     # Normalize rarity to 1-10
@@ -4250,6 +4729,8 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         mode=rarity_mode,
         total_samples=total_stats_samples,
     )
+    for rarity in rarity_results:
+        _refresh_augmented_rarity_after_core_normalization(rarity)
 
     runtime = _instantiate_runtime(config, concurrency=config.scoring_concurrency)
     setattr(config, "_adaptive_runtime", runtime)
@@ -4370,6 +4851,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
 
     # Compute selection scores (intra-class quality ranking, no LLM)
     compute_selection_scores(samples, config=config)
+    apply_v2_scores(samples, config=config)
 
     # Write outputs (atomic: write to .tmp then rename)
     scored_path = output_dir / "scored.json"
@@ -4442,6 +4924,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
         "combo_alpha": config.rarity_combo_alpha,
         "combo_mode": combo_mode,
         "score_mode": rarity_mode,
+    }
+    stats["extension_rarity_config"] = {
+        "mode": resolve_extension_rarity_mode(config),
+        "baseline_source": "external" if stats_source else "local",
+        "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
     }
     _annotate_scoring_prompt_stats(stats, config)
 
@@ -4833,6 +5320,7 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
             selection = selection_results[cursor]
             value["selection_score"] = selection["selection_score"]
             value["intra_class_rank"] = selection["intra_class_rank"]
+            apply_v2_scores([sample], config=config)
             cursor += 1
 
         _write_scored_samples(scored_path, samples)
@@ -4896,6 +5384,7 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None, genera
 
     # Compute selection scores (intra-class quality ranking, no LLM)
     compute_selection_scores(samples, config=config)
+    apply_v2_scores(samples, config=config)
 
     # Write outputs (atomic: write to .tmp then rename)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -4968,6 +5457,11 @@ def _flush_scoring_file(collector, config, pprint=print, file_label=None, genera
         "combo_alpha": config.rarity_combo_alpha,
         "combo_mode": collector.combo_mode,
         "score_mode": resolve_rarity_mode(config),
+    }
+    stats["extension_rarity_config"] = {
+        "mode": resolve_extension_rarity_mode(config),
+        "baseline_source": "external" if collector.stats_source else "local",
+        "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
     }
     _annotate_scoring_prompt_stats(stats, config)
 
@@ -5227,6 +5721,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             mode=rarity_mode,
             total_samples=global_total_stats_samples,
         )
+        for rarity in rarity_results:
+            _refresh_augmented_rarity_after_core_normalization(rarity)
 
         file_output_dir = labeled_path.parent
         collector = _ScoringFileCollector(
@@ -5623,6 +6119,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             "combo_alpha": config.rarity_combo_alpha,
             "combo_mode": global_combo_mode,
             "score_mode": rarity_mode,
+        }
+        summary["extension_rarity_config"] = {
+            "mode": resolve_extension_rarity_mode(config),
+            "baseline_source": "external" if global_stats_source else "local",
+            "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
         }
         if rate_limiter:
             summary["http_request_stats"] = rate_limiter.stats.to_dict()

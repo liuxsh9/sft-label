@@ -1138,6 +1138,41 @@ def _compute_conv_rarity(slices, weights, score_conf):
     }
 
 
+def _compute_conv_extension_v2_rarity(slices, weights, score_conf, legacy_conv_rarity):
+    """Aggregate extension-aware conversation rarity from gated sample-level rarity_v2 deltas."""
+    rarity_v2_bonus_values = []
+    saw_sample_v2 = False
+    for s, weight in zip(slices, weights):
+        value = s.get("value") or {}
+        rarity_v2 = (value.get("rarity_v2") or {}).get("score")
+        if not isinstance(rarity_v2, (int, float)):
+            continue
+        saw_sample_v2 = True
+        core_rarity = (value.get("rarity") or {}).get("score")
+        if not isinstance(core_rarity, (int, float)):
+            continue
+        bonus = max(0.0, float(rarity_v2) - float(core_rarity))
+        rarity_v2_bonus_values.append((bonus, weight))
+
+    if not saw_sample_v2:
+        return None
+    if not rarity_v2_bonus_values:
+        return legacy_conv_rarity
+
+    total_weight = sum(weight for _bonus, weight in rarity_v2_bonus_values) or 1.0
+    bonus_mean = sum(bonus * weight for bonus, weight in rarity_v2_bonus_values) / total_weight
+    bonus_peak = max(bonus for bonus, _weight in rarity_v2_bonus_values)
+    bonus_confidence = max(0.0, min(1.0, score_conf or 1.0))
+    conv_bonus = (0.7 * bonus_mean + 0.3 * bonus_peak) * bonus_confidence
+
+    if not isinstance(legacy_conv_rarity, (int, float)):
+        return max(1.0, min(10.0, conv_bonus))
+
+    conv_rarity_extension_v2 = legacy_conv_rarity + conv_bonus
+    conv_rarity_extension_v2 = max(legacy_conv_rarity, conv_rarity_extension_v2)
+    return max(1.0, min(10.0, conv_rarity_extension_v2))
+
+
 # ─── Pure quality from slice ─────────────────────────────
 
 def _compute_pure_quality_from_slice(s):
@@ -1243,6 +1278,12 @@ def aggregate_conversation(conversation_key, slices):
     # Conversation rarity: weighted mean + peak + label-state diversity,
     # then shrink when the conversation is dominated by inherited slices.
     conv_rarity, rarity_detail = _compute_conv_rarity(slices, weights, score_conf)
+    conv_rarity_extension_v2 = _compute_conv_extension_v2_rarity(
+        slices,
+        weights,
+        score_conf,
+        conv_rarity,
+    )
 
     # Pure quality (for selection score computation)
     pure_quality = _weighted_average(
@@ -1319,8 +1360,13 @@ def aggregate_conversation(conversation_key, slices):
         "conv_value_v2": round(conv_value_v2, 2),
         "conv_selection": None,  # filled by compute_conv_selection_scores
         "conv_selection_v2": None,  # filled by compute_conv_selection_scores
+        "conv_selection_extension_v2": None,  # filled by compute_conv_selection_scores
         "peak_complexity": peak_complexity,
         "conv_rarity": round(conv_rarity, 2) if conv_rarity is not None else None,
+        "conv_rarity_extension_v2": (
+            round(conv_rarity_extension_v2, 2)
+            if conv_rarity_extension_v2 is not None else None
+        ),
         "trajectory_structure_score": round(trajectory_structure_score, 2),
         "observed_turn_ratio": round(observed_turn_ratio, 2) if observed_turn_ratio is not None else None,
         "inherited_turn_ratio": round(inherited_turn_ratio, 2) if inherited_turn_ratio is not None else None,
@@ -1397,6 +1443,7 @@ def aggregate_conversation(conversation_key, slices):
             "conv_intra_class_rank": None,  # filled later
             "selection_confidence": None,  # filled later
             "conv_value_v2_delta": _round_or_none(conv_value_v2 - conv_value),
+            "conv_selection_extension_v2_delta": None,  # filled later
         },
         "slices": slice_details,
     }
@@ -1534,6 +1581,26 @@ def compute_conv_selection_scores(records):
         rec["detail"]["conv_intra_class_rank"] = round(intra_rank_scaled, 2)
         rec["detail"]["selection_confidence"] = round(selection_conf, 2)
         rec["detail"]["conv_selection_v2_delta"] = _round_or_none(conv_selection_v2 - conv_selection)
+
+        extension_rarity = rec.get("conv_rarity_extension_v2")
+        if extension_rarity is not None:
+            conv_selection_extension_v2 = (
+                intra_weight * intra_rank_scaled +
+                quality_weight * pq_scaled +
+                rarity_fuse_weight * extension_rarity
+            )
+            conv_selection_extension_v2 = apply_score_confidence(
+                conv_selection_extension_v2,
+                selection_conf,
+            )
+            conv_selection_extension_v2 = max(conv_selection, conv_selection_extension_v2)
+        else:
+            conv_selection_extension_v2 = conv_selection
+        conv_selection_extension_v2 = max(1.0, min(10.0, conv_selection_extension_v2))
+        rec["conv_selection_extension_v2"] = round(conv_selection_extension_v2, 2)
+        rec["detail"]["conv_selection_extension_v2_delta"] = _round_or_none(
+            conv_selection_extension_v2 - conv_selection
+        )
 
 
 # ─── Top-level entry points ─────────────────────────────

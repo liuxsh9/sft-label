@@ -235,6 +235,7 @@ def test_build_run_pass1_pass2_semantic_plan():
             "",           # model
             "",           # tag-stats
             "",           # rarity mode (default absolute)
+            "",           # extension rarity mode (default off)
             "n",          # env override
             "",           # extra flags
         ]
@@ -336,6 +337,7 @@ def test_build_score_plan_with_llm_env_override():
             "labeled.json",           # --input
             "",                       # --tag-stats
             "",                       # rarity mode (default absolute)
+            "",                       # extension rarity mode (default off)
             "",                       # --limit
             "",                       # --resume
             "",                       # concurrency (default 200)
@@ -367,6 +369,7 @@ def test_build_score_plan_legacy_supports_custom_runtime_values():
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode
+            "",             # extension rarity mode
             "",             # --limit
             "",             # --resume
             "6",            # concurrency -> custom
@@ -722,6 +725,7 @@ def test_llm_key_can_be_cleared_from_existing_env(monkeypatch):
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode (default absolute)
+            "",             # extension rarity mode (default off)
             "",             # --limit
             "",             # --resume
             "",             # concurrency (default 200)
@@ -904,6 +908,7 @@ def test_chinese_llm_override_prompt_keeps_full_key_name():
             "labeled.json", # --input
             "",             # --tag-stats
             "",             # rarity mode (default absolute)
+            "",             # extension rarity mode (default off)
             "",             # --limit
             "",             # --resume
             "",             # concurrency (default 200)
@@ -981,6 +986,7 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
             "labeled.json", # --input
             "",             # --tag-stats
             "2",            # rarity mode: percentile
+            "",             # extension rarity mode: off (default)
             "",             # --limit
             "",             # --resume
             "",             # concurrency (default 200)
@@ -1003,6 +1009,63 @@ def test_build_score_plan_can_set_percentile_rarity_mode():
         "percentile",
         "--concurrency",
         "200",
+    ]
+
+
+def test_build_score_plan_can_set_extension_rarity_preview_mode():
+    io = StubIO(
+        [
+            "4",            # workflow: score
+            "labeled.json", # --input
+            "",             # --tag-stats
+            "",             # rarity mode: absolute
+            "2",            # extension rarity mode: preview
+            "",             # --limit
+            "",             # --resume
+            "",             # concurrency (default 200)
+            "",             # rps-limit (default)
+            "",             # adaptive runtime (default yes)
+            "",             # recovery sweep (default yes)
+            "",             # prompt mode
+            "",             # model
+            "n",            # env override
+            "",             # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "score",
+        "--input",
+        "labeled.json",
+        "--extension-rarity-mode",
+        "preview",
+        "--concurrency",
+        "200",
+    ]
+
+
+def test_build_refresh_rarity_plan_can_set_extension_rarity_preview_mode():
+    io = StubIO(
+        [
+            "11",           # workflow: refresh-rarity
+            "run_dir",      # --input
+            "",             # --tag-stats
+            "",             # rarity mode: absolute
+            "2",            # extension rarity mode: preview
+            "",             # --output
+            "",             # workers
+            "",             # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+    assert plan is not None
+    assert plan.argv == [
+        "refresh-rarity",
+        "--input",
+        "run_dir",
+        "--extension-rarity-mode",
+        "preview",
     ]
 
 

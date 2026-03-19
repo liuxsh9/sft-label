@@ -8,6 +8,7 @@ import pytest
 from sft_label.inline_labels import (
     DATA_LABEL_SCHEMA_VERSION,
     build_data_label,
+    clear_pass2_state,
     compact_conversation_record,
     compute_data_id,
     ensure_data_id,
@@ -146,8 +147,10 @@ class TestInlineDataLabel:
                 "turn_count": 4,
                 "conv_value": 7.2,
                 "conv_selection": 6.8,
+                "conv_selection_extension_v2": 7.1,
                 "peak_complexity": 8,
                 "conv_rarity": 6.1,
+                "conv_rarity_extension_v2": 7.4,
                 "observed_turn_ratio": 0.5,
                 "inherited_turn_ratio": 0.5,
                 "rarity_confidence": 0.7,
@@ -168,6 +171,7 @@ class TestInlineDataLabel:
                     "test_related_turn_count": 2,
                     "edit_related_turn_count": 3,
                     "bash_execution_turn_count": 2,
+                    "conv_selection_extension_v2_delta": 0.3,
                 },
                 "merged_labels": {"task": ["bug-fixing"]},
                 "slices": [{"id": "x"}],
@@ -178,13 +182,36 @@ class TestInlineDataLabel:
         assert compact["compression_gap"] == 2.1
         assert compact["tool_turn_ratio"] == 0.75
         assert compact["unique_tool_count"] == 3
+        assert compact["conv_selection_extension_v2"] == 7.1
+        assert compact["conv_rarity_extension_v2"] == 7.4
         assert compact["thinking_mode_summary"] == "all_fast"
         assert compact["thinking_mode_counts"]["fast"] == 4
         assert compact["thinking_mode_ratio"]["fast"] == 1.0
         assert compact["detail"]["top_k_mean"] == 8.4
         assert compact["detail"]["unique_tools"] == ["bash", "apply_patch"]
+        assert compact["detail"]["conv_selection_extension_v2_delta"] == 0.3
         assert "merged_labels" not in compact
         assert "slices" not in compact
+
+    def test_clear_pass2_state_removes_extension_conversation_v2_fields(self):
+        data_label = {
+            "conversation": {
+                "conv_value": 7.2,
+                "conv_selection": 6.8,
+                "conv_selection_v2": 7.0,
+                "conv_selection_extension_v2": 7.1,
+                "conv_rarity": 6.1,
+                "conv_rarity_extension_v2": 7.4,
+                "detail": {
+                    "conv_selection_v2_delta": 0.2,
+                    "conv_selection_extension_v2_delta": 0.3,
+                },
+            }
+        }
+
+        clear_pass2_state(data_label, timestamp="2026-03-19T19:00:00")
+
+        assert data_label["conversation"] == {}
 
 
 class TestInlineRunLayout:

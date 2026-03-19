@@ -50,6 +50,43 @@ def _legacy_sample_with_extension(sample_id: str) -> dict:
             "unmapped": [],
         }
     }
+    sample["value"] = {
+        "rarity_extension": {
+            "mode": "preview",
+            "score": 7.4,
+            "confidence": 0.81,
+            "matched_specs": 1,
+            "baseline_source": "external",
+        },
+        "rarity_v2": {"score": 7.1, "extension_bonus": 0.3},
+        "value_score_v2": 7.6,
+        "selection_score_v2": 7.3,
+    }
+    return sample
+
+
+def _legacy_sample_with_extension_preview_only(sample_id: str) -> dict:
+    sample = _legacy_sample(sample_id)
+    sample["labels"]["label_extensions"] = {
+        "ui_fine_labels": {
+            "status": "success",
+            "matched": True,
+            "spec_version": "v1",
+            "spec_hash": "sha256:ui-v1",
+            "labels": {"component_type": ["form"], "visual_complexity": "high"},
+            "confidence": {"component_type": 0.76},
+            "unmapped": [],
+        }
+    }
+    sample["value"] = {
+        "rarity_extension": {
+            "mode": "preview",
+            "score": 7.4,
+            "confidence": 0.81,
+            "matched_specs": 1,
+            "baseline_source": "external",
+        },
+    }
     return sample
 
 
@@ -204,3 +241,46 @@ class TestExportReview:
         assert row["ext_ui_fine_labels_labels_component_type"] == "form, modal"
         assert row["ext_ui_fine_labels_labels_visual_complexity"] == "high"
         assert row["ext_ui_fine_labels_confidence_component_type"] == "0.76"
+        assert row["extension_rarity_preview_score"] == "7.4"
+        assert row["extension_rarity_preview_confidence"] == "0.81"
+        assert row["extension_rarity_preview_matched_specs"] == "1"
+        assert row["extension_rarity_preview_baseline_source"] == "external"
+        assert row["rarity_v2_score"] == "7.1"
+        assert row["value_score_v2"] == "7.6"
+        assert row["selection_score_v2"] == "7.3"
+
+    def test_export_review_omits_extension_rarity_columns_when_not_present(self, tmp_path):
+        sample = _legacy_sample("legacy-4")
+        sample["labels"]["label_extensions"] = {
+            "ui_fine_labels": {
+                "status": "success",
+                "matched": True,
+                "labels": {"component_type": ["form"]},
+            }
+        }
+        input_file = tmp_path / "labeled.json"
+        input_file.write_text(json.dumps([sample]), encoding="utf-8")
+        output_file = tmp_path / "review.csv"
+
+        export_review(str(input_file), str(output_file), include_extensions=True)
+
+        with open(output_file, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        assert "extension_rarity_preview_score" not in rows[0]
+        assert "value_score_v2" not in rows[0]
+
+    def test_export_review_preview_only_mode_omits_v2_columns(self, tmp_path):
+        input_file = tmp_path / "labeled.json"
+        input_file.write_text(json.dumps([_legacy_sample_with_extension_preview_only("legacy-preview")]), encoding="utf-8")
+        output_file = tmp_path / "review.csv"
+
+        export_review(str(input_file), str(output_file), include_extensions=True)
+
+        with open(output_file, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        row = rows[0]
+        assert row["extension_rarity_preview_score"] == "7.4"
+        assert row["extension_rarity_preview_confidence"] == "0.81"
+        assert "rarity_v2_score" not in row
+        assert "value_score_v2" not in row
+        assert "selection_score_v2" not in row
