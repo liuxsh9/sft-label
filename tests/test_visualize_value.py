@@ -164,6 +164,46 @@ def test_compute_value_viz_data_surfaces_extension_rarity_v2_metrics():
     assert "mean_selection_v2" not in conversation_mode["per_file_summary"][0]
 
 
+def test_compute_value_viz_data_stats_only_hides_empty_extension_rarity_v2_metrics():
+    viz = compute_value_viz_data([], {
+        "total_scored": 0,
+        "total_failed": 0,
+        "score_distributions": {
+            "value_score": {"mean": 6.2, "min": 6.2, "max": 6.2, "p50": 6.2},
+            "selection_score": {"mean": 6.5, "min": 6.5, "max": 6.5, "p50": 6.5},
+            "extension_rarity_score": {},
+            "rarity_v2_score": {},
+            "value_score_v2": {},
+            "selection_score_v2": {},
+        },
+        "histograms": {
+            "value_score": [0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            "selection_score": [0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            "extension_rarity_score": [0] * 10,
+            "rarity_v2_score": [0] * 10,
+            "value_score_v2": [0] * 10,
+            "selection_score_v2": [0] * 10,
+        },
+    })
+
+    sample_mode = viz["modes"]["sample"]
+
+    assert "extension_rarity_score" not in sample_mode["score_distributions"]
+    assert "rarity_v2_score" not in sample_mode["score_distributions"]
+    assert "value_score_v2" not in sample_mode["score_distributions"]
+    assert "selection_score_v2" not in sample_mode["score_distributions"]
+    assert "extension_rarity_score" not in sample_mode["histograms"]
+    assert "rarity_v2_score" not in sample_mode["histograms"]
+    assert "value_score_v2" not in sample_mode["histograms"]
+    assert "selection_score_v2" not in sample_mode["histograms"]
+    assert sample_mode["overview"]["mean_extension_rarity"] is None
+    assert sample_mode["overview"]["mean_rarity_v2"] is None
+    assert sample_mode["overview"]["mean_value_v2"] is None
+    assert sample_mode["overview"]["mean_selection_v2"] is None
+    assert sample_mode["overview"]["extension_rarity_mode"] is None
+    assert sample_mode["overview"]["extension_baseline_source"] is None
+
+
 def test_compute_value_viz_data_single_turn_defaults_mean_turns_to_one():
     samples = [
         {

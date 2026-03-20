@@ -2698,12 +2698,16 @@ function renderExplorerDrawer() {
     });
     const cards = [
       [t("value"), value.value_score],
-      [t("value_score_v2"), value.value_score_v2],
       [t("quality"), (value.quality || {}).overall],
       [t("selection"), value.selection_score],
-      [t("selection_v2"), value.selection_score_v2],
-      [t("extension_rarity_preview"), ((value.rarity_extension || {}).score)],
-      [t("rarity_v2"), ((value.rarity_v2 || {}).score)],
+      ...(value.value_score_v2 !== null && value.value_score_v2 !== undefined ? [[t("value_score_v2"), value.value_score_v2]] : []),
+      ...(value.selection_score_v2 !== null && value.selection_score_v2 !== undefined ? [[t("selection_v2"), value.selection_score_v2]] : []),
+      ...(((value.rarity_extension || {}).score) !== null && ((value.rarity_extension || {}).score) !== undefined
+        ? [[t("extension_rarity_preview"), ((value.rarity_extension || {}).score)]]
+        : []),
+      ...(((value.rarity_v2 || {}).score) !== null && ((value.rarity_v2 || {}).score) !== undefined
+        ? [[t("rarity_v2"), ((value.rarity_v2 || {}).score)]]
+        : []),
       [t("conv_value"), (detail.conversation || {}).conv_value],
       [t("conv_sel"), (detail.conversation || {}).conv_selection],
       [t("conv_rarity"), (detail.conversation || {}).conv_rarity],

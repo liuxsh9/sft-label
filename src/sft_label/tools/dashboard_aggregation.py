@@ -634,9 +634,80 @@ _PASS2_EXTENSION_ONLY_KEYS = {
 }
 
 
+def _has_numeric_distribution(distribution: dict | None) -> bool:
+    if not isinstance(distribution, dict):
+        return False
+    return any(isinstance(value, (int, float)) for value in distribution.values())
+
+
+def _has_nonzero_histogram(histogram: list[int] | None) -> bool:
+    if not isinstance(histogram, list):
+        return False
+    return any(isinstance(value, (int, float)) and value > 0 for value in histogram)
+
+
+def _prune_empty_pass2_extension_only_fields(payload: dict) -> dict:
+    score_distributions = payload.get("score_distributions")
+    histograms = payload.get("histograms")
+
+    metric_presence = {
+        key: (
+            _has_numeric_distribution((score_distributions or {}).get(key))
+            or _has_nonzero_histogram((histograms or {}).get(key))
+        )
+        for key in _PASS2_EXTENSION_ONLY_KEYS
+    }
+
+    if isinstance(score_distributions, dict):
+        payload["score_distributions"] = {
+            key: value
+            for key, value in score_distributions.items()
+            if key not in _PASS2_EXTENSION_ONLY_KEYS or metric_presence.get(key)
+        }
+
+    if isinstance(histograms, dict):
+        payload["histograms"] = {
+            key: value
+            for key, value in histograms.items()
+            if key not in _PASS2_EXTENSION_ONLY_KEYS or metric_presence.get(key)
+        }
+
+    overview = payload.get("overview")
+    if isinstance(overview, dict):
+        if not metric_presence.get("extension_rarity_score"):
+            overview["mean_extension_rarity"] = None
+            overview["extension_rarity_mode"] = None
+            overview["extension_baseline_source"] = None
+        if not metric_presence.get("rarity_v2_score"):
+            overview["mean_rarity_v2"] = None
+        if not metric_presence.get("value_score_v2"):
+            overview["mean_value_v2"] = None
+        if not metric_presence.get("selection_score_v2"):
+            overview["mean_selection_v2"] = None
+
+    per_file_summary = payload.get("per_file_summary")
+    if isinstance(per_file_summary, list):
+        scrubbed = []
+        for row in per_file_summary:
+            if not isinstance(row, dict):
+                scrubbed.append(row)
+                continue
+            clean = dict(row)
+            if not metric_presence.get("extension_rarity_score"):
+                clean.pop("mean_extension_rarity", None)
+            if not metric_presence.get("rarity_v2_score"):
+                clean.pop("mean_rarity_v2", None)
+            if not metric_presence.get("selection_score_v2"):
+                clean.pop("mean_selection_v2", None)
+            scrubbed.append(clean)
+        payload["per_file_summary"] = scrubbed
+
+    return payload
+
+
 def _filter_pass2_extension_only_fields(payload: dict, *, mode_id: str) -> dict:
     if mode_id == "sample":
-        return payload
+        return _prune_empty_pass2_extension_only_fields(payload)
 
     score_distributions = payload.get("score_distributions")
     if isinstance(score_distributions, dict):
