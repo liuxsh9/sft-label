@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from sft_label.fs_artifacts import is_ignored_fs_artifact
 from sft_label.inline_labels import build_turn_id, compute_data_id
 from sft_label.preprocessing import normalize_and_slice
 
@@ -48,6 +49,11 @@ def iter_row_sample_bundles_from_jsonl(input_path, limit: int = 0):
     yet, in which case the oversized first row is still included.
     """
     input_path = Path(input_path)
+    if is_ignored_fs_artifact(input_path):
+        raise ValueError(
+            f"Detected macOS AppleDouble sidecar file ({input_path.name}). "
+            "This is not a real JSONL input and should be ignored."
+        )
     sample_count = 0
     yielded_rows = 0
     with open(input_path, "r", encoding="utf-8") as f:

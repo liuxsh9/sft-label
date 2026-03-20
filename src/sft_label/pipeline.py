@@ -38,6 +38,7 @@ from sft_label.prompts import (
     CALL1_FEWSHOT_COMPACT, CALL2_FEWSHOT_COMPACT,
     TAG_POOLS, SINGLE_SELECT, MULTI_SELECT
 )
+from sft_label.fs_artifacts import is_ignored_fs_artifact
 from sft_label.preprocessing import preprocess, format_signals_for_prompt, normalize_and_slice, truncate_conversations_for_labeling, apply_sparse_sampling
 from sft_label.inline_pass1 import (
     append_rows_jsonl,
@@ -175,7 +176,7 @@ def discover_input_files(input_path):
         f.resolve()
         for ext in ("*.json", "*.jsonl")
         for f in p.rglob(ext)
-        if f.is_file()
+        if f.is_file() and not is_ignored_fs_artifact(f)
     )
     base = p.resolve()
     return [(f, f.relative_to(base)) for f in files]

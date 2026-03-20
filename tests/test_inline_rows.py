@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from sft_label.inline_labels import build_turn_id
 from sft_label.inline_rows import (
@@ -184,3 +185,11 @@ def test_iter_row_sample_bundles_limit_is_sample_based(tmp_path):
     assert len(bundles) == 1
     assert bundles[0].raw_row["id"] == "r1"
     assert len(bundles[0].samples) == 1
+
+
+def test_iter_row_sample_bundles_from_jsonl_rejects_macos_sidecar(tmp_path):
+    path = tmp_path / "._rows.jsonl"
+    path.write_bytes(b"\xb0\x00\x01")
+
+    with pytest.raises(ValueError, match="AppleDouble sidecar file"):
+        list(iter_row_sample_bundles_from_jsonl(path))

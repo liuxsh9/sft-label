@@ -13,6 +13,7 @@ from sft_label.conversation import (
     build_conversation_key,
     compute_conv_selection_scores,
 )
+from sft_label.fs_artifacts import is_ignored_fs_artifact
 from sft_label.inline_labels import (
     build_turn_id,
     compact_conversation_record,
@@ -47,7 +48,7 @@ class InlineScoringTarget:
 
 def _contains_mirrored_jsonl(root: Path) -> bool:
     """Return whether a directory contains at least one mirrored JSONL file."""
-    return any(path.is_file() for path in root.rglob("*.jsonl"))
+    return any(path.is_file() and not is_ignored_fs_artifact(path) for path in root.rglob("*.jsonl"))
 
 
 def _single_dataset_root(run_root: Path) -> Path | None:
@@ -141,7 +142,11 @@ def discover_inline_jsonl_files(target: InlineScoringTarget) -> list[Path]:
     if target.target_path.is_file():
         return [target.target_path]
     root = target.target_path if target.target_path != target.layout.run_root else target.layout.dataset_root
-    return sorted(path.resolve() for path in root.rglob("*.jsonl") if path.is_file())
+    return sorted(
+        path.resolve()
+        for path in root.rglob("*.jsonl")
+        if path.is_file() and not is_ignored_fs_artifact(path)
+    )
 
 
 def _labels_from_turn_record(turn_record: dict) -> dict | None:

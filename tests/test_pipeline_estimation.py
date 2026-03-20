@@ -75,3 +75,13 @@ def test_estimate_directory_workload_preserves_rng_state(tmp_path):
     actual_next = random.random()
 
     assert actual_next == expected_next
+
+
+def test_discover_input_files_ignores_macos_sidecars(tmp_path):
+    _write_samples(tmp_path / "a.json", 1)
+    (tmp_path / "._a.jsonl").write_bytes(b"\x00\x01")
+    (tmp_path / ".DS_Store").write_text("ignored", encoding="utf-8")
+
+    files = [(a, r) for a, r in discover_input_files(tmp_path) if r is not None]
+
+    assert [path.name for path, _ in files] == ["a.json"]

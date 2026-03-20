@@ -11,7 +11,13 @@ from sft_label.config import PipelineConfig
 from sft_label.inline_labels import build_turn_id
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
-from sft_label.inline_scoring import infer_inline_scoring_target, load_inline_scoring_file
+from sft_label.inline_scoring import (
+    InlineScoringTarget,
+    discover_inline_jsonl_files,
+    infer_inline_scoring_target,
+    load_inline_scoring_file,
+)
+from sft_label.run_layout import InlineRunLayout
 
 
 def _full_labels(intent: str = "build") -> dict:
@@ -137,6 +143,35 @@ def test_infer_inline_scoring_target_does_not_misclassify_standard_run_file(tmp_
     target = infer_inline_scoring_target(standard_file)
 
     assert target is None
+
+
+def test_infer_inline_scoring_target_ignores_sidecar_only_dataset_dir(tmp_path):
+    run_root = tmp_path / "dataset_labeled_20260318_120000"
+    dataset_dir = run_root / "batch"
+    dataset_dir.mkdir(parents=True)
+    (run_root / "meta_label_data").mkdir()
+    (dataset_dir / "._ghost.jsonl").write_bytes(b"\x00\x01")
+
+    target = infer_inline_scoring_target(run_root)
+
+    assert target is None
+
+
+def test_discover_inline_jsonl_files_ignores_macos_sidecars(tmp_path):
+    run_root = tmp_path / "train_labeled_20260311_120000"
+    dataset_root = run_root / "train"
+    dataset_root.mkdir(parents=True)
+    (run_root / "meta_label_data").mkdir()
+    good = dataset_root / "train.jsonl"
+    good.write_text('{"id":"ok"}\n', encoding="utf-8")
+    (dataset_root / "._train.jsonl").write_bytes(b"\x00\x01")
+
+    target = InlineScoringTarget(
+        layout=InlineRunLayout.from_paths(dataset_root, run_root),
+        target_path=run_root,
+    )
+
+    assert discover_inline_jsonl_files(target) == [good.resolve()]
 
 
 def test_load_inline_scoring_file_rehydrates_label_extensions(tmp_path):
