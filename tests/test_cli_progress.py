@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import time
@@ -5,6 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from sft_label.cli import (
     _CombinedLLMProgressTracker,
@@ -110,6 +119,113 @@ def test_run_with_heartbeat_emits_stage_and_completes(capsys):
     assert "Estimating workload." in out
     assert "Estimating workload......" in out
     assert out.endswith("\n")
+
+
+def test_shared_pipeline_progress_factory_uses_stable_column_layout():
+    from sft_label.progress_display import create_pipeline_progress
+
+    progress = create_pipeline_progress()
+
+    assert [type(column) for column in progress.columns] == [
+        SpinnerColumn,
+        TextColumn,
+        BarColumn,
+        MofNCompleteColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TextColumn,
+        TimeRemainingColumn,
+        TextColumn,
+    ]
+
+
+def test_pass1_and_pass2_progress_factories_share_the_same_layout():
+    from sft_label.pipeline import create_progress
+    from sft_label.scoring import _create_progress
+
+    pass1_progress = create_progress()
+    pass2_progress = _create_progress()
+
+    assert [type(column) for column in pass1_progress.columns] == [
+        type(column) for column in pass2_progress.columns
+    ]
+
+
+def test_pipeline_directory_mode_creates_files_pass1_and_llm_tasks(monkeypatch, tmp_path):
+    from sft_label.pipeline import run
+
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    _write_input(input_dir / "sample.json", 2)
+
+    progress_tasks = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeProgress:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def add_task(self, description, **kwargs):
+            progress_tasks.append(description)
+            return len(progress_tasks)
+
+        def update(self, *args, **kwargs):
+            return None
+
+        @property
+        def console(self):
+            return self
+
+        def print(self, *args, **kwargs):
+            return None
+
+    async def _fake_directory_pipeline(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(
+        "sft_label.pipeline.estimate_directory_workload",
+        lambda *args, **kwargs: type(
+            "Estimate",
+            (),
+            {
+                "files_planned": 1,
+                "total_samples": 2,
+                "total_labeled_samples": 2,
+                "total_inherited_samples": 0,
+                "initial_estimated_llm_calls": 4,
+                "scan_elapsed_seconds": 0.0,
+            },
+        )(),
+    )
+    monkeypatch.setattr("sft_label.pipeline.create_progress", lambda: FakeProgress())
+    monkeypatch.setattr("sft_label.pipeline.run_directory_pipeline", _fake_directory_pipeline)
+    monkeypatch.setattr("sft_label.pipeline._write_global_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "sft_label.pipeline._summary_path_for_run",
+        lambda run_dir, layout=None: tmp_path / "summary.json",
+    )
+    monkeypatch.setattr("httpx.AsyncClient", lambda *args, **kwargs: FakeClient())
+    (tmp_path / "summary.json").write_text(json.dumps({"run_dir": str(tmp_path / "run")}), encoding="utf-8")
+
+    result = asyncio.run(
+        run(
+            input_path=str(input_dir),
+            output=str(tmp_path / "run"),
+            config=PipelineConfig(enable_adaptive_runtime=False),
+        )
+    )
+
+    assert result["run_dir"] == str(tmp_path / "run")
+    assert progress_tasks == ["Files", "Pass 1", "LLM"]
 
 
 def test_cmd_run_semantic_cluster_failure_exits_cleanly(monkeypatch, capsys):

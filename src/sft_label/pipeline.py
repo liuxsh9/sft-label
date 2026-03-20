@@ -31,10 +31,6 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 
 import httpx
-from rich.progress import (
-    Progress, SpinnerColumn, BarColumn, TextColumn,
-    TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn,
-)
 
 from sft_label.prompts import (
     CALL1_SYSTEM, CALL1_FEWSHOT, CALL2_SYSTEM, CALL2_FEWSHOT,
@@ -92,6 +88,7 @@ from sft_label.llm_runtime import (
 from sft_label.label_extensions import run_label_extensions
 from sft_label.label_extensions_schema import load_extension_specs
 from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
+from sft_label.progress_display import create_pipeline_progress
 
 try:
     from sft_label.llm_runtime import AdaptiveLLMRuntime  # type: ignore
@@ -125,17 +122,7 @@ def _resolved_extension_specs(config: PipelineConfig | None) -> list:
 
 def create_progress():
     """Create a Rich progress bar display for labeling."""
-    return Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(bar_width=30),
-        MofNCompleteColumn(),
-        TextColumn("•", style="dim"),
-        TimeElapsedColumn(),
-        TextColumn("•", style="dim"),
-        TimeRemainingColumn(),
-        TextColumn("{task.fields[info]}", style="cyan"),
-    )
+    return create_pipeline_progress()
 
 
 def format_progress_info(ok_count, fail_count=0, label=None, request_stats=None):

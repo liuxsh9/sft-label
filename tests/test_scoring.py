@@ -2036,6 +2036,95 @@ class TestResumeScoringFile:
 
         assert llm_calls_seen == [(1, "pass2"), (1, "pass2")]
 
+    def test_directory_scoring_resume_does_not_count_resumed_samples_as_llm_eta_progress(self, tmp_path):
+        import sft_label.scoring as scoring_module
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        batch_dir = tmp_path / "stream_resume"
+        batch_dir.mkdir()
+        rows = [
+            {
+                "id": f"sample-{idx}",
+                "conversations": [
+                    {"from": "human", "value": f"Q{idx}"},
+                    {"from": "gpt", "value": f"A{idx}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }
+            for idx in range(2)
+        ]
+        (batch_dir / "labeled.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+        resumed = dict(rows[0])
+        resumed["value"] = {
+            "complexity": {"overall": 5},
+            "quality": {"overall": 7},
+            "reasoning": {"overall": 6},
+            "rarity": {"score": 4.0},
+            "flags": [],
+            "thinking_mode": "fast",
+            "value_score": 6.0,
+            "selection_score": 6.0,
+            "intra_class_rank": 5.0,
+            "confidence": 0.8,
+        }
+        (batch_dir / "scored.jsonl").write_text(
+            json.dumps(resumed, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        eta_updates = []
+        original_update = scoring_module.RuntimeEtaEstimator.update
+
+        def tracking_update(self, sample_llm_calls):
+            eta_updates.append(sample_llm_calls)
+            return original_update(self, sample_llm_calls)
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            return {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }, {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one), \
+             patch.object(scoring_module.RuntimeEtaEstimator, "update", tracking_update):
+            asyncio.run(
+                run_scoring(
+                    str(tmp_path),
+                    config=PipelineConfig(
+                        scoring_concurrency=1,
+                        dir_pipeline_watermark=1.0,
+                        dir_pipeline_max_files=1,
+                        chunk_size=1,
+                        max_active_chunks=1,
+                        enable_adaptive_runtime=False,
+                        enable_stage_recovery_sweep=False,
+                    ),
+                    resume=True,
+                )
+            )
+
+        assert eta_updates == [1]
+
     def test_directory_scoring_streaming_files_use_rolling_queue_across_batches(self, tmp_path):
         from sft_label.scoring import run_scoring
         from unittest.mock import patch

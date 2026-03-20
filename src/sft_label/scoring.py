@@ -27,10 +27,6 @@ from datetime import datetime
 from dataclasses import dataclass, field
 
 import httpx
-from rich.progress import (
-    Progress, SpinnerColumn, BarColumn, TextColumn,
-    TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn,
-)
 
 from sft_label.config import (
     SAMPLE_MAX_RETRIES, VALUE_WEIGHTS, RARITY_WEIGHTS, RARITY_COMBO_ALPHA, RARITY_SCORE_MODE,
@@ -77,6 +73,7 @@ from sft_label.inline_scoring import (
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
 from sft_label.label_extensions_stats import aggregate_extension_stats
+from sft_label.progress_display import create_pipeline_progress
 from sft_label.score_confidence import apply_score_confidence, score_confidence
 
 try:
@@ -3632,17 +3629,7 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
 
 def _create_progress():
     """Create a Rich progress bar for scoring."""
-    return Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(bar_width=30),
-        MofNCompleteColumn(),
-        TextColumn("•", style="dim"),
-        TimeElapsedColumn(),
-        TextColumn("•", style="dim"),
-        TimeRemainingColumn(),
-        TextColumn("{task.fields[info]}", style="cyan"),
-    )
+    return create_pipeline_progress()
 
 
 async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
@@ -5860,7 +5847,8 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     nonlocal global_llm_info
                     if llm_progress_cb and monitor:
                         global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass2")
-                    eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                    if monitor is not None:
+                        eta_tracker.update(monitor.get("llm_calls", 0))
                     global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
                     if global_counts:
                         g_done, g_total = global_counts
