@@ -369,6 +369,8 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
         )
 
     if len(slices) == 1:
+        if not normalized.setdefault("metadata", {}).get("thinking_mode"):
+            normalized["metadata"]["thinking_mode"] = "fast"
         if conversation_uid:
             normalized.setdefault("metadata", {})["conversation_uid"] = conversation_uid
         if trajectory_meta:

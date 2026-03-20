@@ -227,6 +227,21 @@ class TestNormalizeAndSlice:
         assert result[1]["metadata"]["thinking_mode"] == "fast"
         assert "cot_text" not in result[1]["metadata"]
 
+    def test_single_turn_pangu_without_cot_defaults_to_fast(self):
+        """Single-turn Pangu sample without explicit COT should emit thinking_mode=fast."""
+        sample = {
+            "id": "pangu-fast-single",
+            "data": [
+                {"role": "user", "content": "Write a python program."},
+                {"role": "assistant", "content": "**Solution Explanation**\nDo X, then Y."},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        meta = result[0].get("metadata", {})
+        assert meta.get("thinking_mode") == "fast"
+        assert "cot_text" not in meta
+
     def test_multi_turn_assigns_stable_conversation_uid(self):
         sample = {
             "id": "dup-source-id",
