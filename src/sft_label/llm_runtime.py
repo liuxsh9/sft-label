@@ -258,14 +258,23 @@ class DynamicConcurrencyGate:
                 self._in_flight = max(0, self._in_flight - 1)
                 self._cond.notify_all()
 
-        asyncio.create_task(_release())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._in_flight = max(0, self._in_flight - 1)
+            return
+        loop.create_task(_release())
 
     def _notify_waiters(self) -> None:
         async def _notify() -> None:
             async with self._cond:
                 self._cond.notify_all()
 
-        asyncio.create_task(_notify())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_notify())
 
 
 class AdaptiveRateLimiter:
@@ -279,7 +288,8 @@ class AdaptiveRateLimiter:
         if target_rps <= 0:
             raise ValueError("target_rps must be > 0")
         self._target_rps = float(target_rps)
-        self._burst = burst if burst is not None else max(int(math.ceil(target_rps)), 1)
+        self._burst_cap = burst if burst is not None else max(int(math.ceil(target_rps)), 1)
+        self._burst = self._burst_cap
         self._tokens = max(0.0, min(float(initial_tokens), float(self._burst)))
         self._last_refill = time.monotonic()
         self._pause_until = 0.0
@@ -297,6 +307,8 @@ class AdaptiveRateLimiter:
         if target_rps <= 0:
             raise ValueError("target_rps must be > 0")
         self._target_rps = float(target_rps)
+        self._burst = max(1, min(self._burst_cap, int(math.ceil(self._target_rps))))
+        self._tokens = min(self._tokens, float(self._burst))
 
     def pause_for(self, seconds: float) -> None:
         if seconds <= 0:
@@ -360,6 +372,11 @@ class AdaptiveLLMRuntime:
         degrade_overload_rate: float = 0.05,
         open_overload_rate: float = 0.15,
         degrade_abnormal_rate: float = 0.04,
+        open_abnormal_rate: float = 0.60,
+        min_observations_degraded: int = 3,
+        min_observations_open: int = 5,
+        min_failures_degraded: int = 2,
+        min_failures_open: int = 2,
         open_base_cooldown: float = 15.0,
         open_max_cooldown: float = 120.0,
         degrade_concurrency_factor: float = 0.5,
@@ -385,6 +402,11 @@ class AdaptiveLLMRuntime:
         self.degrade_overload_rate = max(float(degrade_overload_rate), 0.0)
         self.open_overload_rate = max(float(open_overload_rate), 0.0)
         self.degrade_abnormal_rate = max(float(degrade_abnormal_rate), 0.0)
+        self.open_abnormal_rate = max(float(open_abnormal_rate), 0.0)
+        self.min_observations_degraded = max(int(min_observations_degraded), 1)
+        self.min_observations_open = max(int(min_observations_open), self.min_observations_degraded)
+        self.min_failures_degraded = max(int(min_failures_degraded), 1)
+        self.min_failures_open = max(int(min_failures_open), self.min_failures_degraded)
         self.open_base_cooldown = max(float(open_base_cooldown), 0.0)
         self.open_max_cooldown = max(float(open_max_cooldown), self.open_base_cooldown)
         self.degrade_concurrency_factor = max(float(degrade_concurrency_factor), 0.01)
@@ -455,12 +477,27 @@ class AdaptiveLLMRuntime:
                     self._enter_degraded(reason="probe_success")
             elif outcome.is_infra_failure:
                 self._enter_open(reason="probe_failure")
+            else:
+                self._enter_degraded(reason="probe_terminal_outcome")
             return
 
         if self.state in {"healthy", "degraded"}:
             should_open = (
-                rates["timeout_rate"] >= self.open_timeout_rate
-                or rates["overload_rate"] >= self.open_overload_rate
+                rates["total"] >= self.min_observations_open
+                and (
+                    (
+                        rates["timeout_count"] >= self.min_failures_open
+                        and rates["timeout_rate"] >= self.open_timeout_rate
+                    )
+                    or (
+                        rates["overload_count"] >= self.min_failures_open
+                        and rates["overload_rate"] >= self.open_overload_rate
+                    )
+                    or (
+                        rates["abnormal_count"] >= self.min_failures_open
+                        and rates["abnormal_rate"] >= self.open_abnormal_rate
+                    )
+                )
             )
             if should_open:
                 self._enter_open(reason="open_threshold")
@@ -468,9 +505,21 @@ class AdaptiveLLMRuntime:
 
         if self.state == "healthy":
             should_degrade = (
-                rates["timeout_rate"] >= self.degrade_timeout_rate
-                or rates["overload_rate"] >= self.degrade_overload_rate
-                or rates["abnormal_rate"] >= self.degrade_abnormal_rate
+                rates["total"] >= self.min_observations_degraded
+                and (
+                    (
+                        rates["timeout_count"] >= self.min_failures_degraded
+                        and rates["timeout_rate"] >= self.degrade_timeout_rate
+                    )
+                    or (
+                        rates["overload_count"] >= self.min_failures_degraded
+                        and rates["overload_rate"] >= self.degrade_overload_rate
+                    )
+                    or (
+                        rates["abnormal_count"] >= self.min_failures_degraded
+                        and rates["abnormal_rate"] >= self.degrade_abnormal_rate
+                    )
+                )
             )
             if should_degrade:
                 self._enter_degraded(reason="degrade_threshold")
@@ -478,9 +527,9 @@ class AdaptiveLLMRuntime:
 
         if self.state == "degraded":
             is_healthy_window = (
-                rates["timeout_rate"] < self.degrade_timeout_rate * 0.5
-                and rates["overload_rate"] < self.degrade_overload_rate * 0.5
-                and rates["abnormal_rate"] < self.degrade_abnormal_rate * 0.5
+                rates["timeout_rate"] <= self.degrade_timeout_rate * 0.5
+                and rates["overload_rate"] <= self.degrade_overload_rate * 0.5
+                and rates["abnormal_rate"] <= self.degrade_abnormal_rate * 0.5
             )
             if is_healthy_window:
                 self._healthy_streak += 1
@@ -527,8 +576,11 @@ class AdaptiveLLMRuntime:
             return {
                 "total": 0,
                 "timeout_rate": 0.0,
+                "timeout_count": 0,
                 "overload_rate": 0.0,
+                "overload_count": 0,
                 "abnormal_rate": 0.0,
+                "abnormal_count": 0,
                 "infra_failure_rate": 0.0,
             }
 
@@ -549,8 +601,11 @@ class AdaptiveLLMRuntime:
         return {
             "total": total,
             "timeout_rate": timeouts / total,
+            "timeout_count": timeouts,
             "overload_rate": overloads / total,
+            "overload_count": overloads,
             "abnormal_rate": abnormals / total,
+            "abnormal_count": abnormals,
             "infra_failure_rate": infra_failures / total,
         }
 
@@ -592,6 +647,7 @@ class AdaptiveLLMRuntime:
         self.state = "probing"
         self._probe_successes = 0
         self._healthy_streak = 0
+        self._window.clear()
         self.gate.resume()
         self._set_effective_limits(self.min_concurrency, self.min_rps)
         self._record_event("state", reason, {"state": self.state})

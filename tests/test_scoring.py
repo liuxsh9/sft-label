@@ -20,6 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
+from sft_label.llm_runtime import AdaptiveLLMRuntime
+
 from sft_label.artifacts import (
     PASS2_STATS_FILE,
     PASS2_DASHBOARD_FILE,
@@ -3846,7 +3848,11 @@ async def test_pass2_score_one_malformed_response_counts_as_abnormal_infra(tmp_p
 
     # Semaphore=0 should not block when runtime admission is used.
     sem = asyncio.Semaphore(0)
-    with patch("sft_label.scoring.async_llm_call", side_effect=mock_async_llm_call):
+    async def _no_sleep(_seconds, *_args, **_kwargs):
+        return None
+
+    with patch("sft_label.scoring.async_llm_call", side_effect=mock_async_llm_call), \
+         patch("sft_label.scoring.asyncio.sleep", side_effect=_no_sleep):
         value, monitor = await asyncio.wait_for(
             score_one(
                 None,
@@ -3869,6 +3875,63 @@ async def test_pass2_score_one_malformed_response_counts_as_abnormal_infra(tmp_p
     assert runtime.acquire_calls
     assert runtime.observed
     assert runtime.observed[0].classification.value == "abnormal_response"
+
+
+@pytest.mark.asyncio
+async def test_pass2_repeated_abnormal_responses_can_change_runtime_state():
+    from sft_label.scoring import score_one
+
+    runtime = AdaptiveLLMRuntime(
+        base_concurrency=2,
+        base_rps=10.0,
+        min_observations_degraded=2,
+        min_observations_open=3,
+        degrade_abnormal_rate=0.4,
+        open_abnormal_rate=0.6,
+    )
+
+    config = PipelineConfig(
+        scoring_concurrency=1,
+        enable_adaptive_runtime=True,
+        sample_max_retries=3,
+        request_quick_retries=0,
+    )
+    setattr(config, "_adaptive_runtime", runtime)
+
+    sample = {
+        "id": "sample-malformed",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+        "labels": _full_labels(),
+        "metadata": {},
+    }
+
+    async def mock_async_llm_call(*_args, **_kwargs):
+        return {"foo": "bar"}, '{"foo":"bar"}', {"status_code": 200, "prompt_tokens": 1, "completion_tokens": 1}
+
+    async def _no_sleep(_seconds, *_args, **_kwargs):
+        return None
+
+    with patch("sft_label.scoring.async_llm_call", side_effect=mock_async_llm_call), \
+         patch("sft_label.scoring.asyncio.sleep", side_effect=_no_sleep):
+        value, monitor = await asyncio.wait_for(
+            score_one(
+                None,
+                sample,
+                "mock-model",
+                {"score": 5.0},
+                0,
+                1,
+                asyncio.Semaphore(0),
+                config=config,
+                rate_limiter=None,
+            ),
+            timeout=2,
+        )
+
+    assert value is None
+    assert monitor["status"] == "failed"
+    assert runtime.state in {"degraded", "open"}
+    assert runtime.snapshot()["effective_concurrency"] < runtime.base_concurrency
 
 
 @pytest.mark.asyncio

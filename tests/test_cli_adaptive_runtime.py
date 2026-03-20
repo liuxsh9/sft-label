@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from sft_label.cli import _apply_runtime_overrides, build_parser
 from sft_label.config import PipelineConfig
+from sft_label.pipeline import _build_adaptive_runtime
+from sft_label.scoring import _instantiate_runtime
 
 
 def test_pipeline_config_exposes_adaptive_runtime_defaults():
@@ -13,6 +15,37 @@ def test_pipeline_config_exposes_adaptive_runtime_defaults():
     assert config.request_quick_retries >= 0
     assert config.adaptive_min_concurrency >= 1
     assert config.adaptive_open_base_cooldown > 0
+    assert config.adaptive_min_observations_degraded >= 1
+    assert config.adaptive_min_observations_open >= config.adaptive_min_observations_degraded
+    assert config.adaptive_min_failures_degraded >= 1
+    assert config.adaptive_min_failures_open >= config.adaptive_min_failures_degraded
+    assert config.adaptive_abnormal_rate_open >= config.adaptive_abnormal_rate_degraded
+
+
+def test_runtime_builders_receive_adaptive_threshold_overrides():
+    config = PipelineConfig(
+        concurrency=7,
+        scoring_concurrency=9,
+        adaptive_min_observations_degraded=4,
+        adaptive_min_observations_open=6,
+        adaptive_min_failures_degraded=3,
+        adaptive_min_failures_open=4,
+        adaptive_abnormal_rate_open=0.33,
+    )
+
+    pass1_runtime = _build_adaptive_runtime(config)
+    pass2_runtime = _instantiate_runtime(config, concurrency=config.scoring_concurrency)
+
+    assert pass1_runtime.min_observations_degraded == 4
+    assert pass1_runtime.min_observations_open == 6
+    assert pass1_runtime.min_failures_degraded == 3
+    assert pass1_runtime.min_failures_open == 4
+    assert pass1_runtime.open_abnormal_rate == 0.33
+    assert pass2_runtime.min_observations_degraded == 4
+    assert pass2_runtime.min_observations_open == 6
+    assert pass2_runtime.min_failures_degraded == 3
+    assert pass2_runtime.min_failures_open == 4
+    assert pass2_runtime.open_abnormal_rate == 0.33
 
 
 def test_apply_runtime_overrides_updates_adaptive_runtime_flags():
