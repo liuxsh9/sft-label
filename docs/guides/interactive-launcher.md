@@ -44,6 +44,7 @@ For `run`, it can guide you through:
 - when to use “Smart resume” vs “Resume specific run directory”
 - input path and optional output path
 - inline mode (`refresh`, `incremental`, `migrate`, `recompute`)
+- multi-turn rollout preset (`compact_safe`, `baseline_control`, `planner_hybrid`)
 - optional extension labeling via:
   - auto-loading the repo-root `extensions/` folder,
   - or manually entering one YAML path / one directory path with **one-or-more** YAML selections
@@ -55,7 +56,7 @@ For `run`, it can guide you through:
 - adaptive runtime / recovery sweep toggles
 - one-off environment overrides for `LITELLM_BASE` / `LITELLM_KEY`
 
-Concurrency caps default to 200 across `run`, `score`, and smart-resume flows, but you can quickly pick one of the 25 / 50 / 150 / 200 / 300 presets or type a custom value. The RPS max limit prompt likewise accepts a free-form numeric entry if you need to cap request rate yourself.
+Concurrency caps default to 200 across `run`, `score`, and smart-resume flows, but you can quickly pick one of the 25 / 50 / 150 / 200 / 300 presets or type a custom value. The RPS max limit prompt likewise accepts a free-form numeric entry if you need to cap request rate yourself. For TTY switch-panel sessions, the launcher now also surfaces a dedicated **Multi-turn rollout preset** field before prompt mode. The recommended runtime pairing is `compact_safe` + `compact`; `planner_hybrid` is experimental, and `baseline_control` is the rollback/control preset.
 
 Briefly:
 
@@ -78,6 +79,7 @@ uv run sft-label start --lang zh
 Before anything runs, the launcher prints:
 
 - the exact generated CLI command
+- the selected multi-turn rollout preset
 - any one-off environment overrides, with secrets masked
 
 That means the launcher is a safe way to discover the plain CLI command you want to save in scripts later.
@@ -108,7 +110,7 @@ In this example, empty trigger lists mean “do not filter on this dimension.”
 
 Each enabled extension fires an extra extension-labeling call per sample, so **don’t enable domain-personalized or mobile-specific extensions across your entire dataset without pre-filtering or sampling**. Mobile surfaces belong in their own extension because their prompts, triggers, and responsiveness requirements differ; mixing them dilutes the Web-specific analysis while multiplying per-sample costs.
 
-After the dashboard decisions (auto-publish, service exposure, etc.) are settled, the launcher now prints a richer execution overview—command recap, concurrency / RPS caps, dashboard service state, and auto-publish choices—before asking for final confirmation to run the job.
+After the dashboard decisions (auto-publish, service exposure, etc.) are settled, the launcher now prints a richer execution overview—command recap, rollout preset, concurrency / RPS caps, dashboard service state, and auto-publish choices—before asking for final confirmation to run the job.
 
 ## Auto-publishing dashboards from `start`
 

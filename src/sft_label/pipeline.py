@@ -62,6 +62,7 @@ from sft_label.config import (
     DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
     REQUEST_TIMEOUT, REQUEST_TIMEOUT_ESCALATION,
     MAX_CONVERSATION_CHARS, COMPACT_CONVERSATION_CHARS,
+    COMPACT_LABELING_REQUEST_BYTES,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
     PipelineConfig,
@@ -227,6 +228,92 @@ def _write_checkpoint(checkpoint_path, ckpt):
         json.dump(ckpt, f, ensure_ascii=False, indent=2)
 
 
+def _numeric_summary(values):
+    cleaned = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not cleaned:
+        return {}
+    total = sum(cleaned)
+    return {
+        "count": len(cleaned),
+        "sum": round(total, 3),
+        "mean": round(total / len(cleaned), 3),
+        "min": round(min(cleaned), 3),
+        "max": round(max(cleaned), 3),
+    }
+
+
+def _merge_numeric_summary(summaries):
+    valid = [s for s in summaries if isinstance(s, dict) and s.get("count")]
+    if not valid:
+        return {}
+    total_count = sum(int(s.get("count", 0) or 0) for s in valid)
+    total_sum = sum(float(s.get("sum", 0.0) or 0.0) for s in valid)
+    return {
+        "count": total_count,
+        "sum": round(total_sum, 3),
+        "mean": round(total_sum / max(total_count, 1), 3),
+        "min": round(min(float(s.get("min", 0.0) or 0.0) for s in valid), 3),
+        "max": round(max(float(s.get("max", 0.0) or 0.0) for s in valid), 3),
+    }
+
+
+def _merge_compact_prompt_bytes(payloads):
+    valid = [payload for payload in payloads if isinstance(payload, dict)]
+    if not valid:
+        return {}
+    merged = {}
+    for stage in ("call1", "call2"):
+        stage_payloads = [payload.get(stage) for payload in valid if isinstance(payload.get(stage), dict)]
+        if not stage_payloads:
+            continue
+        summary = _merge_numeric_summary(stage_payloads)
+        if not summary:
+            continue
+        hard_cap_hits = sum(int(item.get("hard_cap_hits", 0) or 0) for item in stage_payloads)
+        summary["limit_bytes"] = max(int(item.get("limit_bytes", 0) or 0) for item in stage_payloads)
+        summary["hard_cap_hits"] = hard_cap_hits
+        summary["hard_cap_hit_rate"] = round(hard_cap_hits / max(summary["count"], 1), 4)
+        merged[stage] = summary
+    return merged
+
+
+def _merge_planner_stats(payloads):
+    valid = [payload for payload in payloads if isinstance(payload, dict)]
+    if not valid:
+        return {}
+
+    anchor_priority_counts = {}
+    anchor_reason_counts = {}
+    for item in valid:
+        for key, value in (item.get("anchor_priority_counts") or {}).items():
+            anchor_priority_counts[key] = anchor_priority_counts.get(key, 0) + int(value or 0)
+        for key, value in (item.get("anchor_reason_counts") or {}).items():
+            anchor_reason_counts[key] = anchor_reason_counts.get(key, 0) + int(value or 0)
+
+    conversations_with_metadata = sum(int(item.get("conversations_with_metadata", 0) or 0) for item in valid)
+    fallback_conversations = sum(int(item.get("fallback_conversations", 0) or 0) for item in valid)
+    inherit_edges = sum(int(item.get("inherit_edges", 0) or 0) for item in valid)
+    cross_segment_inherit_edges = sum(int(item.get("cross_segment_inherit_edges", 0) or 0) for item in valid)
+
+    merged = {
+        "conversations_total": sum(int(item.get("conversations_total", 0) or 0) for item in valid),
+        "conversations_with_metadata": conversations_with_metadata,
+        "fallback_conversations": fallback_conversations,
+        "fallback_rate": round(fallback_conversations / max(conversations_with_metadata, 1), 4),
+        "inherit_edges": inherit_edges,
+        "cross_segment_inherit_edges": cross_segment_inherit_edges,
+        "cross_segment_inherit_ratio": round(cross_segment_inherit_edges / max(inherit_edges, 1), 4),
+        "anchor_priority_counts": dict(sorted(anchor_priority_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "anchor_reason_counts": dict(sorted(anchor_reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+    }
+
+    for key in ("segments_per_conversation", "boundary_score"):
+        summary = _merge_numeric_summary([item.get(key) for item in valid])
+        if summary:
+            merged[key] = summary
+    return merged
+
+
 def merge_stats(all_file_stats):
     """Merge per-file stats into a global summary."""
     merged = {
@@ -305,6 +392,14 @@ def merge_stats(all_file_stats):
     extension_stats = merge_extension_stats(all_file_stats)
     if extension_stats:
         merged["extension_stats"] = extension_stats
+    planner_stats = _merge_planner_stats([st.get("planner_stats") for st in all_file_stats if st.get("planner_stats")])
+    if planner_stats:
+        merged["planner_stats"] = planner_stats
+    compact_prompt_bytes = _merge_compact_prompt_bytes(
+        [st.get("compact_prompt_bytes") for st in all_file_stats if st.get("compact_prompt_bytes")]
+    )
+    if compact_prompt_bytes:
+        merged["compact_prompt_bytes"] = compact_prompt_bytes
 
     # Finalize confidence_stats: convert accumulated sum/count to mean
     for dim, entry in merged["confidence_stats"].items():
@@ -1232,6 +1327,54 @@ def _resolved_labeling_prompt_budget(config=None):
     return compact, budget
 
 
+def _message_payload_bytes(messages):
+    """Return UTF-8 payload size for the full request body."""
+    return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
+
+
+def _labeling_truncation_kwargs(config=None, *, max_total_chars):
+    kwargs = {"max_total_chars": max_total_chars}
+    if config:
+        kwargs.update(
+            head_ratio=config.truncation_head_ratio,
+            last_response_ratio=config.truncation_last_response_ratio,
+            per_turn_ratio=config.truncation_per_turn_ratio,
+        )
+    return kwargs
+
+
+def _build_labeling_messages_with_budget(
+    conversations,
+    *,
+    signals_str,
+    compact,
+    max_chars,
+    config,
+    call1_context=None,
+):
+    """Build Pass 1 messages and shrink conversation chars until byte-safe."""
+    compact_byte_limit = None
+    if compact:
+        compact_byte_limit = int(getattr(config, "compact_labeling_request_bytes", COMPACT_LABELING_REQUEST_BYTES) or COMPACT_LABELING_REQUEST_BYTES)
+
+    current_chars = int(max_chars)
+    last_payload_bytes = None
+    while True:
+        truncated_convs, was_truncated = truncate_conversations_for_labeling(
+            conversations,
+            **_labeling_truncation_kwargs(config, max_total_chars=current_chars),
+        )
+        conversation_json = json.dumps(truncated_convs, ensure_ascii=False)
+        if call1_context is None:
+            messages = build_call1_messages(conversation_json, signals_str, compact=compact)
+        else:
+            messages = build_call2_messages(conversation_json, signals_str, call1_context, compact=compact)
+        last_payload_bytes = _message_payload_bytes(messages)
+        if compact_byte_limit is None or last_payload_bytes <= compact_byte_limit or current_chars <= 2000:
+            return truncated_convs, conversation_json, messages, was_truncated, last_payload_bytes
+        current_chars = max(2000, int(current_chars * 0.85))
+
+
 def _annotate_labeling_prompt_stats(stats, config=None):
     compact, budget = _resolved_labeling_prompt_budget(config)
     stats["prompt_mode"] = "compact" if compact else "full"
@@ -1257,19 +1400,16 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
         enable_arbitration = False
     start = time.time()
 
-    # Truncate oversized conversations before sending to LLM
     conversations = sample.get("conversations", [])
-    _trunc_kw = {"max_total_chars": _max_chars}
-    if config:
-        _trunc_kw.update(
-            head_ratio=config.truncation_head_ratio,
-            last_response_ratio=config.truncation_last_response_ratio,
-            per_turn_ratio=config.truncation_per_turn_ratio,
-        )
-    truncated_convs, was_truncated = truncate_conversations_for_labeling(conversations, **_trunc_kw)
-    base_conversations_json = json.dumps(truncated_convs, ensure_ascii=False)
-    effective_conversations_json = base_conversations_json
-    sanitized_conversations_json = None
+    truncated_convs, effective_conversations_json, _initial_msgs, was_truncated, assembled_prompt_bytes = _build_labeling_messages_with_budget(
+        conversations,
+        signals_str="",
+        compact=_compact,
+        max_chars=_max_chars,
+        config=config,
+    )
+    effective_conversations = truncated_convs
+    sanitized_convs = None
 
     _cached_call1 = None  # Cache successful Call 1 across sample retries
 
@@ -1348,6 +1488,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
             signals_str = format_signals_for_prompt(signals)
             # Use truncated conversations for LLM prompt
             conversations_json = effective_conversations_json
+            monitor["assembled_prompt_bytes"] = assembled_prompt_bytes
             if was_truncated:
                 monitor["truncated"] = True
 
@@ -1356,7 +1497,21 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 call1_cleaned, msgs1 = _cached_call1
                 monitor["call1_cached"] = True
             else:
-                msgs1 = build_call1_messages(conversations_json, signals_str, compact=_compact)
+                truncated_convs, conversations_json, msgs1, was_truncated, assembled_prompt_bytes = _build_labeling_messages_with_budget(
+                    conversations,
+                    signals_str=signals_str,
+                    compact=_compact,
+                    max_chars=_max_chars,
+                    config=config,
+                )
+                effective_conversations = truncated_convs
+                effective_conversations_json = conversations_json
+                monitor["assembled_prompt_bytes"] = assembled_prompt_bytes
+                if _compact and assembled_prompt_bytes > int(getattr(config, "compact_labeling_request_bytes", COMPACT_LABELING_REQUEST_BYTES) or COMPACT_LABELING_REQUEST_BYTES):
+                    monitor["status"] = "prompt_budget_exceeded"
+                    monitor["error"] = f"assembled labeling prompt exceeds {config.compact_labeling_request_bytes} bytes"
+                    monitor["elapsed_seconds"] = round(time.time() - start, 2)
+                    return sample_idx, None, monitor
                 call1_result, call1_raw, usage1, outcome1 = await _call("pass1.call1", msgs1)
                 monitor["llm_calls"] += 1
                 monitor["total_prompt_tokens"] += usage1.get("prompt_tokens", 0)
@@ -1367,12 +1522,21 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     monitor["runtime_state"] = usage1.get("runtime_state")
 
                 if call1_result is None and usage1.get("content_filtered"):
-                    if sanitized_conversations_json is None:
+                    if sanitized_convs is None:
                         sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
                         if changed:
-                            sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
+                            pass
+                    if sanitized_convs:
+                        _sanitized_convs, sanitized_conversations_json, retry_msgs1, _retry_truncated, retry_prompt_bytes = _build_labeling_messages_with_budget(
+                            sanitized_convs,
+                            signals_str=signals_str,
+                            compact=_compact,
+                            max_chars=_max_chars,
+                            config=config,
+                        )
+                    else:
+                        sanitized_conversations_json = None
                     if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
-                        retry_msgs1 = build_call1_messages(sanitized_conversations_json, signals_str, compact=_compact)
                         retry_result, retry_raw, retry_usage, retry_outcome1 = await _call(
                             "pass1.call1.sanitized",
                             retry_msgs1,
@@ -1380,11 +1544,13 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                         monitor["llm_calls"] += 1
                         monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
                         monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
+                        monitor["assembled_prompt_bytes"] = retry_prompt_bytes
                         monitor["content_filter_retry"] = "call1"
                         if retry_result is not None:
                             call1_result, call1_raw, usage1, outcome1 = retry_result, retry_raw, retry_usage, retry_outcome1
                             msgs1 = retry_msgs1
                             conversations_json = sanitized_conversations_json
+                            effective_conversations = sanitized_convs
                             effective_conversations_json = sanitized_conversations_json
                         else:
                             call1_result, call1_raw, usage1, outcome1 = retry_result, retry_raw, retry_usage, retry_outcome1
@@ -1410,19 +1576,43 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
             # Call 2 (depends on Call 1)
             call1_context = {d: call1_cleaned[d] for d in ["intent", "language", "domain", "task", "difficulty"] if d in call1_cleaned}
-            msgs2 = build_call2_messages(conversations_json, signals_str, call1_context, compact=_compact)
+            call2_source_conversations = effective_conversations
+            _call2_convs, conversations_json, msgs2, _call2_truncated, assembled_prompt_bytes = _build_labeling_messages_with_budget(
+                call2_source_conversations,
+                signals_str=signals_str,
+                compact=_compact,
+                max_chars=_max_chars,
+                config=config,
+                call1_context=call1_context,
+            )
+            monitor["assembled_prompt_bytes_call2"] = assembled_prompt_bytes
+            if _compact and assembled_prompt_bytes > int(getattr(config, "compact_labeling_request_bytes", COMPACT_LABELING_REQUEST_BYTES) or COMPACT_LABELING_REQUEST_BYTES):
+                monitor["status"] = "prompt_budget_exceeded"
+                monitor["error"] = f"assembled labeling prompt exceeds {config.compact_labeling_request_bytes} bytes"
+                monitor["elapsed_seconds"] = round(time.time() - start, 2)
+                return sample_idx, None, monitor
             call2_result, call2_raw, usage2, outcome2 = await _call("pass1.call2", msgs2)
             monitor["llm_calls"] += 1
             monitor["total_prompt_tokens"] += usage2.get("prompt_tokens", 0)
             monitor["total_completion_tokens"] += usage2.get("completion_tokens", 0)
 
             if call2_result is None and usage2.get("content_filtered"):
-                if sanitized_conversations_json is None:
+                if sanitized_convs is None:
                     sanitized_convs, changed = sanitize_conversations_for_content_filter(truncated_convs)
                     if changed:
-                        sanitized_conversations_json = json.dumps(sanitized_convs, ensure_ascii=False)
+                        pass
+                if sanitized_convs:
+                    _sanitized_convs, sanitized_conversations_json, retry_msgs2, _retry_truncated, retry_prompt_bytes = _build_labeling_messages_with_budget(
+                        sanitized_convs,
+                        signals_str=signals_str,
+                        compact=_compact,
+                        max_chars=_max_chars,
+                        config=config,
+                        call1_context=call1_context,
+                    )
+                else:
+                    sanitized_conversations_json = None
                 if sanitized_conversations_json and sanitized_conversations_json != conversations_json:
-                    retry_msgs2 = build_call2_messages(sanitized_conversations_json, signals_str, call1_context, compact=_compact)
                     retry_result, retry_raw, retry_usage, retry_outcome2 = await _call(
                         "pass1.call2.sanitized",
                         retry_msgs2,
@@ -1430,6 +1620,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     monitor["llm_calls"] += 1
                     monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
+                    monitor["assembled_prompt_bytes_call2"] = retry_prompt_bytes
                     monitor["content_filter_retry"] = "call2"
                     if retry_result is not None:
                         call2_result, call2_raw, usage2, outcome2 = retry_result, retry_raw, retry_usage, retry_outcome2
@@ -1980,6 +2171,13 @@ def estimate_directory_workload(
             min_gap=config.sparse_min_gap,
             max_gap=config.sparse_max_gap,
             threshold=config.sparse_threshold,
+            planner_enabled=config.planner_enabled,
+            planner_metadata_only=config.planner_metadata_only,
+            planner_policy=config.planner_policy,
+            planner_boundary_threshold=config.planner_boundary_threshold,
+            planner_min_segment_size=config.planner_min_segment_size,
+            planner_max_anchor_gap=config.planner_max_anchor_gap,
+            planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio,
         )
 
     extension_specs = _resolved_extension_specs(config)
@@ -2251,7 +2449,7 @@ class StatsAccumulator:
     DIMS = ["intent", "language", "domain", "concept", "task",
             "agentic", "constraint", "context", "difficulty"]
 
-    def __init__(self, extension_specs=None):
+    def __init__(self, extension_specs=None, compact_labeling_request_bytes=None):
         self.total = 0
         self.distribution_total = 0
         self.success = 0
@@ -2280,8 +2478,26 @@ class StatsAccumulator:
         self.sparse_inherited = 0
         self.extension_stats_batches = []
         self.extension_specs = extension_specs or []
+        self.compact_labeling_request_bytes = int(compact_labeling_request_bytes or 0)
 
-    def update(self, all_labels, all_monitors, inherit_map=None):
+        # Planner rollout observability
+        self.planner_conversations_total = 0
+        self.planner_conversations_with_metadata = 0
+        self.planner_fallback_conversations = 0
+        self.planner_segment_counts = []
+        self.planner_boundary_scores = []
+        self.planner_anchor_priority_counts = {}
+        self.planner_anchor_reason_counts = {}
+        self.planner_inherit_edges = 0
+        self.planner_cross_segment_inherit_edges = 0
+
+        # Compact prompt byte tracking
+        self.prompt_bytes_call1 = []
+        self.prompt_bytes_call2 = []
+        self.prompt_bytes_call1_hard_cap_hits = 0
+        self.prompt_bytes_call2_hard_cap_hits = 0
+
+    def update(self, all_labels, all_monitors, inherit_map=None, samples=None):
         """Ingest one chunk's labels and monitors.
 
         Inherited samples (from inherit_map) are counted toward total/success
@@ -2307,6 +2523,16 @@ class StatsAccumulator:
             for lc in m.get("low_confidence_dims", []):
                 d = lc["dim"]
                 self.low_conf_freq[d] = self.low_conf_freq.get(d, 0) + 1
+            call1_bytes = m.get("assembled_prompt_bytes")
+            if isinstance(call1_bytes, (int, float)) and not isinstance(call1_bytes, bool):
+                self.prompt_bytes_call1.append(int(call1_bytes))
+                if self.compact_labeling_request_bytes and int(call1_bytes) > self.compact_labeling_request_bytes:
+                    self.prompt_bytes_call1_hard_cap_hits += 1
+            call2_bytes = m.get("assembled_prompt_bytes_call2")
+            if isinstance(call2_bytes, (int, float)) and not isinstance(call2_bytes, bool):
+                self.prompt_bytes_call2.append(int(call2_bytes))
+                if self.compact_labeling_request_bytes and int(call2_bytes) > self.compact_labeling_request_bytes:
+                    self.prompt_bytes_call2_hard_cap_hits += 1
 
         for idx, labels in enumerate(all_labels):
             if not is_usable_labels(labels) or idx in inherited_indices:
@@ -2355,6 +2581,9 @@ class StatsAccumulator:
         if inherit_map:
             self.sparse_inherited += len(inherit_map)
 
+        if samples:
+            self._update_planner_stats(samples, inherit_map=inherit_map)
+
         extension_stats = aggregate_extension_stats(
             [{"labels": labels} for labels in all_labels if is_usable_labels(labels)],
             extension_specs=self.extension_specs,
@@ -2365,6 +2594,56 @@ class StatsAccumulator:
     def set_sparse_labeled(self, count):
         """Track total sparse-labeled count across chunks."""
         self.sparse_labeled += count
+
+    def _update_planner_stats(self, samples, *, inherit_map=None):
+        groups = {}
+        for idx, sample in enumerate(samples):
+            meta = sample.get("metadata") or {}
+            conversation_key = meta.get("conversation_uid") or meta.get("source_id")
+            total_turns = meta.get("total_turns", 1)
+            if not conversation_key or total_turns <= 1:
+                continue
+            groups.setdefault(conversation_key, []).append((idx, sample))
+
+        self.planner_conversations_total += len(groups)
+        for members in groups.values():
+            metas = [(sample.get("metadata") or {}) for _idx, sample in members]
+            planner_metas = [meta for meta in metas if meta.get("planner_policy")]
+            if not planner_metas:
+                continue
+            self.planner_conversations_with_metadata += 1
+            if any(meta.get("planner_fallback") for meta in planner_metas):
+                self.planner_fallback_conversations += 1
+
+            segment_ids = {meta.get("segment_id") for meta in planner_metas if meta.get("segment_id") is not None}
+            if segment_ids:
+                self.planner_segment_counts.append(len(segment_ids))
+
+            for meta in planner_metas:
+                boundary_score = meta.get("boundary_score")
+                if isinstance(boundary_score, (int, float)) and not isinstance(boundary_score, bool):
+                    self.planner_boundary_scores.append(float(boundary_score))
+                anchor_priority = str(meta.get("anchor_priority") or "").strip().lower()
+                if anchor_priority:
+                    self.planner_anchor_priority_counts[anchor_priority] = (
+                        self.planner_anchor_priority_counts.get(anchor_priority, 0) + 1
+                    )
+                anchor_reason = str(meta.get("anchor_reason") or "").strip().lower()
+                if anchor_reason:
+                    self.planner_anchor_reason_counts[anchor_reason] = (
+                        self.planner_anchor_reason_counts.get(anchor_reason, 0) + 1
+                    )
+
+        for target_idx, source_idx in (inherit_map or {}).items():
+            if not (0 <= target_idx < len(samples) and 0 <= source_idx < len(samples)):
+                continue
+            target_meta = samples[target_idx].get("metadata") or {}
+            source_meta = samples[source_idx].get("metadata") or {}
+            if not target_meta.get("planner_policy") or not source_meta.get("planner_policy"):
+                continue
+            self.planner_inherit_edges += 1
+            if target_meta.get("segment_id") != source_meta.get("segment_id"):
+                self.planner_cross_segment_inherit_edges += 1
 
     def finalize(self):
         """Produce the same dict structure as compute_stats()."""
@@ -2418,6 +2697,48 @@ class StatsAccumulator:
         if self.sparse_inherited > 0:
             result["sparse_labeled"] = self.sparse_labeled
             result["sparse_inherited"] = self.sparse_inherited
+        planner_stats = {
+            "conversations_total": self.planner_conversations_total,
+            "conversations_with_metadata": self.planner_conversations_with_metadata,
+            "fallback_conversations": self.planner_fallback_conversations,
+            "fallback_rate": round(self.planner_fallback_conversations / max(self.planner_conversations_with_metadata, 1), 4),
+            "inherit_edges": self.planner_inherit_edges,
+            "cross_segment_inherit_edges": self.planner_cross_segment_inherit_edges,
+            "cross_segment_inherit_ratio": round(
+                self.planner_cross_segment_inherit_edges / max(self.planner_inherit_edges, 1),
+                4,
+            ),
+            "anchor_priority_counts": dict(sorted(self.planner_anchor_priority_counts.items(), key=lambda item: (-item[1], item[0]))),
+            "anchor_reason_counts": dict(sorted(self.planner_anchor_reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+        }
+        segments_summary = _numeric_summary(self.planner_segment_counts)
+        if segments_summary:
+            planner_stats["segments_per_conversation"] = segments_summary
+        boundary_summary = _numeric_summary(self.planner_boundary_scores)
+        if boundary_summary:
+            planner_stats["boundary_score"] = boundary_summary
+        if self.planner_conversations_total:
+            result["planner_stats"] = planner_stats
+
+        compact_prompt_bytes = {}
+        call1_summary = _numeric_summary(self.prompt_bytes_call1)
+        if call1_summary:
+            call1_summary["limit_bytes"] = self.compact_labeling_request_bytes
+            call1_summary["hard_cap_hits"] = self.prompt_bytes_call1_hard_cap_hits
+            call1_summary["hard_cap_hit_rate"] = round(
+                self.prompt_bytes_call1_hard_cap_hits / max(call1_summary["count"], 1), 4
+            )
+            compact_prompt_bytes["call1"] = call1_summary
+        call2_summary = _numeric_summary(self.prompt_bytes_call2)
+        if call2_summary:
+            call2_summary["limit_bytes"] = self.compact_labeling_request_bytes
+            call2_summary["hard_cap_hits"] = self.prompt_bytes_call2_hard_cap_hits
+            call2_summary["hard_cap_hit_rate"] = round(
+                self.prompt_bytes_call2_hard_cap_hits / max(call2_summary["count"], 1), 4
+            )
+            compact_prompt_bytes["call2"] = call2_summary
+        if compact_prompt_bytes:
+            result["compact_prompt_bytes"] = compact_prompt_bytes
 
         return result
 
@@ -2607,7 +2928,7 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_ac
                 }, ensure_ascii=False) + "\n")
 
     # Update stats accumulator
-    stats_acc.update(all_labels, all_monitors, inherit_map=chunk.inherit_map)
+    stats_acc.update(all_labels, all_monitors, inherit_map=chunk.inherit_map, samples=samples)
     stats_acc.set_sparse_labeled(chunk.label_count)
 
     # Release memory
@@ -2658,9 +2979,23 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                           gap_multiplier=config.sparse_gap_multiplier,
                           min_gap=config.sparse_min_gap,
                           max_gap=config.sparse_max_gap,
-                          threshold=config.sparse_threshold)
+                          threshold=config.sparse_threshold,
+                          planner_enabled=config.planner_enabled,
+                          planner_metadata_only=config.planner_metadata_only,
+                          planner_policy=config.planner_policy,
+                          planner_boundary_threshold=config.planner_boundary_threshold,
+                          planner_min_segment_size=config.planner_min_segment_size,
+                          planner_max_anchor_gap=config.planner_max_anchor_gap,
+                          planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio)
 
-    stats_acc = StatsAccumulator(extension_specs=_resolved_extension_specs(config))
+    stats_acc = StatsAccumulator(
+        extension_specs=_resolved_extension_specs(config),
+        compact_labeling_request_bytes=(
+            getattr(config, "compact_labeling_request_bytes", COMPACT_LABELING_REQUEST_BYTES)
+            if config is not None
+            else COMPACT_LABELING_REQUEST_BYTES
+        ),
+    )
     chunk_gen = iter_row_sample_bundle_chunks_from_jsonl(input_path, chunk_size, limit=limit)
     plan_totals = {
         "rows_total": 0,
@@ -2954,7 +3289,14 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                           gap_multiplier=config.sparse_gap_multiplier,
                           min_gap=config.sparse_min_gap,
                           max_gap=config.sparse_max_gap,
-                          threshold=config.sparse_threshold)
+                          threshold=config.sparse_threshold,
+                          planner_enabled=config.planner_enabled,
+                          planner_metadata_only=config.planner_metadata_only,
+                          planner_policy=config.planner_policy,
+                          planner_boundary_threshold=config.planner_boundary_threshold,
+                          planner_min_segment_size=config.planner_min_segment_size,
+                          planner_max_anchor_gap=config.planner_max_anchor_gap,
+                          planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio)
     if inline_output and str(input_path).endswith(".jsonl"):
         raw_row_bundles = list(iter_row_sample_bundles_from_jsonl(input_path, limit=limit))
         prepared_batch = prepare_inline_pass1_batch(
@@ -3359,7 +3701,14 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                               gap_multiplier=config.sparse_gap_multiplier,
                               min_gap=config.sparse_min_gap,
                               max_gap=config.sparse_max_gap,
-                              threshold=config.sparse_threshold)
+                              threshold=config.sparse_threshold,
+                              planner_enabled=config.planner_enabled,
+                              planner_metadata_only=config.planner_metadata_only,
+                              planner_policy=config.planner_policy,
+                              planner_boundary_threshold=config.planner_boundary_threshold,
+                              planner_min_segment_size=config.planner_min_segment_size,
+                              planner_max_anchor_gap=config.planner_max_anchor_gap,
+                              planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio)
 
         use_chunked_delegate = _should_delegate_directory_jsonl_to_chunked(
             abs_path,

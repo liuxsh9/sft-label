@@ -15,6 +15,7 @@ from sft_label.launcher import (
     sanitize_prompt_input,
 )
 from sft_label.cli import build_parser, cmd_dashboard_service, cmd_start
+from sft_label.config import DEFAULT_CONCURRENCY, DEFAULT_ROLLOUT_PRESET
 from sft_label.dashboard_service import (
     DashboardPortConflictError,
     init_dashboard_service,
@@ -396,6 +397,108 @@ def test_build_score_plan_legacy_supports_custom_runtime_values():
         "260",
         "--rps-limit",
         "123.5",
+    ]
+
+
+def test_build_run_plan_switch_panel_emits_rollout_preset(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_switch_panel(input_fn, output_fn, title, fields):
+        captured["field_keys"] = [field.key for field in fields]
+        return {
+            "rollout_preset": "planner_hybrid",
+            "prompt_mode": "compact",
+            "shuffle": "off",
+            "arbitration": "on",
+            "limit": "",
+            "concurrency": str(DEFAULT_CONCURRENCY),
+            "rps_limit": "",
+            "rps_warmup": "",
+            "adaptive_runtime": "on",
+            "recovery_sweep": "on",
+            "request_timeout": "",
+            "max_retries": "",
+            "model_override": "no",
+            "env_override": "no",
+        }
+
+    monkeypatch.setattr("sft_label.launcher._supports_switch_panel", lambda input_fn: True)
+    monkeypatch.setattr("sft_label.launcher._ask_switch_panel", _fake_switch_panel)
+
+    io = StubIO(
+        [
+            "3",          # workflow: run-pass1
+            "1",          # run mode: new
+            "data.json",  # --input
+            "",           # --output
+            "",           # inline mode
+            "",           # extension prompt
+            "",           # extra flags
+        ]
+    )
+
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert captured["field_keys"][:2] == ["rollout_preset", "prompt_mode"]
+    assert plan.argv == [
+        "run",
+        "--input",
+        "data.json",
+        "--rollout-preset",
+        "planner_hybrid",
+        "--prompt-mode",
+        "compact",
+        "--concurrency",
+        "200",
+    ]
+
+
+def test_build_score_plan_switch_panel_emits_default_rollout_preset(monkeypatch):
+    def _fake_switch_panel(input_fn, output_fn, title, fields):
+        return {
+            "rollout_preset": DEFAULT_ROLLOUT_PRESET,
+            "prompt_mode": "compact",
+            "resume": "off",
+            "rarity_mode": "absolute",
+            "limit": "",
+            "concurrency": str(DEFAULT_CONCURRENCY),
+            "rps_limit": "",
+            "rps_warmup": "",
+            "adaptive_runtime": "on",
+            "recovery_sweep": "on",
+            "request_timeout": "",
+            "max_retries": "",
+            "model_override": "no",
+            "env_override": "no",
+        }
+
+    monkeypatch.setattr("sft_label.launcher._supports_switch_panel", lambda input_fn: True)
+    monkeypatch.setattr("sft_label.launcher._ask_switch_panel", _fake_switch_panel)
+
+    io = StubIO(
+        [
+            "4",             # workflow: score
+            "labeled.json",  # --input
+            "",              # --tag-stats
+            "",              # extension rarity mode
+            "",              # extra flags
+        ]
+    )
+
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.argv == [
+        "score",
+        "--input",
+        "labeled.json",
+        "--rollout-preset",
+        DEFAULT_ROLLOUT_PRESET,
+        "--prompt-mode",
+        "compact",
+        "--concurrency",
+        "200",
     ]
 
 
@@ -1634,3 +1737,24 @@ def test_cmd_start_dry_run_shows_label_extension_flags(monkeypatch, capsys):
     assert out.count("--label-extension") >= 2
     assert "extensions/ui.yaml" in out
     assert "extensions/mobile.yaml" in out
+
+
+def test_cmd_start_dry_run_shows_rollout_preset_summary(monkeypatch, capsys):
+    parser = build_parser()
+    plan = LaunchPlan(
+        argv=[
+            "run",
+            "--input",
+            "data.json",
+            "--rollout-preset",
+            "planner_hybrid",
+        ]
+    )
+    monkeypatch.setattr("sft_label.launcher.build_launch_plan", lambda **kwargs: plan, raising=False)
+    args = parser.parse_args(["start", "--dry-run"])
+
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert "planner_hybrid" in out
+    assert "rollout" in out.lower() or "预设" in out

@@ -71,8 +71,14 @@ LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data
 # Pass 1 + Pass 2
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score
 
-# Pass 1 + Pass 2 with compact prompt payloads
-LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --prompt-mode compact
+# Pass 1 + Pass 2 with the experimental multi-turn preset
+LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --rollout-preset planner_hybrid
+
+# Pass 1 + Pass 2 with the rollback/control preset
+LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --rollout-preset baseline_control
+
+# Use full prompt payloads only when the endpoint can absorb larger requests
+LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label run --input data.json --score --prompt-mode full
 
 # Pass 2 only on existing labels
 LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run sft-label score --input labeled.json
@@ -349,6 +355,9 @@ Treat that as an environment-specific note, not a guaranteed path.
 
 - Taxonomy package data lives under `/Users/lxs/.codex/worktrees/e39f/sft-label/src/sft_label/taxonomy/` and should be loaded via `_resources.py`, not raw file-system assumptions.
 - Runtime defaults live in `/Users/lxs/.codex/worktrees/e39f/sft-label/src/sft_label/config.py`; CLI flags selectively override those defaults.
+- CLI / `sft-label start` default runtime is `prompt_mode=compact` plus `rollout_preset=compact_safe`.
+- Preset meanings: `compact_safe` = recommended production default, `planner_hybrid` = experimental, `baseline_control` = rollback/control.
+- Library mode is different: `PipelineConfig()` does not automatically inherit CLI prompt-mode defaults, so set `prompt_mode` explicitly when reproducing CLI behavior programmatically.
 - `LITELLM_BASE` and `LITELLM_KEY` configure the LLM endpoint.
 - Prompt budget is a production constraint, not a soft preference: when editing labeling/scoring prompts, **do not increase prompt length**, and treat **compact prompt length as a hard ceiling**. Prefer equal-or-shorter rewrites; if a change adds wording in one area, remove at least as much elsewhere first.
 - Python requirement is `>=3.9`; any file using `X | Y` unions should include:

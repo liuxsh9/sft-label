@@ -57,7 +57,7 @@ Why start here?
 - it previews the exact command before execution
 - it can auto-publish dashboards after the run
 
-The launcher also defaults concurrency to 200 (with quick presets 25 / 50 / 150 / 200 / 300 plus a custom entry) and lets you set a custom RPS max limit, so you can often leave those prompts untouched. The auto-publish question now defaults to **Yes**, and once the dashboard decisions are settled it prints the command and a richer execution overview before asking whether to execute.
+The launcher also defaults concurrency to 200 (with quick presets 25 / 50 / 150 / 200 / 300 plus a custom entry), defaults runtime behavior to `prompt_mode=compact` plus `rollout_preset=compact_safe`, and lets you set a custom RPS max limit, so you can often leave those prompts untouched. The auto-publish question now defaults to **Yes**, and once the dashboard decisions are settled it prints the command and a richer execution overview before asking whether to execute.
 
 If you want to inspect the generated command without running it:
 
@@ -116,10 +116,10 @@ Check:
 - firewall / proxy / localhost routing
 - whether your endpoint supports the request size implied by the chosen prompt mode
 
-For smaller payloads, prefer compact prompts:
+CLI / launcher runs already default to compact prompts and the `compact_safe` multi-turn preset. Only switch to `full` when your endpoint can handle larger payloads and you explicitly want that tradeoff:
 
 ```bash
-uv run sft-label run --input data.json --score --prompt-mode compact
+uv run sft-label run --input data.json --score --prompt-mode full
 ```
 
 ### You edited labels and want updated dashboards without new LLM calls

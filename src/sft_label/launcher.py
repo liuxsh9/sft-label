@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Callable
 
 from sft_label.config import (
+    DEFAULT_ROLLOUT_PRESET,
     DEFAULT_CONCURRENCY,
     DEFAULT_RPS_LIMIT,
     DEFAULT_RPS_WARMUP,
     MAX_RETRIES,
+    ROLLOUT_PRESETS,
     REQUEST_TIMEOUT,
 )
 from sft_label.label_extensions_guidance import summarize_extension_specs
@@ -119,6 +121,37 @@ def _format_default_value(value: int | float | str) -> str:
 
 def _custom_choice_label() -> str:
     return _msg("自定义… / Custom...", "Custom...")
+
+
+def _rollout_preset_switch_field() -> SwitchField:
+    return SwitchField(
+        key="rollout_preset",
+        label="多轮优化预设 / Multi-turn rollout preset",
+        options=[
+            SwitchOption(
+                "compact_safe",
+                "compact_safe（默认推荐） / compact_safe (default recommended)",
+            ),
+            SwitchOption(
+                "baseline_control",
+                "baseline_control（回退 / 对照） / baseline_control (rollback / control)",
+            ),
+            SwitchOption(
+                "planner_hybrid",
+                "planner_hybrid（实验） / planner_hybrid (experimental)",
+            ),
+        ],
+        default_value=DEFAULT_ROLLOUT_PRESET,
+    )
+
+
+def _print_rollout_preset_note(output_fn: OutputFn):
+    output_fn(
+        _msg(
+            "提示：预设控制多轮稀疏规划 / selective scoring；Prompt 模式仍单独控制请求大小。默认组合为 compact_safe + compact。",
+            "Note: rollout preset controls multi-turn sparse planning / selective scoring; prompt mode still controls request size. Default pairing is compact_safe + compact.",
+        )
+    )
 
 
 WORKFLOWS = [
@@ -830,7 +863,10 @@ def _build_run_plan(
         _section(output_fn, "三阶段联动 / Pass 3 chaining")
         argv.append("--semantic-cluster")
 
+    _section(output_fn, "多轮优化 / Multi-turn rollout")
+    _print_rollout_preset_note(output_fn)
     switch_fields = [
+        _rollout_preset_switch_field(),
         SwitchField(
             key="prompt_mode",
             label="Prompt 模式 / Prompt mode",
@@ -982,6 +1018,7 @@ def _build_run_plan(
     )
     switch_values = _resolve_switch_custom_numeric_values(input_fn, switch_values)
 
+    argv.extend(["--rollout-preset", switch_values["rollout_preset"]])
     if switch_values["prompt_mode"] != "full":
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
     if switch_values["shuffle"] == "on":
@@ -1038,11 +1075,14 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     if extension_rarity_mode != "off":
         argv.extend(["--extension-rarity-mode", extension_rarity_mode])
 
+    _section(output_fn, "多轮优化 / Multi-turn rollout")
+    _print_rollout_preset_note(output_fn)
     switch_values = _ask_switch_panel(
         input_fn,
         output_fn,
         "评分配置（上下选择，左右切值） / Score config (Up/Down select, Left/Right switch)",
         [
+            _rollout_preset_switch_field(),
             SwitchField(
                 key="prompt_mode",
                 label="Prompt 模式 / Prompt mode",
@@ -1188,6 +1228,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
         ],
     )
     switch_values = _resolve_switch_custom_numeric_values(input_fn, switch_values)
+    argv.extend(["--rollout-preset", switch_values["rollout_preset"]])
     if switch_values["prompt_mode"] != "full":
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
     if switch_values["resume"] == "on":

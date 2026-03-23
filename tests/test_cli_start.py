@@ -69,6 +69,10 @@ def test_apply_runtime_overrides_updates_pipeline_config():
         request_timeout=77,
         max_retries=4,
         rarity_mode="percentile",
+        extension_rarity_mode=None,
+        adaptive_runtime=None,
+        recovery_sweep=None,
+        rollout_preset="compact_safe",
     )
     _apply_runtime_overrides(config, args)
     assert config.concurrency == 123
@@ -78,6 +82,35 @@ def test_apply_runtime_overrides_updates_pipeline_config():
     assert config.request_timeout == 77
     assert config.max_retries == 4
     assert config.rarity_score_mode == "percentile"
+
+
+def test_apply_runtime_overrides_applies_rollout_preset():
+    config = PipelineConfig(
+        enable_selective_scoring=True,
+        planner_enabled=False,
+        planner_metadata_only=True,
+        planner_pass2_enabled=False,
+    )
+    args = SimpleNamespace(
+        concurrency=None,
+        scoring_concurrency=None,
+        rps_limit=None,
+        rps_warmup=None,
+        request_timeout=None,
+        max_retries=None,
+        rarity_mode=None,
+        extension_rarity_mode=None,
+        adaptive_runtime=None,
+        recovery_sweep=None,
+        rollout_preset="baseline_control",
+    )
+
+    _apply_runtime_overrides(config, args)
+
+    assert config.enable_selective_scoring is False
+    assert config.planner_enabled is False
+    assert config.planner_metadata_only is True
+    assert config.planner_pass2_enabled is False
 
 
 def test_apply_runtime_overrides_uses_legacy_scoring_alias_when_needed():
@@ -90,6 +123,10 @@ def test_apply_runtime_overrides_uses_legacy_scoring_alias_when_needed():
         request_timeout=None,
         max_retries=None,
         rarity_mode=None,
+        extension_rarity_mode=None,
+        adaptive_runtime=None,
+        recovery_sweep=None,
+        rollout_preset="compact_safe",
     )
     _apply_runtime_overrides(config, args)
     assert config.concurrency == 220
@@ -117,6 +154,8 @@ def test_parser_accepts_runtime_override_flags():
             "--no-recovery-sweep",
             "--rarity-mode",
             "percentile",
+            "--rollout-preset",
+            "planner_hybrid",
         ]
     )
     assert run_args.concurrency == 80
@@ -127,6 +166,7 @@ def test_parser_accepts_runtime_override_flags():
     assert run_args.adaptive_runtime is False
     assert run_args.recovery_sweep is False
     assert run_args.rarity_mode == "percentile"
+    assert run_args.rollout_preset == "planner_hybrid"
 
     score_args = parser.parse_args(
         [
@@ -147,6 +187,8 @@ def test_parser_accepts_runtime_override_flags():
             "--recovery-sweep",
             "--rarity-mode",
             "percentile",
+            "--rollout-preset",
+            "baseline_control",
         ]
     )
     assert score_args.concurrency == 700
@@ -157,6 +199,7 @@ def test_parser_accepts_runtime_override_flags():
     assert score_args.adaptive_runtime is True
     assert score_args.recovery_sweep is True
     assert score_args.rarity_mode == "percentile"
+    assert score_args.rollout_preset == "baseline_control"
 
 
 def test_parser_keeps_scoring_concurrency_legacy_alias():

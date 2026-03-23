@@ -40,6 +40,8 @@ from sft_label.config import (
     SELECTION_SUMMARY_EVIDENCE_BONUS,
     ENABLE_SELECTIVE_SCORING, SELECTIVE_SCORING_POLICY, SELECTIVE_SCORING_MIN_TURNS,
     SELECTIVE_SCORING_DRIFT_INTERVAL, SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP,
+    PLANNER_PASS2_ENABLED, PLANNER_POLICY, PLANNER_BOUNDARY_THRESHOLD,
+    COMPACT_SCORING_REQUEST_BYTES,
     FILE_RANKING_KEEP_RATE_THRESHOLD, FILE_RANKING_KEEP_RATE_THRESHOLDS,
     PipelineConfig,
 )
@@ -518,6 +520,9 @@ def _init_monitor_totals():
         "total_llm_calls": 0,
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
+        "prompt_bytes": [],
+        "prompt_bytes_hard_cap_hits": 0,
+        "selective_reason_counts": {},
     }
 
 
@@ -529,9 +534,19 @@ def _accumulate_monitor_totals(monitor_totals, monitor):
         monitor_totals["total_failed"] += 1
     if status == "estimated_selective":
         monitor_totals["total_estimated"] += 1
+        reason = str(((monitor.get("selective_scoring") or {}).get("reason")) or "").strip()
+        if reason:
+            counts = monitor_totals.setdefault("selective_reason_counts", {})
+            counts[reason] = counts.get(reason, 0) + 1
     monitor_totals["total_llm_calls"] += monitor.get("llm_calls", 0) or 0
     monitor_totals["total_prompt_tokens"] += monitor.get("prompt_tokens", 0) or 0
     monitor_totals["total_completion_tokens"] += monitor.get("completion_tokens", 0) or 0
+    prompt_bytes = monitor.get("assembled_prompt_bytes")
+    if isinstance(prompt_bytes, (int, float)) and not isinstance(prompt_bytes, bool):
+        monitor_totals.setdefault("prompt_bytes", []).append(float(prompt_bytes))
+    error = str(monitor.get("error") or "").lower()
+    if "assembled scoring prompt exceeds" in error:
+        monitor_totals["prompt_bytes_hard_cap_hits"] = monitor_totals.get("prompt_bytes_hard_cap_hits", 0) + 1
 
 
 def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Path):
@@ -2578,6 +2593,17 @@ _SELECTIVE_COMPLEXITY_PRIOR = {
     "expert": 8.0,
 }
 _DISABLED_SELECTIVE_POLICIES = {"off", "disabled", "all", "full"}
+_PROMPT_VISIBLE_LABEL_KEYS = {
+    "intent",
+    "language",
+    "domain",
+    "task",
+    "difficulty",
+    "concept",
+    "agentic",
+    "constraint",
+    "context",
+}
 
 
 def _resolve_selective_scoring_policy(config=None):
@@ -2591,6 +2617,36 @@ def _resolve_selective_scoring_policy(config=None):
     if not policy or policy in _DISABLED_SELECTIVE_POLICIES:
         return None
     return policy
+
+
+def _message_payload_bytes(messages):
+    """Return UTF-8 payload size for the full request body."""
+    return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
+
+
+def _numeric_summary(values):
+    cleaned = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not cleaned:
+        return {}
+    total = sum(cleaned)
+    return {
+        "count": len(cleaned),
+        "sum": round(total, 3),
+        "mean": round(total / len(cleaned), 3),
+        "min": round(min(cleaned), 3),
+        "max": round(max(cleaned), 3),
+    }
+
+
+def _prompt_visible_labels(labels):
+    """Keep only prompt-safe Pass 1 label fields visible to Pass 2."""
+    if not isinstance(labels, dict):
+        return {}
+    return {
+        key: copy.deepcopy(value)
+        for key, value in labels.items()
+        if key in _PROMPT_VISIBLE_LABEL_KEYS
+    }
 
 
 def _required_turn_anchors(total_turns, drift_interval):
@@ -2660,6 +2716,28 @@ def _selective_scoring_decision(sample, config=None):
             "reason": "non_inherited_turn",
             "anchor_distance": None,
         }
+
+    planner_pass2_enabled = getattr(config, "planner_pass2_enabled", PLANNER_PASS2_ENABLED)
+    planner_metadata_only = getattr(config, "planner_metadata_only", False)
+    if planner_pass2_enabled and not planner_metadata_only and metadata.get("planner_policy") == PLANNER_POLICY:
+        anchor_priority = str(metadata.get("anchor_priority") or "").strip().lower()
+        anchor_reason = str(metadata.get("anchor_reason") or "").strip().lower()
+        boundary_score = float(metadata.get("boundary_score") or 0.0)
+        anchor_distance = metadata.get("anchor_distance")
+        if anchor_priority == "required" or anchor_distance == 0:
+            return {
+                "requires_llm": True,
+                "policy": policy,
+                "reason": "planner_anchor_turn",
+                "anchor_distance": anchor_distance,
+            }
+        if anchor_reason == "segment_boundary" and (anchor_distance is None or anchor_distance <= 1):
+            return {
+                "requires_llm": True,
+                "policy": policy,
+                "reason": "planner_anchor_turn",
+                "anchor_distance": anchor_distance,
+            }
 
     anchors = _required_turn_anchors(total_turns, drift_interval)
     if turn_index in anchors:
@@ -2847,10 +2925,11 @@ async def score_one(http_client, sample, model, rarity_result,
     turn_index = metadata.get("turn_index")
     total_turns_meta = metadata.get("total_turns")
 
+    prompt_labels = _prompt_visible_labels(labels)
     messages = build_scoring_messages(
         truncated=truncated,
         thinking_mode=thinking_mode,
-        labels=labels,
+        labels=prompt_labels,
         total_turns=total_turns,
         code_block_count=code_block_count,
         enable_rationale=config.enable_rationale if config else False,
@@ -2860,6 +2939,36 @@ async def score_one(http_client, sample, model, rarity_result,
         total_turns_meta=total_turns_meta,
         compact=_compact,
     )
+
+    compact_byte_limit = None
+    if _compact:
+        compact_byte_limit = int(getattr(config, "compact_scoring_request_bytes", COMPACT_SCORING_REQUEST_BYTES) or COMPACT_SCORING_REQUEST_BYTES)
+    if compact_byte_limit:
+        budget = int(_budget)
+        while _message_payload_bytes(messages) > compact_byte_limit and budget > 2000:
+            budget = max(2000, int(budget * 0.85))
+            truncated = truncate_for_scoring(
+                conversations, thinking_mode, cot_text=cot_text,
+                budget=budget,
+            )
+            messages = build_scoring_messages(
+                truncated=truncated,
+                thinking_mode=thinking_mode,
+                labels=prompt_labels,
+                total_turns=total_turns,
+                code_block_count=code_block_count,
+                enable_rationale=config.enable_rationale if config else False,
+                slice_position=slice_position,
+                slice_count=slice_count,
+                turn_index=turn_index,
+                total_turns_meta=total_turns_meta,
+                compact=_compact,
+            )
+        monitor["assembled_prompt_bytes"] = _message_payload_bytes(messages)
+        if monitor["assembled_prompt_bytes"] > compact_byte_limit:
+            monitor["status"] = "prompt_budget_exceeded"
+            monitor["error"] = f"assembled scoring prompt exceeds {compact_byte_limit} bytes"
+            return None, monitor
 
     # LLM call with retry — retry OUTSIDE admission gates so failed/retrying samples
     # do not block other tasks from acquiring a slot.
@@ -3274,6 +3383,19 @@ def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
     total_llm_calls = sum(m.get("llm_calls", 0) for m in all_monitors)
     total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in all_monitors)
     total_completion_tokens = sum(m.get("completion_tokens", 0) for m in all_monitors)
+    selective_reason_counts = {}
+    prompt_bytes = []
+    prompt_bytes_hard_cap_hits = 0
+    for monitor in all_monitors:
+        selective = monitor.get("selective_scoring") or {}
+        reason = str(selective.get("reason") or "").strip()
+        if reason:
+            selective_reason_counts[reason] = selective_reason_counts.get(reason, 0) + 1
+        assembled_prompt_bytes = monitor.get("assembled_prompt_bytes")
+        if isinstance(assembled_prompt_bytes, (int, float)) and not isinstance(assembled_prompt_bytes, bool):
+            prompt_bytes.append(float(assembled_prompt_bytes))
+        if "assembled scoring prompt exceeds" in str(monitor.get("error") or "").lower():
+            prompt_bytes_hard_cap_hits += 1
 
     stats = {
         "total_scored": total_scored,
@@ -3297,6 +3419,17 @@ def compute_value_stats(scored_samples, all_monitors, include_raw_scores=True):
         "keep_rate_7": keep_rate_7,
         "mean_turns": mean_turns,
     }
+    if selective_reason_counts:
+        stats["selective_scoring_stats"] = {
+            "reason_counts": dict(sorted(selective_reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+            "planner_anchor_turns": selective_reason_counts.get("planner_anchor_turn", 0),
+            "estimated_mid_turns": selective_reason_counts.get("inherited_mid_turn_estimate", 0),
+        }
+    prompt_summary = _numeric_summary(prompt_bytes)
+    if prompt_summary:
+        prompt_summary["hard_cap_hits"] = prompt_bytes_hard_cap_hits
+        prompt_summary["hard_cap_hit_rate"] = round(prompt_bytes_hard_cap_hits / max(prompt_summary["count"], 1), 4)
+        stats["compact_prompt_bytes"] = {"scoring": prompt_summary}
     if include_raw_scores:
         stats["_raw_scores"] = score_arrays
     return stats
@@ -4331,6 +4464,9 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
         total_llm_calls = int(monitor_totals.get("total_llm_calls", 0) or 0)
         total_prompt_tokens = int(monitor_totals.get("total_prompt_tokens", 0) or 0)
         total_completion_tokens = int(monitor_totals.get("total_completion_tokens", 0) or 0)
+        selective_reason_counts = dict(monitor_totals.get("selective_reason_counts") or {})
+        prompt_bytes = list(monitor_totals.get("prompt_bytes") or [])
+        prompt_bytes_hard_cap_hits = int(monitor_totals.get("prompt_bytes_hard_cap_hits", 0) or 0)
     else:
         monitors = monitor_totals or []
         total_failed = sum(1 for m in monitors if m.get("status") == "failed")
@@ -4338,6 +4474,18 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
         total_llm_calls = sum(m.get("llm_calls", 0) for m in monitors)
         total_prompt_tokens = sum(m.get("prompt_tokens", 0) for m in monitors)
         total_completion_tokens = sum(m.get("completion_tokens", 0) for m in monitors)
+        selective_reason_counts = {}
+        prompt_bytes = []
+        prompt_bytes_hard_cap_hits = 0
+        for monitor in monitors:
+            reason = str(((monitor.get("selective_scoring") or {}).get("reason")) or "").strip()
+            if reason:
+                selective_reason_counts[reason] = selective_reason_counts.get(reason, 0) + 1
+            assembled_prompt_bytes = monitor.get("assembled_prompt_bytes")
+            if isinstance(assembled_prompt_bytes, (int, float)) and not isinstance(assembled_prompt_bytes, bool):
+                prompt_bytes.append(float(assembled_prompt_bytes))
+            if "assembled scoring prompt exceeds" in str(monitor.get("error") or "").lower():
+                prompt_bytes_hard_cap_hits += 1
 
     # Score distributions
     def _gather(key):
@@ -4451,7 +4599,7 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
     ]
     mean_turns = round(sum(turn_counts) / len(turn_counts), 2) if turn_counts else 0
 
-    return {
+    stats = {
         "total_scored": total_scored,
         "total_failed": total_failed,
         "total_estimated": total_estimated,
@@ -4471,6 +4619,18 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
         "keep_rate_7": keep_rate_7,
         "mean_turns": mean_turns,
     }
+    if selective_reason_counts:
+        stats["selective_scoring_stats"] = {
+            "reason_counts": dict(sorted(selective_reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+            "planner_anchor_turns": selective_reason_counts.get("planner_anchor_turn", 0),
+            "estimated_mid_turns": selective_reason_counts.get("inherited_mid_turn_estimate", 0),
+        }
+    prompt_summary = _numeric_summary(prompt_bytes)
+    if prompt_summary:
+        prompt_summary["hard_cap_hits"] = prompt_bytes_hard_cap_hits
+        prompt_summary["hard_cap_hit_rate"] = round(prompt_bytes_hard_cap_hits / max(prompt_summary["count"], 1), 4)
+        stats["compact_prompt_bytes"] = {"scoring": prompt_summary}
+    return stats
 
 
 def print_scoring_summary(stats, run_dir, is_batch=False):
@@ -4823,6 +4983,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                         if run_info:
                             _info = f"{_info} • {run_info}"
                     progress.update(task, advance=1, info=_info)
+                await asyncio.sleep(0)
                 submit_more_tasks()
 
         sweep = await _run_pass2_recovery_sweep_in_memory(
@@ -6285,6 +6446,38 @@ def _merge_value_stats(file_stats_list):
         }
         for mode, d in merged_thinking.items()
     }
+
+    selective_reason_counts = {}
+    for s in file_stats_list:
+        for reason, count in (s.get("selective_scoring_stats", {}).get("reason_counts") or {}).items():
+            selective_reason_counts[reason] = selective_reason_counts.get(reason, 0) + count
+    if selective_reason_counts:
+        merged["selective_scoring_stats"] = {
+            "reason_counts": dict(sorted(selective_reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+            "planner_anchor_turns": selective_reason_counts.get("planner_anchor_turn", 0),
+            "estimated_mid_turns": selective_reason_counts.get("inherited_mid_turn_estimate", 0),
+        }
+
+    prompt_payloads = [
+        s.get("compact_prompt_bytes", {}).get("scoring")
+        for s in file_stats_list
+        if isinstance(s.get("compact_prompt_bytes", {}).get("scoring"), dict)
+    ]
+    if prompt_payloads:
+        total_count = sum(int(item.get("count", 0) or 0) for item in prompt_payloads)
+        total_sum = sum(float(item.get("sum", 0.0) or 0.0) for item in prompt_payloads)
+        hard_cap_hits = sum(int(item.get("hard_cap_hits", 0) or 0) for item in prompt_payloads)
+        merged["compact_prompt_bytes"] = {
+            "scoring": {
+                "count": total_count,
+                "sum": round(total_sum, 3),
+                "mean": round(total_sum / max(total_count, 1), 3),
+                "min": round(min(float(item.get("min", 0.0) or 0.0) for item in prompt_payloads), 3),
+                "max": round(max(float(item.get("max", 0.0) or 0.0) for item in prompt_payloads), 3),
+                "hard_cap_hits": hard_cap_hits,
+                "hard_cap_hit_rate": round(hard_cap_hits / max(total_count, 1), 4),
+            }
+        }
 
     # Merge flag counts: sum across files
     merged_flags = {}

@@ -47,6 +47,7 @@ uv run sft-label start
 # 默认路径：
 # - 选择 “Pass 1 + Pass 2”
 # - 大多数问题保持默认（并发默认 200，提供 25 / 50 / 150 / 200 / 300 预设及自定义输入，RPS 最大值也支持自由填写）
+# - 运行时默认采用 prompt_mode=compact + rollout_preset=compact_safe
 # - auto-publish 提示默认是 **Yes**
 # - 结束后直接拿到 dashboard URL
 ```
@@ -69,6 +70,15 @@ uv run sft-label run --input data.json
 # Pass 1 + Pass 2
 uv run sft-label run --input data.json --score
 
+# Pass 1 + Pass 2，并启用实验性的多轮预设
+uv run sft-label run --input data.json --score --rollout-preset planner_hybrid
+
+# Pass 1 + Pass 2，并切回回退/对照预设
+uv run sft-label run --input data.json --score --rollout-preset baseline_control
+
+# 只有在接口能承受更大请求包时，才改用 full prompt
+uv run sft-label run --input data.json --score --prompt-mode full
+
 # 对已有 labeled 文件单独打分
 uv run sft-label score --input labeled.json
 ```
@@ -89,7 +99,11 @@ flowchart LR
 一般情况下：
 
 - 选择 **Pass 1 + Pass 2**
-- 大多数提示保持默认（并发默认 200，提供 25 / 50 / 150 / 200 / 300 预设及自定义输入，RPS 最大值也支持自由填写）
+- 大多数提示保持默认
+- 运行时默认采用 **prompt_mode=compact** 与 **rollout_preset=compact_safe**
+- `compact_safe` 是面向生产 / 包大小受限场景的推荐预设；`planner_hybrid` 为实验项；`baseline_control` 用于回退 / 对照
+- 终端交互版 switch panel 现在会先给出 **多轮优化预设** 选择，再选择 prompt mode
+- 并发默认 200，提供 25 / 50 / 150 / 200 / 300 预设及自定义输入，RPS 最大值也支持自由填写
 - auto-publish 提示默认是 **Yes**
 - 如果还没有 dashboard service，`start` 可以直接初始化、启动并输出稳定的 dashboard URL
 - 首次配置只需选一次访问方式：
@@ -97,12 +111,12 @@ flowchart LR
   - **LAN** → `0.0.0.0`，供局域网访问
   - **public** → `0.0.0.0`，再补上反向代理 / 对外访问 URL
 
-完成 auto-publish/服务暴露等决策后，启动器会展示更丰富的执行概览，并在你确认后再执行。
+完成 auto-publish/服务暴露等决策后，启动器会展示更丰富的执行概览（包括 rollout preset、并发 / RPS、dashboard 状态等），并在你确认后再执行。
 
 `start` 主要做四件事：
 
 1. **让你选择工作流**：默认推荐 Pass 1 + Pass 2；对于中断任务，流水线分组里也把“智能续跑”提前展示，后面再是只跑 Pass 1、只打分、语义聚类、过滤、维护、导出、dashboard service 管理等。
-2. **只询问必要参数**：输入路径、可选输出路径、运行模式、prompt mode、并发等（必要时也会提示 `--adaptive-runtime` / `--recovery-sweep` 等开关）。
+2. **只询问必要参数**：输入路径、可选输出路径、运行模式、多轮优化预设、prompt mode、并发等（必要时也会提示 `--adaptive-runtime` / `--recovery-sweep` 等开关）。
 3. **生成准确的 CLI 命令并展示摘要**，执行前可以再确认一次。
 4. **在任务结束后输出 URL**：如果开启 auto-publish，会把 dashboard 发布到已配置服务并打印访问链接。
 

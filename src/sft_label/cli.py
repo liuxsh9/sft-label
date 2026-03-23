@@ -31,6 +31,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from sft_label.config import (
+    DEFAULT_ROLLOUT_PRESET,
     DEFAULT_CONCURRENCY,
     DEFAULT_RPS_LIMIT,
     DEFAULT_RPS_WARMUP,
@@ -38,6 +39,8 @@ from sft_label.config import (
     ENABLE_STAGE_RECOVERY_SWEEP,
     MAX_RETRIES,
     REQUEST_TIMEOUT,
+    ROLLOUT_PRESETS,
+    apply_rollout_preset,
 )
 from sft_label.dashboard_service import (
     DashboardPortConflictError,
@@ -476,6 +479,7 @@ def _runtime_summary_values(launched_args) -> dict[str, object]:
         "max_retries": getattr(launched_args, "max_retries", None) or MAX_RETRIES,
         "adaptive_runtime": ENABLE_ADAPTIVE_RUNTIME if getattr(launched_args, "adaptive_runtime", None) is None else bool(getattr(launched_args, "adaptive_runtime")),
         "recovery_sweep": ENABLE_STAGE_RECOVERY_SWEEP if getattr(launched_args, "recovery_sweep", None) is None else bool(getattr(launched_args, "recovery_sweep")),
+        "rollout_preset": getattr(launched_args, "rollout_preset", None) or DEFAULT_ROLLOUT_PRESET,
     }
 
 
@@ -500,6 +504,11 @@ def _print_start_plan_summary(plan, lang: str, *, launched_args=None, dashboard_
         print(f"  {_start_msg(lang, '最大重试次数', 'Max retries')}: {runtime['max_retries']}")
         print(f"  {_start_msg(lang, '自适应运行时', 'Adaptive runtime')}: {'on' if runtime['adaptive_runtime'] else 'off'}")
         print(f"  {_start_msg(lang, '恢复补跑', 'Recovery sweep')}: {'on' if runtime['recovery_sweep'] else 'off'}")
+        rollout_preset = runtime["rollout_preset"]
+        preset_desc = (ROLLOUT_PRESETS.get(rollout_preset, {}) or {}).get("description", "")
+        print(f"  {_start_msg(lang, '多轮优化预设', 'Multi-turn rollout preset')}: {rollout_preset}")
+        if preset_desc:
+            print(f"    {_start_msg(lang, '说明', 'Note')}: {preset_desc}")
         if dashboard_plan is not None:
             print(_start_msg(lang, "Dashboard 计划：", "Dashboard plan:"))
             if not dashboard_plan.enabled:
@@ -572,6 +581,8 @@ def _run_dashboard_service_maintenance_session(
 
 def _apply_runtime_overrides(config, args):
     """Apply optional runtime overrides from CLI args onto PipelineConfig."""
+    apply_rollout_preset(config, getattr(args, "rollout_preset", None))
+
     shared_concurrency = getattr(args, "concurrency", None)
     legacy_scoring_concurrency = getattr(args, "scoring_concurrency", None)
     if shared_concurrency is None and legacy_scoring_concurrency is not None:
@@ -1628,6 +1639,10 @@ def build_parser():
     run_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
                             default="compact",
                             help="Prompt mode: 'full' or 'compact' (default: compact). Compact uses smaller payloads; for extension labeling, keep each prompt+schema compact-friendly when possible.")
+    run_parser.add_argument("--rollout-preset", type=str,
+                            choices=sorted(ROLLOUT_PRESETS.keys()),
+                            default=DEFAULT_ROLLOUT_PRESET,
+                            help="Multi-turn rollout preset: compact_safe (default recommended), planner_hybrid (experimental), or baseline_control.")
     run_parser.add_argument("--model", type=str, default=None,
                             help="LLM model name (default: gpt-4o-mini)")
     run_parser.add_argument("--concurrency", type=int, default=None,
@@ -1682,6 +1697,10 @@ def build_parser():
     score_parser.add_argument("--prompt-mode", type=str, choices=["full", "compact"],
                                default="compact",
                                help="Prompt mode: 'full' or 'compact' (default: compact). Compact uses smaller payloads for size-limited endpoints.")
+    score_parser.add_argument("--rollout-preset", type=str,
+                               choices=sorted(ROLLOUT_PRESETS.keys()),
+                               default=DEFAULT_ROLLOUT_PRESET,
+                               help="Multi-turn rollout preset: compact_safe (default recommended), planner_hybrid (experimental), or baseline_control.")
     score_parser.add_argument("--model", type=str, default=None,
                                help="LLM model name (default: gpt-4o-mini)")
     score_parser.add_argument("--concurrency", type=int, default=None,

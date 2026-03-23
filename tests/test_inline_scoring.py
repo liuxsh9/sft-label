@@ -9,8 +9,9 @@ import pytest
 from sft_label.artifacts import DASHBOARDS_DIRNAME
 from sft_label.config import PipelineConfig
 from sft_label.inline_labels import build_turn_id
-from sft_label.inline_pass1 import merge_pass1_results
+from sft_label.inline_pass1 import merge_pass1_results, prepare_inline_pass1_batch
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
+from sft_label.preprocessing import apply_sparse_sampling
 from sft_label.inline_scoring import (
     InlineScoringTarget,
     discover_inline_jsonl_files,
@@ -132,6 +133,78 @@ def test_load_inline_scoring_file_rehydrates_embedded_turn_labels(tmp_path):
     assert samples[1]["metadata"]["turn_index"] == 2
     assert samples[0]["id"] == build_turn_id(bundles[0].data_id, 1)
     assert samples[1]["id"] == build_turn_id(bundles[0].data_id, 2)
+    assert samples[0]["metadata"]["planner_policy"] == "compact_semantic_anchor_v1"
+    assert samples[1]["metadata"]["slice_position"] == 2
+    assert samples[1]["metadata"]["slice_count"] == 2
+    assert samples[1]["metadata"]["conversation_uid"]
+
+
+def test_prepare_inline_pass1_refresh_preserves_sparse_inheritance_for_tool_trajectory_growth():
+    conversations = [{"from": "human", "value": "Debug the flaky retry pipeline end to end."}]
+    for i in range(13):
+        conversations.append({"from": "tool", "value": f"$ pytest tests/test_retry.py::test_case_{i}\nFAILED timeout"})
+        conversations.append({"from": "gpt", "value": "I inspected the failure and tightened the retry handling."})
+
+    bundle = build_row_sample_bundle(
+        {"id": "inline-tool-trajectory-growth", "conversations": conversations},
+        Path("synthetic.jsonl"),
+        1,
+    )
+    config = PipelineConfig(planner_enabled=True, planner_metadata_only=False, prompt_mode="compact")
+    sparse_kwargs = dict(
+        full_label_count=config.sparse_full_label_count,
+        gap_multiplier=config.sparse_gap_multiplier,
+        min_gap=config.sparse_min_gap,
+        max_gap=config.sparse_max_gap,
+        threshold=config.sparse_threshold,
+        planner_enabled=config.planner_enabled,
+        planner_metadata_only=config.planner_metadata_only,
+        planner_policy=config.planner_policy,
+        planner_boundary_threshold=config.planner_boundary_threshold,
+        planner_min_segment_size=config.planner_min_segment_size,
+        planner_max_anchor_gap=config.planner_max_anchor_gap,
+        planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio,
+    )
+
+    prepared = prepare_inline_pass1_batch([bundle], mode="refresh", sparse_kwargs=sparse_kwargs)
+
+    assert len(prepared.samples) == 13
+    assert len(prepared.inherit_map) > 0
+    assert len(prepared.label_indices) < len(prepared.samples)
+
+
+def test_prepare_inline_pass1_refresh_matches_direct_sparse_plan():
+    conversations = [{"from": "human", "value": "Debug the flaky retry pipeline end to end."}]
+    for i in range(13):
+        conversations.append({"from": "tool", "value": f"$ pytest tests/test_retry.py::test_case_{i}\nFAILED timeout"})
+        conversations.append({"from": "gpt", "value": "I inspected the failure and tightened the retry handling."})
+
+    bundle = build_row_sample_bundle(
+        {"id": "inline-direct-consistency", "conversations": conversations},
+        Path("synthetic.jsonl"),
+        1,
+    )
+    config = PipelineConfig(planner_enabled=True, planner_metadata_only=False, prompt_mode="compact")
+    sparse_kwargs = dict(
+        full_label_count=config.sparse_full_label_count,
+        gap_multiplier=config.sparse_gap_multiplier,
+        min_gap=config.sparse_min_gap,
+        max_gap=config.sparse_max_gap,
+        threshold=config.sparse_threshold,
+        planner_enabled=config.planner_enabled,
+        planner_metadata_only=config.planner_metadata_only,
+        planner_policy=config.planner_policy,
+        planner_boundary_threshold=config.planner_boundary_threshold,
+        planner_min_segment_size=config.planner_min_segment_size,
+        planner_max_anchor_gap=config.planner_max_anchor_gap,
+        planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio,
+    )
+
+    direct_label_indices, direct_inherit_map = apply_sparse_sampling(bundle.samples, **sparse_kwargs)
+    prepared = prepare_inline_pass1_batch([bundle], mode="refresh", sparse_kwargs=sparse_kwargs)
+
+    assert sorted(prepared.label_indices) == sorted(direct_label_indices)
+    assert prepared.inherit_map == direct_inherit_map
 
 
 def test_infer_inline_scoring_target_does_not_misclassify_standard_run_file(tmp_path):

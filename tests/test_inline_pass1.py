@@ -77,6 +77,27 @@ def _extension_spec(spec_hash_suffix: str = "v1") -> ExtensionSpec:
     )
 
 
+def _incremental_tool_trajectory_samples(total_turns: int = 13) -> list[dict]:
+    samples = []
+    for i in range(total_turns):
+        conversations = [{"from": "human", "value": "Diagnose the same flaky test failure."}]
+        for j in range(i):
+            conversations.append({
+                "from": "tool",
+                "value": f"pytest repeat run {j}: same flaky stack trace",
+            })
+        conversations.append({
+            "from": "gpt",
+            "value": "The root cause is the same timeout race; keep the same fix plan.",
+        })
+        samples.append({
+            "id": f"conv_t{i + 1}",
+            "metadata": {"source_id": "conv", "turn_index": i + 1, "total_turns": total_turns},
+            "conversations": conversations,
+        })
+    return samples
+
+
 def test_merge_pass1_results_preserves_sibling_fields_on_single_turn_row(tmp_path):
     row = {
         "meta_prompt": ["You are helpful"],
@@ -403,6 +424,45 @@ def test_prepare_inline_pass1_batch_reruns_extension_only_changes_without_invali
     assert prepared.label_indices == [0]
     assert prepared.bundle_plans[0].pass1_changed is True
     assert prepared.bundle_plans[0].invalidate_pass2 is False
+
+
+def test_prepare_inline_pass1_batch_refresh_preserves_sparse_inheritance_for_tool_growth(tmp_path):
+    bundle = RowSampleBundle(
+        raw_row={"id": "conv"},
+        source_path=tmp_path / "train.jsonl",
+        row_number=1,
+        data_id="conv",
+        samples=_incremental_tool_trajectory_samples(),
+    )
+    config = PipelineConfig(
+        prompt_mode="compact",
+        planner_enabled=True,
+        planner_metadata_only=False,
+    )
+    sparse_kwargs = dict(
+        full_label_count=config.sparse_full_label_count,
+        gap_multiplier=config.sparse_gap_multiplier,
+        min_gap=config.sparse_min_gap,
+        max_gap=config.sparse_max_gap,
+        threshold=config.sparse_threshold,
+        planner_enabled=config.planner_enabled,
+        planner_metadata_only=config.planner_metadata_only,
+        planner_policy=config.planner_policy,
+        planner_boundary_threshold=config.planner_boundary_threshold,
+        planner_min_segment_size=config.planner_min_segment_size,
+        planner_max_anchor_gap=config.planner_max_anchor_gap,
+        planner_fallback_boundary_ratio=config.planner_fallback_boundary_ratio,
+    )
+
+    prepared = prepare_inline_pass1_batch(
+        [bundle],
+        mode="refresh",
+        sparse_kwargs=sparse_kwargs,
+    )
+
+    assert len(prepared.samples) == 13
+    assert len(prepared.label_indices) < len(prepared.samples)
+    assert prepared.inherit_map
 
 
 @pytest.mark.asyncio

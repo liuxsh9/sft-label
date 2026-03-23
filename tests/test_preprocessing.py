@@ -328,6 +328,37 @@ class TestMultiturnRegressionFixtures:
             assert meta["total_turns"] == 3
             assert meta["source_file"] == "synthetic/multiturn_regressions.json"
 
+    def test_planner_metadata_added_to_multiturn_slices(self):
+        sample = _load_multiturn_fixture("mt-agentic-medium")
+        slices = normalize_and_slice(sample)
+
+        assert len(slices) == 4
+        for idx, item in enumerate(slices, start=1):
+            meta = item["metadata"]
+            assert meta["planner_policy"] == "compact_semantic_anchor_v1"
+            assert meta["segment_id"] >= 0
+            assert meta["segment_turn_start"] <= idx <= meta["segment_turn_end"]
+            assert meta["inherit_group_id"].startswith("segment-")
+            assert 0.0 <= meta["planner_confidence"] <= 1.0
+
+    def test_planner_uses_local_view_not_whole_prefix_growth(self):
+        sample = {
+            "id": "mt-local-view",
+            "conversations": [
+                {"from": "human", "value": "Initial project setup.\n" + ("A" * 2000)},
+                {"from": "gpt", "value": "Created the project scaffold.\n" + ("B" * 2000)},
+                {"from": "human", "value": "Run the tests and fix the timeout regression."},
+                {"from": "gpt", "value": "Ran pytest, found the timeout, and fixed the flaky retry loop."},
+                {"from": "human", "value": "Run the tests and fix the timeout regression."},
+                {"from": "gpt", "value": "Ran pytest, found the timeout, and fixed the flaky retry loop."},
+            ],
+        }
+
+        slices = normalize_and_slice(sample)
+
+        assert len(slices) == 3
+        assert slices[1]["metadata"]["segment_id"] == slices[2]["metadata"]["segment_id"]
+
     def test_system_turn_preserved_in_each_slice(self):
         sample = _load_multiturn_fixture("mt-system-preserve")
         slices = normalize_and_slice(sample)
@@ -422,9 +453,66 @@ class TestSparseSchedule:
 
 
 class TestApplySparseSampling:
+    @staticmethod
+    def _incremental_tool_trajectory_samples(total_turns=13):
+        samples = []
+        for i in range(total_turns):
+            conversations = [{"from": "human", "value": "Diagnose the same flaky test failure."}]
+            for j in range(i):
+                conversations.append({
+                    "from": "tool",
+                    "value": f"pytest repeat run {j}: same flaky stack trace",
+                })
+            conversations.append({
+                "from": "gpt",
+                "value": "The root cause is the same timeout race; keep the same fix plan.",
+            })
+            samples.append({
+                "id": f"conv_t{i + 1}",
+                "metadata": {"source_id": "conv", "turn_index": i + 1, "total_turns": total_turns},
+                "conversations": conversations,
+            })
+        return samples
+
+    def test_planner_allows_inheritance_when_only_tool_trajectory_grows(self):
+        conversations = [{"from": "human", "value": "Debug the flaky retry pipeline end to end."}]
+        for i in range(13):
+            conversations.append({"from": "tool", "value": f"$ pytest tests/test_retry.py::test_case_{i}\nFAILED timeout"})
+            conversations.append({"from": "gpt", "value": "I inspected the failure and tightened the retry handling."})
+
+        samples = normalize_and_slice({
+            "id": "tool-trajectory-growth",
+            "conversations": conversations,
+        })
+
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=True)
+
+        assert len(samples) == 13
+        assert len(inherit_map) > 0
+        assert len(label_indices) < len(samples)
+        for target_idx, source_idx in inherit_map.items():
+            target_meta = samples[target_idx]["metadata"]
+            source_meta = samples[source_idx]["metadata"]
+            assert target_meta["segment_id"] == source_meta["segment_id"]
+
+    def test_planner_falls_back_when_it_would_use_more_labels_than_legacy(self):
+        fixture_path = FIXTURES_DIR / "e2e_folder_test" / "multi_turn" / "coderforge_swe_trajectories.jsonl"
+        row = json.loads(fixture_path.read_text(encoding="utf-8").splitlines()[1])
+        samples = normalize_and_slice(row, source_file=fixture_path, source_row=2)
+
+        legacy_label_indices, legacy_inherit_map = apply_sparse_sampling(samples, planner_enabled=False)
+        planner_label_indices, planner_inherit_map = apply_sparse_sampling(
+            samples,
+            planner_enabled=True,
+            planner_metadata_only=False,
+        )
+
+        assert planner_label_indices == legacy_label_indices
+        assert planner_inherit_map == legacy_inherit_map
+
     def test_single_turn_always_labeled(self):
         samples = [{"id": "s1", "metadata": {}}]
-        label_indices, inherit_map = apply_sparse_sampling(samples)
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=True)
         assert 0 in label_indices
         assert len(inherit_map) == 0
 
@@ -435,7 +523,7 @@ class TestApplySparseSampling:
             {"id": "m_t2", "metadata": {"source_id": "m", "turn_index": 2, "total_turns": 3}},
             {"id": "m_t3", "metadata": {"source_id": "m", "turn_index": 3, "total_turns": 3}},
         ]
-        label_indices, inherit_map = apply_sparse_sampling(samples)
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=True)
         assert label_indices == {0, 1, 2}
         assert len(inherit_map) == 0
 
@@ -459,9 +547,29 @@ class TestApplySparseSampling:
                 ],
             })
 
-        label_indices, inherit_map = apply_sparse_sampling(samples)
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=True)
         assert 9 in label_indices
         assert 9 not in inherit_map
+
+    def test_legacy_sparse_allows_inheritance_for_incremental_tool_growth(self):
+        samples = self._incremental_tool_trajectory_samples()
+
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=False)
+
+        assert label_indices == {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12}
+        assert inherit_map == {9: 10, 11: 12}
+
+    def test_legacy_sparse_can_fall_back_backward_when_forward_path_is_hard_boundary(self):
+        samples = self._incremental_tool_trajectory_samples()
+        samples[10]["conversations"] = [
+            {"from": "human", "value": "Update src/app.py to fix the flaky timeout."},
+            {"from": "gpt", "value": "Patched src/app.py and kept the same timeout fix."},
+        ]
+
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=False)
+
+        assert 9 not in label_indices
+        assert inherit_map[9] == 8
 
     def test_duplicate_source_ids_do_not_cross_inherit_when_uid_present(self):
         samples = []
@@ -500,6 +608,75 @@ class TestApplySparseSampling:
             target_uid = samples[target_idx]["metadata"]["conversation_uid"]
             source_uid = samples[source_idx]["metadata"]["conversation_uid"]
             assert target_uid == source_uid
+
+    def test_planner_restricts_inheritance_within_segment(self):
+        samples = []
+        for i in range(13):
+            lang = "python" if i < 9 else "javascript"
+            request = f"Implement feature step {i}"
+            response = f"```{lang}\nprint({i})\n```"
+            samples.append({
+                "id": f"conv_t{i + 1}",
+                "metadata": {"source_id": "conv", "turn_index": i + 1, "total_turns": 13},
+                "conversations": [
+                    {"from": "human", "value": request},
+                    {"from": "gpt", "value": response},
+                ],
+            })
+
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=True)
+
+        assert any(i >= 9 for i in label_indices)
+        for target_idx, source_idx in inherit_map.items():
+            target_meta = samples[target_idx]["metadata"]
+            source_meta = samples[source_idx]["metadata"]
+            assert target_meta["segment_id"] == source_meta["segment_id"]
+
+    def test_planner_can_fall_back_to_legacy_sparse_schedule(self):
+        samples = []
+        for i in range(15):
+            lang = "python" if i % 2 == 0 else "javascript"
+            samples.append({
+                "id": f"conv_t{i + 1}",
+                "metadata": {"source_id": "conv", "turn_index": i + 1, "total_turns": 15},
+                "conversations": [
+                    {"from": "human", "value": f"Rewrite module {i} in {lang}"},
+                    {"from": "gpt", "value": f"```{lang}\ncode_{i}\n```"},
+                ],
+            })
+
+        planner_label_indices, planner_inherit_map = apply_sparse_sampling(
+            samples,
+            planner_enabled=True,
+            planner_fallback_boundary_ratio=0.20,
+        )
+        legacy_label_indices, legacy_inherit_map = apply_sparse_sampling(
+            samples,
+            planner_enabled=False,
+        )
+
+        assert planner_label_indices == legacy_label_indices
+        assert planner_inherit_map == legacy_inherit_map
+
+    def test_planner_still_force_labels_high_risk_file_scope_change(self):
+        samples = []
+        for i in range(13):
+            request = "Update the README"
+            if i == 9:
+                request = "Update src/app.py and tests/test_app.py"
+            samples.append({
+                "id": f"conv_t{i + 1}",
+                "metadata": {"source_id": "conv", "turn_index": i + 1, "total_turns": 13},
+                "conversations": [
+                    {"from": "human", "value": request},
+                    {"from": "gpt", "value": "Done."},
+                ],
+            })
+
+        label_indices, inherit_map = apply_sparse_sampling(samples, planner_enabled=True)
+
+        assert 9 in label_indices
+        assert 9 not in inherit_map
 
 
 class TestTruncation:

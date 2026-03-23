@@ -146,3 +146,77 @@ def test_sanitize_conversations_for_content_filter_softens_trigger_phrases():
     assert "erroneous code" not in user_text
     assert "misdirection" not in user_text
     assert "briefly explain your approach" in user_text
+
+
+@pytest.mark.asyncio
+async def test_label_one_compact_prompt_stays_under_utf8_byte_limit():
+    sample = {
+        "id": "compact-cjk",
+        "conversations": [
+            {"from": "human", "value": "请修复超时问题并解释原因🙂" * 900},
+            {"from": "gpt", "value": "我会先运行测试再修复问题。" * 900},
+        ],
+    }
+    payload_sizes = []
+
+    async def fake_async_llm_call(http_client, messages, model, **kwargs):
+        payload_sizes.append(len(json.dumps(messages, ensure_ascii=False).encode("utf-8")))
+        if len(payload_sizes) == 1:
+            return CALL1_OK, json.dumps(CALL1_OK), {"prompt_tokens": 10, "completion_tokens": 5}
+        return CALL2_OK, json.dumps(CALL2_OK), {"prompt_tokens": 8, "completion_tokens": 4}
+
+    config = PipelineConfig(sample_max_retries=1, max_retries=1, prompt_mode="compact")
+
+    with patch("sft_label.pipeline.async_llm_call", side_effect=fake_async_llm_call):
+        idx, labels, monitor = await label_one(
+            http_client=None,
+            sample=sample,
+            model="mock-model",
+            sample_idx=0,
+            total=1,
+            sem=asyncio.Semaphore(1),
+            enable_arbitration=False,
+            config=config,
+        )
+
+    assert idx == 0
+    assert labels is not None
+    assert monitor["status"] == "success"
+    assert payload_sizes
+    assert max(payload_sizes) <= config.compact_labeling_request_bytes
+
+
+@pytest.mark.asyncio
+async def test_label_one_propagates_sanitized_call1_context_into_call2():
+    calls = []
+
+    async def fake_async_llm_call(http_client, messages, model, **kwargs):
+        payload = json.dumps(messages, ensure_ascii=False).lower()
+        calls.append(payload)
+        if len(calls) == 1:
+            assert "reason step by step" in payload
+            return None, "", dict(CONTENT_FILTER_USAGE)
+        if len(calls) == 2:
+            assert "reason step by step" not in payload
+            return CALL1_OK, json.dumps(CALL1_OK), {"prompt_tokens": 10, "completion_tokens": 5}
+        assert "reason step by step" not in payload
+        return CALL2_OK, json.dumps(CALL2_OK), {"prompt_tokens": 8, "completion_tokens": 4}
+
+    config = PipelineConfig(sample_max_retries=1, max_retries=1, prompt_mode="compact")
+
+    with patch("sft_label.pipeline.async_llm_call", side_effect=fake_async_llm_call):
+        idx, labels, monitor = await label_one(
+            http_client=None,
+            sample=_sample(),
+            model="mock-model",
+            sample_idx=0,
+            total=1,
+            sem=asyncio.Semaphore(1),
+            enable_arbitration=False,
+            config=config,
+        )
+
+    assert idx == 0
+    assert labels is not None
+    assert monitor["status"] == "success"
+    assert len(calls) == 3

@@ -29,6 +29,12 @@ from sft_label.config import (
     VALUE_TRUNCATION_BUDGET, VALUE_TRUNCATION_INSTRUCTION_RATIO,
     VALUE_TRUNCATION_COT_RATIO, VALUE_TRUNCATION_RESPONSE_RATIO,
     VALUE_TRUNCATION_FRAGMENT_COUNT,
+    ENABLE_COMPACT_SEMANTIC_PLANNER,
+    PLANNER_POLICY,
+    PLANNER_BOUNDARY_THRESHOLD,
+    PLANNER_MIN_SEGMENT_SIZE,
+    PLANNER_MAX_ANCHOR_GAP,
+    PLANNER_FALLBACK_BOUNDARY_RATIO,
 )
 
 
@@ -424,6 +430,7 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
         }
         results.append(s)
 
+    annotate_multiturn_planner_metadata(results)
     return results
 
 
@@ -1509,6 +1516,255 @@ def _current_turn_signature(sample):
     }
 
 
+def _planner_boundary_score(source_sig, target_sig):
+    """Return deterministic boundary score/reasons for adjacent local views."""
+    score = 0.0
+    reasons = []
+
+    s_langs = source_sig["fence_langs"]
+    t_langs = target_sig["fence_langs"]
+    if s_langs and t_langs and s_langs != t_langs:
+        score += 3.0
+        reasons.append("language_change")
+
+    if source_sig["trajectory_tool_turns"] != target_sig["trajectory_tool_turns"]:
+        score += 2.5
+        reasons.append("tool_pattern_change")
+    if source_sig["role_pattern"] != target_sig["role_pattern"] and (
+        source_sig["trajectory_turn_count"] or target_sig["trajectory_turn_count"]
+    ):
+        score += 2.0
+        reasons.append("role_pattern_change")
+
+    s_code_blocks = source_sig["code_block_count"]
+    t_code_blocks = target_sig["code_block_count"]
+    if (s_code_blocks == 0) != (t_code_blocks == 0):
+        score += 2.0
+        reasons.append("code_density_flip")
+    elif abs(s_code_blocks - t_code_blocks) >= 2:
+        score += 1.0
+        reasons.append("code_density_shift")
+
+    if source_sig["has_file_scope"] != target_sig["has_file_scope"]:
+        score += 2.0
+        reasons.append("file_scope_change")
+
+    s_keywords = source_sig["keyword_groups"]
+    t_keywords = target_sig["keyword_groups"]
+    if s_keywords and t_keywords and s_keywords != t_keywords:
+        score += 1.5
+        reasons.append("keyword_shift")
+
+    request_similarity = _jaccard_similarity(
+        source_sig["request_ngrams"], target_sig["request_ngrams"]
+    )
+    if (request_similarity is not None
+            and min(source_sig["request_len"], target_sig["request_len"]) >= 24
+            and min(len(source_sig["request_ngrams"]), len(target_sig["request_ngrams"])) >= 8
+            and request_similarity < 0.25):
+        score += 1.5
+        reasons.append("request_similarity_drop")
+    elif (request_similarity is not None
+            and min(source_sig["request_len"], target_sig["request_len"]) >= 12
+            and request_similarity < 0.10):
+        score += 2.0
+        reasons.append("short_request_shift")
+
+    response_similarity = _jaccard_similarity(
+        source_sig["response_ngrams"], target_sig["response_ngrams"]
+    )
+    if (response_similarity is not None
+            and min(source_sig["response_len"], target_sig["response_len"]) >= 32
+            and min(len(source_sig["response_ngrams"]), len(target_sig["response_ngrams"])) >= 8
+            and response_similarity < 0.20):
+        score += 1.5
+        reasons.append("response_similarity_drop")
+    elif (response_similarity is not None
+            and min(source_sig["response_len"], target_sig["response_len"]) >= 16
+            and response_similarity < 0.08):
+        score += 2.0
+        reasons.append("short_response_shift")
+
+    window_similarity = _jaccard_similarity(
+        source_sig["window_ngrams"], target_sig["window_ngrams"]
+    )
+    if (window_similarity is not None
+            and min(source_sig["window_len"], target_sig["window_len"]) >= 48
+            and min(len(source_sig["window_ngrams"]), len(target_sig["window_ngrams"])) >= 12
+            and window_similarity < 0.22):
+        score += 1.0
+        reasons.append("window_similarity_drop")
+
+    return score, reasons
+
+
+def _merge_tiny_segments(segments, min_segment_size):
+    if len(segments) <= 1:
+        return segments
+
+    merged = []
+    for segment in segments:
+        if merged and len(segment) < min_segment_size:
+            merged[-1].extend(segment)
+            continue
+        merged.append(list(segment))
+
+    if len(merged) > 1 and len(merged[0]) < min_segment_size:
+        merged[1] = merged[0] + merged[1]
+        merged = merged[1:]
+
+    return merged
+
+
+def _annotate_planner_group(
+    ordered_samples,
+    *,
+    planner_policy=PLANNER_POLICY,
+    boundary_threshold=PLANNER_BOUNDARY_THRESHOLD,
+    min_segment_size=PLANNER_MIN_SEGMENT_SIZE,
+    max_anchor_gap=PLANNER_MAX_ANCHOR_GAP,
+    fallback_boundary_ratio=PLANNER_FALLBACK_BOUNDARY_RATIO,
+):
+    if len(ordered_samples) <= 1:
+        return
+
+    signatures = [_current_turn_signature(sample) for sample in ordered_samples]
+    boundary_scores = [0.0] * len(ordered_samples)
+    boundary_reasons = [[] for _ in ordered_samples]
+    boundary_before = [False] * len(ordered_samples)
+
+    for idx in range(1, len(ordered_samples)):
+        score, reasons = _planner_boundary_score(signatures[idx - 1], signatures[idx])
+        boundary_scores[idx] = round(score, 3)
+        boundary_reasons[idx] = reasons
+        boundary_before[idx] = score >= boundary_threshold
+
+    boundary_count = sum(1 for flag in boundary_before[1:] if flag)
+    boundary_ratio = boundary_count / max(1, len(ordered_samples) - 1)
+    planner_fallback = (
+        len(ordered_samples) >= 8
+        and boundary_count >= 3
+        and boundary_ratio > float(fallback_boundary_ratio)
+    )
+
+    if planner_fallback:
+        first_turn = (ordered_samples[0].get("metadata") or {}).get("turn_index") or 1
+        last_turn = (ordered_samples[-1].get("metadata") or {}).get("turn_index") or len(ordered_samples)
+        for sample in ordered_samples:
+            meta = sample.setdefault("metadata", {})
+            turn_index = meta.get("turn_index") or first_turn
+            meta["planner_policy"] = planner_policy
+            meta["planner_confidence"] = 0.0
+            meta["planner_fallback"] = True
+            meta["segment_id"] = 0
+            meta["segment_turn_start"] = first_turn
+            meta["segment_turn_end"] = last_turn
+            meta["boundary_score"] = 0.0
+            meta["anchor_priority"] = "required" if turn_index in {first_turn, last_turn} else "inherit"
+            meta["anchor_reason"] = "segment_end" if turn_index == last_turn else ("segment_start" if turn_index == first_turn else "inherit")
+            meta["anchor_distance"] = min(abs(turn_index - first_turn), abs(last_turn - turn_index))
+            meta["inherit_group_id"] = "segment-0"
+        return
+
+    segments = []
+    start = 0
+    for idx in range(1, len(ordered_samples)):
+        if boundary_before[idx]:
+            segments.append(list(range(start, idx)))
+            start = idx
+    segments.append(list(range(start, len(ordered_samples))))
+    segments = _merge_tiny_segments(segments, max(1, int(min_segment_size)))
+
+    anchor_positions = set()
+    position_to_segment = {}
+    for segment_id, positions in enumerate(segments):
+        for pos in positions:
+            position_to_segment[pos] = segment_id
+        anchor_positions.add(positions[0])
+        anchor_positions.add(positions[-1])
+        if len(positions) > max(1, int(max_anchor_gap)):
+            anchor_positions.add(positions[len(positions) // 2])
+
+    planner_confidence = round(max(0.0, min(1.0, 1.0 - (boundary_ratio * 0.8))), 3)
+
+    for segment_id, positions in enumerate(segments):
+        start_pos = positions[0]
+        end_pos = positions[-1]
+        start_turn = (ordered_samples[start_pos].get("metadata") or {}).get("turn_index") or (start_pos + 1)
+        end_turn = (ordered_samples[end_pos].get("metadata") or {}).get("turn_index") or (end_pos + 1)
+        segment_anchor_positions = sorted(anchor_positions & set(positions))
+
+        for pos in positions:
+            sample = ordered_samples[pos]
+            meta = sample.setdefault("metadata", {})
+            anchor_distance = min(abs(pos - anchor) for anchor in segment_anchor_positions) if segment_anchor_positions else None
+
+            anchor_reason = "inherit"
+            anchor_priority = "inherit"
+            if pos == start_pos and pos == end_pos:
+                anchor_reason = "segment_end"
+                anchor_priority = "required"
+            elif pos == start_pos:
+                anchor_reason = "segment_boundary" if pos > 0 else "segment_start"
+                anchor_priority = "boundary" if pos > 0 else "required"
+            elif pos == end_pos:
+                anchor_reason = "segment_end"
+                anchor_priority = "required"
+            elif pos in anchor_positions:
+                anchor_reason = "segment_mid"
+                anchor_priority = "required"
+            elif boundary_scores[pos] >= boundary_threshold:
+                anchor_reason = "segment_boundary"
+                anchor_priority = "boundary"
+
+            meta["segment_id"] = segment_id
+            meta["segment_turn_start"] = start_turn
+            meta["segment_turn_end"] = end_turn
+            meta["boundary_score"] = boundary_scores[pos]
+            meta["anchor_priority"] = anchor_priority
+            meta["anchor_reason"] = anchor_reason
+            meta["anchor_distance"] = anchor_distance
+            meta["inherit_group_id"] = f"segment-{segment_id}"
+            meta["planner_policy"] = planner_policy
+            meta["planner_confidence"] = planner_confidence
+            meta["planner_fallback"] = False
+            if boundary_reasons[pos]:
+                meta["boundary_reasons"] = list(boundary_reasons[pos])
+
+
+def annotate_multiturn_planner_metadata(
+    samples,
+    *,
+    planner_policy=PLANNER_POLICY,
+    boundary_threshold=PLANNER_BOUNDARY_THRESHOLD,
+    min_segment_size=PLANNER_MIN_SEGMENT_SIZE,
+    max_anchor_gap=PLANNER_MAX_ANCHOR_GAP,
+    fallback_boundary_ratio=PLANNER_FALLBACK_BOUNDARY_RATIO,
+):
+    """Add deterministic planner metadata to multi-turn samples in place."""
+    groups = {}
+    for idx, sample in enumerate(samples):
+        meta = sample.get("metadata") or {}
+        conversation_key = meta.get("conversation_uid") or meta.get("source_id")
+        total_turns = meta.get("total_turns", 1)
+        if not conversation_key or total_turns <= 1:
+            continue
+        turn_index = meta.get("turn_index", idx + 1)
+        groups.setdefault(conversation_key, []).append((turn_index, sample))
+
+    for members in groups.values():
+        members.sort(key=lambda item: item[0])
+        ordered_samples = [sample for _turn_index, sample in members]
+        _annotate_planner_group(
+            ordered_samples,
+            planner_policy=planner_policy,
+            boundary_threshold=boundary_threshold,
+            min_segment_size=min_segment_size,
+            max_anchor_gap=max_anchor_gap,
+            fallback_boundary_ratio=fallback_boundary_ratio,
+        )
+
+
 def _should_force_label(source_sample, target_sample):
     """Check if target's signals differ enough from source to warrant fresh labeling.
 
@@ -1518,70 +1774,106 @@ def _should_force_label(source_sample, target_sample):
     source_sig = _current_turn_signature(source_sample)
     target_sig = _current_turn_signature(target_sample)
 
-    # Compare last-turn code languages
-    s_langs = source_sig["fence_langs"]
-    t_langs = target_sig["fence_langs"]
-    if s_langs and t_langs and s_langs != t_langs:
-        return True
+    score, _reasons = _planner_boundary_score(source_sig, target_sig)
+    return score >= min(PLANNER_BOUNDARY_THRESHOLD, 2.0)
 
-    # Tool execution pattern changed materially.
-    if source_sig["trajectory_tool_turns"] != target_sig["trajectory_tool_turns"]:
-        return True
-    if source_sig["role_pattern"] != target_sig["role_pattern"] and (
-        source_sig["trajectory_turn_count"] or target_sig["trajectory_turn_count"]
-    ):
-        return True
 
-    # Current-turn evidence moved between plain text and code-heavy.
-    s_code_blocks = source_sig["code_block_count"]
-    t_code_blocks = target_sig["code_block_count"]
-    if (s_code_blocks == 0) != (t_code_blocks == 0):
-        return True
-    if abs(s_code_blocks - t_code_blocks) >= 2:
-        return True
+def _should_force_planner_segment_label(source_sample, target_sample):
+    """Conservative divergence guard retained inside planner segments."""
+    source_sig = _current_turn_signature(source_sample)
+    target_sig = _current_turn_signature(target_sample)
+    _score, reasons = _planner_boundary_score(source_sig, target_sig)
+    high_risk_reasons = {
+        "language_change",
+        "file_scope_change",
+        "code_density_flip",
+    }
+    return bool(high_risk_reasons & set(reasons))
 
-    # File-scope changes usually indicate a different coordination burden.
-    if source_sig["has_file_scope"] != target_sig["has_file_scope"]:
-        return True
 
-    # Query focus changed between materially different keyword groups.
-    s_keywords = source_sig["keyword_groups"]
-    t_keywords = target_sig["keyword_groups"]
-    if s_keywords and t_keywords and s_keywords != t_keywords:
-        return True
+_HARD_PATH_BOUNDARY_REASONS = {
+    "language_change",
+    "file_scope_change",
+    "code_density_flip",
+    "keyword_shift",
+    "short_request_shift",
+    "request_similarity_drop",
+    "short_response_shift",
+    "response_similarity_drop",
+}
 
-    # Semantic drift: similar structure but materially different request/answer.
-    request_similarity = _jaccard_similarity(
-        source_sig["request_ngrams"], target_sig["request_ngrams"]
-    )
-    if (request_similarity is not None
-            and min(source_sig["request_len"], target_sig["request_len"]) >= 24
-            and min(len(source_sig["request_ngrams"]), len(target_sig["request_ngrams"])) >= 8
-            and request_similarity < 0.25):
-        return True
 
-    response_similarity = _jaccard_similarity(
-        source_sig["response_ngrams"], target_sig["response_ngrams"]
-    )
-    if (response_similarity is not None
-            and min(source_sig["response_len"], target_sig["response_len"]) >= 32
-            and min(len(source_sig["response_ngrams"]), len(target_sig["response_ngrams"])) >= 8
-            and response_similarity < 0.20):
-        return True
+def _group_hard_boundary_edges(members, samples):
+    """Return per-edge hard-boundary flags for adjacent samples within one group."""
+    hard_edges = [False] * len(members)
+    if len(members) <= 1:
+        return hard_edges
 
-    window_similarity = _jaccard_similarity(
-        source_sig["window_ngrams"], target_sig["window_ngrams"]
-    )
-    if (window_similarity is not None
-            and min(source_sig["window_len"], target_sig["window_len"]) >= 48
-            and min(len(source_sig["window_ngrams"]), len(target_sig["window_ngrams"])) >= 12
-            and window_similarity < 0.22):
-        return True
+    signatures = [
+        _current_turn_signature(samples[global_idx])
+        for global_idx, _turn_idx in members
+    ]
+    for pos in range(1, len(members)):
+        _score, reasons = _planner_boundary_score(signatures[pos - 1], signatures[pos])
+        hard_edges[pos] = bool(_HARD_PATH_BOUNDARY_REASONS & set(reasons))
+    return hard_edges
 
+
+def _path_has_hard_boundary(hard_edges, left_pos, right_pos):
+    """Check whether any adjacent hop on the path crosses a hard boundary."""
+    lo = min(left_pos, right_pos) + 1
+    hi = max(left_pos, right_pos)
+    for pos in range(lo, hi + 1):
+        if 0 <= pos < len(hard_edges) and hard_edges[pos]:
+            return True
     return False
 
 
-def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, max_gap=8, threshold=12):
+def _choose_inheritance_source(pos_in_group, labeled_positions, hard_edges):
+    """Prefer forward inheritance, but fall back backward when it is the only soft path."""
+    source_pos = None
+    for lp in labeled_positions:
+        if lp > pos_in_group and not _path_has_hard_boundary(hard_edges, pos_in_group, lp):
+            source_pos = lp
+            break
+    if source_pos is not None:
+        return source_pos
+
+    for lp in reversed(labeled_positions):
+        if lp < pos_in_group and not _path_has_hard_boundary(hard_edges, pos_in_group, lp):
+            return lp
+    return None
+
+
+def _legacy_sparse_group_plan(members, label_indices, inherit_map, samples,
+                              full_label_count, gap_multiplier, min_gap, max_gap, threshold):
+    n = len(members)
+    schedule = generate_sparse_schedule(n, full_label_count, gap_multiplier, min_gap, max_gap, threshold)
+    schedule_set = set(schedule)
+    hard_edges = _group_hard_boundary_edges(members, samples)
+
+    labeled_positions = []
+    for pos_in_group, (global_idx, _) in enumerate(members):
+        if pos_in_group in schedule_set:
+            label_indices.add(global_idx)
+            labeled_positions.append(pos_in_group)
+
+    for pos_in_group, (global_idx, _) in enumerate(members):
+        if pos_in_group in schedule_set:
+            continue
+        source_pos = _choose_inheritance_source(pos_in_group, labeled_positions, hard_edges)
+        if source_pos is not None:
+            source_global_idx = members[source_pos][0]
+            inherit_map[global_idx] = source_global_idx
+        else:
+            label_indices.add(global_idx)
+
+
+def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_gap=2, max_gap=8, threshold=12,
+                          planner_enabled=ENABLE_COMPACT_SEMANTIC_PLANNER, planner_metadata_only=False,
+                          planner_policy=PLANNER_POLICY, planner_boundary_threshold=PLANNER_BOUNDARY_THRESHOLD,
+                          planner_min_segment_size=PLANNER_MIN_SEGMENT_SIZE, planner_max_anchor_gap=PLANNER_MAX_ANCHOR_GAP,
+                          planner_fallback_boundary_ratio=PLANNER_FALLBACK_BOUNDARY_RATIO):
     """Apply sparse sampling to multi-turn pyramid slices.
 
     Single-turn samples (no conversation identity or total_turns=1) are always labeled.
@@ -1615,45 +1907,108 @@ def apply_sparse_sampling(samples, full_label_count=8, gap_multiplier=1.3, min_g
             turn_idx = meta.get("turn_index", 1)
             groups.setdefault(conversation_key, []).append((i, turn_idx))
 
+    if planner_enabled:
+        annotate_multiturn_planner_metadata(
+            samples,
+            planner_policy=planner_policy,
+            boundary_threshold=planner_boundary_threshold,
+            min_segment_size=planner_min_segment_size,
+            max_anchor_gap=planner_max_anchor_gap,
+            fallback_boundary_ratio=planner_fallback_boundary_ratio,
+        )
+
     # For each multi-turn group, apply sparse schedule
     for _conversation_key, members in groups.items():
         # Sort by turn_index
         members.sort(key=lambda x: x[1])
         n = len(members)
-        schedule = generate_sparse_schedule(n, full_label_count, gap_multiplier, min_gap, max_gap, threshold)
-        schedule_set = set(schedule)
-
-        # Mark labeled indices
-        labeled_positions = []
-        for pos_in_group, (global_idx, _) in enumerate(members):
-            if pos_in_group in schedule_set:
+        if n <= threshold:
+            for global_idx, _turn_idx in members:
                 label_indices.add(global_idx)
-                labeled_positions.append(pos_in_group)
+            continue
 
-        # Build inherit_map: unlabeled → nearest labeled (forward first, backward fallback)
-        # Signal change detection: if target differs from source, force fresh labeling
-        for pos_in_group, (global_idx, _) in enumerate(members):
-            if pos_in_group in schedule_set:
-                continue
-            # Find next labeled position (forward)
-            source_pos = None
-            for lp in labeled_positions:
-                if lp > pos_in_group:
-                    source_pos = lp
-                    break
-            # Fallback: previous labeled position (backward)
-            if source_pos is None:
-                for lp in reversed(labeled_positions):
-                    if lp < pos_in_group:
-                        source_pos = lp
-                        break
-            if source_pos is not None:
+        planner_ready = planner_enabled and not planner_metadata_only
+        planner_ready = planner_ready and all(
+            (samples[global_idx].get("metadata") or {}).get("planner_policy") == planner_policy
+            for global_idx, _turn_idx in members
+        )
+        planner_ready = planner_ready and not any(
+            (samples[global_idx].get("metadata") or {}).get("planner_fallback")
+            for global_idx, _turn_idx in members
+        )
+
+        if not planner_ready:
+            _legacy_sparse_group_plan(
+                members, label_indices, inherit_map, samples,
+                full_label_count, gap_multiplier, min_gap, max_gap, threshold,
+            )
+            continue
+
+        legacy_group_label_indices = set()
+        legacy_group_inherit_map = {}
+        _legacy_sparse_group_plan(
+            members, legacy_group_label_indices, legacy_group_inherit_map, samples,
+            full_label_count, gap_multiplier, min_gap, max_gap, threshold,
+        )
+
+        planner_group_label_indices = set()
+        planner_group_inherit_map = {}
+        positions_by_segment = {}
+        for pos_in_group, (global_idx, _turn_idx) in enumerate(members):
+            meta = samples[global_idx].get("metadata") or {}
+            segment_id = meta.get("segment_id", 0)
+            positions_by_segment.setdefault(segment_id, []).append(pos_in_group)
+
+        required_positions = set()
+        for positions in positions_by_segment.values():
+            required_positions.add(positions[0])
+            required_positions.add(positions[-1])
+            if len(positions) > max(1, int(planner_max_anchor_gap)):
+                required_positions.add(positions[len(positions) // 2])
+
+        if required_positions:
+            for pos_in_group in sorted(required_positions):
+                planner_group_label_indices.add(members[pos_in_group][0])
+
+        for segment_positions in positions_by_segment.values():
+            labeled_positions = [pos for pos in segment_positions if pos in required_positions]
+            hard_edges = _group_hard_boundary_edges(
+                [members[pos_in_group] for pos_in_group in segment_positions],
+                samples,
+            )
+            for pos_in_group in segment_positions:
+                if pos_in_group in required_positions:
+                    continue
+
+                local_pos = segment_positions.index(pos_in_group)
+                local_labeled_positions = [
+                    segment_positions.index(lp)
+                    for lp in labeled_positions
+                ]
+                source_local_pos = _choose_inheritance_source(
+                    local_pos,
+                    local_labeled_positions,
+                    hard_edges,
+                )
+                source_pos = (
+                    segment_positions[source_local_pos]
+                    if source_local_pos is not None
+                    else None
+                )
+                if source_pos is None:
+                    planner_group_label_indices.add(members[pos_in_group][0])
+                    continue
+
+                global_idx = members[pos_in_group][0]
                 source_global_idx = members[source_pos][0]
-                # Check for signal divergence before inheriting
-                if _should_force_label(samples[source_global_idx], samples[global_idx]):
-                    label_indices.add(global_idx)
-                else:
-                    inherit_map[global_idx] = source_global_idx
+                planner_group_inherit_map[global_idx] = source_global_idx
+
+        if len(planner_group_label_indices) >= len(legacy_group_label_indices):
+            label_indices.update(legacy_group_label_indices)
+            inherit_map.update(legacy_group_inherit_map)
+        else:
+            label_indices.update(planner_group_label_indices)
+            inherit_map.update(planner_group_inherit_map)
 
     return label_indices, inherit_map
 

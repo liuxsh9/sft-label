@@ -14,10 +14,12 @@ uv run sft-label run --input data.json
 uv run sft-label run --input data.json --score
 ```
 
-Use compact prompts for smaller model payloads:
+CLI / launcher runs already default to `prompt_mode=compact` and `rollout_preset=compact_safe`. Useful advanced overrides:
 
 ```bash
-uv run sft-label run --input data.json --score --prompt-mode compact
+uv run sft-label run --input data.json --score --prompt-mode full
+uv run sft-label run --input data.json --score --rollout-preset planner_hybrid
+uv run sft-label run --input data.json --score --rollout-preset baseline_control
 ```
 
 ## 3. Run on a directory
@@ -64,6 +66,7 @@ uv run sft-label regenerate-dashboard --input <run_dir> --open
 ```bash
 uv run sft-label score --input labeled.json
 uv run sft-label score --input labeled.json --tag-stats global_stats.json
+uv run sft-label score --input labeled.json --rollout-preset planner_hybrid
 ```
 
 ## 8. Filter high-value samples

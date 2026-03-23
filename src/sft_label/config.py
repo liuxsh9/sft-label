@@ -77,6 +77,14 @@ SPARSE_GAP_MULTIPLIER = 1.3   # gap between labeled slices grows by this factor
 SPARSE_MIN_GAP = 2            # minimum gap between labeled slices
 SPARSE_MAX_GAP = 8            # maximum gap between labeled slices (bounds inheritance distance)
 SPARSE_THRESHOLD = 12         # slices <= this: label all, no sparse sampling
+ENABLE_COMPACT_SEMANTIC_PLANNER = False
+PLANNER_METADATA_ONLY = True
+PLANNER_POLICY = "compact_semantic_anchor_v1"
+PLANNER_BOUNDARY_THRESHOLD = 3.0
+PLANNER_MIN_SEGMENT_SIZE = 2
+PLANNER_MAX_ANCHOR_GAP = 6
+PLANNER_FALLBACK_BOUNDARY_RATIO = 1.0
+COMPACT_LABELING_REQUEST_BYTES = 24000
 
 # ─── Consistency Rules ──────────────────────────────────
 CONSISTENCY_RULES = [
@@ -226,11 +234,66 @@ FILE_RANKING_KEEP_RATE_THRESHOLDS = (4.0, 5.0, 6.0, 7.0)  # common keep-rate thr
 ENABLE_RATIONALE = False                  # when True, prompt asks for rationale field (~30% more tokens)
 
 # ─── Selective Scoring (optional Pass 2 LLM reduction) ──
-ENABLE_SELECTIVE_SCORING = False          # default off for backward compatibility
+DEFAULT_ROLLOUT_PRESET = "compact_safe"
+ENABLE_SELECTIVE_SCORING = True           # default on for compact-safe multi-turn rollout
 SELECTIVE_SCORING_POLICY = "multiturn_adaptive_v1"
 SELECTIVE_SCORING_MIN_TURNS = 8           # only apply to longer conversations
 SELECTIVE_SCORING_DRIFT_INTERVAL = 4      # score every Nth turn as drift anchor
 SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP = 0.55  # conservative cap for estimated slices
+PLANNER_PASS2_ENABLED = False
+COMPACT_SCORING_REQUEST_BYTES = 24000
+
+ROLLOUT_PRESETS = {
+    "compact_safe": {
+        "description": "Recommended default: compact prompts + legacy sparse planning + selective scoring.",
+        "overrides": {
+            "planner_enabled": False,
+            "planner_metadata_only": True,
+            "planner_pass2_enabled": False,
+            "enable_selective_scoring": True,
+        },
+    },
+    "planner_hybrid": {
+        "description": "Experimental: enable planner-driven sparse planning and planner-aware selective scoring.",
+        "overrides": {
+            "planner_enabled": True,
+            "planner_metadata_only": False,
+            "planner_pass2_enabled": True,
+            "enable_selective_scoring": True,
+        },
+    },
+    "baseline_control": {
+        "description": "Rollback/control preset: disable planner-driven behavior and selective scoring.",
+        "overrides": {
+            "planner_enabled": False,
+            "planner_metadata_only": True,
+            "planner_pass2_enabled": False,
+            "enable_selective_scoring": False,
+        },
+    },
+}
+
+
+def normalize_rollout_preset_name(preset: str | None) -> str:
+    """Normalize rollout preset values to stable internal keys."""
+    if preset is None:
+        return DEFAULT_ROLLOUT_PRESET
+    normalized = str(preset).strip().lower().replace("-", "_")
+    if not normalized:
+        return DEFAULT_ROLLOUT_PRESET
+    if normalized not in ROLLOUT_PRESETS:
+        raise ValueError(f"Unknown rollout preset: {preset}")
+    return normalized
+
+
+def apply_rollout_preset(config, preset: str | None = None) -> str:
+    """Apply one rollout preset onto a PipelineConfig-like object."""
+    resolved = normalize_rollout_preset_name(preset)
+    payload = ROLLOUT_PRESETS[resolved]
+    for key, value in (payload.get("overrides") or {}).items():
+        setattr(config, key, value)
+    setattr(config, "rollout_preset", resolved)
+    return resolved
 
 # ═══════════════════════════════════════════════════════════
 # Trajectory SemHash + ANN Clustering
@@ -327,6 +390,14 @@ class PipelineConfig:
     sparse_min_gap: int = SPARSE_MIN_GAP
     sparse_max_gap: int = SPARSE_MAX_GAP
     sparse_threshold: int = SPARSE_THRESHOLD
+    planner_enabled: bool = ENABLE_COMPACT_SEMANTIC_PLANNER
+    planner_metadata_only: bool = PLANNER_METADATA_ONLY
+    planner_policy: str = PLANNER_POLICY
+    planner_boundary_threshold: float = PLANNER_BOUNDARY_THRESHOLD
+    planner_min_segment_size: int = PLANNER_MIN_SEGMENT_SIZE
+    planner_max_anchor_gap: int = PLANNER_MAX_ANCHOR_GAP
+    planner_fallback_boundary_ratio: float = PLANNER_FALLBACK_BOUNDARY_RATIO
+    compact_labeling_request_bytes: int = COMPACT_LABELING_REQUEST_BYTES
 
     # Extension specs
     extension_spec_paths: list[str] | None = None
@@ -351,11 +422,14 @@ class PipelineConfig:
     enable_selection_stability: bool = ENABLE_SELECTION_STABILITY
     enable_domain_backfill: bool = ENABLE_DOMAIN_BACKFILL
     enable_rationale: bool = ENABLE_RATIONALE
+    rollout_preset: str = DEFAULT_ROLLOUT_PRESET
     enable_selective_scoring: bool = ENABLE_SELECTIVE_SCORING
     selective_scoring_policy: str = SELECTIVE_SCORING_POLICY
     selective_scoring_min_turns: int = SELECTIVE_SCORING_MIN_TURNS
     selective_scoring_drift_interval: int = SELECTIVE_SCORING_DRIFT_INTERVAL
     selective_scoring_estimate_confidence_cap: float = SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP
+    planner_pass2_enabled: bool = PLANNER_PASS2_ENABLED
+    compact_scoring_request_bytes: int = COMPACT_SCORING_REQUEST_BYTES
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
     enable_conversation_v2: bool = ENABLE_CONVERSATION_V2
     conversation_v2_turn_threshold: int = CONV_V2_TURN_THRESHOLD

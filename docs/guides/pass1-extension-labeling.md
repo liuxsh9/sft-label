@@ -282,8 +282,8 @@ Each extension:
 
 ### Compact-mode advisory
 
-1.  Compact mode uses an 8,000-character conversation budget. We do not gate it, but we recommend keeping each extension’s prompt+schema ≤ 2,000 characters so the payload stays comfortable.
-2.  When you pick compact, include a quick summary of the current prompt length and schema size alongside the recommendation so you can adjust before the run.
+1.  The default CLI / launcher compact runtime uses an 8,000-character conversation budget. We do not gate it, but we recommend keeping each extension’s prompt+schema ≤ 2,000 characters so the payload stays comfortable.
+2.  When you stay on the default compact path, include a quick summary of the current prompt length and schema size alongside the recommendation so you can adjust before the run.
 3.  If you are over the suggestion, focus on tightening instructions, reducing option counts, or splitting functionality into a separate extension.
 
 ### Validation checklist

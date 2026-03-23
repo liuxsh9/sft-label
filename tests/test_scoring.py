@@ -56,6 +56,7 @@ from sft_label.scoring import (
     _count_scoring_samples_in_file,
     _count_required_llm_calls_in_file,
     _selection_summary_from_sample,
+    _message_payload_bytes,
 )
 from sft_label.prompts_value import SCORING_SYSTEM, SCORING_SYSTEM_COMPACT, build_scoring_messages
 from sft_label.tools.compare_selection import compare_selection_configs, load_selection_regression_pack
@@ -1394,7 +1395,124 @@ class TestResumeScoringFile:
         assert value is not None
         assert monitor["status"] == "success"
         assert monitor["llm_calls"] == 1
-        assert "estimation" not in value
+
+    def test_score_one_selective_scoring_keeps_planner_boundary_turn_llm_scored(self):
+        from sft_label.scoring import score_one
+        from unittest.mock import patch
+
+        sample = {
+            "id": "mt-boundary",
+            "conversations": [
+                {"from": "human", "value": "request"},
+                {"from": "gpt", "value": "answer"},
+            ],
+            "labels": {
+                "intent": "build",
+                "difficulty": "advanced",
+                "inherited": True,
+            },
+            "metadata": {
+                "source_id": "conv-1",
+                "turn_index": 3,
+                "total_turns": 10,
+                "anchor_priority": "boundary",
+                "anchor_reason": "segment_boundary",
+                "boundary_score": 4.2,
+                "planner_policy": "compact_semantic_anchor_v1",
+            },
+        }
+
+        async def fake_async_llm_call(http_client, messages, model, **kwargs):
+            payload = {
+                "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 6, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "flags": [],
+                "confidence": 0.8,
+            }
+            return payload, json.dumps(payload), {"prompt_tokens": 10, "completion_tokens": 5}
+
+        config = PipelineConfig(
+            sample_max_retries=1,
+            enable_selective_scoring=True,
+            selective_scoring_min_turns=6,
+            selective_scoring_drift_interval=10,
+            planner_metadata_only=False,
+            planner_pass2_enabled=True,
+        )
+        with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+            value, monitor = asyncio.run(
+                score_one(
+                    None,
+                    sample,
+                    "mock-model",
+                    {"score": 5.5},
+                    0,
+                    1,
+                    asyncio.Semaphore(1),
+                    config=config,
+                )
+            )
+
+        assert value is not None
+        assert monitor["status"] == "success"
+        assert monitor["llm_calls"] == 1
+
+    def test_score_one_prompt_excludes_planner_metadata(self):
+        from sft_label.scoring import score_one
+        captured = {}
+
+        sample = {
+            "id": "mt-prompt-safe",
+            "conversations": [
+                {"from": "human", "value": "请修复这个超时问题"},
+                {"from": "gpt", "value": "我先运行测试，再修复问题。"},
+            ],
+            "labels": {
+                "intent": "debug",
+                "difficulty": "advanced",
+                "language": ["python"],
+            },
+            "metadata": {
+                "source_id": "conv-1",
+                "turn_index": 2,
+                "total_turns": 10,
+                "anchor_priority": "boundary",
+                "anchor_reason": "segment_boundary",
+                "planner_policy": "compact_semantic_anchor_v1",
+                "planner_confidence": 0.81,
+            },
+        }
+
+        async def fake_async_llm_call(http_client, messages, model, **kwargs):
+            captured["messages"] = messages
+            payload = {
+                "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+                "quality": {"correctness": 7, "code_quality": 7, "explanation": 6, "completeness": 7, "overall": 7},
+                "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+                "flags": [],
+                "confidence": 0.8,
+            }
+            return payload, json.dumps(payload), {"prompt_tokens": 10, "completion_tokens": 5}
+
+        with patch("sft_label.scoring.async_llm_call", side_effect=fake_async_llm_call):
+            asyncio.run(
+                score_one(
+                    None,
+                    sample,
+                    "mock-model",
+                    {"score": 5.5},
+                    0,
+                    1,
+                    asyncio.Semaphore(1),
+                    config=PipelineConfig(sample_max_retries=1, prompt_mode="compact"),
+                )
+            )
+
+        user_msg = captured["messages"][-1]["content"]
+        assert "planner_policy" not in user_msg
+        assert "anchor_priority" not in user_msg
+        assert "planner_confidence" not in user_msg
 
     def test_directory_jsonl_uses_chunked_pipeline(self, tmp_path):
         from sft_label.scoring import run_scoring
@@ -3247,6 +3365,7 @@ class TestPromptBudgetRegression:
         assert len(SCORING_SYSTEM) <= 8791
         assert len(SCORING_SYSTEM_COMPACT) <= 4598
         assert sum(len(message["content"]) for message in messages) <= 10888
+        assert _message_payload_bytes(messages) <= 24000
 
 
 # ─────────────────────────────────────────────────────────

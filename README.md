@@ -48,6 +48,7 @@ uv run sft-label start
 # default path:
 # - choose "Pass 1 + Pass 2"
 # - keep most prompts at their defaults
+# - runtime defaults to prompt_mode=compact + rollout_preset=compact_safe
 # - auto-publish prompt defaults to **Yes**
 # - finish with dashboard URLs
 ```
@@ -70,6 +71,15 @@ uv run sft-label run --input data.json
 # Pass 1 + Pass 2
 uv run sft-label run --input data.json --score
 
+# Pass 1 + Pass 2 with the experimental multi-turn preset
+uv run sft-label run --input data.json --score --rollout-preset planner_hybrid
+
+# Pass 1 + Pass 2 with rollback/control behavior
+uv run sft-label run --input data.json --score --rollout-preset baseline_control
+
+# Use full prompts only when your endpoint can tolerate larger payloads
+uv run sft-label run --input data.json --score --prompt-mode full
+
 # Score an existing labeled file
 uv run sft-label score --input labeled.json
 ```
@@ -90,7 +100,11 @@ flowchart LR
 In the common case:
 
 - choose **Pass 1 + Pass 2**
-- keep most prompts unchanged (concurrency defaults to 200 with presets 25/50/150/200/300 plus a custom value, and the RPS max limit prompt also accepts a custom entry)
+- keep most prompts unchanged
+- runtime defaults to **prompt_mode=compact** and **rollout_preset=compact_safe**
+- `compact_safe` is the recommended production preset for size-limited endpoints; `planner_hybrid` is experimental; `baseline_control` is the rollback/control preset
+- the launcher's TTY switch panel now exposes a dedicated **Multi-turn rollout preset** selector before prompt mode
+- concurrency defaults to 200 with presets 25/50/150/200/300 plus a custom value, and the RPS max limit prompt also accepts a custom entry
 - auto-publish prompts default to **Yes**
 - if no dashboard service exists yet, `start` can initialize one, start it, and print stable dashboard URLs
 - pick one dashboard exposure mode once:
@@ -101,11 +115,11 @@ In the common case:
 What `start` does:
 
 1. **Lets you choose a workflow**: Pass 1 + Pass 2 is the default recommendation, and the Pipeline section now also surfaces Smart resume near the top for interrupted runs before the rest of the Pass 1 / scoring / semantic / filtering / maintenance / export / dashboard-service workflows.
-2. **Asks only for the required inputs**: input path, optional output path, mode, prompt mode, concurrency, and a few workflow-specific options (including `--adaptive-runtime` / `--recovery-sweep` toggles when relevant).
+2. **Asks only for the required inputs**: input path, optional output path, mode, multi-turn rollout preset, prompt mode, concurrency, and a few workflow-specific options (including `--adaptive-runtime` / `--recovery-sweep` toggles when relevant).
 3. **Builds the exact CLI command for you** and shows a launch summary before execution.
 4. **Can finish the run with URLs** by auto-publishing dashboards to your configured service.
 
-After the launcher captures your dashboard service/auto-publish choices and any needed exposure details, it prints a richer execution overview—command, concurrency/RPS caps, dashboard status, and auto-publish decisions—before asking whether to execute.
+After the launcher captures your dashboard service/auto-publish choices and any needed exposure details, it prints a richer execution overview—command, rollout preset, concurrency/RPS caps, dashboard status, and auto-publish decisions—before asking whether to execute.
 
 Two dashboard-service quality-of-life details:
 
