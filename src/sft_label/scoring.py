@@ -240,7 +240,9 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
             except OSError:
                 continue
             if is_failure_artifact:
-                if size > 0 and not _is_usable_pass2_jsonl_artifact(candidate):
+                if size <= 0:
+                    continue
+                if not _is_usable_pass2_jsonl_artifact(candidate):
                     continue
             else:
                 if size <= 0:
@@ -253,19 +255,23 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
 
         if chosen_path is None:
             if is_failure_artifact:
+                has_empty_marker = False
                 for path in ordered_paths:
-                    if path.exists():
-                        path.unlink()
+                    if not path.exists():
+                        continue
+                    try:
+                        if int(path.stat().st_size) <= 0:
+                            has_empty_marker = True
+                    except OSError:
+                        continue
+                if has_empty_marker:
+                    for path in ordered_paths:
+                        if path.exists():
+                            path.unlink()
             else:
                 for path in (working_path, checkpoint_path):
                     if path.exists():
                         path.unlink()
-            continue
-
-        if is_failure_artifact and chosen_size == 0:
-            for path in ordered_paths:
-                if path.exists():
-                    path.unlink()
             continue
 
         if chosen_path != final_path:
@@ -4293,6 +4299,12 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 )
                 if len(score_summaries) == expected_total:
                     for failure_name in ("failed_value.jsonl", "score_failures.jsonl"):
+                        for stale_path in (
+                            _pass2_checkpoint_path(output_dir, failure_name),
+                            Path(output_dir) / failure_name,
+                        ):
+                            if stale_path.exists():
+                                stale_path.unlink()
                         with open(_pass2_working_path(output_dir, failure_name), "w", encoding="utf-8"):
                             pass
                 return _finalize_chunked_outputs(
@@ -4507,28 +4519,41 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             checkpoint_path = _pass2_checkpoint_path(output_dir, name)
             final_path = output_dir / name
             source_path = None
-            if working_path.exists():
-                if _is_usable_pass2_jsonl_artifact(
-                    working_path,
-                    allow_empty=name in failure_names,
-                ):
-                    source_path = working_path
-                else:
+            if name in failure_names:
+                ordered_paths = (working_path, checkpoint_path, final_path)
+                empty_marker_path = None
+                for candidate in ordered_paths:
+                    if not candidate.exists():
+                        continue
                     try:
-                        if working_path.stat().st_size <= 0:
-                            working_path.unlink()
+                        size = int(candidate.stat().st_size)
                     except OSError:
-                        pass
-            allow_empty = name in failure_names
-            checkpoint_usable = _is_usable_pass2_jsonl_artifact(checkpoint_path, allow_empty=allow_empty)
-            final_usable = _is_usable_pass2_jsonl_artifact(
-                final_path,
-                allow_empty=allow_empty,
-            )
-            if source_path is None and checkpoint_usable:
-                source_path = checkpoint_path
-            if source_path is None and final_usable:
-                source_path = final_path
+                        continue
+                    if size <= 0:
+                        if empty_marker_path is None:
+                            empty_marker_path = candidate
+                        continue
+                    if _is_usable_pass2_jsonl_artifact(candidate):
+                        source_path = candidate
+                        break
+                if source_path is None:
+                    source_path = empty_marker_path
+            else:
+                if working_path.exists():
+                    if _is_usable_pass2_jsonl_artifact(working_path):
+                        source_path = working_path
+                    else:
+                        try:
+                            if working_path.stat().st_size <= 0:
+                                working_path.unlink()
+                        except OSError:
+                            pass
+                checkpoint_usable = _is_usable_pass2_jsonl_artifact(checkpoint_path)
+                final_usable = _is_usable_pass2_jsonl_artifact(final_path)
+                if source_path is None and checkpoint_usable:
+                    source_path = checkpoint_path
+                if source_path is None and final_usable:
+                    source_path = final_path
             if source_path is not None:
                 if source_path != checkpoint_path:
                     shutil.copyfile(source_path, checkpoint_path)

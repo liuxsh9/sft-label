@@ -308,6 +308,67 @@ def test_finalize_ignores_corrupt_working_failure_artifact_and_uses_checkpoint(t
     assert _read_jsonl(tmp_path / "score_failures.jsonl") == checkpoint_failures
 
 
+def test_finalize_empty_working_failure_marker_does_not_erase_valid_checkpoint(tmp_path):
+    checkpoint_failed = [dict(_sample("sample-checkpoint"), value=None)]
+    checkpoint_failures = [{"sample_id": "sample-checkpoint", "status": "checkpoint-failure"}]
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "failed_value.jsonl"), checkpoint_failed)
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "score_failures.jsonl"), checkpoint_failures)
+    _pass2_working_path(tmp_path, "failed_value.jsonl").write_text("", encoding="utf-8")
+    _pass2_working_path(tmp_path, "score_failures.jsonl").write_text("", encoding="utf-8")
+
+    _finalize_pass2_working_files(tmp_path)
+
+    assert _read_jsonl(tmp_path / "failed_value.jsonl") == checkpoint_failed
+    assert _read_jsonl(tmp_path / "score_failures.jsonl") == checkpoint_failures
+
+
+def test_resume_setup_empty_higher_tier_failure_marker_keeps_lower_tier_failures(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    samples = [_sample("sample-0"), _sample("sample-1")]
+    _write_jsonl(labeled_path, samples)
+
+    checkpoint_failed_rows = [dict(samples[0], value=None)]
+    checkpoint_failure_rows = [{"sample_id": samples[0]["id"], "status": "checkpoint-failure"}]
+    final_failed_rows = [dict(samples[1], value=None)]
+    final_failure_rows = [{"sample_id": samples[1]["id"], "status": "final-failure"}]
+
+    # empty working should not beat non-empty checkpoint
+    _pass2_working_path(tmp_path, "score_failures.jsonl").write_text("", encoding="utf-8")
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "score_failures.jsonl"), checkpoint_failure_rows)
+
+    # empty checkpoint should not beat non-empty final
+    _pass2_checkpoint_path(tmp_path, "failed_value.jsonl").write_text("", encoding="utf-8")
+    _write_jsonl(tmp_path / "failed_value.jsonl", final_failed_rows)
+
+    # Provide minimal scored/monitor artifacts to reach resume setup path.
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), [{**samples[0], "value": _value_payload(score=8.0, rarity_score=5.0, confidence=0.9)}])
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"), [_monitor(samples[0]["id"])])
+
+    with patch("sft_label.scoring._reset_pass2_working_files", side_effect=RuntimeError("stop-after-resume-setup")):
+        try:
+            asyncio.run(
+                _run_scoring_file_chunked(
+                    labeled_path,
+                    tmp_path,
+                    None,
+                    0,
+                    _quiet_chunked_config(enable_stage_recovery_sweep=False),
+                    resume=True,
+                    generate_dashboard=False,
+                    show_progress=False,
+                    print_summary=False,
+                    quiet=True,
+                )
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "stop-after-resume-setup"
+        else:
+            raise AssertionError("Expected resume setup interruption")
+
+    assert _read_jsonl(_pass2_checkpoint_path(tmp_path, "score_failures.jsonl")) == checkpoint_failure_rows
+    assert _read_jsonl(_pass2_checkpoint_path(tmp_path, "failed_value.jsonl")) == final_failed_rows
+
+
 def test_resume_setup_preserves_checkpoint_over_final_when_no_working_exists(tmp_path):
     labeled_path = tmp_path / "labeled.jsonl"
     samples = [_sample(f"sample-{idx}") for idx in range(2)]
