@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from sft_label.config import PipelineConfig
 from sft_label.scoring import (
+    _finalize_pass2_working_files,
     _pass2_checkpoint_path,
     _pass2_working_path,
     _resolve_pass2_resume_path,
@@ -285,6 +286,26 @@ def test_resume_fastpath_rejects_trailing_corrupt_working_and_uses_checkpoint(tm
 
     final_scored_rows = _read_jsonl(tmp_path / "scored.jsonl")
     assert [row["value"]["value_score"] for row in final_scored_rows] == [8.2]
+
+
+def test_finalize_ignores_corrupt_working_failure_artifact_and_uses_checkpoint(tmp_path):
+    checkpoint_failed = [dict(_sample("sample-checkpoint"), value=None)]
+    checkpoint_failures = [{"sample_id": "sample-checkpoint", "status": "checkpoint-failure"}]
+    final_failed = [dict(_sample("sample-final"), value=None)]
+    final_failures = [{"sample_id": "sample-final", "status": "final-failure"}]
+
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "failed_value.jsonl"), checkpoint_failed)
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "score_failures.jsonl"), checkpoint_failures)
+    _write_jsonl(tmp_path / "failed_value.jsonl", final_failed)
+    _write_jsonl(tmp_path / "score_failures.jsonl", final_failures)
+
+    _pass2_working_path(tmp_path, "failed_value.jsonl").write_text('{"id":"broken-failure"', encoding="utf-8")
+    _pass2_working_path(tmp_path, "score_failures.jsonl").write_text('{"sample_id":"broken-failure"', encoding="utf-8")
+
+    _finalize_pass2_working_files(tmp_path)
+
+    assert _read_jsonl(tmp_path / "failed_value.jsonl") == checkpoint_failed
+    assert _read_jsonl(tmp_path / "score_failures.jsonl") == checkpoint_failures
 
 
 def test_resume_setup_preserves_checkpoint_over_final_when_no_working_exists(tmp_path):

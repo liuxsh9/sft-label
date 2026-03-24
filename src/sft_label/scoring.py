@@ -239,12 +239,14 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
                 size = int(candidate.stat().st_size)
             except OSError:
                 continue
-            if not is_failure_artifact and size <= 0:
-                continue
-            if not is_failure_artifact and not _is_usable_pass2_jsonl_artifact(
-                candidate,
-            ):
-                continue
+            if is_failure_artifact:
+                if size > 0 and not _is_usable_pass2_jsonl_artifact(candidate):
+                    continue
+            else:
+                if size <= 0:
+                    continue
+                if not _is_usable_pass2_jsonl_artifact(candidate):
+                    continue
             chosen_path = candidate
             chosen_size = size
             break
