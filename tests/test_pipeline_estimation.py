@@ -2,9 +2,12 @@ import json
 import random
 from pathlib import Path
 
+import pytest
+
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
     RuntimeEtaEstimator,
+    _write_checkpoint,
     discover_input_files,
     estimate_directory_workload,
 )
@@ -85,3 +88,33 @@ def test_discover_input_files_ignores_macos_sidecars(tmp_path):
     files = [(a, r) for a, r in discover_input_files(tmp_path) if r is not None]
 
     assert [path.name for path, _ in files] == ["a.json"]
+
+
+def test_write_checkpoint_keeps_existing_json_when_dump_fails(tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    original = {
+        "status": "in_progress",
+        "completed": ["a.jsonl"],
+        "failed": {},
+        "total_files": 2,
+    }
+    checkpoint_path.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _broken_dump(payload, fp, *, ensure_ascii=False, indent=2):
+        fp.write("{")
+        raise RuntimeError("simulated write interruption")
+
+    monkeypatch.setattr("sft_label.pipeline.json.dump", _broken_dump)
+
+    with pytest.raises(RuntimeError, match="simulated write interruption"):
+        _write_checkpoint(
+            checkpoint_path,
+            {
+                "status": "done",
+                "completed": ["a.jsonl", "b.jsonl"],
+                "failed": {},
+                "total_files": 2,
+            },
+        )
+
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == original

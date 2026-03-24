@@ -28,6 +28,7 @@ from sft_label.tools.recompute import (
     recompute_value_stats_from_scored,
     run_recompute,
     run_refresh_rarity,
+    run_complete_postprocess,
     run_regenerate_dashboard,
     _build_inherit_map,
     _synthesize_monitor,
@@ -1337,3 +1338,81 @@ class TestRegenerateDashboard:
         assert expected_dir.is_dir()
         assert all(Path(path).parent == expected_dir for path in map(Path, generated))
         assert len(list(expected_dir.glob("dashboard_scoring*.html"))) >= 1
+
+
+class TestCompletePostprocess:
+    def _setup_deferred_pass2_run(self, tmp_path: Path) -> Path:
+        run_dir = tmp_path / "dataset_labeled_20260324_100000"
+        batch_a = run_dir / "batch_a"
+        batch_b = run_dir / "batch_b"
+        batch_a.mkdir(parents=True)
+        batch_b.mkdir(parents=True)
+
+        samples_a = _make_multiturn_scored_samples("conv-a", n_turns=2)
+        samples_b = _make_multiturn_scored_samples("conv-b", n_turns=2)
+
+        def _write_jsonl(path: Path, rows: list[dict]) -> None:
+            path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+
+        _write_jsonl(batch_a / "scored.jsonl", samples_a)
+        _write_jsonl(batch_b / "scored.jsonl", samples_b)
+
+        stats_a = recompute_value_stats_from_scored(samples_a)
+        stats_a["input_file"] = str(run_dir / "batch_a" / "labeled.jsonl")
+        stats_a["postprocess"] = {
+            "conversation_scores": {"status": "deferred", "reason": "samples=2"},
+            "dashboard": {"status": "deferred", "reason": "samples=2"},
+        }
+        (batch_a / "stats_scoring.json").write_text(json.dumps(stats_a), encoding="utf-8")
+
+        stats_b = recompute_value_stats_from_scored(samples_b)
+        stats_b["input_file"] = str(run_dir / "batch_b" / "labeled.jsonl")
+        stats_b["postprocess"] = {
+            "conversation_scores": {"status": "deferred", "reason": "samples=2"},
+            "dashboard": {"status": "deferred", "reason": "samples=2"},
+        }
+        (batch_b / "stats_scoring.json").write_text(json.dumps(stats_b), encoding="utf-8")
+
+        summary = {
+            "total_scored": stats_a["total_scored"] + stats_b["total_scored"],
+            "files_processed": 2,
+            "postprocess": {
+                "conversation_scores": {"status": "deferred", "reason": "samples=4"},
+                "dashboard": {"status": "deferred", "reason": "samples=4"},
+            },
+        }
+        (run_dir / "summary_stats_scoring.json").write_text(json.dumps(summary), encoding="utf-8")
+        return run_dir
+
+    def test_complete_postprocess_generates_global_dashboard_and_conversations(self, tmp_path):
+        run_dir = self._setup_deferred_pass2_run(tmp_path)
+
+        result = run_complete_postprocess(str(run_dir), scope="global")
+
+        summary = json.loads((run_dir / "summary_stats_scoring.json").read_text(encoding="utf-8"))
+        assert summary["postprocess"]["conversation_scores"]["status"] == "completed"
+        assert summary["postprocess"]["dashboard"]["status"] == "completed"
+        assert (run_dir / "conversation_scores.json").exists()
+        assert (run_dir / "dashboards" / f"dashboard_scoring_{run_dir.name}.html").exists()
+        assert (run_dir / "batch_a" / "conversation_scores.json").exists()
+        batch_a_stats = json.loads((run_dir / "batch_a" / "stats_scoring.json").read_text(encoding="utf-8"))
+        assert batch_a_stats["postprocess"]["conversation_scores"]["status"] == "completed"
+        assert batch_a_stats["postprocess"]["dashboard"]["status"] == "deferred"
+        assert result["scope"] == "global"
+        assert result["files_processed"] == 2
+
+    def test_complete_postprocess_all_also_generates_per_file_dashboards(self, tmp_path):
+        run_dir = self._setup_deferred_pass2_run(tmp_path)
+
+        result = run_complete_postprocess(str(run_dir), scope="all")
+
+        batch_a_stats = json.loads((run_dir / "batch_a" / "stats_scoring.json").read_text(encoding="utf-8"))
+        batch_b_stats = json.loads((run_dir / "batch_b" / "stats_scoring.json").read_text(encoding="utf-8"))
+        assert batch_a_stats["postprocess"]["dashboard"]["status"] == "completed"
+        assert batch_b_stats["postprocess"]["dashboard"]["status"] == "completed"
+        assert (run_dir / "batch_a" / "dashboards" / "dashboard_scoring.html").exists()
+        assert (run_dir / "batch_b" / "dashboards" / "dashboard_scoring.html").exists()
+        assert len(result["generated_dashboards"]) >= 3

@@ -67,7 +67,9 @@ async def test_pass1_chunked_recovery_sweep_recovers_infra_failure(tmp_path):
 
     calls: list[str] = []
 
-    async def fake_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True, config=None, rate_limiter=None):
+    async def fake_label_one(http_client, sample, model, sample_idx, total, sem,
+                             enable_arbitration=True, config=None, rate_limiter=None,
+                             llm_progress_cb=None, progress_event_cb=None):
         # First attempt fails with retryable infra; sweep re-calls and succeeds.
         calls.append(sample.get("id", ""))
         if len(calls) == 1:

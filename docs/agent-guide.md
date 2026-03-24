@@ -140,6 +140,8 @@ uv run sft-label filter --input scored.json --conv-value-min 7 --peak-complexity
 uv run sft-label recompute-stats --input <run_dir>
 uv run sft-label recompute-stats --input scored.json --pass 2
 uv run sft-label regenerate-dashboard --input <run_dir> --pass 1
+uv run sft-label complete-postprocess --input <run_dir>
+uv run sft-label complete-postprocess --input <run_dir> --scope all
 
 # Review/export/debug helpers
 uv run sft-label export-review --input <run_dir_or_json>

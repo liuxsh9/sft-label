@@ -493,7 +493,7 @@ async def test_run_single_jsonl_writes_mirrored_inline_dataset(tmp_path):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         turn_index = (sample.get("metadata") or {}).get("turn_index", 1)
         return sample_idx, _full_labels(f"turn-{turn_index}"), _monitor()
 
@@ -549,7 +549,7 @@ async def test_run_single_jsonl_chunked_preserves_original_row_order(tmp_path):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         user_text = next(
             turn["value"] for turn in sample["conversations"] if turn["from"] == "human"
         )
@@ -605,7 +605,7 @@ async def test_run_directory_jsonl_mirrors_source_tree(tmp_path):
     )
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         turn_index = (sample.get("metadata") or {}).get("turn_index", 1)
         return sample_idx, _full_labels(f"turn-{turn_index}"), _monitor()
 
@@ -682,7 +682,7 @@ async def test_incremental_run_preserves_line_count_and_skips_completed_rows(tmp
     called = []
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         called.append(sample.get("id"))
         return sample_idx, _full_labels("fresh"), _monitor()
 
@@ -777,7 +777,7 @@ async def test_migrate_run_copies_matching_rows_and_marks_provenance(tmp_path):
     called = []
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         called.append(sample.get("id"))
         return sample_idx, _full_labels("new"), _monitor()
 
@@ -843,7 +843,7 @@ async def test_directory_run_bounds_inflight_submission_by_watermark(tmp_path):
         return task
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         await asyncio.sleep(0.01)
         return sample_idx, _full_labels("bounded"), _monitor()
 
@@ -1062,7 +1062,7 @@ async def test_directory_large_jsonl_chunked_smoke_preserves_full_row_count(tmp_
     )
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         return sample_idx, _full_labels(f"intent-{sample_idx}"), _monitor()
 
     with patch("sft_label.pipeline.label_one", side_effect=mock_label_one):
@@ -1110,7 +1110,7 @@ async def test_pass1_writes_conversation_stats_artifact_for_inline_jsonl(tmp_pat
     )
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         turn_index = (sample.get("metadata") or {}).get("turn_index", 1)
         return sample_idx, _full_labels(f"turn-{turn_index}"), _monitor()
 
@@ -1200,7 +1200,7 @@ async def test_pass1_conversation_stats_sidecar_failure_does_not_abort_run(tmp_p
     )
 
     async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                             config=None, rate_limiter=None):
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
         return sample_idx, _full_labels("turn-1"), _monitor()
 
     with patch("sft_label.pipeline.label_one", side_effect=mock_label_one), \

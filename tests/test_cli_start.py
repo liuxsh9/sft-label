@@ -234,6 +234,12 @@ def test_parser_accepts_maintenance_workers():
     )
     assert regen_args.workers == 4
 
+    complete_args = parser.parse_args(
+        ["complete-postprocess", "--input", "run_dir", "--workers", "6", "--scope", "all"]
+    )
+    assert complete_args.workers == 6
+    assert complete_args.scope == "all"
+
 
 def test_parser_accepts_analyze_unmapped_flags():
     parser = build_parser()

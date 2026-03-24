@@ -16,6 +16,7 @@ import copy
 import json
 import math
 import os
+import shutil
 import time
 import asyncio
 import random
@@ -42,6 +43,8 @@ from sft_label.config import (
     SELECTIVE_SCORING_DRIFT_INTERVAL, SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP,
     PLANNER_PASS2_ENABLED, PLANNER_POLICY, PLANNER_BOUNDARY_THRESHOLD,
     COMPACT_SCORING_REQUEST_BYTES,
+    PASS2_HEAVY_POSTPROCESS_MODE, PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD,
+    PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD,
     FILE_RANKING_KEEP_RATE_THRESHOLD, FILE_RANKING_KEEP_RATE_THRESHOLDS,
     PipelineConfig,
 )
@@ -75,8 +78,27 @@ from sft_label.inline_scoring import (
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
 from sft_label.label_extensions_stats import aggregate_extension_stats
+from sft_label.http_limits import resolve_httpx_connection_limits
 from sft_label.progress_display import create_pipeline_progress
 from sft_label.score_confidence import apply_score_confidence, score_confidence
+
+
+def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits:
+    max_connections, max_keepalive, capped = resolve_httpx_connection_limits(
+        requested_concurrency=concurrency,
+        extra_connections=10,
+    )
+    if capped:
+        pprint(
+            "  [warn] lowering scoring HTTP connection pool to "
+            f"max_connections={max_connections}, keepalive={max_keepalive} "
+            f"for requested concurrency={concurrency} to avoid FD exhaustion"
+        )
+    return httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive,
+    )
+
 
 try:
     from sft_label.llm_runtime import (
@@ -95,6 +117,8 @@ except Exception:  # pragma: no cover - runtime module lands in parallel task
 
 
 DIRECTORY_JSON_STREAMING_THRESHOLD_BYTES = 64 * 1024 * 1024
+PASS2_CHECKPOINT_SUFFIX = ".checkpoint"
+PASS2_WORKING_SUFFIX = ".next"
 
 
 # ─────────────────────────────────────────────────────────
@@ -120,6 +144,114 @@ def _cfg_number(config, key, default):
     if isinstance(value, (int, float)):
         return value
     return default
+
+
+def _pass2_checkpoint_path(output_dir: Path, filename: str) -> Path:
+    path = Path(output_dir) / filename
+    return path.with_name(f"{path.stem}{PASS2_CHECKPOINT_SUFFIX}{path.suffix}")
+
+
+def _pass2_working_path(output_dir: Path, filename: str) -> Path:
+    path = Path(output_dir) / filename
+    return path.with_name(f".{path.name}{PASS2_WORKING_SUFFIX}")
+
+
+def _reset_pass2_working_files(output_dir: Path) -> None:
+    for name in (
+        "scored.jsonl",
+        "monitor_value.jsonl",
+        "failed_value.jsonl",
+        "score_failures.jsonl",
+    ):
+        path = _pass2_working_path(output_dir, name)
+        if path.exists():
+            path.unlink()
+
+
+def _clear_pass2_checkpoint_files(output_dir: Path) -> None:
+    for name in (
+        "scored.jsonl",
+        "monitor_value.jsonl",
+        "failed_value.jsonl",
+        "score_failures.jsonl",
+    ):
+        path = _pass2_checkpoint_path(output_dir, name)
+        if path.exists():
+            path.unlink()
+
+
+def _finalize_pass2_working_files(output_dir: Path) -> None:
+    final_names = (
+        "scored.jsonl",
+        "monitor_value.jsonl",
+        "failed_value.jsonl",
+        "score_failures.jsonl",
+    )
+    for name in final_names:
+        working_path = _pass2_working_path(output_dir, name)
+        final_path = Path(output_dir) / name
+        if working_path.exists():
+            if working_path.stat().st_size == 0 and name in {"failed_value.jsonl", "score_failures.jsonl"}:
+                working_path.unlink()
+                if final_path.exists():
+                    final_path.unlink()
+                continue
+            os.replace(working_path, final_path)
+        elif name in {"failed_value.jsonl", "score_failures.jsonl"} and final_path.exists():
+            final_path.unlink()
+    _clear_pass2_checkpoint_files(output_dir)
+
+
+def _postprocess_status(status: str, reason: str | None = None, **extra):
+    payload = {"status": status}
+    if reason:
+        payload["reason"] = reason
+    payload.update(extra)
+    return payload
+
+
+def _resolve_pass2_postprocess_policy(*, total_samples: int, scored_path: Path | None, config=None):
+    mode = str(getattr(config, "pass2_heavy_postprocess_mode", PASS2_HEAVY_POSTPROCESS_MODE) or "auto").strip().lower()
+    sample_threshold = int(
+        getattr(config, "pass2_heavy_postprocess_sample_threshold", PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD)
+        or PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD
+    )
+    byte_threshold = int(
+        getattr(config, "pass2_heavy_postprocess_file_bytes_threshold", PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD)
+        or PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD
+    )
+    file_bytes = 0
+    if scored_path is not None and Path(scored_path).exists():
+        try:
+            file_bytes = int(Path(scored_path).stat().st_size)
+        except OSError:
+            file_bytes = 0
+    reasons = []
+    if total_samples >= max(sample_threshold, 1):
+        reasons.append(f"samples={total_samples}>={sample_threshold}")
+    if file_bytes >= max(byte_threshold, 1):
+        reasons.append(f"scored_bytes={file_bytes}>={byte_threshold}")
+
+    defer = False
+    if mode == "defer":
+        defer = True
+        if not reasons:
+            reasons.append("mode=defer")
+    elif mode == "always":
+        defer = False
+    else:
+        defer = bool(reasons)
+
+    reason = ", ".join(reasons) if reasons else None
+    status = "deferred" if defer else "pending"
+    return {
+        "defer": defer,
+        "reason": reason,
+        "file_bytes": file_bytes,
+        "sample_threshold": sample_threshold,
+        "byte_threshold": byte_threshold,
+        "status": status,
+    }
 
 
 def _instantiate_runtime(config=None, *, concurrency=1) -> AdaptiveLLMRuntime | None:
@@ -382,7 +514,7 @@ def _classify_pass2_attempt(
         return "ok", False, outcome
     if outcome is not None and retryable_infra:
         if outcome.classification == OutcomeClass.ABNORMAL_RESPONSE:
-            return "abnormal_response", True, outcome
+            return "abnormal_response", False, outcome
         if outcome.classification == OutcomeClass.TIMEOUT:
             return "timeout", True, outcome
         if outcome.classification in (OutcomeClass.OVERLOAD, OutcomeClass.SERVER_ERROR):
@@ -413,7 +545,6 @@ def _should_recovery_retry(monitor: dict | None) -> bool:
         "infra_retryable_error",
         "timeout",
         "overload",
-        "abnormal_response",
         "unknown_error",
     }
 
@@ -563,6 +694,15 @@ def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Pat
     return summaries, monitor_totals
 
 
+def _count_nonempty_jsonl_lines(path: Path) -> int:
+    count = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
 async def _run_pass2_recovery_sweep_chunked(
     *,
     output_dir: Path,
@@ -573,9 +713,9 @@ async def _run_pass2_recovery_sweep_chunked(
     if not getattr(config, "enable_stage_recovery_sweep", True):
         return {"enabled": False, "attempted": 0, "recovered": 0}
 
-    scored_path = Path(output_dir) / "scored.jsonl"
-    monitor_path = Path(output_dir) / "monitor_value.jsonl"
-    if not scored_path.exists() or not monitor_path.exists():
+    scored_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+    monitor_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl")
+    if scored_path is None or monitor_path is None or not scored_path.exists() or not monitor_path.exists():
         return {"enabled": True, "attempted": 0, "recovered": 0}
 
     retry_items: list[tuple[int, dict]] = []
@@ -616,13 +756,11 @@ async def _run_pass2_recovery_sweep_chunked(
 
         recovered_map: dict[int, tuple[dict, dict]] = {}
 
+        client_limits = _build_http_client_limits(sweep_config.scoring_concurrency)
         async with httpx.AsyncClient(
             proxy=None,
             timeout=sweep_config.request_timeout,
-            limits=httpx.Limits(
-                max_connections=sweep_config.scoring_concurrency + 10,
-                max_keepalive_connections=sweep_config.scoring_concurrency,
-            ),
+            limits=client_limits,
         ) as client:
 
             async def _retry_one(idx: int, sample: dict):
@@ -745,6 +883,157 @@ def _write_json_atomic(path, payload):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, path)
+
+
+def _write_pass2_stats(output_dir: Path, stats: dict) -> Path:
+    stats_path = Path(output_dir) / PASS2_STATS_FILE
+    _write_json_atomic(stats_path, {k: v for k, v in stats.items() if k != "_raw_scores"})
+    return stats_path
+
+
+def _finalize_chunked_outputs(
+    *,
+    output_dir: Path,
+    scored_path: Path,
+    score_summaries,
+    monitor_totals,
+    total: int,
+    elapsed: float,
+    config,
+    file_label,
+    input_path,
+    stats_source,
+    total_stats_samples,
+    combo_mode,
+    rarity_mode,
+    generate_dashboard,
+    quiet,
+    rate_limiter,
+    runtime,
+    sweep,
+    print_summary,
+):
+    selection_results = compute_selection_scores_from_summaries(score_summaries, config=config)
+    for summary, sel in zip(score_summaries, selection_results):
+        summary["selection_score"] = sel["selection_score"]
+        summary["intra_class_rank"] = sel["intra_class_rank"]
+
+    scored_tmp = Path(output_dir) / "scored.jsonl.tmp"
+    scored_idx = 0
+    with open(scored_path, "r", encoding="utf-8") as fin, open(scored_tmp, "w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            if sample.get("value"):
+                if scored_idx < len(selection_results):
+                    sample["value"]["selection_score"] = selection_results[scored_idx]["selection_score"]
+                    sample["value"]["intra_class_rank"] = selection_results[scored_idx]["intra_class_rank"]
+                    apply_v2_scores([sample], config=config)
+                    scored_idx += 1
+            fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    scored_tmp.rename(scored_path)
+
+    _finalize_pass2_working_files(output_dir)
+    scored_path = Path(output_dir) / "scored.jsonl"
+
+    stats = _compute_value_stats_from_summaries(score_summaries, monitor_totals, total)
+    stats["elapsed_seconds"] = round(elapsed, 1)
+    stats["model"] = config.scoring_model
+    stats["input_file"] = str(input_path)
+    stats["file"] = file_label or stats.get("file") or Path(input_path).name
+    if rate_limiter:
+        stats["http_request_stats"] = rate_limiter.stats.to_dict()
+    if runtime is not None:
+        stats["adaptive_runtime"] = {"enabled": True, "final": _runtime_snapshot(runtime)}
+    if sweep:
+        stats["recovery_sweep"] = sweep
+    stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
+    stats["rarity_config"] = {
+        "stats_ref": str(stats_source) if stats_source else None,
+        "total_samples_in_distribution": total_stats_samples,
+        "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
+        "combo_alpha": config.rarity_combo_alpha,
+        "combo_mode": combo_mode,
+        "score_mode": rarity_mode,
+    }
+    stats["extension_rarity_config"] = {
+        "mode": resolve_extension_rarity_mode(config),
+        "baseline_source": "external" if stats_source else "local",
+        "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
+    }
+    stats["chunked"] = True
+    postprocess_policy = _resolve_pass2_postprocess_policy(
+        total_samples=total,
+        scored_path=scored_path,
+        config=config,
+    )
+    stats["postprocess"] = {
+        "conversation_scores": _postprocess_status(
+            "deferred" if postprocess_policy["defer"] else "pending",
+            postprocess_policy["reason"],
+            file_bytes=postprocess_policy["file_bytes"],
+        ),
+        "dashboard": _postprocess_status(
+            "disabled" if not generate_dashboard else ("deferred" if postprocess_policy["defer"] else "pending"),
+            postprocess_policy["reason"] if postprocess_policy["defer"] else None,
+            file_bytes=postprocess_policy["file_bytes"],
+        ),
+    }
+    _annotate_scoring_prompt_stats(stats, config)
+    _write_pass2_stats(output_dir, stats)
+
+    if postprocess_policy["defer"]:
+        if not quiet:
+            print(f"  Large-run mode: deferred Pass 2 conversation aggregation ({postprocess_policy['reason']})")
+    else:
+        try:
+            def _aggregate_chunked_conversations():
+                from sft_label.conversation import aggregate_conversations, write_conversation_scores
+                if not scored_path.exists():
+                    return None
+                def _iter_scored_samples():
+                    with open(scored_path, encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                yield json.loads(line)
+                conv_records = aggregate_conversations(_iter_scored_samples())
+                if conv_records:
+                    write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+                return conv_records
+            run_with_heartbeat("Aggregating conversation scores", _aggregate_chunked_conversations)
+            stats["postprocess"]["conversation_scores"] = _postprocess_status("completed")
+        except Exception as e:
+            stats["postprocess"]["conversation_scores"] = _postprocess_status("failed", str(e))
+            print(f"  Warning: conversation aggregation failed: {e}")
+
+    if generate_dashboard and not postprocess_policy["defer"]:
+        try:
+            from sft_label.tools.visualize_value import generate_value_dashboard
+            run_with_heartbeat(
+                "Generating scoring dashboard",
+                lambda: generate_value_dashboard(
+                    output_dir,
+                    scored_file="scored.jsonl",
+                    stats_file=PASS2_STATS_FILE,
+                    output_file=PASS2_DASHBOARD_FILE,
+                    quiet=quiet,
+                ),
+            )
+            stats["postprocess"]["dashboard"] = _postprocess_status("completed")
+        except Exception as e:
+            stats["postprocess"]["dashboard"] = _postprocess_status("failed", str(e))
+            print(f"  Warning: dashboard generation failed: {e}")
+    elif generate_dashboard and postprocess_policy["defer"] and not quiet:
+        print(f"  Large-run mode: deferred Pass 2 dashboard generation ({postprocess_policy['reason']})")
+
+    _write_pass2_stats(output_dir, stats)
+
+    if print_summary:
+        print_scoring_summary(stats, output_dir)
+    return stats
 
 
 def _write_jsonl_atomic(path, records):
@@ -3041,8 +3330,8 @@ async def score_one(http_client, sample, model, rarity_result,
 
         value_score = compute_value_score(score_result, rarity_result, _weights)
         if value_score is None:
-            # Treat structurally invalid / unusable scoring outputs as abnormal infra failures
-            # so recovery sweeps can retry them. (validate_score_response returns a dict even
+            # Treat structurally invalid / unusable scoring outputs as abnormal responses
+            # for runtime health tracking. (validate_score_response returns a dict even
             # when all scores are None.)
             monitor["error"] = "abnormal_response: insufficient valid scores"
             error_class, retryable_infra, outcome = _classify_pass2_attempt(
@@ -3482,19 +3771,50 @@ def _load_monitor_lookup(path: Path) -> dict[str, dict]:
     return lookup
 
 
+def _resolve_pass2_resume_path(output_dir: Path, filename: str) -> Path | None:
+    output_dir = Path(output_dir)
+    working = _pass2_working_path(output_dir, filename)
+    if working.exists():
+        try:
+            if working.stat().st_size > 0:
+                return working
+        except OSError:
+            pass
+    candidates = [
+        _pass2_checkpoint_path(output_dir, filename),
+        output_dir / filename,
+        working,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _load_resumed_value_cache(output_dir: Path) -> dict[str, dict]:
     """Load existing scored values keyed by sample id from scored.jsonl."""
     resumed_values: dict[str, dict] = {}
-    scored_jsonl_path = Path(output_dir) / "scored.jsonl"
-    if not scored_jsonl_path.exists():
+    scored_jsonl_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+    if scored_jsonl_path is None:
         return resumed_values
 
     with open(scored_jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            scored_sample = json.loads(line)
+            try:
+                scored_sample = json.loads(line)
+            except json.JSONDecodeError:
+                # Interrupted runs can leave a truncated/corrupt trailing line.
+                # Treat a malformed final line as non-fatal so resume can continue.
+                if not f.read().strip():
+                    print(
+                        "  Warning: ignored corrupt trailing line in "
+                        f"{scored_jsonl_path} (line {line_no})"
+                    )
+                    break
+                raise
             sample_id = scored_sample.get("id", "")
             value = scored_sample.get("value")
             if sample_id and isinstance(value, dict):
@@ -3875,6 +4195,45 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     if resumed_values and not quiet:
         print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
 
+    if resume:
+        scored_resume_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+        monitor_resume_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl")
+        if scored_resume_path is not None and monitor_resume_path is not None:
+            existing_scored = _count_nonempty_jsonl_lines(scored_resume_path)
+            existing_monitors = _count_nonempty_jsonl_lines(monitor_resume_path)
+            expected_total = _count_scoring_samples_in_file(input_path, limit=limit)
+            if expected_total > 0 and existing_scored == expected_total and existing_monitors == expected_total:
+                if not quiet:
+                    print(
+                        "  Resume: detected complete prior scored/monitor artifacts; "
+                        "finalizing without rescoring"
+                    )
+                score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
+                    scored_resume_path,
+                    monitor_resume_path,
+                )
+                return _finalize_chunked_outputs(
+                    output_dir=output_dir,
+                    scored_path=scored_resume_path,
+                    score_summaries=score_summaries,
+                    monitor_totals=monitor_totals,
+                    total=expected_total,
+                    elapsed=0.0,
+                    config=config,
+                    file_label=file_label,
+                    input_path=input_path,
+                    stats_source=tag_stats_path,
+                    total_stats_samples=0,
+                    combo_mode="resume_finalize",
+                    rarity_mode=resolve_rarity_mode(config),
+                    generate_dashboard=generate_dashboard,
+                    quiet=quiet,
+                    rate_limiter=shared_rate_limiter,
+                    runtime=shared_runtime,
+                    sweep={"enabled": False, "attempted": 0, "recovered": 0, "resume_fast_path": True},
+                    print_summary=print_summary,
+                )
+
     chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
 
@@ -4048,11 +4407,45 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     # Lightweight per-sample summaries for final stats
     score_summaries = []
     monitor_totals = _init_monitor_totals()
+    scored_working_path = _pass2_working_path(output_dir, "scored.jsonl")
+    monitor_working_path = _pass2_working_path(output_dir, "monitor_value.jsonl")
+    failed_working_path = _pass2_working_path(output_dir, "failed_value.jsonl")
+    failures_working_path = _pass2_working_path(output_dir, "score_failures.jsonl")
 
-    out_scored = open(output_dir / "scored.jsonl", "w", encoding="utf-8")
-    out_monitor = open(output_dir / "monitor_value.jsonl", "w", encoding="utf-8")
-    out_failed = open(output_dir / "failed_value.jsonl", "w", encoding="utf-8")
-    out_failures_log = open(output_dir / "score_failures.jsonl", "w", encoding="utf-8")
+    if resume:
+        for name in (
+            "scored.jsonl",
+            "monitor_value.jsonl",
+            "failed_value.jsonl",
+            "score_failures.jsonl",
+        ):
+            working_path = _pass2_working_path(output_dir, name)
+            checkpoint_path = _pass2_checkpoint_path(output_dir, name)
+            final_path = output_dir / name
+            source_path = None
+            if working_path.exists():
+                try:
+                    if working_path.stat().st_size > 0:
+                        source_path = working_path
+                    else:
+                        working_path.unlink()
+                except OSError:
+                    pass
+            if source_path is None and final_path.exists():
+                source_path = final_path
+            if source_path is not None:
+                shutil.copyfile(source_path, checkpoint_path)
+            elif checkpoint_path.exists():
+                checkpoint_path.unlink()
+    else:
+        _clear_pass2_checkpoint_files(output_dir)
+
+    _reset_pass2_working_files(output_dir)
+
+    out_scored = open(scored_working_path, "w", encoding="utf-8")
+    out_monitor = open(monitor_working_path, "w", encoding="utf-8")
+    out_failed = open(failed_working_path, "w", encoding="utf-8")
+    out_failures_log = open(failures_working_path, "w", encoding="utf-8")
 
     try:
         client_ctx = (
@@ -4061,17 +4454,14 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             else httpx.AsyncClient(
                 proxy=None,
                 timeout=config.request_timeout,
-                limits=httpx.Limits(
-                    max_connections=config.scoring_concurrency + 10,
-                    max_keepalive_connections=config.scoring_concurrency,
-                ),
+                limits=_build_http_client_limits(config.scoring_concurrency),
             )
         )
         async with client_ctx as client:
 
             # Chunk state tracking
             global_offset = 0
-            active_chunks = {}  # chunk_idx -> {samples, pending_count, done_samples, offset}
+            active_chunks = {}
             pending_futures = set()
             chunk_gen = iter_chunks_from_jsonl(input_path, chunk_size, limit=limit)
             chunks_loaded = 0
@@ -4113,28 +4503,19 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     "done": 0,
                     "values": [None] * len(samples),
                     "monitors": [None] * len(samples),
+                    "submit_cursor": 0,
                     "flushed": False,
                 }
 
-                # Submit scoring tasks
                 resumed_in_chunk = 0
                 for i, sample in enumerate(samples):
-                    abs_idx = offset + i
                     resumed_value = _existing_resume_value(sample, resumed_values)
                     if resumed_value is not None:
                         active_chunks[chunk_idx]["values"][i] = resumed_value
-                        active_chunks[chunk_idx]["monitors"][i] = _resumed_monitor(
-                            sample.get("id", f"sample-{abs_idx}")
-                        )
+                        active_chunks[chunk_idx]["monitors"][i] = _resumed_monitor(sample.get("id", f"sample-{offset + i}"))
                         active_chunks[chunk_idx]["done"] += 1
                         resumed_in_chunk += 1
                         skipped_count += 1
-                        continue
-                    rarity_result = raw_rarities[abs_idx] if abs_idx < len(raw_rarities) else {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
-                    fut = asyncio.ensure_future(
-                        _tagged_score(abs_idx, chunk_idx, sample, rarity_result)
-                    )
-                    pending_futures.add(fut)
 
                 return chunk_idx, resumed_in_chunk
 
@@ -4142,6 +4523,36 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 config.scoring_concurrency,
                 int(config.scoring_concurrency * config.dir_pipeline_watermark),
             )
+
+            def submit_more_scoring_tasks():
+                submitted = 0
+                capacity = max(chunk_submission_watermark - len(pending_futures), 0)
+                if capacity <= 0:
+                    return submitted
+                for chunk_idx in sorted(active_chunks.keys()):
+                    chunk_data = active_chunks[chunk_idx]
+                    if chunk_data.get("flushed"):
+                        continue
+                    while chunk_data["submit_cursor"] < chunk_data["total"] and capacity > 0:
+                        local_idx = chunk_data["submit_cursor"]
+                        chunk_data["submit_cursor"] += 1
+                        if chunk_data["values"][local_idx] is not None:
+                            continue
+                        abs_idx = chunk_data["offset"] + local_idx
+                        rarity_result = (
+                            raw_rarities[abs_idx]
+                            if abs_idx < len(raw_rarities)
+                            else {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
+                        )
+                        fut = asyncio.ensure_future(
+                            _tagged_score(abs_idx, chunk_idx, chunk_data["samples"][local_idx], rarity_result)
+                        )
+                        pending_futures.add(fut)
+                        submitted += 1
+                        capacity -= 1
+                    if capacity <= 0:
+                        break
+                return submitted
 
             def maybe_load_more_scoring():
                 resumed_loaded = 0
@@ -4221,6 +4632,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
                 # Initial load
                 resumed_loaded = maybe_load_more_scoring()
+                submit_more_scoring_tasks()
                 if resumed_loaded:
                     if progress_hook is not None:
                         progress_hook({
@@ -4236,6 +4648,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 while pending_futures or not gen_exhausted:
                     if not pending_futures:
                         resumed_loaded = maybe_load_more_scoring()
+                        submit_more_scoring_tasks()
                         if resumed_loaded:
                             if progress_hook is not None:
                                 progress_hook({
@@ -4290,6 +4703,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             progress.update(task, advance=1, info=_info)
                     flush_ready_scoring_chunks()
                     resumed_loaded = maybe_load_more_scoring()
+                    submit_more_scoring_tasks()
                     if resumed_loaded:
                         if progress_hook is not None:
                             progress_hook({
@@ -4317,138 +4731,37 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         raw_rarities=raw_rarities,
         config=config,
     )
+    scored_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl") or scored_working_path
+    monitor_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl") or monitor_working_path
     if sweep and sweep.get("recovered"):
         # After patching scored/monitor files, rebuild summaries/monitors in file order
         # so selection/stats align with the rewritten outputs.
         score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
-            output_dir / "scored.jsonl",
-            output_dir / "monitor_value.jsonl",
+            scored_path,
+            monitor_path,
         )
 
-    # Remove empty failed file
-    failed_path = output_dir / "failed_value.jsonl"
-    if failed_path.exists() and failed_path.stat().st_size == 0:
-        failed_path.unlink()
-
-    # Remove empty failure log
-    failures_log_path = output_dir / "score_failures.jsonl"
-    if failures_log_path.exists() and failures_log_path.stat().st_size == 0:
-        failures_log_path.unlink()
-
-    # ── Compute selection scores from summaries ──
-    selection_results = compute_selection_scores_from_summaries(
-        score_summaries, config=config)
-
-    # Attach selection scores back to summaries (for stats computation)
-    for summary, sel in zip(score_summaries, selection_results):
-        summary["selection_score"] = sel["selection_score"]
-        summary["intra_class_rank"] = sel["intra_class_rank"]
-
-    # Re-stream scored.jsonl to attach selection_score and intra_class_rank
-    scored_path = output_dir / "scored.jsonl"
-    scored_tmp = output_dir / "scored.jsonl.tmp"
-    scored_idx = 0  # index into selection_results (only for samples with value)
-    with open(scored_path, "r", encoding="utf-8") as fin, \
-         open(scored_tmp, "w", encoding="utf-8") as fout:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            sample = json.loads(line)
-            if sample.get("value"):
-                if scored_idx < len(selection_results):
-                    sample["value"]["selection_score"] = selection_results[scored_idx]["selection_score"]
-                    sample["value"]["intra_class_rank"] = selection_results[scored_idx]["intra_class_rank"]
-                    apply_v2_scores([sample], config=config)
-                    scored_idx += 1
-            fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    scored_tmp.rename(scored_path)
-
-    # ── Compute stats from summaries ──
-    stats = _compute_value_stats_from_summaries(score_summaries, monitor_totals, total)
-    stats["elapsed_seconds"] = round(elapsed, 1)
-    stats["model"] = config.scoring_model
-    stats["input_file"] = str(input_path)
-    stats["file"] = file_label or stats.get("file") or input_path.name
-    if rate_limiter:
-        stats["http_request_stats"] = rate_limiter.stats.to_dict()
-    if runtime is not None:
-        stats["adaptive_runtime"] = {
-            "enabled": True,
-            "final": _runtime_snapshot(runtime),
-        }
-    if sweep:
-        stats["recovery_sweep"] = sweep
-    stats["weights_used"] = config.value_weights or VALUE_WEIGHTS
-    stats["rarity_config"] = {
-        "stats_ref": str(stats_source) if stats_source else None,
-        "total_samples_in_distribution": total_stats_samples,
-        "dimension_weights": config.rarity_weights or RARITY_WEIGHTS,
-        "combo_alpha": config.rarity_combo_alpha,
-        "combo_mode": combo_mode,
-        "score_mode": rarity_mode,
-    }
-    stats["extension_rarity_config"] = {
-        "mode": resolve_extension_rarity_mode(config),
-        "baseline_source": "external" if stats_source else "local",
-        "min_extension_baseline_total": getattr(config, "min_extension_baseline_total", None),
-    }
-    stats["chunked"] = True
-    _annotate_scoring_prompt_stats(stats, config)
-
-    stats_path = output_dir / PASS2_STATS_FILE
-    stats_to_write = {k: v for k, v in stats.items() if k != "_raw_scores"}
-    tmp_stats = stats_path.with_suffix(".tmp.json")
-    with open(tmp_stats, "w", encoding="utf-8") as f:
-        json.dump(stats_to_write, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_stats, stats_path)
-
-    # Conversation-level aggregation (re-read scored.jsonl for chunked mode)
-    try:
-        def _aggregate_chunked_conversations():
-            from sft_label.conversation import aggregate_conversations, write_conversation_scores
-
-            scored_path = output_dir / "scored.jsonl"
-            if not scored_path.exists():
-                return None
-
-            def _iter_scored_samples():
-                with open(scored_path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            yield json.loads(line)
-
-            conv_records = aggregate_conversations(_iter_scored_samples())
-            if conv_records:
-                write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-            return conv_records
-
-        run_with_heartbeat("Aggregating conversation scores", _aggregate_chunked_conversations)
-    except Exception as e:
-        print(f"  Warning: conversation aggregation failed: {e}")
-
-    # Dashboard
-    if generate_dashboard:
-        try:
-            from sft_label.tools.visualize_value import generate_value_dashboard
-            run_with_heartbeat(
-                "Generating scoring dashboard",
-                lambda: generate_value_dashboard(
-                    output_dir,
-                    scored_file="scored.jsonl",
-                    stats_file=PASS2_STATS_FILE,
-                    output_file=PASS2_DASHBOARD_FILE,
-                    quiet=quiet,
-                ),
-            )
-        except Exception as e:
-            print(f"  Warning: dashboard generation failed: {e}")
-
-    if print_summary:
-        print_scoring_summary(stats, output_dir)
-
-    return stats
+    return _finalize_chunked_outputs(
+        output_dir=output_dir,
+        scored_path=scored_path,
+        score_summaries=score_summaries,
+        monitor_totals=monitor_totals,
+        total=total,
+        elapsed=elapsed,
+        config=config,
+        file_label=file_label,
+        input_path=input_path,
+        stats_source=stats_source,
+        total_stats_samples=total_stats_samples,
+        combo_mode=combo_mode,
+        rarity_mode=rarity_mode,
+        generate_dashboard=generate_dashboard,
+        quiet=quiet,
+        rate_limiter=rate_limiter,
+        runtime=runtime,
+        sweep=sweep,
+        print_summary=print_summary,
+    )
 
 
 def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
@@ -4919,13 +5232,11 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
           f"| model={config.scoring_model} concurrency={config.scoring_concurrency} {_rps}")
 
     sweep = None
+    client_limits = _build_http_client_limits(config.scoring_concurrency)
     async with httpx.AsyncClient(
         proxy=None,
         timeout=config.request_timeout,
-        limits=httpx.Limits(
-            max_connections=config.scoring_concurrency + 10,
-            max_keepalive_connections=config.scoring_concurrency,
-        ),
+        limits=client_limits,
     ) as client:
         async def score_task(idx):
             nonlocal scored_count, failed_count, first_error_logged
@@ -5426,6 +5737,22 @@ def _load_monitor_records(dir_path):
     return monitors
 
 
+def _load_monitor_totals(dir_path):
+    """Load compact monitor totals without materializing the full monitor list."""
+    monitor_path = Path(dir_path) / "monitor_value.jsonl"
+    monitor_totals = _init_monitor_totals()
+    if not monitor_path.exists():
+        return monitor_totals
+
+    with open(monitor_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            _accumulate_monitor_totals(monitor_totals, json.loads(line))
+    return monitor_totals
+
+
 def _load_existing_pass2_stats(dir_path):
     """Load existing per-file Pass 2 stats if present."""
     stats_path = Path(dir_path) / PASS2_STATS_FILE
@@ -5435,7 +5762,56 @@ def _load_existing_pass2_stats(dir_path):
         return json.load(f)
 
 
-def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=print):
+def _iter_scored_samples(path):
+    """Yield scored samples from .jsonl or .json without forcing JSONL into memory."""
+    path = Path(path)
+    if path.suffix == ".jsonl":
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+        return
+
+    for sample in _load_scored_samples(path):
+        yield sample
+
+
+def _stream_selection_summaries(scored_path, config=None):
+    """Collect lightweight selection summaries for a scored file."""
+    summaries = []
+    scored_count = 0
+    for sample in _iter_scored_samples(scored_path):
+        if sample.get("value"):
+            summaries.append(_selection_summary_from_sample(sample, config=config))
+            scored_count += 1
+    return summaries, scored_count
+
+
+def _rewrite_scored_jsonl_selection(scored_path, selection_results, cursor, config):
+    """Rewrite a scored.jsonl file in a streaming fashion."""
+    scored_path = Path(scored_path)
+    tmp_path = scored_path.with_name(f".{scored_path.name}.tmp")
+    with open(scored_path, "r", encoding="utf-8") as fin, open(tmp_path, "w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            sample = json.loads(line)
+            if sample.get("value"):
+                if cursor >= len(selection_results):
+                    raise ValueError(f"selection result underflow while rewriting {scored_path}")
+                selection = selection_results[cursor]
+                sample["value"]["selection_score"] = selection["selection_score"]
+                sample["value"]["intra_class_rank"] = selection["intra_class_rank"]
+                apply_v2_scores([sample], config=config)
+                cursor += 1
+            fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, scored_path)
+    return cursor
+
+
+def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=print, generate_dashboard=True):
     """Recompute selection globally across directory outputs and rewrite files."""
     scored_files = _discover_scored_output_files(output_dir)
     if not scored_files:
@@ -5446,15 +5822,13 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
     summaries = []
     file_entries = []
     for scored_path in scored_files:
-        samples = _load_scored_samples(scored_path)
-        scored_count = 0
-        for sample in samples:
-            if sample.get("value"):
-                summaries.append(_selection_summary_from_sample(sample, config=config))
-                scored_count += 1
+        file_summaries, scored_count = _stream_selection_summaries(scored_path, config=config)
+        summaries.extend(file_summaries)
         file_entries.append({
             "path": scored_path,
             "scored_count": scored_count,
+            "summaries": file_summaries,
+            "monitor_totals": _load_monitor_totals(scored_path.parent),
         })
 
     selection_results = compute_selection_scores_from_summaries(summaries, config=config)
@@ -5463,23 +5837,44 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
     cursor = 0
     for entry in file_entries:
         scored_path = entry["path"]
-        samples = _load_scored_samples(scored_path)
-        for sample in samples:
-            value = sample.get("value")
-            if not value:
-                continue
-            if cursor >= len(selection_results):
-                break
-            selection = selection_results[cursor]
-            value["selection_score"] = selection["selection_score"]
-            value["intra_class_rank"] = selection["intra_class_rank"]
-            apply_v2_scores([sample], config=config)
-            cursor += 1
+        file_summaries = entry["summaries"]
+        file_selection_results = selection_results[cursor: cursor + entry["scored_count"]]
+        if len(file_selection_results) != entry["scored_count"]:
+            raise ValueError(
+                f"selection result count mismatch for {scored_path}: "
+                f"expected {entry['scored_count']}, got {len(file_selection_results)}"
+            )
+        for summary, selection in zip(file_summaries, file_selection_results):
+            summary["selection_score"] = selection["selection_score"]
+            summary["intra_class_rank"] = selection["intra_class_rank"]
+            sample_stub = {"value": summary}
+            apply_v2_scores([sample_stub], config=config)
+            summary["value_score_v2"] = sample_stub["value"].get("value_score_v2")
+            summary["selection_score_v2"] = sample_stub["value"].get("selection_score_v2")
 
-        _write_scored_samples(scored_path, samples)
+        json_sibling = scored_path.parent / "scored.json"
+        if scored_path.suffix == ".jsonl" and not json_sibling.exists():
+            cursor = _rewrite_scored_jsonl_selection(scored_path, selection_results, cursor, config=config)
+        else:
+            samples = _load_scored_samples(scored_path)
+            for sample in samples:
+                value = sample.get("value")
+                if not value:
+                    continue
+                if cursor >= len(selection_results):
+                    raise ValueError(f"selection result underflow while rewriting {scored_path}")
+                selection = selection_results[cursor]
+                value["selection_score"] = selection["selection_score"]
+                value["intra_class_rank"] = selection["intra_class_rank"]
+                apply_v2_scores([sample], config=config)
+                cursor += 1
+            _write_scored_samples(scored_path, samples)
 
-        monitors = _load_monitor_records(scored_path.parent)
-        stats = compute_value_stats(samples, monitors, include_raw_scores=False)
+        stats = _compute_value_stats_from_summaries(
+            file_summaries,
+            entry["monitor_totals"],
+            entry["scored_count"],
+        )
         existing_stats = _load_existing_pass2_stats(scored_path.parent)
         for key in (
             "elapsed_seconds",
@@ -5488,6 +5883,10 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
             "http_request_stats",
             "weights_used",
             "rarity_config",
+            "extension_rarity_config",
+            "adaptive_runtime",
+            "recovery_sweep",
+            "postprocess",
             "chunked",
         ):
             if key in existing_stats:
@@ -5504,18 +5903,24 @@ def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=pr
                       f, ensure_ascii=False, indent=2)
         os.replace(tmp_stats, stats_path)
 
-        try:
-            from sft_label.tools.visualize_value import generate_value_dashboard
-            generate_value_dashboard(
-                scored_path.parent,
-                scored_file="scored.json" if (scored_path.parent / "scored.json").exists() else "scored.jsonl",
-                stats_file=PASS2_STATS_FILE,
-                output_file=PASS2_DASHBOARD_FILE,
-                quiet=True,
-            )
-        except Exception:
-            pass
+        if generate_dashboard:
+            try:
+                from sft_label.tools.visualize_value import generate_value_dashboard
+                generate_value_dashboard(
+                    scored_path.parent,
+                    scored_file="scored.json" if (scored_path.parent / "scored.json").exists() else "scored.jsonl",
+                    stats_file=PASS2_STATS_FILE,
+                    output_file=PASS2_DASHBOARD_FILE,
+                    quiet=True,
+                )
+            except Exception:
+                pass
         updated_stats.append(stats)
+
+    if cursor != len(selection_results):
+        raise ValueError(
+            f"global selection rewrite consumed {cursor} results, expected {len(selection_results)}"
+        )
 
     return updated_stats
 
@@ -5820,6 +6225,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     concurrency = config.scoring_concurrency
     watermark = max(concurrency, int(concurrency * config.dir_pipeline_watermark))
     max_active = config.dir_pipeline_max_files
+    directory_postprocess_policy = _resolve_pass2_postprocess_policy(
+        total_samples=workload_estimate.total_samples,
+        scored_path=None,
+        config=config,
+    )
     runtime = _instantiate_runtime(config, concurrency=concurrency)
     setattr(config, "_adaptive_runtime", runtime)
     rate_limiter = (
@@ -5977,13 +6387,11 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
     )
 
     try:
+        client_limits = _build_http_client_limits(concurrency)
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,
-            limits=httpx.Limits(
-                max_connections=concurrency + 10,
-                max_keepalive_connections=concurrency,
-            ),
+            limits=client_limits,
         ) as client:
             with _create_progress() as progress:
                 global_llm_info = None
@@ -6043,6 +6451,17 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     progress.update(sample_task, advance=advance, info=info)
                     _update_llm_progress(monitor)
 
+                def _update_post_processing_progress(stage: str):
+                    total_ok, total_fail = _combined_counts()
+                    info = format_progress_info(
+                        ok_count=total_ok,
+                        fail_count=total_fail,
+                        label="post",
+                        request_stats=rate_limiter.stats if rate_limiter else None,
+                    )
+                    progress.update(sample_task, advance=0, info=f"{info} • {stage}")
+                    _update_llm_progress(None)
+
                 def _streaming_progress_hook(event):
                     nonlocal streaming_ok, streaming_fail
                     label = event.get("label")
@@ -6071,6 +6490,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     for collector in collectors.values():
                         if collector.done < collector.total or collector.completed:
                             continue
+                        collector_label = _relative_file_label(collector.labeled_path, input_dir)
+                        _update_post_processing_progress(
+                            f"post: resident finalize {collector_label}"
+                        )
                         sweep = await _run_pass2_recovery_sweep_in_memory(
                             http_client=client,
                             samples=collector.samples,
@@ -6086,10 +6509,10 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                             collector,
                             config,
                             pprint=pprint,
-                            file_label=_relative_file_label(collector.labeled_path, input_dir),
+                            file_label=collector_label,
                             generate_dashboard=False,
                         )
-                        stats["file"] = stats.get("file") or _relative_file_label(collector.labeled_path, input_dir)
+                        stats["file"] = stats.get("file") or collector_label
                         all_file_stats.append(stats)
                         progress.update(file_task, advance=1)
                         flushed += 1
@@ -6234,6 +6657,22 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     await top_up_work()
 
                 await flush_completed_collectors()
+                if all_file_stats:
+                    _update_post_processing_progress(
+                        "post: directory recompute global selection"
+                    )
+                    rewritten_file_stats = _rewrite_directory_global_selection(
+                        output_dir=output_dir,
+                        input_dir=input_dir,
+                        config=config,
+                        pprint=pprint,
+                        generate_dashboard=not directory_postprocess_policy["defer"],
+                    )
+                    if rewritten_file_stats:
+                        all_file_stats = rewritten_file_stats
+                    _update_post_processing_progress(
+                        "post: directory summary + aggregation + dashboard"
+                    )
                 _update_active_file_info()
     finally:
         if temp_tag_stats_path and temp_tag_stats_path.exists():
@@ -6243,16 +6682,6 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 temp_input_path.unlink()
 
     elapsed = time.time() - batch_start
-
-    if all_file_stats:
-        rewritten_file_stats = _rewrite_directory_global_selection(
-            output_dir=output_dir,
-            input_dir=input_dir,
-            config=config,
-            pprint=pprint,
-        )
-        if rewritten_file_stats:
-            all_file_stats = rewritten_file_stats
 
     # Write global summary
     if all_file_stats:
@@ -6286,6 +6715,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                 "enabled": True,
                 "final": _runtime_snapshot(runtime),
             }
+        summary["postprocess"] = {
+            "conversation_scores": _postprocess_status(
+                "deferred" if directory_postprocess_policy["defer"] else "pending",
+                directory_postprocess_policy["reason"],
+            ),
+            "dashboard": _postprocess_status(
+                "deferred" if directory_postprocess_policy["defer"] else "pending",
+                directory_postprocess_policy["reason"],
+            ),
+        }
         _annotate_scoring_prompt_stats(summary, config)
 
         summary_path = output_dir / PASS2_SUMMARY_STATS_FILE
@@ -6293,37 +6732,50 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
         # Global conversation-level aggregation across all files
-        try:
-            from sft_label.conversation import (
-                merge_conversation_record_batches,
-                write_conversation_scores,
-            )
+        if directory_postprocess_policy["defer"]:
+            print(f"  Large-run mode: deferred global conversation aggregation ({directory_postprocess_policy['reason']})")
+        else:
+            try:
+                from sft_label.conversation import (
+                    merge_conversation_record_batches,
+                    write_conversation_scores,
+                )
 
-            conv_batches = []
-            for conv_path in sorted(output_dir.rglob("conversation_scores.json")):
-                if conv_path.parent == output_dir:
-                    continue
-                with open(conv_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list) and data:
-                    conv_batches.append(data)
+                conv_batches = []
+                for conv_path in sorted(output_dir.rglob("conversation_scores.json")):
+                    if conv_path.parent == output_dir:
+                        continue
+                    with open(conv_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list) and data:
+                        conv_batches.append(data)
 
-            conv_records = merge_conversation_record_batches(conv_batches)
-            if conv_records:
-                write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
-        except Exception as e:
-            print(f"  Warning: global conversation aggregation failed: {e}")
+                conv_records = merge_conversation_record_batches(conv_batches)
+                if conv_records:
+                    write_conversation_scores(conv_records, output_dir / "conversation_scores.json")
+                summary["postprocess"]["conversation_scores"] = _postprocess_status("completed")
+            except Exception as e:
+                summary["postprocess"]["conversation_scores"] = _postprocess_status("failed", str(e))
+                print(f"  Warning: global conversation aggregation failed: {e}")
 
         # Global dashboard
-        try:
-            from sft_label.tools.visualize_value import generate_value_dashboard
-            dir_name = input_dir.name
-            generate_value_dashboard(output_dir, scored_file=None,
-                                     stats_file=PASS2_SUMMARY_STATS_FILE,
-                                     output_file=pass2_global_dashboard_filename(dir_name),
-                                     quiet=True)
-        except Exception as e:
-            print(f"  Warning: global dashboard generation failed: {e}")
+        if directory_postprocess_policy["defer"]:
+            print(f"  Large-run mode: deferred global scoring dashboard ({directory_postprocess_policy['reason']})")
+        else:
+            try:
+                from sft_label.tools.visualize_value import generate_value_dashboard
+                dir_name = input_dir.name
+                generate_value_dashboard(output_dir, scored_file=None,
+                                         stats_file=PASS2_SUMMARY_STATS_FILE,
+                                         output_file=pass2_global_dashboard_filename(dir_name),
+                                         quiet=True)
+                summary["postprocess"]["dashboard"] = _postprocess_status("completed")
+            except Exception as e:
+                summary["postprocess"]["dashboard"] = _postprocess_status("failed", str(e))
+                print(f"  Warning: global dashboard generation failed: {e}")
+
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
 
         print_scoring_summary(summary, output_dir, is_batch=True)
 

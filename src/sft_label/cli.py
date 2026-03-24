@@ -15,6 +15,7 @@ Subcommands:
   sft-label export-review        — Export labeled or inline-labeled data to review CSV
   sft-label recompute-stats      — Recompute stats from labeled/scored output (no LLM)
   sft-label regenerate-dashboard — Regenerate HTML dashboards from stats/data
+  sft-label complete-postprocess — Materialize deferred Pass 2 postprocess offline
 
 Most defaults come from config.py (PipelineConfig).
 Selected runtime knobs (concurrency/rps/timeout/retries) can be overridden via CLI flags.
@@ -1235,6 +1236,29 @@ def cmd_regenerate_dashboard(args):
     }
 
 
+def cmd_complete_postprocess(args):
+    """Materialize deferred Pass 2 postprocess artifacts offline."""
+    from sft_label.tools.recompute import run_complete_postprocess
+
+    try:
+        result = run_complete_postprocess(
+            input_path=args.input,
+            scope=getattr(args, "scope", "global"),
+            open_browser=getattr(args, "open", False),
+            workers=getattr(args, "workers", 8),
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    dashboards = result.get("generated_dashboards") or []
+    print(
+        f"\nDone. Completed deferred postprocess for {result.get('files_processed', 0)} "
+        f"file(s); generated {len(dashboards)} dashboard(s)."
+    )
+    return result
+
+
 def cmd_export_semantic(args):
     """Export representative windows from semantic clustering artifacts."""
     from sft_label.tools.export_semantic_clusters import run_export_semantic_clusters
@@ -1861,6 +1885,27 @@ def build_parser():
     regen_parser.add_argument("--workers", type=int, default=8,
                                help="Directory-level parallel workers in batch mode (default: 8)")
 
+    # --- complete-postprocess ---
+    complete_parser = subparsers.add_parser(
+        "complete-postprocess",
+        help="Materialize deferred Pass 2 postprocess offline",
+        description="Finish deferred Pass 2 conversation aggregation and dashboard generation "
+                    "after a large run completes. Default scope=global is large-run-safe; "
+                    "scope=all also builds standalone per-file dashboards.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    complete_parser.add_argument("--input", type=str, required=True,
+                                 help="Run directory containing scored outputs and summary stats")
+    complete_parser.add_argument("--scope", type=str, default="global",
+                                 choices=["global", "all"],
+                                 help="global: per-file conversation_scores + global dashboard "
+                                      "(default, safer for huge runs); "
+                                      "all: also generate standalone per-file dashboards")
+    complete_parser.add_argument("--open", action="store_true",
+                                 help="Open the last generated dashboard in browser")
+    complete_parser.add_argument("--workers", type=int, default=8,
+                                 help="File-level workers for conversation aggregation (default: 8)")
+
     # --- export-review ---
     review_parser = subparsers.add_parser(
         "export-review",
@@ -1998,6 +2043,8 @@ def dispatch_command(args, parser):
         return cmd_refresh_rarity(args)
     elif args.command == "regenerate-dashboard":
         return cmd_regenerate_dashboard(args)
+    elif args.command == "complete-postprocess":
+        return cmd_complete_postprocess(args)
 
 
 def main(argv=None):

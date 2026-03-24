@@ -1699,6 +1699,108 @@ class TestResumeScoringFile:
         assert observed["output_dir"] == batch_dir
         assert result["files_processed"] == 1
 
+    def test_directory_global_selection_rewrite_streams_jsonl_files(self, tmp_path):
+        from sft_label.scoring import _rewrite_directory_global_selection
+
+        input_dir = tmp_path / "inputs"
+        output_dir = tmp_path / "run"
+        batch_a_input = input_dir / "batch_a" / "labeled.jsonl"
+        batch_b_input = input_dir / "batch_b" / "labeled.jsonl"
+        batch_a_output = output_dir / "batch_a"
+        batch_b_output = output_dir / "batch_b"
+        batch_a_output.mkdir(parents=True)
+        batch_b_output.mkdir(parents=True)
+        batch_a_input.parent.mkdir(parents=True)
+        batch_b_input.parent.mkdir(parents=True)
+        batch_a_input.write_text("", encoding="utf-8")
+        batch_b_input.write_text("", encoding="utf-8")
+
+        def _sample(sample_id: str, *, intent: str, score: float) -> dict:
+            return {
+                "id": sample_id,
+                "conversations": [
+                    {"from": "human", "value": "Q" * 2048},
+                    {"from": "gpt", "value": "A" * 2048},
+                ],
+                "labels": {
+                    "intent": intent,
+                    "difficulty": "intermediate",
+                    "domain": "python",
+                    "task": "debug",
+                },
+                "metadata": {"total_turns": 2},
+                "value": {
+                    "complexity": {"overall": 6},
+                    "quality": {"overall": score},
+                    "reasoning": {"overall": score - 1},
+                    "rarity": {"score": 5.0},
+                    "rarity_extension": {"score": 5.0},
+                    "rarity_v2": {"score": 5.0},
+                    "value_score": score,
+                    "confidence": 0.8,
+                },
+            }
+
+        def _write_jsonl(path: Path, records: list[dict]) -> None:
+            path.write_text(
+                "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+        _write_jsonl(
+            batch_a_output / "scored.jsonl",
+            [
+                _sample("a-1", intent="build", score=7.2),
+                _sample("a-2", intent="debug", score=6.3),
+            ],
+        )
+        _write_jsonl(
+            batch_b_output / "scored.jsonl",
+            [
+                _sample("b-1", intent="analyze", score=8.1),
+            ],
+        )
+        _write_jsonl(
+            batch_a_output / "monitor_value.jsonl",
+            [
+                {"sample_id": "a-1", "status": "success", "llm_calls": 1},
+                {"sample_id": "a-2", "status": "success", "llm_calls": 1},
+            ],
+        )
+        _write_jsonl(
+            batch_b_output / "monitor_value.jsonl",
+            [
+                {"sample_id": "b-1", "status": "success", "llm_calls": 1},
+            ],
+        )
+        (batch_a_output / PASS2_STATS_FILE).write_text(
+            json.dumps({"input_file": str(batch_a_input)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (batch_b_output / PASS2_STATS_FILE).write_text(
+            json.dumps({"input_file": str(batch_b_input)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        with patch(
+            "sft_label.scoring._load_scored_samples",
+            side_effect=AssertionError("directory global selection should stream jsonl outputs"),
+        ):
+            _rewrite_directory_global_selection(
+                output_dir=output_dir,
+                input_dir=input_dir,
+                config=PipelineConfig(),
+                pprint=lambda *_args, **_kwargs: None,
+                generate_dashboard=False,
+            )
+
+        first_row = json.loads((batch_a_output / "scored.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        assert first_row["value"]["selection_score"] is not None
+        assert first_row["value"]["intra_class_rank"] is not None
+        stats = json.loads((batch_a_output / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+        assert stats["total_scored"] == 2
+        assert stats["file"] == "batch_a/labeled.jsonl"
+
     def test_count_scoring_samples_in_file_streams_json_arrays(self, tmp_path, monkeypatch):
         labeled_path = tmp_path / "labeled.json"
         labeled_path.write_text(
@@ -1937,6 +2039,236 @@ class TestResumeScoringFile:
         assert scored_ids == ["sample-3", "sample-4"]
         assert [row["id"] for row in scored_output] == [f"sample-{idx}" for idx in range(5)]
 
+    def test_chunked_resume_preserves_interrupted_working_outputs(self, tmp_path):
+        from sft_label.scoring import _run_scoring_file_chunked, _pass2_working_path
+        from unittest.mock import patch
+
+        labeled_path = tmp_path / "labeled.jsonl"
+        rows = []
+        for idx in range(4):
+            rows.append({
+                "id": f"sample-{idx}",
+                "conversations": [
+                    {"from": "human", "value": f"Q{idx}"},
+                    {"from": "gpt", "value": f"A{idx}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            })
+        labeled_path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+        resumed_rows = []
+        resumed_monitors = []
+        for idx in range(2):
+            resumed = dict(rows[idx])
+            resumed["value"] = {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": {"score": 4.0},
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "selection_score": 6.0,
+                "intra_class_rank": 5.0,
+                "confidence": 0.8,
+            }
+            resumed_rows.append(resumed)
+            resumed_monitors.append({
+                "sample_id": resumed["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            })
+
+        _pass2_working_path(tmp_path, "scored.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in resumed_rows) + "\n",
+            encoding="utf-8",
+        )
+        _pass2_working_path(tmp_path, "monitor_value.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in resumed_monitors) + "\n",
+            encoding="utf-8",
+        )
+
+        scored_ids = []
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            scored_ids.append(sample["id"])
+            return {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.2,
+                "selection_score": 6.1,
+                "intra_class_rank": 5.1,
+                "confidence": 0.82,
+            }, {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            asyncio.run(
+                _run_scoring_file_chunked(
+                    labeled_path,
+                    tmp_path,
+                    None,
+                    0,
+                    PipelineConfig(
+                        scoring_concurrency=1,
+                        chunk_size=1,
+                        max_active_chunks=2,
+                        enable_adaptive_runtime=False,
+                        enable_stage_recovery_sweep=False,
+                        pass2_heavy_postprocess_mode="defer",
+                    ),
+                    resume=True,
+                    generate_dashboard=False,
+                    show_progress=False,
+                    print_summary=False,
+                    quiet=True,
+                )
+            )
+
+        assert scored_ids == ["sample-2", "sample-3"]
+        assert not _pass2_working_path(tmp_path, "scored.jsonl").exists()
+        final_rows = [
+            json.loads(line)
+            for line in (tmp_path / "scored.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert [row["id"] for row in final_rows] == [f"sample-{idx}" for idx in range(4)]
+
+    def test_chunked_resume_fast_finalizes_complete_outputs_without_rescoring(self, tmp_path):
+        from sft_label.scoring import _run_scoring_file_chunked
+        from unittest.mock import patch
+
+        labeled_path = tmp_path / "labeled.jsonl"
+        rows = []
+        for idx in range(3):
+            rows.append({
+                "id": f"sample-{idx}",
+                "conversations": [
+                    {"from": "human", "value": f"Q{idx}"},
+                    {"from": "gpt", "value": f"A{idx}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            })
+        labeled_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+        scored_rows = []
+        monitors = []
+        for idx, row in enumerate(rows):
+            payload = dict(row)
+            payload["value"] = {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7 + idx},
+                "reasoning": {"overall": 6},
+                "rarity": {"score": 4.0 + idx},
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0 + idx,
+                "confidence": 0.8,
+            }
+            scored_rows.append(payload)
+            monitors.append({
+                "sample_id": row["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            })
+        (tmp_path / "scored.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in scored_rows) + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "monitor_value.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in monitors) + "\n",
+            encoding="utf-8",
+        )
+
+        async def fail_score_one(*args, **kwargs):
+            raise AssertionError("score_one should not be called for fully-covered resume finalize")
+
+        with patch("sft_label.scoring.score_one", side_effect=fail_score_one):
+            stats = asyncio.run(
+                _run_scoring_file_chunked(
+                    labeled_path,
+                    tmp_path,
+                    None,
+                    0,
+                    PipelineConfig(
+                        scoring_concurrency=1,
+                        enable_adaptive_runtime=False,
+                        enable_stage_recovery_sweep=False,
+                        pass2_heavy_postprocess_mode="defer",
+                    ),
+                    resume=True,
+                    generate_dashboard=False,
+                    show_progress=False,
+                    print_summary=False,
+                    quiet=True,
+                )
+            )
+
+        assert stats["recovery_sweep"]["resume_fast_path"] is True
+        final_rows = [
+            json.loads(line)
+            for line in (tmp_path / "scored.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert all("selection_score" in (row.get("value") or {}) for row in final_rows)
+
+    @pytest.mark.parametrize(
+        "bad_tail",
+        [
+            '{"id":"broken-tail"',
+            "this-is-not-json",
+        ],
+    )
+    def test_load_resumed_cache_ignores_corrupt_trailing_line(self, tmp_path, bad_tail):
+        from sft_label.scoring import _load_resumed_value_cache
+
+        resumed = {
+            "id": "sample-0",
+            "value": {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": {"score": 4.0},
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "selection_score": 6.0,
+                "intra_class_rank": 5.0,
+                "confidence": 0.8,
+            },
+        }
+        (tmp_path / "scored.jsonl").write_text(
+            json.dumps(resumed, ensure_ascii=False) + "\n" + bad_tail + "\n",
+            encoding="utf-8",
+        )
+
+        cache = _load_resumed_value_cache(tmp_path)
+        assert set(cache.keys()) == {"sample-0"}
+        assert cache["sample-0"]["value_score"] == 6.0
+
     def test_directory_scoring_interleaves_resident_files_under_watermark(self, tmp_path):
         from sft_label.scoring import run_scoring
         from unittest.mock import patch
@@ -2090,6 +2422,109 @@ class TestResumeScoringFile:
         assert progress_tasks == ["Files", "Pass 2", "LLM"]
         assert seen_concurrency == [4, 4]
         assert seen_show_progress == [False, False]
+
+    def test_directory_scoring_surfaces_post_processing_progress_after_100_percent(self, tmp_path):
+        from sft_label.scoring import run_scoring
+        from unittest.mock import patch
+
+        batch_dir = tmp_path / "resident_only"
+        batch_dir.mkdir()
+        (batch_dir / "labeled.json").write_text(
+            json.dumps([
+                {
+                    "id": "sample-0",
+                    "conversations": [
+                        {"from": "human", "value": "Q0"},
+                        {"from": "gpt", "value": "A0"},
+                    ],
+                    "labels": {"intent": "build", "difficulty": "intermediate"},
+                }
+            ]),
+            encoding="utf-8",
+        )
+
+        task_ids = {}
+        sample_events = []
+        sample_total = 0
+
+        class FakeProgress:
+            def __init__(self):
+                self.console = self
+                self._counter = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def add_task(self, description, **kwargs):
+                nonlocal sample_total
+                self._counter += 1
+                task_id = self._counter
+                task_ids[description] = task_id
+                if description == "Pass 2":
+                    sample_total = kwargs.get("total", 0)
+                return task_id
+
+            def update(self, task_id, **kwargs):
+                if task_id == task_ids.get("Pass 2"):
+                    sample_events.append((kwargs.get("advance", 0), kwargs.get("info")))
+
+            def print(self, *args, **kwargs):
+                return None
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            return {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }, {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one), \
+             patch("sft_label.scoring._create_progress", return_value=FakeProgress()), \
+             patch("sft_label.tools.visualize_value.generate_value_dashboard", return_value=None):
+            asyncio.run(
+                run_scoring(
+                    str(tmp_path),
+                    config=PipelineConfig(
+                        scoring_concurrency=1,
+                        dir_pipeline_watermark=1.0,
+                        dir_pipeline_max_files=1,
+                        enable_adaptive_runtime=False,
+                    ),
+                )
+            )
+
+        assert sample_total == 1
+        cumulative = 0
+        completion_idx = None
+        for idx, (advance, _info) in enumerate(sample_events):
+            cumulative += advance or 0
+            if completion_idx is None and cumulative >= sample_total:
+                completion_idx = idx
+                break
+        assert completion_idx is not None
+
+        post_infos = [
+            info for _advance, info in sample_events[completion_idx + 1:] if isinstance(info, str)
+        ]
+        assert any("post: resident" in info for info in post_infos)
+        assert any("post: directory" in info for info in post_infos)
 
     def test_directory_scoring_streaming_files_do_not_double_count_llm_progress(self, tmp_path):
         from sft_label.scoring import run_scoring
@@ -2389,6 +2824,159 @@ class TestResumeScoringFile:
 
         assert isinstance(captured.get("monitor_arg"), dict)
         assert captured["monitor_arg"]["total_llm_calls"] == 4
+
+    def test_chunked_scoring_limits_inflight_tasks_to_watermark(self, tmp_path):
+        from sft_label.scoring import _run_scoring_file_chunked
+        from unittest.mock import patch
+
+        labeled_path = tmp_path / "labeled.jsonl"
+        rows = [
+            {
+                "id": f"sample-{idx}",
+                "conversations": [
+                    {"from": "human", "value": f"Q{idx}"},
+                    {"from": "gpt", "value": f"A{idx}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }
+            for idx in range(8)
+        ]
+        labeled_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            await asyncio.sleep(0.001)
+            return {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }, {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+
+        real_ensure_future = asyncio.ensure_future
+        in_flight = 0
+        max_in_flight = 0
+
+        def tracking_ensure_future(coro):
+            nonlocal in_flight, max_in_flight
+            task = real_ensure_future(coro)
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+
+            def _done(_task):
+                nonlocal in_flight
+                in_flight -= 1
+
+            task.add_done_callback(_done)
+            return task
+
+        config = PipelineConfig(
+            scoring_concurrency=2,
+            dir_pipeline_watermark=1.0,
+            sample_max_retries=1,
+            chunk_size=6,
+            max_active_chunks=2,
+            enable_adaptive_runtime=False,
+            enable_stage_recovery_sweep=False,
+            pass2_heavy_postprocess_mode="defer",
+        )
+        expected_max = max(config.scoring_concurrency, int(config.scoring_concurrency * config.dir_pipeline_watermark))
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one), \
+                patch("sft_label.scoring.asyncio.ensure_future", side_effect=tracking_ensure_future):
+            asyncio.run(
+                _run_scoring_file_chunked(
+                    labeled_path,
+                    tmp_path,
+                    None,
+                    0,
+                    config,
+                    generate_dashboard=False,
+                    show_progress=False,
+                    print_summary=False,
+                    quiet=True,
+                )
+            )
+
+        assert max_in_flight <= expected_max + 1
+
+    def test_chunked_large_run_defers_conversation_and_dashboard(self, tmp_path):
+        from sft_label.scoring import _run_scoring_file_chunked
+        from unittest.mock import patch
+
+        labeled_path = tmp_path / "labeled.jsonl"
+        rows = [
+            {
+                "id": f"sample-{idx}",
+                "conversations": [
+                    {"from": "human", "value": f"Q{idx}"},
+                    {"from": "gpt", "value": f"A{idx}"},
+                ],
+                "labels": {"intent": "build", "difficulty": "intermediate"},
+            }
+            for idx in range(3)
+        ]
+        labeled_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            return {
+                "complexity": {"overall": 5},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": rarity_result,
+                "flags": [],
+                "thinking_mode": "fast",
+                "value_score": 6.0,
+                "confidence": 0.85,
+            }, {
+                "sample_id": sample["id"],
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one), \
+                patch("sft_label.conversation.aggregate_conversations", side_effect=AssertionError("should not aggregate")), \
+                patch("sft_label.tools.visualize_value.generate_value_dashboard", side_effect=AssertionError("should not build dashboard")):
+            stats = asyncio.run(
+                _run_scoring_file_chunked(
+                    labeled_path,
+                    tmp_path,
+                    None,
+                    0,
+                    PipelineConfig(
+                        scoring_concurrency=1,
+                        sample_max_retries=1,
+                        enable_adaptive_runtime=False,
+                        enable_stage_recovery_sweep=False,
+                        pass2_heavy_postprocess_mode="auto",
+                        pass2_heavy_postprocess_sample_threshold=1,
+                    ),
+                    generate_dashboard=True,
+                    show_progress=False,
+                    print_summary=False,
+                    quiet=True,
+                )
+            )
+
+        assert stats["postprocess"]["conversation_scores"]["status"] == "deferred"
+        assert stats["postprocess"]["dashboard"]["status"] == "deferred"
 
     def test_directory_selection_is_global_not_per_file(self, tmp_path):
         from sft_label.scoring import run_scoring
@@ -3990,7 +4578,7 @@ async def test_pass2_score_one_malformed_response_counts_as_abnormal_infra(tmp_p
     assert value is None
     assert monitor["status"] == "failed"
     assert monitor.get("error_class") == "abnormal_response"
-    assert monitor.get("retryable_infra") is True
+    assert monitor.get("retryable_infra") is False
     assert runtime.acquire_calls
     assert runtime.observed
     assert runtime.observed[0].classification.value == "abnormal_response"

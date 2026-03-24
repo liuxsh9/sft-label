@@ -242,6 +242,9 @@ SELECTIVE_SCORING_DRIFT_INTERVAL = 4      # score every Nth turn as drift anchor
 SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP = 0.55  # conservative cap for estimated slices
 PLANNER_PASS2_ENABLED = False
 COMPACT_SCORING_REQUEST_BYTES = 24000
+PASS2_HEAVY_POSTPROCESS_MODE = "auto"          # auto | always | defer
+PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD = 20000
+PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD = 1_000_000_000
 
 ROLLOUT_PRESETS = {
     "compact_safe": {
@@ -430,6 +433,9 @@ class PipelineConfig:
     selective_scoring_estimate_confidence_cap: float = SELECTIVE_SCORING_ESTIMATE_CONFIDENCE_CAP
     planner_pass2_enabled: bool = PLANNER_PASS2_ENABLED
     compact_scoring_request_bytes: int = COMPACT_SCORING_REQUEST_BYTES
+    pass2_heavy_postprocess_mode: str = PASS2_HEAVY_POSTPROCESS_MODE
+    pass2_heavy_postprocess_sample_threshold: int = PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD
+    pass2_heavy_postprocess_file_bytes_threshold: int = PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
     enable_conversation_v2: bool = ENABLE_CONVERSATION_V2
     conversation_v2_turn_threshold: int = CONV_V2_TURN_THRESHOLD

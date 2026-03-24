@@ -90,6 +90,7 @@ from sft_label.llm_runtime import (
 from sft_label.label_extensions import run_label_extensions
 from sft_label.label_extensions_schema import load_extension_specs
 from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
+from sft_label.http_limits import resolve_httpx_connection_limits
 from sft_label.progress_display import create_pipeline_progress
 
 try:
@@ -159,6 +160,48 @@ def parse_run_progress(info):
     return done, total
 
 
+def _update_llm_task_progress(progress, llm_task, run_info, eta_tracker=None):
+    """Refresh the global LLM progress task from tracker info or local ETA fallback."""
+    if not progress or llm_task is None:
+        return
+
+    global_counts = parse_run_progress(run_info) if run_info else None
+    if global_counts:
+        g_done, g_total = global_counts
+        progress.update(
+            llm_task,
+            total=max(g_total, 1),
+            completed=min(g_done, g_total),
+            info=run_info,
+        )
+        return
+
+    if eta_tracker is not None:
+        progress.update(
+            llm_task,
+            total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
+            completed=eta_tracker.calls_done,
+            info=eta_tracker.info_line(),
+        )
+
+
+def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits:
+    max_connections, max_keepalive, capped = resolve_httpx_connection_limits(
+        requested_concurrency=concurrency,
+        extra_connections=10,
+    )
+    if capped:
+        pprint(
+            "  [warn] lowering HTTP connection pool to "
+            f"max_connections={max_connections}, keepalive={max_keepalive} "
+            f"for requested concurrency={concurrency} to avoid FD exhaustion"
+        )
+    return httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive,
+    )
+
+
 # ─────────────────────────────────────────────────────────
 # Directory discovery & checkpoint
 # ─────────────────────────────────────────────────────────
@@ -222,10 +265,7 @@ def update_checkpoint(checkpoint_path, rel_path_str, success=True, error_msg=Non
 
 
 def _write_checkpoint(checkpoint_path, ckpt):
-    checkpoint_path = Path(checkpoint_path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(checkpoint_path, "w", encoding="utf-8") as f:
-        json.dump(ckpt, f, ensure_ascii=False, indent=2)
+    _write_json_atomic(checkpoint_path, ckpt)
 
 
 def _numeric_summary(values):
@@ -1389,7 +1429,7 @@ def _annotate_labeling_prompt_stats(stats, config=None):
 # ─────────────────────────────────────────────────────────
 
 async def label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
-                    config=None, rate_limiter=None):
+                    config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
     """Label a single sample with sample-level retry on failure."""
     _max_retries_sample = config.sample_max_retries if config else SAMPLE_MAX_RETRIES
     _max_retries = config.max_retries if config else MAX_RETRIES
@@ -1412,6 +1452,22 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
     sanitized_convs = None
 
     _cached_call1 = None  # Cache successful Call 1 across sample retries
+    last_run_info = None
+
+    def _record_llm_progress(delta_calls: int):
+        nonlocal last_run_info
+        delta = max(int(delta_calls or 0), 0)
+        if delta <= 0:
+            return last_run_info
+        if llm_progress_cb:
+            last_run_info = llm_progress_cb(delta, "pass1")
+        if progress_event_cb:
+            progress_event_cb({
+                "kind": "llm_delta",
+                "delta_calls": delta,
+                "run_info": last_run_info,
+            })
+        return last_run_info
 
     async def _call(stage: str, messages, *, temperature=0.1, max_tokens=1000):
         if runtime is None:
@@ -1514,6 +1570,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     return sample_idx, None, monitor
                 call1_result, call1_raw, usage1, outcome1 = await _call("pass1.call1", msgs1)
                 monitor["llm_calls"] += 1
+                _record_llm_progress(1)
                 monitor["total_prompt_tokens"] += usage1.get("prompt_tokens", 0)
                 monitor["total_completion_tokens"] += usage1.get("completion_tokens", 0)
                 if "queue_wait_ms" in usage1:
@@ -1542,6 +1599,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                             retry_msgs1,
                         )
                         monitor["llm_calls"] += 1
+                        _record_llm_progress(1)
                         monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
                         monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
                         monitor["assembled_prompt_bytes"] = retry_prompt_bytes
@@ -1593,6 +1651,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 return sample_idx, None, monitor
             call2_result, call2_raw, usage2, outcome2 = await _call("pass1.call2", msgs2)
             monitor["llm_calls"] += 1
+            _record_llm_progress(1)
             monitor["total_prompt_tokens"] += usage2.get("prompt_tokens", 0)
             monitor["total_completion_tokens"] += usage2.get("completion_tokens", 0)
 
@@ -1618,6 +1677,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                         retry_msgs2,
                     )
                     monitor["llm_calls"] += 1
+                    _record_llm_progress(1)
                     monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
                     monitor["assembled_prompt_bytes_call2"] = retry_prompt_bytes
@@ -1690,6 +1750,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 if any(d in call1_dims for d, _ in low_conf):
                     re1, _, u1, _ = await _call("pass1.call1.arb", msgs1, temperature=0.3, max_tokens=1000)
                     monitor["llm_calls"] += 1
+                    _record_llm_progress(1)
                     monitor["total_prompt_tokens"] += u1.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += u1.get("completion_tokens", 0)
                     if re1:
@@ -1702,6 +1763,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 if any(d in call2_dims for d, _ in low_conf):
                     re2, _, u2, _ = await _call("pass1.call2.arb", msgs2, temperature=0.3, max_tokens=1000)
                     monitor["llm_calls"] += 1
+                    _record_llm_progress(1)
                     monitor["total_prompt_tokens"] += u2.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += u2.get("completion_tokens", 0)
                     if re2:
@@ -1736,7 +1798,9 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 )
                 for spec_id, payload in extension_payloads.items():
                     usage = extension_usage.get(spec_id) or {}
-                    monitor["llm_calls"] += int((payload.get("monitor") or {}).get("llm_calls", 0))
+                    extension_calls = int((payload.get("monitor") or {}).get("llm_calls", 0))
+                    monitor["llm_calls"] += extension_calls
+                    _record_llm_progress(extension_calls)
                     monitor["total_prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
                     monitor["total_completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
                     if isinstance(payload.get("monitor"), dict):
@@ -2012,6 +2076,7 @@ class FileCollector:
     submit_order: list[int] = field(default_factory=list)
     submit_cursor: int = 0
     chunked_delegate: bool = False
+    live_progress: bool = False
 
     def __post_init__(self):
         # Pre-allocate result slots
@@ -2801,11 +2866,16 @@ class ChunkCollector:
     monitors: list = field(default_factory=list)
     completed: bool = False
     sample_id_offset: int = 0  # global offset for sample IDs
+    submit_order: list[int] = field(default_factory=list)
+    submit_cursor: int = 0
 
     def __post_init__(self):
         n = len(self.samples)
         self.labels = [None] * n
         self.monitors = [None] * n
+
+    def has_pending_submission(self) -> bool:
+        return self.submit_cursor < len(self.submit_order)
 
 
 async def _run_pass1_recovery_sweep(
@@ -2944,6 +3014,13 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_ac
     chunk.completed = True
 
 
+def _effective_chunk_row_count(chunk_size: int, watermark: int) -> int:
+    """Cap giant JSONL chunks so large runs flush incrementally."""
+    requested = max(int(chunk_size or 0), 1)
+    target = max(int(watermark or 0) * 2, 128)
+    return max(1, min(requested, target))
+
+
 async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  enable_arbitration=True, limit=0, shuffle=False,
                                  progress=None, sample_task=None, config=None,
@@ -2951,7 +3028,8 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  dataset_output_path=None,
                                  run_failure_log_path=None,
                                  mode: str = "refresh",
-                                 migration_index: dict | None = None):
+                                 migration_index: dict | None = None,
+                                 progress_event_cb=None):
     """Chunked JSONL labeling: watermark-based processing for large files.
 
     Processes JSONL files in chunks to bound memory usage. Each chunk is
@@ -2965,13 +3043,14 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     output_dir.mkdir(parents=True, exist_ok=True)
     pprint = progress.console.print if progress else print
 
-    chunk_size = config.chunk_size if config else CHUNK_SIZE
+    requested_chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
     concurrency = config.concurrency if config else DEFAULT_CONCURRENCY
     watermark = max(
         int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK)),
         1,
     )
+    chunk_size = _effective_chunk_row_count(requested_chunk_size, watermark)
 
     _sparse_kw = {}
     if config:
@@ -3088,17 +3167,10 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                 current_total = progress.tasks[sample_task].total or 0
                 progress.update(sample_task, total=current_total + label_count, visible=True)
 
-            # Submit tasks (shuffled)
             submit_order = list(label_indices)
             random.shuffle(submit_order)
-            for idx in submit_order:
-                coro = label_one(
-                    http_client, samples[idx], model, idx, len(samples), sem,
-                    enable_arbitration=enable_arbitration,
-                    config=config, rate_limiter=rate_limiter,
-                )
-                fut = asyncio.ensure_future(_tagged_label(coro, chunk_idx, idx))
-                pending_futures.add(fut)
+            collector.submit_order = submit_order
+            collector.submit_cursor = 0
 
             chunks_loaded += 1  # noqa: F841 (nonlocal assignment)
             return collector
@@ -3116,6 +3188,45 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                 loaded.append(c)
                 active_count += 1
             return loaded
+
+        def top_up_submissions(pending_futures, collectors):
+            if len(pending_futures) >= watermark:
+                return
+            active = [
+                c for c in collectors.values()
+                if not c.completed and c.has_pending_submission()
+            ]
+            while len(pending_futures) < watermark and active:
+                submitted = 0
+                for c in active:
+                    if len(pending_futures) >= watermark:
+                        break
+                    if not c.has_pending_submission():
+                        continue
+                    idx = c.submit_order[c.submit_cursor]
+                    c.submit_cursor += 1
+                    coro = label_one(
+                        http_client,
+                        c.samples[idx],
+                        model,
+                        idx,
+                        len(c.samples),
+                        sem,
+                        enable_arbitration=enable_arbitration,
+                        config=config,
+                        rate_limiter=rate_limiter,
+                        llm_progress_cb=llm_progress_cb,
+                        progress_event_cb=progress_event_cb,
+                    )
+                    fut = asyncio.ensure_future(_tagged_label(coro, c.chunk_idx, idx))
+                    pending_futures.add(fut)
+                    submitted += 1
+                if submitted == 0:
+                    break
+                active = [
+                    c for c in collectors.values()
+                    if not c.completed and c.has_pending_submission()
+                ]
 
         # --- Main watermark-driven loop ---
         collectors = {}
@@ -3165,6 +3276,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
         # Initial load
         maybe_load_more(pending_futures, collectors)
+        top_up_submissions(pending_futures, collectors)
         await flush_ready_chunks()
 
         file_start = time.time()
@@ -3195,14 +3307,23 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                         request_stats=rate_limiter.stats if rate_limiter else None,
                     )
                     if llm_progress_cb and monitor:
-                        run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                        run_info = llm_progress_cb(0, "pass1")
                         if run_info:
                             info = f"{info} • {run_info}"
                     progress.update(sample_task, advance=1, info=info)
+                if progress_event_cb:
+                    progress_event_cb({
+                        "kind": "sample_complete",
+                        "chunk_idx": c.chunk_idx,
+                        "sample_idx": sample_idx,
+                        "labels": labels,
+                        "monitor": monitor,
+                    })
 
             await flush_ready_chunks()
             # After processing batch, check if we should load more chunks
             maybe_load_more(pending_futures, collectors)
+            top_up_submissions(pending_futures, collectors)
             await flush_ready_chunks()
 
         await flush_ready_chunks()
@@ -3342,64 +3463,82 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         all_labels = [None] * total
     all_monitors = [None] * total
 
+    concurrency = config.concurrency if config else DEFAULT_CONCURRENCY
+    submit_window = max(
+        int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK)),
+        1,
+    )
+
     # Submit tasks in shuffled order — only for indices that need labeling
     submit_order = list(label_indices)
     random.shuffle(submit_order)
-    tasks = []
-    for idx in submit_order:
-        tasks.append(label_one(
-            http_client, samples[idx], model, idx, total, sem,
-            enable_arbitration=enable_arbitration,
-            config=config, rate_limiter=rate_limiter,
-        ))
+    submit_cursor = 0
+    pending_tasks = set()
+
+    def top_up_submissions():
+        nonlocal submit_cursor
+        while submit_cursor < len(submit_order) and len(pending_tasks) < submit_window:
+            idx = submit_order[submit_cursor]
+            submit_cursor += 1
+            pending_tasks.add(asyncio.ensure_future(label_one(
+                http_client, samples[idx], model, idx, total, sem,
+                enable_arbitration=enable_arbitration,
+                config=config, rate_limiter=rate_limiter,
+                llm_progress_cb=llm_progress_cb,
+            )))
 
     done_count = 0
     ok_count = 0
     fail_count = 0
     file_start = time.time()
-    for coro in asyncio.as_completed(tasks):
-        sample_idx, labels, monitor = await coro
+    top_up_submissions()
+    while pending_tasks:
+        done, pending_tasks = await asyncio.wait(
+            pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            sample_idx, labels, monitor = await task
 
-        all_labels[sample_idx] = labels
-        all_monitors[sample_idx] = monitor
-        done_count += 1
-
-        if labels:
-            ok_count += 1
-        else:
-            fail_count += 1
-
-        if progress and sample_task is not None:
-            info = format_progress_info(
-                ok_count,
-                fail_count,
-                label=sparse_info.strip() if sparse_info else None,
-                request_stats=rate_limiter.stats if rate_limiter else None,
-            )
-            if llm_progress_cb and monitor:
-                run_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
-                if run_info:
-                    info = f"{info} • {run_info}"
-            progress.update(sample_task, advance=1, info=info)
-        else:
-            # Fallback: per-sample print (no progress bar)
-            sid = monitor["sample_id"]
-            calls = monitor["llm_calls"]
-            elapsed = monitor.get("elapsed_seconds", 0)
-            status = monitor["status"]
+            all_labels[sample_idx] = labels
+            all_monitors[sample_idx] = monitor
+            done_count += 1
 
             if labels:
-                intent = labels.get("intent", "?")
-                diff = labels.get("difficulty", "?")
-                langs = ",".join(labels.get("language", [])[:3])
-                n_tags = sum(
-                    (len(labels[d]) if isinstance(labels.get(d), list) else (1 if labels.get(d) else 0))
-                    for d in ["intent", "language", "domain", "concept", "task", "constraint", "agentic", "context", "difficulty"]
-                )
-                arb = " [ARB]" if monitor["arbitrated"] else ""
-                print(f"  [{done_count:4d}/{total}] {sid:20s} | {calls} calls {elapsed:5.1f}s | {intent:6s} {diff:12s} | {langs:20s} | {n_tags:2d} tags{arb}")
+                ok_count += 1
             else:
-                print(f"  [{done_count:4d}/{total}] {sid:20s} | {calls} calls {elapsed:5.1f}s | FAILED: {status}")
+                fail_count += 1
+
+            if progress and sample_task is not None:
+                info = format_progress_info(
+                    ok_count,
+                    fail_count,
+                    label=sparse_info.strip() if sparse_info else None,
+                    request_stats=rate_limiter.stats if rate_limiter else None,
+                )
+                if llm_progress_cb and monitor:
+                    run_info = llm_progress_cb(0, "pass1")
+                    if run_info:
+                        info = f"{info} • {run_info}"
+                progress.update(sample_task, advance=1, info=info)
+            else:
+                # Fallback: per-sample print (no progress bar)
+                sid = monitor["sample_id"]
+                calls = monitor["llm_calls"]
+                elapsed = monitor.get("elapsed_seconds", 0)
+                status = monitor["status"]
+
+                if labels:
+                    intent = labels.get("intent", "?")
+                    diff = labels.get("difficulty", "?")
+                    langs = ",".join(labels.get("language", [])[:3])
+                    n_tags = sum(
+                        (len(labels[d]) if isinstance(labels.get(d), list) else (1 if labels.get(d) else 0))
+                        for d in ["intent", "language", "domain", "concept", "task", "constraint", "agentic", "context", "difficulty"]
+                    )
+                    arb = " [ARB]" if monitor["arbitrated"] else ""
+                    print(f"  [{done_count:4d}/{total}] {sid:20s} | {calls} calls {elapsed:5.1f}s | {intent:6s} {diff:12s} | {langs:20s} | {n_tags:2d} tags{arb}")
+                else:
+                    print(f"  [{done_count:4d}/{total}] {sid:20s} | {calls} calls {elapsed:5.1f}s | FAILED: {status}")
+        top_up_submissions()
 
     file_elapsed = time.time() - file_start
 
@@ -3717,6 +3856,25 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             limit=limit,
         )
         if use_chunked_delegate:
+            def _chunked_progress_event(event):
+                if not isinstance(event, dict):
+                    return
+                kind = event.get("kind")
+                if kind == "llm_delta":
+                    _record_live_llm_delta(event.get("delta_calls", 0), event.get("run_info"))
+                    return
+                if kind == "sample_complete" and progress and sample_task is not None:
+                    if workload_estimate is None:
+                        current_total = progress.tasks[sample_task].total or 0
+                        progress.update(
+                            sample_task,
+                            total=current_total + 1,
+                            advance=1,
+                            info=f"{rel_path.name} (chunked)",
+                        )
+                    else:
+                        progress.update(sample_task, advance=1, info=f"{rel_path.name} (chunked)")
+
             collector = FileCollector(
                 file_idx=orig_idx,
                 abs_path=abs_path,
@@ -3739,6 +3897,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 run_mode=mode,
                 sparse_info="",
                 chunked_delegate=True,
+                live_progress=True,
             )
             fut = asyncio.ensure_future(
                 _tagged_chunked_file(
@@ -3760,6 +3919,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                         run_failure_log_path=run_failure_log_path,
                         mode=mode,
                         migration_index=migration_index,
+                        progress_event_cb=_chunked_progress_event,
                     ),
                     orig_idx,
                 )
@@ -3887,6 +4047,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                     enable_arbitration=enable_arbitration,
                     config=config,
                     rate_limiter=rate_limiter,
+                    llm_progress_cb=llm_progress_cb,
                 )
                 fut = asyncio.ensure_future(_tagged_label(coro, c.file_idx, idx))
                 pending_futures.add(fut)
@@ -3911,6 +4072,23 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             initial_estimated_calls=workload_estimate.initial_estimated_llm_calls,
         )
     global_llm_info = None
+
+    def _record_live_llm_delta(delta_calls: int, run_info: str | None):
+        nonlocal global_llm_info
+        delta = max(int(delta_calls or 0), 0)
+        if eta_tracker and delta > 0:
+            eta_tracker.calls_done += delta
+            eta_tracker.estimated_total_calls = max(eta_tracker.estimated_total_calls, eta_tracker.calls_done)
+            elapsed = max(time.time() - eta_tracker._start_time, 1e-6)
+            instant_cps = eta_tracker.calls_done / elapsed
+            if eta_tracker._smoothed_cps <= 0:
+                eta_tracker._smoothed_cps = instant_cps
+            else:
+                eta_tracker._smoothed_cps = 0.2 * instant_cps + 0.8 * eta_tracker._smoothed_cps
+            eta_tracker.calls_per_sec = eta_tracker._smoothed_cps
+        if run_info:
+            global_llm_info = run_info
+        _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker)
 
     if progress and sample_task is not None:
         initial_sample_total = (
@@ -3974,27 +4152,13 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                         request_stats=rate_limiter.stats if rate_limiter else None,
                     )
                     if llm_progress_cb and monitor:
-                        global_llm_info = llm_progress_cb(monitor.get("llm_calls", 0), "pass1")
+                        global_llm_info = llm_progress_cb(0, "pass1")
                     progress.update(sample_task, advance=1, info=info)
                 if eta_tracker:
-                    eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
-                    if progress and llm_task is not None:
-                        global_counts = parse_run_progress(global_llm_info) if global_llm_info else None
-                        if global_counts:
-                            g_done, g_total = global_counts
-                            progress.update(
-                                llm_task,
-                                total=max(g_total, 1),
-                                completed=min(g_done, g_total),
-                                info=global_llm_info,
-                            )
-                        else:
-                            progress.update(
-                                llm_task,
-                                total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-                                completed=eta_tracker.calls_done,
-                                info=eta_tracker.info_line(),
-                            )
+                    eta_tracker.samples_done += 1
+                    if not llm_progress_cb:
+                        eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
+                    _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker)
 
                 # Check if this file is fully done (compare against label_count, not total)
                 if c.done >= c.label_count and not c.completed:
@@ -4024,7 +4188,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 all_file_stats.append(stats)
 
                 labeled_done = _labeled_samples_from_stats(stats)
-                if progress and sample_task is not None and labeled_done > 0:
+                if progress and sample_task is not None and labeled_done > 0 and not c.live_progress:
                     if workload_estimate is None:
                         current_total = progress.tasks[sample_task].total or 0
                         progress.update(
@@ -4035,7 +4199,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                         )
                     else:
                         progress.update(sample_task, advance=labeled_done, info=f"{c.rel_path.name} (chunked)")
-                if eta_tracker:
+                if eta_tracker and not c.live_progress:
                     calls_done = int(stats.get("total_llm_calls", 0) or 0)
                     eta_tracker.calls_done += max(calls_done, 0)
                     eta_tracker.samples_done += max(labeled_done, 0)
@@ -4049,13 +4213,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                     else:
                         eta_tracker._smoothed_cps = 0.2 * instant_cps + 0.8 * eta_tracker._smoothed_cps
                     eta_tracker.calls_per_sec = eta_tracker._smoothed_cps
-                    if progress and llm_task is not None:
-                        progress.update(
-                            llm_task,
-                            total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-                            completed=eta_tracker.calls_done,
-                            info=eta_tracker.info_line(),
-                        )
+                    _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker)
                 if progress and file_task is not None:
                     progress.update(file_task, advance=1)
 
@@ -4398,13 +4556,11 @@ async def run(
 
         batch_start = time.time()
 
+        client_limits = _build_http_client_limits(_concurrency, pprint=print)
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,
-            limits=httpx.Limits(
-                max_connections=_concurrency + 10,
-                max_keepalive_connections=_concurrency,
-            ),
+            limits=client_limits,
         ) as http_client:
             sem = asyncio.Semaphore(_concurrency)
             n = len(dir_files)
@@ -4528,13 +4684,11 @@ async def run(
         )
         batch_start = time.time()
 
+        client_limits = _build_http_client_limits(_concurrency, pprint=print)
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,
-            limits=httpx.Limits(
-                max_connections=_concurrency + 10,
-                max_keepalive_connections=_concurrency,
-            ),
+            limits=client_limits,
         ) as http_client:
             sem = asyncio.Semaphore(_concurrency)
             n = len(dir_files)
@@ -4579,13 +4733,11 @@ async def run(
     else:
         # ── Single-file mode: backward compatible ────────
         batch_start = time.time()
+        client_limits = _build_http_client_limits(_concurrency, pprint=print)
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,
-            limits=httpx.Limits(
-                max_connections=_concurrency + 10,
-                max_keepalive_connections=_concurrency,
-            ),
+            limits=client_limits,
         ) as http_client:
             sem = asyncio.Semaphore(_concurrency)
             with create_progress() as progress:
