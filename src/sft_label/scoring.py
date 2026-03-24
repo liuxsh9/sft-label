@@ -4465,10 +4465,13 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         working_path.unlink()
                 except OSError:
                     pass
+            if source_path is None and checkpoint_path.exists():
+                source_path = checkpoint_path
             if source_path is None and final_path.exists():
                 source_path = final_path
             if source_path is not None:
-                shutil.copyfile(source_path, checkpoint_path)
+                if source_path != checkpoint_path:
+                    shutil.copyfile(source_path, checkpoint_path)
             elif checkpoint_path.exists():
                 checkpoint_path.unlink()
     else:
