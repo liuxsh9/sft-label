@@ -1291,6 +1291,7 @@ function renderHero() {
   document.getElementById("hero-stats").innerHTML = heroStats
     .map(([label, value]) => `<div class="pill"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
     .join("");
+  document.getElementById("hero-toolbar").innerHTML = renderTagBarControlsInline();
 }
 
 function breadcrumbIds(scope) {
@@ -1968,8 +1969,7 @@ function renderChildren(scope) {
   );
 }
 
-function renderTagBarControlsInline(scope) {
-  if (!scope || (!scope.pass1 && !scope.pass2)) return "";
+function renderTagBarControlsInline() {
   const tagButtons = [
     ["hidden", t("hide"), t("hide_tag_bars")],
     ["relative", t("normalized"), t("relative_hint")],
@@ -1989,10 +1989,10 @@ function renderTagBarControlsInline(scope) {
   ].map(([value, label]) => (
     `<button class="segmented-btn ${STATE.locale === value ? "active" : ""}" type="button" data-locale="${escapeHtml(value)}">${escapeHtml(label)}</button>`
   )).join("");
-  return `<div class="toolbar-inline-copy" title="${escapeHtml(t("language_toggle_help"))}">${escapeHtml(t("language"))}</div><div class="segmented">${localeButtons}</div><div class="toolbar-inline-copy">${escapeHtml(t("aggregation"))}</div><div class="segmented">${aggButtons}</div>${aggregationInfoHtml()}<div class="toolbar-inline-copy" title="${escapeHtml(t("tag_bar_help"))}">${escapeHtml(t("tag_bars"))}</div><div class="segmented">${tagButtons}</div>`;
+  return `<div class="hero-toolbar-group"><div class="hero-toolbar-label toolbar-inline-copy" title="${escapeHtml(t("language_toggle_help"))}">${escapeHtml(t("language"))}</div><div class="hero-toolbar-body"><div class="segmented">${localeButtons}</div></div></div><div class="hero-toolbar-group"><div class="hero-toolbar-label">${escapeHtml(t("aggregation"))}</div><div class="hero-toolbar-body"><div class="segmented">${aggButtons}</div>${aggregationInfoHtml()}</div></div><div class="hero-toolbar-group"><div class="hero-toolbar-label toolbar-inline-copy" title="${escapeHtml(t("tag_bar_help"))}">${escapeHtml(t("tag_bars"))}</div><div class="hero-toolbar-body"><div class="segmented">${tagButtons}</div></div></div>`;
 }
 
-function renderPass1(pass1, scope) {
+function renderPass1(pass1) {
   if (!pass1) return "";
   const pass1View = aggregationPayload(pass1);
   if (!pass1View) return "";
@@ -2864,7 +2864,7 @@ function renderExplorer(scope) {
 function renderScopeContent(scope) {
   const chunks = [];
   chunks.push(renderChildren(scope));
-  chunks.push(renderPass1(scope.pass1, scope));
+  chunks.push(renderPass1(scope.pass1));
   chunks.push(renderPass2(scope.pass2));
   chunks.push(renderExplorer(scope));
   chunks.push(renderConversations(scope.conversation));
@@ -2879,7 +2879,6 @@ async function renderScope() {
 
   document.getElementById("scope-title").textContent = scope.label;
   document.getElementById("scope-path").textContent = scope.path || t("global_overview");
-  document.getElementById("scope-toolbar-extra").innerHTML = renderTagBarControlsInline(scope);
   renderBreadcrumbs(scope);
   document.getElementById("scope-content").innerHTML = renderScopeContent(scope);
 
