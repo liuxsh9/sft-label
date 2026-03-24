@@ -13,7 +13,7 @@ from sft_label.artifacts import (
     PASS2_SUMMARY_STATS_FILE,
 )
 from sft_label.config import FILE_RANKING_KEEP_RATE_THRESHOLDS
-from sft_label.run_layout import FILE_ARTIFACTS_DIRNAME
+from sft_label.run_layout import FILE_ARTIFACTS_DIRNAME, META_LABEL_DATA_DIRNAME
 
 
 def _load_json(path: Path):
@@ -315,6 +315,12 @@ _ARTIFACT_LEAF_NAMES = {
     "monitor_value.jsonl",
 }
 
+_GENERATED_SCOPE_ROOTS = {
+    META_LABEL_DATA_DIRNAME,
+    FILE_ARTIFACTS_DIRNAME,
+    DASHBOARDS_DIRNAME,
+}
+
 
 def _canonical_leaf_key(path: str | Path) -> str:
     candidate = Path(path)
@@ -355,6 +361,109 @@ def _guess_leaf_path(rel_dir: Path, stats: dict) -> Path:
     return rel_dir / candidate_path.name
 
 
+def _load_source_file_from_artifact(data_path: str | None) -> str | None:
+    if not data_path:
+        return None
+    path = Path(data_path)
+    if not path.exists():
+        return None
+    try:
+        if path.suffix == ".jsonl":
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        source_file = (row.get("metadata") or {}).get("source_file")
+                        if isinstance(source_file, str) and source_file:
+                            return source_file
+                    break
+        else:
+            payload = _load_json(path)
+            if isinstance(payload, list):
+                for row in payload:
+                    if isinstance(row, dict):
+                        source_file = (row.get("metadata") or {}).get("source_file")
+                        if isinstance(source_file, str) and source_file:
+                            return source_file
+                        break
+    except OSError:
+        return None
+    return None
+
+
+def _normalize_source_leaf_path(candidate: str, *, root_dir: Path) -> Path | None:
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    path = Path(candidate)
+    if path.is_absolute():
+        try:
+            return path.relative_to(root_dir)
+        except ValueError:
+            return Path(path.name)
+    return path
+
+
+def _looks_like_generated_leaf_path(path: Path) -> bool:
+    if path.name in _ARTIFACT_LEAF_NAMES:
+        return True
+    return bool(path.parts) and path.parts[0] in _GENERATED_SCOPE_ROOTS
+
+
+def _stats_wrap_named_source(stats: dict) -> bool:
+    for key in ("input_file", "file"):
+        value = stats.get(key)
+        if not isinstance(value, str):
+            continue
+        name = Path(value).name
+        if any(name.startswith(prefix) for prefix in ("labeled_", "scored_", "monitor_")):
+            return True
+    return False
+
+
+def _resolve_leaf_path(
+    root_dir: Path,
+    rel_dir: Path,
+    stats: dict,
+    *,
+    conv_records: list[dict] | None = None,
+    data_path: str | None = None,
+) -> Path:
+    guessed = _guess_leaf_path(rel_dir, stats)
+    prefers_source_candidates = _looks_like_generated_leaf_path(guessed) or _stats_wrap_named_source(stats)
+    if not prefers_source_candidates:
+        return guessed
+
+    candidates: list[str] = []
+    for key in ("mirrored_file", "input_file", "file"):
+        value = stats.get(key)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+
+    if conv_records:
+        for record in conv_records:
+            source_file = record.get("source_file")
+            if isinstance(source_file, str) and source_file:
+                candidates.append(source_file)
+                break
+
+    source_from_artifact = _load_source_file_from_artifact(data_path)
+    if source_from_artifact:
+        candidates.append(source_from_artifact)
+
+    for candidate in candidates:
+        normalized = _normalize_source_leaf_path(candidate, root_dir=root_dir)
+        if normalized is None or _looks_like_generated_leaf_path(normalized):
+            continue
+        if any(normalized.name.startswith(prefix) for prefix in ("labeled_", "scored_", "monitor_")):
+            continue
+        return normalized
+
+    return guessed
+
+
 def _with_scoring_file_label(stats: dict | None, file_label: str) -> dict | None:
     """Ensure scoring stats carry a stable source file label for aggregation."""
     if not isinstance(stats, dict):
@@ -362,7 +471,12 @@ def _with_scoring_file_label(stats: dict | None, file_label: str) -> dict | None
 
     payload = dict(stats)
     label = payload.get("file")
-    if isinstance(label, str) and label and Path(label).name not in _ARTIFACT_LEAF_NAMES:
+    if (
+        isinstance(label, str)
+        and label
+        and Path(label).name not in _ARTIFACT_LEAF_NAMES
+        and not _stats_wrap_named_source({"file": label})
+    ):
         return payload
 
     payload["file"] = file_label
@@ -416,7 +530,8 @@ def _discover_leaf_records(root_dir: Path, stats_filename: str | None, *,
         if not isinstance(stats, dict):
             continue
 
-        rel_path = _guess_leaf_path(rel_dir, stats).as_posix()
+        data_path = _find_sibling_artifact(stats_path, data_candidates)
+
         conv_records = []
         conv_path_str = None
         if include_conversations:
@@ -426,13 +541,21 @@ def _discover_leaf_records(root_dir: Path, stats_filename: str | None, *,
                 conv_records = payload
                 conv_path_str = str(conv_path)
 
+        rel_path = _resolve_leaf_path(
+            root_dir,
+            rel_dir,
+            stats,
+            conv_records=conv_records,
+            data_path=data_path,
+        ).as_posix()
+
         discovered[rel_path] = {
             "path": rel_path,
             "stats": stats,
             "stats_path": str(stats_path),
             "conv_records": conv_records,
             "conv_path": conv_path_str,
-            "data_path": _find_sibling_artifact(stats_path, data_candidates),
+            "data_path": data_path,
         }
     return discovered
 

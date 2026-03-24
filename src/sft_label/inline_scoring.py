@@ -294,6 +294,20 @@ def load_inline_scoring_file(input_path, limit: int = 0):
     return bundles, samples, sample_to_bundle
 
 
+def inline_source_has_embedded_scores(input_path, limit: int = 1) -> bool:
+    """Return whether an inline mirrored source file contains embedded Pass 2 values."""
+    input_path = Path(input_path)
+    found = 0
+    for bundle in iter_row_sample_bundles_from_jsonl(input_path, limit=0):
+        scored_samples = embedded_samples_from_bundle(bundle, require_usable_labels=True, require_value=True)
+        if scored_samples:
+            return True
+        found += 1
+        if limit > 0 and found >= limit:
+            break
+    return False
+
+
 def write_inline_labeled_cache(source_file, artifact_dir, limit: int = 0):
     """Materialize inline embedded Pass 1 labels as rebuildable labeled caches."""
     bundles, samples, _sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
@@ -326,7 +340,28 @@ def write_inline_pass1_cache(source_file, artifact_dir, limit: int = 0):
 
 def write_inline_scored_cache(source_file, artifact_dir, limit: int = 0):
     """Materialize inline embedded Pass 2 values as rebuildable scored caches."""
-    bundles, samples, _sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
+    input_path = Path(source_file)
+    bundles: list[RowSampleBundle] = []
+    samples: list[dict] = []
+    sample_budget = 0
+
+    for bundle in iter_row_sample_bundles_from_jsonl(input_path, limit=0):
+        bundle_samples = embedded_samples_from_bundle(
+            bundle,
+            require_usable_labels=True,
+            require_value=True,
+        )
+        projected = sample_budget + len(bundle_samples)
+        if limit > 0 and bundles and projected > limit:
+            break
+
+        bundles.append(bundle)
+        samples.extend(bundle_samples)
+        sample_budget = projected
+
+        if limit > 0 and sample_budget >= limit:
+            break
+
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 

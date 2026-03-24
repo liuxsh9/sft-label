@@ -34,6 +34,7 @@ from sft_label.artifacts import (
 from sft_label.inline_scoring import (
     discover_inline_jsonl_files,
     infer_inline_scoring_target,
+    inline_source_has_embedded_scores,
     write_inline_pass1_cache,
     write_inline_scored_cache,
 )
@@ -1271,6 +1272,33 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
         f"Starting inline dashboard regeneration: input={target.target_path} pass={pass_num}"
     )
 
+    def _artifact_cache_has_scored_values(artifact_dir: Path) -> bool:
+        for name in ("scored.jsonl", "scored.json"):
+            cache_path = artifact_dir / name
+            if not cache_path.exists():
+                continue
+            try:
+                if cache_path.suffix == ".jsonl":
+                    with open(cache_path, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            row = json.loads(line)
+                            if isinstance((row or {}).get("value"), dict):
+                                return True
+                else:
+                    with open(cache_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        for row in data:
+                            if isinstance(row, dict):
+                                if isinstance((row or {}).get("value"), dict):
+                                    return True
+            except (OSError, json.JSONDecodeError):
+                continue
+        return False
+
     for source_file in selected:
         artifact_dir = target.layout.file_artifact_dir(source_file)
         rel_label = target.layout.relative_source_path(source_file)
@@ -1295,7 +1323,16 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
         if pass_num in ("2", "both"):
             pass2_stats_path = artifact_dir / PASS2_STATS_FILE
             if pass2_stats_path.exists():
-                write_inline_scored_cache(source_file, artifact_dir)
+                cache_has_scores = _artifact_cache_has_scored_values(artifact_dir)
+                if not cache_has_scores and inline_source_has_embedded_scores(source_file):
+                    write_inline_scored_cache(source_file, artifact_dir)
+                    cache_has_scores = _artifact_cache_has_scored_values(artifact_dir)
+                if not cache_has_scores:
+                    _log_regenerate_dashboard(
+                        f"{rel_label}: no embedded Pass 2 values found in source; "
+                        "reusing existing scored cache state"
+                    )
+                _ensure_conversation_scores_current(artifact_dir)
                 _log_regenerate_dashboard(
                     f"{rel_label}: generating inline Pass 2 dashboard from {pass2_stats_path.name}"
                 )
@@ -1556,6 +1593,7 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
             pass2_stats_path = None
         if pass2_stats_path:
             try:
+                _ensure_conversation_scores_current(dir_path)
                 _log_regenerate_dashboard(
                     f"{dir_path}: generating Pass 2 dashboard from {pass2_stats_path.name}"
                 )
@@ -1671,6 +1709,50 @@ def _load_json_payload(path):
         return {}
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _conversation_records_need_backfill(records) -> bool:
+    if not isinstance(records, list) or not records:
+        return False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        detail = record.get("detail") or {}
+        if record.get("conv_value") is not None and (
+            detail.get("quality_overall") is None
+            or detail.get("reasoning_overall") is None
+        ):
+            return True
+    return False
+
+
+def _pick_scored_path(dir_path: Path) -> Path | None:
+    for name in ("scored.jsonl", "scored.json"):
+        path = dir_path / name
+        if path.exists():
+            return path
+    return None
+
+
+def _ensure_conversation_scores_current(dir_path: Path) -> bool:
+    conv_path = Path(dir_path) / "conversation_scores.json"
+    records = _load_json_payload(conv_path) if conv_path.exists() else []
+    if not _conversation_records_need_backfill(records):
+        return False
+
+    scored_path = _pick_scored_path(Path(dir_path))
+    if scored_path is None:
+        return False
+
+    refreshed_records = _stream_conversation_records(scored_path)
+    written = _write_conversation_records(refreshed_records, Path(dir_path))
+    if not written:
+        return False
+    _log_regenerate_dashboard(
+        f"{dir_path}: refreshed conversation_scores.json from {scored_path.name} "
+        "to backfill quality/reasoning metrics"
+    )
+    return True
 
 
 def _completed_postprocess_payload(*, artifact=None, count=None):

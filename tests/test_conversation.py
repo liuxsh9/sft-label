@@ -857,6 +857,17 @@ class TestAggregateConversations:
         samples = [_single_turn_sample(), _single_turn_sample()]
         assert aggregate_conversations(samples) == []
 
+    def test_conversation_detail_persists_weighted_quality_and_reasoning(self):
+        records = aggregate_conversations([
+            _slice("c1", 1, 2, value_score=4.0, quality=4, reasoning=5),
+            _slice("c1", 2, 2, value_score=8.0, quality=8, reasoning=7),
+        ])
+
+        assert len(records) == 1
+        detail = records[0]["detail"]
+        assert detail["quality_overall"] == 6.67
+        assert detail["reasoning_overall"] == 6.33
+
     def test_merge_record_batches_matches_full_aggregation(self):
         batch_a = [
             _slice("c1", 1, 3, value_score=5.0),

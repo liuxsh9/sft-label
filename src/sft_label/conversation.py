@@ -1274,6 +1274,16 @@ def aggregate_conversation(conversation_key, slices):
         if c is not None:
             complexities.append(c)
     peak_complexity = max(complexities) if complexities else None
+    quality_overall = _weighted_average(
+        slices,
+        weights,
+        lambda s: ((s.get("value") or {}).get("quality") or {}).get("overall"),
+    )
+    reasoning_overall = _weighted_average(
+        slices,
+        weights,
+        lambda s: ((s.get("value") or {}).get("reasoning") or {}).get("overall"),
+    )
 
     # Conversation rarity: weighted mean + peak + label-state diversity,
     # then shrink when the conversation is dominated by inherited slices.
@@ -1407,6 +1417,8 @@ def aggregate_conversation(conversation_key, slices):
             "bottom_k_mean": _round_or_none(turn_metrics.get("bottom_k_mean")),
             "peak_minus_mean": _round_or_none(turn_metrics.get("peak_minus_mean")),
             "late_turn_gain": _round_or_none(turn_metrics.get("late_turn_gain")),
+            "quality_overall": _round_or_none(quality_overall),
+            "reasoning_overall": _round_or_none(reasoning_overall),
             "conv_turn_signal_raw": _round_or_none(turn_signal_detail.get("conv_turn_signal_raw")),
             "conv_turn_signal": _round_or_none(turn_signal_detail.get("conv_turn_signal")),
             "conv_turn_signal_tail_penalty": _round_or_none(turn_signal_detail.get("conv_turn_signal_tail_penalty"), 3),

@@ -89,6 +89,47 @@ def _load_conversation_scores(run_dir):
         return []
 
 
+def _first_source_file(samples: list[dict] | None, conv_records: list[dict] | None) -> str | None:
+    for sample in samples or []:
+        source_file = ((sample or {}).get("metadata") or {}).get("source_file")
+        if isinstance(source_file, str) and source_file:
+            return source_file
+    for record in conv_records or []:
+        source_file = (record or {}).get("source_file")
+        if isinstance(source_file, str) and source_file:
+            return source_file
+    return None
+
+
+def _normalized_dashboard_stats(
+    stats: dict | None,
+    *,
+    scope_kind: str,
+    scope_path: str,
+    samples: list[dict] | None = None,
+    conv_records: list[dict] | None = None,
+    run_dir: Path | None = None,
+) -> dict | None:
+    if not isinstance(stats, dict):
+        return stats
+    payload = dict(stats)
+
+    if scope_kind == "file":
+        source_path = scope_path or _first_source_file(samples, conv_records)
+        if source_path:
+            payload["input_file"] = source_path
+        return payload
+
+    if scope_kind == "dir":
+        if scope_path:
+            payload["input_path"] = scope_path
+        return payload
+
+    if scope_kind == "global" and run_dir is not None:
+        payload["input_path"] = payload.get("input_path") or str(run_dir)
+    return payload
+
+
 def _compute_conv_viz_data(conv_records):
     if not conv_records:
         return None
@@ -309,8 +350,22 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             conv_records = []
             for leaf_path in raw_scope.get("descendant_files", []):
                 conv_records.extend(file_conversations.get(f"file:{leaf_path}", []))
-        pass1 = compute_viz_data([], raw_scope["raw_pass1"]) if raw_scope.get("raw_pass1") else None
-        pass2 = compute_value_viz_data([], raw_scope["raw_pass2"], conv_records) if raw_scope.get("raw_pass2") else None
+        normalized_pass1_stats = _normalized_dashboard_stats(
+            raw_scope.get("raw_pass1"),
+            scope_kind=raw_scope["kind"],
+            scope_path=raw_scope["path"],
+            conv_records=conv_records,
+            run_dir=run_dir,
+        )
+        normalized_pass2_stats = _normalized_dashboard_stats(
+            raw_scope.get("raw_pass2"),
+            scope_kind=raw_scope["kind"],
+            scope_path=raw_scope["path"],
+            conv_records=conv_records,
+            run_dir=run_dir,
+        )
+        pass1 = compute_viz_data([], normalized_pass1_stats) if normalized_pass1_stats else None
+        pass2 = compute_value_viz_data([], normalized_pass2_stats, conv_records) if normalized_pass2_stats else None
         conversation = _compute_conv_viz_data(conv_records)
         if is_file:
             turn_kind = file_turn_kind.get(scope_id)
@@ -379,7 +434,21 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
         payload, explorer_sources = _tree_payload(run_dir)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
-        payload = _single_scope_payload(run_dir, samples, compute_value_viz_data(samples, stats, _load_conversation_scores(run_dir)), stats)
+        conv_records = _load_conversation_scores(run_dir)
+        normalized_stats = _normalized_dashboard_stats(
+            stats,
+            scope_kind="file",
+            scope_path=_first_source_file(samples, conv_records) or "",
+            samples=samples,
+            conv_records=conv_records,
+            run_dir=run_dir,
+        ) or {}
+        payload = _single_scope_payload(
+            run_dir,
+            samples,
+            compute_value_viz_data(samples, normalized_stats, conv_records),
+            normalized_stats,
+        )
         explorer_sources = []
         data_path = run_dir / scored_file if scored_file else None
         conv_path = run_dir / "conversation_scores.json"

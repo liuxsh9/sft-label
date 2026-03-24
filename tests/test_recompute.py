@@ -1387,6 +1387,133 @@ class TestRegenerateDashboard:
         assert not any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
         assert manifest["scopes"]["global"]["explorer"]["detail_chunks"] == []
 
+    def test_inline_regenerate_pass2_preserves_existing_scored_cache(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        artifact_dir = run_root / "meta_label_data" / "files" / "sample"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        scored_samples = [
+            {
+                "id": "turn-1",
+                "conversations": [{"from": "human", "value": "q1"}, {"from": "gpt", "value": "a1"}],
+                "metadata": {"source_file": "dataset/sample.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
+                "labels": _inline_full_labels("build"),
+                "value": _inline_value("turn-1"),
+            },
+            {
+                "id": "turn-2",
+                "conversations": [{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}],
+                "metadata": {"source_file": "dataset/sample.jsonl", "source_id": "conv-1", "turn_index": 2, "total_turns": 2},
+                "labels": _inline_full_labels("modify"),
+                "value": _inline_value("turn-2"),
+            },
+        ]
+        (artifact_dir / "scored.json").write_text(json.dumps(scored_samples), encoding="utf-8")
+        _write_jsonl(artifact_dir / "scored.jsonl", scored_samples)
+        (artifact_dir / "conversation_scores.json").write_text(json.dumps([
+            {
+                "conversation_id": "conv-1",
+                "conversation_key": "dataset/sample.jsonl::conv-1",
+                "source_file": "dataset/sample.jsonl",
+                "turn_count": 2,
+                "conv_value": 6.2,
+                "conv_selection": 6.4,
+                "peak_complexity": 6.0,
+                "conv_rarity": 5.0,
+                "thinking_mode": "fast",
+                "merged_labels": _inline_full_labels("modify"),
+                "detail": {"quality_overall": 7.0, "reasoning_overall": 6.0},
+            }
+        ]), encoding="utf-8")
+        stats = recompute_value_stats_from_scored(scored_samples)
+        stats["input_file"] = "dataset/sample.jsonl"
+        (artifact_dir / "stats_scoring.json").write_text(json.dumps(stats), encoding="utf-8")
+
+        generated = run_regenerate_dashboard(str(source_file), pass_num="2")
+
+        assert len(generated) == 1
+        refreshed_cache = json.loads((artifact_dir / "scored.json").read_text(encoding="utf-8"))
+        assert refreshed_cache[0]["value"]["quality"]["overall"] == 7
+
+    def test_inline_regenerate_pass2_backfills_stale_conversation_scores(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        artifact_dir = run_root / "meta_label_data" / "files" / "sample"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        scored_samples = [
+            {
+                "id": "turn-1",
+                "conversations": [{"from": "human", "value": "q1"}, {"from": "gpt", "value": "a1"}],
+                "metadata": {"source_file": "dataset/sample.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
+                "labels": _inline_full_labels("build"),
+                "value": _inline_value("turn-1"),
+            },
+            {
+                "id": "turn-2",
+                "conversations": [{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}],
+                "metadata": {"source_file": "dataset/sample.jsonl", "source_id": "conv-1", "turn_index": 2, "total_turns": 2},
+                "labels": _inline_full_labels("modify"),
+                "value": _inline_value("turn-2"),
+            },
+        ]
+        (artifact_dir / "scored.json").write_text(json.dumps(scored_samples), encoding="utf-8")
+        _write_jsonl(artifact_dir / "scored.jsonl", scored_samples)
+        (artifact_dir / "conversation_scores.json").write_text(json.dumps([
+            {
+                "conversation_id": "conv-1",
+                "conversation_key": "dataset/sample.jsonl::conv-1",
+                "source_file": "dataset/sample.jsonl",
+                "turn_count": 2,
+                "conv_value": 6.2,
+                "conv_selection": 6.4,
+                "peak_complexity": 6.0,
+                "conv_rarity": 5.0,
+                "thinking_mode": "fast",
+                "merged_labels": _inline_full_labels("modify"),
+                "detail": {},
+            }
+        ]), encoding="utf-8")
+        stats = recompute_value_stats_from_scored(scored_samples)
+        stats["input_file"] = "dataset/sample.jsonl"
+        (artifact_dir / "stats_scoring.json").write_text(json.dumps(stats), encoding="utf-8")
+
+        run_regenerate_dashboard(str(source_file), pass_num="2")
+
+        refreshed = json.loads((artifact_dir / "conversation_scores.json").read_text(encoding="utf-8"))
+        detail = refreshed[0]["detail"]
+        assert detail["quality_overall"] == 7.0
+        assert detail["reasoning_overall"] == 6.0
+
 
 class TestCompletePostprocess:
     def _setup_deferred_pass2_run(self, tmp_path: Path) -> Path:

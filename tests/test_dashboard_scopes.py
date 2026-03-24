@@ -236,6 +236,102 @@ def test_build_scope_tree_does_not_duplicate_leaf_conversations_into_parent_scop
     assert tree["scopes"]["global"]["raw_conversations"] == []
 
 
+def test_build_scope_tree_on_run_root_prefers_real_source_paths_over_meta_artifacts(tmp_path):
+    run_root = tmp_path / "dataset_labeled_20260324_120000"
+    dataset_file = run_root / "dataset" / "code" / "sample.jsonl"
+    manifest_source = tmp_path / "input" / "manifest.json"
+    artifact_dir = run_root / "meta_label_data" / "files" / "code" / "sample"
+    manifest_dir = run_root / "manifest"
+
+    dataset_file.parent.mkdir(parents=True, exist_ok=True)
+    dataset_file.write_text('{"id":"conv-1"}\n', encoding="utf-8")
+    manifest_source.parent.mkdir(parents=True, exist_ok=True)
+    manifest_source.write_text('{"id":"manifest"}\n', encoding="utf-8")
+
+    _write_json(
+        artifact_dir / PASS2_STATS_FILE,
+        {
+            "input_file": str(artifact_dir / "labeled.jsonl"),
+            "file": "meta_label_data/files/code/sample/labeled.jsonl",
+            "total_scored": 1,
+            "total_failed": 0,
+            "score_distributions": {"value_score": {"mean": 6.0, "min": 6.0, "max": 6.0}},
+            "histograms": {},
+            "flag_counts": {},
+        },
+    )
+    _write_jsonl(
+        artifact_dir / "scored.jsonl",
+        [
+            {
+                "id": "sample-1",
+                "metadata": {"source_file": str(dataset_file), "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
+                "labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
+                "value": {"value_score": 6.0, "quality": {"overall": 6.0}},
+            }
+        ],
+    )
+    _write_json(
+        artifact_dir / "conversation_scores.json",
+        [
+            {
+                "conversation_id": "conv-1",
+                "conversation_key": "dataset/code/sample.jsonl::conv-1",
+                "source_file": str(dataset_file),
+                "turn_count": 2,
+                "conv_value": 6.0,
+                "conv_selection": 6.1,
+                "peak_complexity": 6.0,
+            }
+        ],
+    )
+    _write_json(
+        manifest_dir / PASS2_STATS_FILE,
+        {
+            "input_file": str(manifest_dir / "labeled_manifest.jsonl"),
+            "file": "manifest/labeled_manifest.jsonl",
+            "total_scored": 1,
+            "total_failed": 0,
+            "score_distributions": {"value_score": {"mean": 1.0, "min": 1.0, "max": 1.0}},
+            "histograms": {},
+            "flag_counts": {},
+        },
+    )
+    _write_jsonl(
+        manifest_dir / "scored.jsonl",
+        [
+            {
+                "id": "manifest-1",
+                "metadata": {"source_file": str(manifest_source), "source_id": "manifest-1"},
+                "labels": {"intent": "other", "difficulty": "beginner", "context": "snippet"},
+                "value": {"value_score": 1.0, "quality": {"overall": 1.0}},
+            }
+        ],
+    )
+    _write_json(
+        run_root / PASS2_SUMMARY_STATS_FILE,
+        {
+            "input_path": str(run_root),
+            "total_scored": 2,
+            "total_failed": 0,
+            "score_distributions": {"value_score": {"mean": 3.5, "min": 1.0, "max": 6.0}},
+            "histograms": {},
+            "flag_counts": {},
+        },
+    )
+
+    tree = build_scope_tree(run_root)
+    file_paths = sorted(scope["path"] for scope in tree["scopes"].values() if scope["kind"] == "file")
+
+    assert file_paths == ["dataset/code/sample.jsonl", "manifest.json"]
+    assert "file:dataset/code/sample.jsonl" in tree["scopes"]
+    assert sorted(row["file"] for row in tree["scopes"]["global"]["raw_pass2"]["per_file_summary"]) == [
+        "dataset/code/sample.jsonl",
+        "manifest.json",
+    ]
+    assert all(not path.startswith("meta_label_data/") for path in file_paths)
+
+
 def test_infer_scope_turn_kind_from_path_streams_json_array_without_json_load(tmp_path, monkeypatch):
     json_path = tmp_path / "labeled.json"
     json_path.write_text(

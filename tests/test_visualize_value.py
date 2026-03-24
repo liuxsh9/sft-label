@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-
 from sft_label.artifacts import PASS2_STATS_FILE, PASS2_SUMMARY_STATS_FILE
+from sft_label.conversation import aggregate_conversations
 from sft_label.tools import visualize_value as visualize_value_module
 from sft_label.tools.visualize_value import compute_value_viz_data, _compute_conv_viz_data
 from sft_label.tools.visualize_value import generate_value_dashboard
@@ -426,7 +426,7 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
     (artifact_dir / PASS2_STATS_FILE).write_text(
         json.dumps(
             {
-                "input_file": "code/sample.jsonl",
+                "input_file": str(artifact_dir / "labeled.jsonl"),
                 "total_scored": 1,
                 "total_failed": 0,
                 "score_distributions": {
@@ -434,12 +434,16 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
                     "selection_score": {"mean": 7.1, "min": 7.1, "max": 7.1},
                     "complexity_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
                     "quality_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "reasoning_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
                     "confidence": {"mean": 0.8, "min": 0.8, "max": 0.8},
                 },
                 "histograms": {},
                 "flag_counts": {},
                 "value_by_tag": {},
                 "selection_by_tag": {},
+                "thinking_mode_stats": {
+                    "fast": {"count": 1, "mean_value": 6.5, "mean_quality": 6.0, "mean_reasoning": 6.0},
+                },
             }
         ),
         encoding="utf-8",
@@ -455,6 +459,7 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
                     "selection_score": {"mean": 7.1, "min": 7.1, "max": 7.1},
                     "complexity_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
                     "quality_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "reasoning_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
                     "confidence": {"mean": 0.8, "min": 0.8, "max": 0.8},
                 },
                 "histograms": {},
@@ -469,6 +474,9 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
                         "mean_selection": 7.1,
                     }
                 ],
+                "thinking_mode_stats": {
+                    "fast": {"count": 1, "mean_value": 6.5, "mean_quality": 6.0, "mean_reasoning": 6.0},
+                },
             }
         ),
         encoding="utf-8",
@@ -486,6 +494,82 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
 
     assert manifest["scopes"]["file:code/sample.jsonl"]["explorer"]["sample_count"] == 1
     assert detail["conversation"]["mean_conv_value"] == 6.5
+    assert detail["pass2"]["modes"]["sample"]["overview"]["input_file"] == "code/sample.jsonl"
+    assert detail["pass2"]["modes"]["conversation"]["overview"]["input_file"] == "code/sample.jsonl"
+    assert detail["pass2"]["modes"]["conversation"]["overview"]["mean_quality"] == 6.0
+    assert detail["pass2"]["modes"]["conversation"]["score_distributions"]["reasoning_overall"]["mean"] == 6.0
+    assert detail["pass2"]["modes"]["conversation"]["per_file_summary"][0]["mean_quality"] == 6.0
+    assert detail["pass2"]["modes"]["conversation"]["thinking_mode_stats"]["fast"]["mean_quality"] == 6.0
+
+
+def test_generate_value_dashboard_single_scope_normalizes_input_file_to_source_path(tmp_path):
+    scored_row = {
+        "id": "sample-1",
+        "metadata": {"source_file": "code/sample.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
+        "labels": {"intent": "build", "difficulty": "intermediate", "context": "snippet"},
+        "value": {
+            "value_score": 6.5,
+            "selection_score": 7.1,
+            "thinking_mode": "fast",
+            "quality": {"overall": 6.0},
+            "complexity": {"overall": 6.0},
+            "reasoning": {"overall": 6.0},
+            "rarity": {"score": 5.5},
+            "confidence": 0.8,
+        },
+    }
+    (tmp_path / "scored.jsonl").write_text(
+        json.dumps(scored_row, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "conversation_scores.json").write_text(
+        json.dumps(
+            [
+                {
+                    "conversation_id": "conv-1",
+                    "conversation_key": "code/sample.jsonl::conv-1",
+                    "source_file": "code/sample.jsonl",
+                    "turn_count": 2,
+                    "conv_value": 6.5,
+                    "conv_selection": 7.1,
+                    "peak_complexity": 7,
+                    "detail": {"quality_overall": 6.0, "reasoning_overall": 6.0},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / PASS2_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": str(tmp_path / "labeled.jsonl"),
+                "total_scored": 1,
+                "total_failed": 0,
+                "score_distributions": {
+                    "value_score": {"mean": 6.5, "min": 6.5, "max": 6.5},
+                    "selection_score": {"mean": 7.1, "min": 7.1, "max": 7.1},
+                    "complexity_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "quality_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "reasoning_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "confidence": {"mean": 0.8, "min": 0.8, "max": 0.8},
+                },
+                "histograms": {},
+                "flag_counts": {},
+                "value_by_tag": {},
+                "selection_by_tag": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = generate_value_dashboard(tmp_path, scored_file="scored.jsonl", stats_file=PASS2_STATS_FILE, quiet=True)
+    data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+
+    assert manifest["scopes"]["global"]["path"] == "code/sample.jsonl"
+    assert detail["pass2"]["modes"]["sample"]["overview"]["input_file"] == "code/sample.jsonl"
+    assert detail["pass2"]["modes"]["conversation"]["overview"]["input_file"] == "code/sample.jsonl"
 
 
 def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_parent_scopes(tmp_path):
@@ -498,7 +582,7 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
     code_rows = [
         {
             "id": "code-1",
-            "metadata": {"source_file": "code/sample_a.jsonl", "source_id": "conv-1"},
+            "metadata": {"source_file": "code/sample_a.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
             "labels": {"intent": "build", "difficulty": "intermediate", "context": "snippet"},
             "value": {
                 "value_score": 4.0,
@@ -513,7 +597,7 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
         },
         {
             "id": "code-2",
-            "metadata": {"source_file": "code/sample_a.jsonl", "source_id": "conv-1"},
+            "metadata": {"source_file": "code/sample_a.jsonl", "source_id": "conv-1", "turn_index": 2, "total_turns": 2},
             "labels": {"intent": "debug", "difficulty": "advanced", "context": "repository"},
             "value": {
                 "value_score": 8.0,
@@ -530,19 +614,34 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
     docs_rows = [
         {
             "id": "docs-1",
-            "metadata": {"source_file": "docs/sample_b.jsonl", "source_id": "conv-2"},
+            "metadata": {"source_file": "docs/sample_b.jsonl", "source_id": "conv-2", "turn_index": 1, "total_turns": 2},
             "labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
             "value": {
-                "value_score": 5.0,
-                "selection_score": 5.4,
+                "value_score": 3.0,
+                "selection_score": 3.4,
                 "thinking_mode": "fast",
-                "quality": {"overall": 5.0},
-                "complexity": {"overall": 5.0},
-                "reasoning": {"overall": 5.0},
-                "rarity": {"score": 5.0},
+                "quality": {"overall": 3.0},
+                "complexity": {"overall": 3.0},
+                "reasoning": {"overall": 3.0},
+                "rarity": {"score": 3.0},
                 "confidence": 0.8,
             },
-        }
+        },
+        {
+            "id": "docs-2",
+            "metadata": {"source_file": "docs/sample_b.jsonl", "source_id": "conv-2", "turn_index": 2, "total_turns": 2},
+            "labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
+            "value": {
+                "value_score": 7.0,
+                "selection_score": 7.4,
+                "thinking_mode": "fast",
+                "quality": {"overall": 5.0},
+                "complexity": {"overall": 7.0},
+                "reasoning": {"overall": 5.0},
+                "rarity": {"score": 7.0},
+                "confidence": 0.8,
+            },
+        },
     ]
     (code_leaf / "scored.jsonl").write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in code_rows) + "\n",
@@ -553,41 +652,11 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
         encoding="utf-8",
     )
     (code_leaf / "conversation_scores.json").write_text(
-        json.dumps(
-            [
-                {
-                    "conversation_id": "conv-1",
-                    "conversation_key": "code/sample_a.jsonl::conv-1",
-                    "source_file": "code/sample_a.jsonl",
-                    "turn_count": 2,
-                    "conv_value": 7.0,
-                    "conv_selection": 7.5,
-                    "peak_complexity": 8.0,
-                    "conv_rarity": 6.6,
-                    "thinking_mode": "fast",
-                    "merged_labels": {"intent": "debug", "difficulty": "advanced", "context": "repository"},
-                }
-            ]
-        ),
+        json.dumps(aggregate_conversations(code_rows)),
         encoding="utf-8",
     )
     (docs_leaf / "conversation_scores.json").write_text(
-        json.dumps(
-            [
-                {
-                    "conversation_id": "conv-2",
-                    "conversation_key": "docs/sample_b.jsonl::conv-2",
-                    "source_file": "docs/sample_b.jsonl",
-                    "turn_count": 1,
-                    "conv_value": 5.0,
-                    "conv_selection": 5.4,
-                    "peak_complexity": 5.0,
-                    "conv_rarity": 5.0,
-                    "thinking_mode": "fast",
-                    "merged_labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
-                }
-            ]
-        ),
+        json.dumps(aggregate_conversations(docs_rows)),
         encoding="utf-8",
     )
     (code_leaf / PASS2_STATS_FILE).write_text(
@@ -616,17 +685,17 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
     (docs_leaf / PASS2_STATS_FILE).write_text(
         json.dumps(
             {
-                "input_file": "docs/sample_b.jsonl",
-                "total_scored": 1,
-                "total_failed": 0,
-                "score_distributions": {
-                    "value_score": {"mean": 5.0},
-                    "selection_score": {"mean": 5.4},
-                    "complexity_overall": {"mean": 5.0},
-                    "quality_overall": {"mean": 5.0},
-                    "reasoning_overall": {"mean": 5.0},
-                    "rarity_score": {"mean": 5.0},
-                    "confidence": {"mean": 0.8},
+                    "input_file": "docs/sample_b.jsonl",
+                    "total_scored": 2,
+                    "total_failed": 0,
+                    "score_distributions": {
+                        "value_score": {"mean": 5.0},
+                        "selection_score": {"mean": 5.4},
+                        "complexity_overall": {"mean": 5.0},
+                        "quality_overall": {"mean": 5.0},
+                        "reasoning_overall": {"mean": 5.0},
+                        "rarity_score": {"mean": 5.0},
+                        "confidence": {"mean": 0.8},
                 },
                 "histograms": {},
                 "flag_counts": {},
@@ -640,25 +709,25 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
         json.dumps(
             {
                 "input_path": "dataset",
-                "total_scored": 3,
-                "total_failed": 0,
-                "score_distributions": {
-                    "value_score": {"mean": 5.7},
-                    "selection_score": {"mean": 6.0},
-                    "complexity_overall": {"mean": 5.7},
-                    "quality_overall": {"mean": 5.7},
-                    "reasoning_overall": {"mean": 5.7},
-                    "rarity_score": {"mean": 5.7},
-                    "confidence": {"mean": 0.8},
-                },
-                "histograms": {},
-                "flag_counts": {},
-                "per_file_summary": [
-                    {"file": "code/sample_a.jsonl", "count": 2, "mean_value": 6.0, "mean_complexity": 6.0, "mean_quality": 6.0, "mean_selection": 6.3},
-                    {"file": "docs/sample_b.jsonl", "count": 1, "mean_value": 5.0, "mean_complexity": 5.0, "mean_quality": 5.0, "mean_selection": 5.4},
-                ],
-            }
-        ),
+                    "total_scored": 4,
+                    "total_failed": 0,
+                    "score_distributions": {
+                        "value_score": {"mean": 5.5},
+                        "selection_score": {"mean": 5.85},
+                        "complexity_overall": {"mean": 5.5},
+                        "quality_overall": {"mean": 5.5},
+                        "reasoning_overall": {"mean": 5.5},
+                        "rarity_score": {"mean": 5.5},
+                        "confidence": {"mean": 0.8},
+                    },
+                    "histograms": {},
+                    "flag_counts": {},
+                    "per_file_summary": [
+                        {"file": "code/sample_a.jsonl", "count": 2, "mean_value": 6.0, "mean_complexity": 6.0, "mean_quality": 6.0, "mean_selection": 6.3},
+                        {"file": "docs/sample_b.jsonl", "count": 2, "mean_value": 5.0, "mean_complexity": 5.0, "mean_quality": 5.0, "mean_selection": 5.4},
+                    ],
+                }
+            ),
         encoding="utf-8",
     )
 
@@ -669,6 +738,9 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
 
     assert code_detail["pass2"]["modes"]["conversation"]["overview"]["total_scored"] == 1
     assert global_detail["pass2"]["modes"]["conversation"]["overview"]["total_scored"] == 2
+    assert code_detail["pass2"]["modes"]["conversation"]["overview"]["mean_quality"] == 6.67
+    assert global_detail["pass2"]["modes"]["conversation"]["overview"]["mean_quality"] == 5.5
+    assert global_detail["pass2"]["modes"]["conversation"]["score_distributions"]["quality_overall"]["mean"] == 5.5
     assert global_detail["summary_modes"]["conversation"]["scored_total"] == 2
     assert global_detail["conversation"]["total"] == 2
-    assert global_detail["conversation"]["mean_conv_value"] == 6.0
+    assert global_detail["conversation"]["mean_conv_value"] == 5.24

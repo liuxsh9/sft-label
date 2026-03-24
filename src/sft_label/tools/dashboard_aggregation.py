@@ -804,6 +804,109 @@ def _stats_only_pass2_mode(stats: dict, *, mode_id: str, unit_label: str, per_fi
     return _filter_pass2_extension_only_fields(payload, mode_id=mode_id)
 
 
+def _conversation_units_missing_subscore_metrics(units: list[dict]) -> bool:
+    if not units:
+        return False
+    return all(
+        unit.get("quality_overall") is None and unit.get("reasoning_overall") is None
+        for unit in units
+    )
+
+
+def _backfill_conversation_mode_from_stats(mode: dict, stats: dict) -> None:
+    score_distributions = stats.get("score_distributions") or {}
+    mode_distributions = mode.setdefault("score_distributions", {})
+    for key in ("complexity_overall", "quality_overall", "reasoning_overall", "confidence"):
+        if not isinstance(mode_distributions.get(key), dict) or "mean" not in mode_distributions.get(key, {}):
+            value = score_distributions.get(key)
+            if isinstance(value, dict):
+                mode_distributions[key] = value
+
+    mode_sub_scores = mode.setdefault("sub_score_means", {})
+    if not isinstance(mode_sub_scores.get("complexity"), dict):
+        mode_sub_scores["complexity"] = {}
+    if not isinstance(mode_sub_scores.get("quality"), dict):
+        mode_sub_scores["quality"] = {}
+    if not isinstance(mode_sub_scores.get("reasoning"), dict):
+        mode_sub_scores["reasoning"] = {}
+    if mode_sub_scores["complexity"].get("overall") is None:
+        complexity_mean = (mode_distributions.get("complexity_overall") or {}).get("mean")
+        if complexity_mean is not None:
+            mode_sub_scores["complexity"]["overall"] = complexity_mean
+    if mode_sub_scores["quality"].get("overall") is None:
+        quality_mean = (mode_distributions.get("quality_overall") or {}).get("mean")
+        if quality_mean is not None:
+            mode_sub_scores["quality"]["overall"] = quality_mean
+    if mode_sub_scores["reasoning"].get("overall") is None:
+        reasoning_mean = (mode_distributions.get("reasoning_overall") or {}).get("mean")
+        if reasoning_mean is not None:
+            mode_sub_scores["reasoning"]["overall"] = reasoning_mean
+
+    overview = mode.setdefault("overview", {})
+    for overview_key, distribution_key in (
+        ("mean_complexity", "complexity_overall"),
+        ("mean_quality", "quality_overall"),
+        ("mean_confidence", "confidence"),
+    ):
+        if overview.get(overview_key) in (None, 0):
+            mean_value = (mode_distributions.get(distribution_key) or {}).get("mean")
+            if mean_value is not None:
+                overview[overview_key] = mean_value
+
+    stats_file_summary = {
+        row.get("file"): row
+        for row in (stats.get("per_file_summary") or [])
+        if isinstance(row, dict) and row.get("file")
+    }
+    for row in mode.get("per_file_summary") or []:
+        if not isinstance(row, dict):
+            continue
+        stats_row = stats_file_summary.get(row.get("file"))
+        if isinstance(stats_row, dict):
+            if row.get("mean_quality") in (None, 0):
+                stats_mean_quality = stats_row.get("mean_quality")
+                if stats_mean_quality is not None:
+                    row["mean_quality"] = stats_mean_quality
+            if row.get("mean_complexity") in (None, 0):
+                stats_mean_complexity = stats_row.get("mean_complexity")
+                if stats_mean_complexity is not None:
+                    row["mean_complexity"] = stats_mean_complexity
+            continue
+        if row.get("mean_quality") in (None, 0):
+            overview_quality = overview.get("mean_quality")
+            if overview_quality is not None:
+                row["mean_quality"] = overview_quality
+        if row.get("mean_complexity") in (None, 0):
+            overview_complexity = overview.get("mean_complexity")
+            if overview_complexity is not None:
+                row["mean_complexity"] = overview_complexity
+
+    stats_thinking_mode = {
+        key: value
+        for key, value in (stats.get("thinking_mode_stats") or {}).items()
+        if isinstance(value, dict)
+    }
+    if not mode.get("thinking_mode_stats") and stats_thinking_mode:
+        mode["thinking_mode_stats"] = {
+            key: dict(value)
+            for key, value in stats_thinking_mode.items()
+        }
+    for mode_key, mode_stats in (mode.get("thinking_mode_stats") or {}).items():
+        if not isinstance(mode_stats, dict):
+            continue
+        stats_mode = stats_thinking_mode.get(mode_key)
+        if not isinstance(stats_mode, dict):
+            continue
+        if mode_stats.get("mean_quality") in (None, 0):
+            stats_mean_quality = stats_mode.get("mean_quality")
+            if stats_mean_quality is not None:
+                mode_stats["mean_quality"] = stats_mean_quality
+        if mode_stats.get("mean_reasoning") in (None, 0):
+            stats_mean_reasoning = stats_mode.get("mean_reasoning")
+            if stats_mean_reasoning is not None:
+                mode_stats["mean_reasoning"] = stats_mean_reasoning
+
+
 def _sample_pass2_unit(sample: dict) -> dict | None:
     value = sample.get("value") or {}
     if not value:
@@ -1221,6 +1324,8 @@ def build_pass2_viz(samples: list[dict], stats: dict, conv_records: list[dict] |
         unit_label="units",
         per_file_summary=_build_per_file_summary(conversation_units),
     )
+    if _conversation_units_missing_subscore_metrics(conversation_units):
+        _backfill_conversation_mode_from_stats(conversation_mode, stats)
     payload = dict(sample_mode)
     payload["modes"] = {
         "sample": sample_mode,
