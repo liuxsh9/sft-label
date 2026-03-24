@@ -901,24 +901,25 @@ def _assert_dashboard_bundle_complete(html_files: list[Path]) -> None:
             )
 
 
-def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_files: list[Path]) -> None:
-    if not _scoring_dashboard_present(html_files):
-        return
-
-    summary_payload = None
-    summary_path = None
+def _load_scoring_summary_metadata(run_dir: Path, dashboards_dir: Path) -> tuple[Path | None, dict[str, Any] | None]:
     for candidate in _iter_scoring_summary_candidates(run_dir, dashboards_dir):
         payload = _load_json_if_exists(candidate)
         if payload is None:
             continue
-        summary_payload = payload
-        summary_path = candidate
-        break
+        return candidate, payload
+    return None, None
+
+
+def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_files: list[Path]) -> None:
+    has_scoring_dashboard = _scoring_dashboard_present(html_files)
+    summary_path, summary_payload = _load_scoring_summary_metadata(run_dir, dashboards_dir)
     if summary_payload is None:
-        raise ValueError(
-            "Scoring dashboards are not publishable yet: missing summary_stats_scoring.json metadata with "
-            "completed postprocess status."
-        )
+        if has_scoring_dashboard:
+            raise ValueError(
+                "Scoring dashboards are not publishable yet: missing summary_stats_scoring.json metadata with "
+                "completed postprocess status."
+            )
+        return
 
     postprocess = summary_payload.get("postprocess")
     if not isinstance(postprocess, dict):
@@ -934,6 +935,30 @@ def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_f
         raise ValueError(
             f"Scoring dashboards are not publishable yet: postprocess.{key}.status={status or 'missing'}"
         )
+
+
+def _stage_runtime_assets(service: DashboardServiceConfig) -> Path:
+    assets_root = service.web_root_path / _ASSETS_DIRNAME
+    assets_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = assets_root / f".{DASHBOARD_RUNTIME_VERSION}.tmp-{os.getpid()}-{time.time_ns()}"
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    for name in _RUNTIME_ASSET_FILENAMES:
+        shutil.copyfile(_RUNTIME_SOURCE_DIR / name, staging_dir / name)
+    return staging_dir
+
+
+def _runtime_assets_live_dir(service: DashboardServiceConfig) -> Path:
+    return service.web_root_path / _ASSETS_DIRNAME / DASHBOARD_RUNTIME_VERSION
+
+
+def _cleanup_path_nonfatal(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        if path.exists():
+            _remove_path(path)
+    except OSError:
+        return
 
 
 def _make_publish_staging_dir(service: DashboardServiceConfig, run_id: str) -> Path:
@@ -997,16 +1022,19 @@ def publish_run_dashboards(
 
         _assert_dashboard_bundle_complete(html_files)
         _assert_scoring_publish_eligible(run_dir, dashboards_dir, html_files)
-        sync_dashboard_service_runtime_assets(service)
 
         run_id = _allocate_run_id(service, run_dir)
         published_root = service.web_root_path / _RUNS_DIRNAME / run_id
         staging_root = _make_publish_staging_dir(service, run_id)
+        assets_staging_root = _stage_runtime_assets(service)
+        assets_live_root = _runtime_assets_live_dir(service)
         previous_published_runs = list(service.published_runs)
         previous_default_service = store.default_service
         dashboards: dict[str, dict[str, Any]] = {}
         backup_root: Path | None = None
+        assets_backup_root: Path | None = None
         swapped = False
+        assets_swapped = False
 
         try:
             for src_html in html_files:
@@ -1032,6 +1060,8 @@ def publish_run_dashboards(
 
             backup_root = _swap_published_directory(staging_root, published_root)
             swapped = True
+            assets_backup_root = _swap_published_directory(assets_staging_root, assets_live_root)
+            assets_swapped = True
 
             service.published_runs = [
                 item for item in service.published_runs
@@ -1050,10 +1080,14 @@ def publish_run_dashboards(
                 _rollback_published_directory(published_root, backup_root)
             else:
                 _remove_path(staging_root)
+            if assets_swapped:
+                _rollback_published_directory(assets_live_root, assets_backup_root)
+            else:
+                _remove_path(assets_staging_root)
             raise
 
-        if backup_root is not None and backup_root.exists():
-            _remove_path(backup_root)
+        _cleanup_path_nonfatal(backup_root)
+        _cleanup_path_nonfatal(assets_backup_root)
         return published_record
     finally:
         _release_publish_lock(lock_path)
