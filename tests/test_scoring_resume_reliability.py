@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sft_label.config import PipelineConfig
-from sft_label.scoring import _pass2_checkpoint_path, _run_scoring_file_chunked
+from sft_label.scoring import _pass2_checkpoint_path, _resolve_pass2_resume_path, _run_scoring_file_chunked
 
 
 def _sample(sample_id: str) -> dict:
@@ -107,6 +107,11 @@ def test_chunked_resume_fastpath_materializes_checkpoint_only_artifacts(tmp_path
         checkpoint_scored_rows,
     )
     _write_jsonl(checkpoint_monitor, checkpoint_monitor_rows)
+    _write_jsonl(tmp_path / "failed_value.jsonl", [dict(samples[0], value=None)])
+    _write_jsonl(
+        tmp_path / "score_failures.jsonl",
+        [{"sample_id": samples[0]["id"], "status": "stale-final-failure"}],
+    )
 
     async def fail_score_one(*_args, **_kwargs):
         raise AssertionError("score_one must not run during checkpoint-only resume finalize")
@@ -133,6 +138,25 @@ def test_chunked_resume_fastpath_materializes_checkpoint_only_artifacts(tmp_path
     final_monitor_rows = _read_jsonl(tmp_path / "monitor_value.jsonl")
     assert [row["value"]["value_score"] for row in final_scored_rows] == [6.0, 7.0, 8.0]
     assert {row["status"] for row in final_monitor_rows} == {"checkpoint-only"}
+    assert not (tmp_path / "failed_value.jsonl").exists()
+    assert not (tmp_path / "score_failures.jsonl").exists()
+
+
+def test_resolve_resume_path_ignores_empty_or_truncated_checkpoint_when_final_is_valid(tmp_path):
+    final_scored_rows = [
+        {
+            **_sample("sample-final"),
+            "value": _value_payload(score=7.3, rarity_score=4.9, confidence=0.92),
+        }
+    ]
+    _write_jsonl(tmp_path / "scored.jsonl", final_scored_rows)
+
+    checkpoint = _pass2_checkpoint_path(tmp_path, "scored.jsonl")
+    checkpoint.write_text("", encoding="utf-8")
+    assert _resolve_pass2_resume_path(tmp_path, "scored.jsonl") == tmp_path / "scored.jsonl"
+
+    checkpoint.write_text('{"id":"sample-final","value":', encoding="utf-8")
+    assert _resolve_pass2_resume_path(tmp_path, "scored.jsonl") == tmp_path / "scored.jsonl"
 
 
 def test_resume_setup_preserves_checkpoint_over_final_when_no_working_exists(tmp_path):
@@ -201,6 +225,50 @@ def test_resume_setup_preserves_checkpoint_over_final_when_no_working_exists(tmp
     assert _read_jsonl(_pass2_checkpoint_path(tmp_path, "score_failures.jsonl")) == [
         {"sample_id": samples[0]["id"], "status": "checkpoint-failure"}
     ]
+
+
+def test_resume_setup_uses_final_when_checkpoint_is_empty_or_truncated(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    samples = [_sample("sample-0"), _sample("sample-1")]
+    _write_jsonl(labeled_path, samples)
+
+    final_scored_rows = [
+        {
+            **samples[0],
+            "value": _value_payload(score=8.4, rarity_score=5.5, confidence=0.95),
+        }
+    ]
+    final_monitor_rows = [_monitor(samples[0]["id"], status="final-source")]
+    _write_jsonl(tmp_path / "scored.jsonl", final_scored_rows)
+    _write_jsonl(tmp_path / "monitor_value.jsonl", final_monitor_rows)
+
+    _pass2_checkpoint_path(tmp_path, "scored.jsonl").write_text('{"id":"sample-0","value":', encoding="utf-8")
+    _pass2_checkpoint_path(tmp_path, "monitor_value.jsonl").write_text("", encoding="utf-8")
+
+    with patch("sft_label.scoring._reset_pass2_working_files", side_effect=RuntimeError("stop-after-resume-setup")):
+        with patch("sft_label.scoring.score_one", side_effect=AssertionError("score_one should not run")):
+            try:
+                asyncio.run(
+                    _run_scoring_file_chunked(
+                        labeled_path,
+                        tmp_path,
+                        None,
+                        0,
+                        _quiet_chunked_config(enable_stage_recovery_sweep=False),
+                        resume=True,
+                        generate_dashboard=False,
+                        show_progress=False,
+                        print_summary=False,
+                        quiet=True,
+                    )
+                )
+            except RuntimeError as exc:
+                assert str(exc) == "stop-after-resume-setup"
+            else:
+                raise AssertionError("Expected resume setup interruption")
+
+    assert _read_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl")) == final_scored_rows
+    assert _read_jsonl(_pass2_checkpoint_path(tmp_path, "monitor_value.jsonl")) == final_monitor_rows
 
 
 def test_chunked_recovery_sweep_keeps_failure_outputs_consistent_after_recovery(tmp_path):

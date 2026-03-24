@@ -180,6 +180,40 @@ def _clear_pass2_checkpoint_files(output_dir: Path) -> None:
             path.unlink()
 
 
+def _is_usable_pass2_jsonl_artifact(
+    path: Path,
+    *,
+    allow_empty: bool = False,
+    allow_trailing_corrupt_line: bool = False,
+) -> bool:
+    if not path.exists():
+        return False
+    try:
+        size = int(path.stat().st_size)
+    except OSError:
+        return False
+    if size <= 0:
+        return allow_empty
+
+    has_row = False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                has_row = True
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError:
+                    if allow_trailing_corrupt_line and not f.read().strip():
+                        return has_row
+                    return False
+    except (OSError, json.JSONDecodeError):
+        return False
+    return has_row
+
+
 def _finalize_pass2_working_files(output_dir: Path) -> None:
     final_names = (
         "scored.jsonl",
@@ -3808,20 +3842,15 @@ def _load_monitor_lookup(path: Path) -> dict[str, dict]:
 def _resolve_pass2_resume_path(output_dir: Path, filename: str) -> Path | None:
     output_dir = Path(output_dir)
     working = _pass2_working_path(output_dir, filename)
-    if working.exists():
-        try:
-            if working.stat().st_size > 0:
-                return working
-        except OSError:
-            pass
-    candidates = [
-        _pass2_checkpoint_path(output_dir, filename),
-        output_dir / filename,
-        working,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    checkpoint = _pass2_checkpoint_path(output_dir, filename)
+    final = output_dir / filename
+
+    if _is_usable_pass2_jsonl_artifact(working, allow_trailing_corrupt_line=True):
+        return working
+    if _is_usable_pass2_jsonl_artifact(checkpoint):
+        return checkpoint
+    if _is_usable_pass2_jsonl_artifact(final, allow_trailing_corrupt_line=True):
+        return final
     return None
 
 
@@ -4246,6 +4275,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     scored_resume_path,
                     monitor_resume_path,
                 )
+                if len(score_summaries) == expected_total:
+                    for failure_name in ("failed_value.jsonl", "score_failures.jsonl"):
+                        with open(_pass2_working_path(output_dir, failure_name), "w", encoding="utf-8"):
+                            pass
                 return _finalize_chunked_outputs(
                     output_dir=output_dir,
                     scored_path=scored_resume_path,
@@ -4447,6 +4480,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     failures_working_path = _pass2_working_path(output_dir, "score_failures.jsonl")
 
     if resume:
+        failure_names = {"failed_value.jsonl", "score_failures.jsonl"}
         for name in (
             "scored.jsonl",
             "monitor_value.jsonl",
@@ -4465,9 +4499,16 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         working_path.unlink()
                 except OSError:
                     pass
-            if source_path is None and checkpoint_path.exists():
+            allow_empty = name in failure_names
+            checkpoint_usable = _is_usable_pass2_jsonl_artifact(checkpoint_path, allow_empty=allow_empty)
+            final_usable = _is_usable_pass2_jsonl_artifact(
+                final_path,
+                allow_empty=allow_empty,
+                allow_trailing_corrupt_line=True,
+            )
+            if source_path is None and checkpoint_usable:
                 source_path = checkpoint_path
-            if source_path is None and final_path.exists():
+            if source_path is None and final_usable:
                 source_path = final_path
             if source_path is not None:
                 if source_path != checkpoint_path:
