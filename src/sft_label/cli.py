@@ -476,7 +476,12 @@ def _score_postprocess_payload_for_publish_guard(launched_args, result):
     return postprocess if isinstance(postprocess, dict) else {}
 
 
-def _auto_publish_pass2_guard(launched_args, result, lang: str) -> tuple[bool, str | None]:
+def _auto_publish_pass2_guard(
+    launched_args,
+    result,
+    lang: str,
+    run_dir: str | None = None,
+) -> tuple[bool, str | None]:
     postprocess = _score_postprocess_payload_for_publish_guard(launched_args, result)
     if postprocess is None:
         return True, None
@@ -500,12 +505,13 @@ def _auto_publish_pass2_guard(launched_args, result, lang: str) -> tuple[bool, s
     if failures:
         observed_text = ", ".join(observed) if observed else "none"
         blocked_text = ", ".join(failures)
+        run_dir_arg = str(run_dir) if run_dir else "<run_dir>"
         return (
             False,
             _start_msg(
                 lang,
-                f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。请先运行 `sft-label complete-postprocess --input <run_dir>`。",
-                f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. Run `sft-label complete-postprocess --input <run_dir>` first.",
+                f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。请先运行 `sft-label complete-postprocess --input {run_dir_arg}`。",
+                f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. Run `sft-label complete-postprocess --input {run_dir_arg}` first.",
             ),
         )
 
@@ -1566,7 +1572,12 @@ def cmd_start(args, parser):
     if dashboard_service is not None:
         run_dir = _extract_dashboard_publish_run_dir(launched_args, result)
         if run_dir:
-            can_publish, guard_message = _auto_publish_pass2_guard(launched_args, result, lang)
+            can_publish, guard_message = _auto_publish_pass2_guard(
+                launched_args,
+                result,
+                lang,
+                run_dir=str(run_dir),
+            )
             if not can_publish:
                 print(guard_message)
             else:

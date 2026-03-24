@@ -838,6 +838,7 @@ def test_cmd_start_auto_publish_skips_when_pass2_postprocess_not_completed(
     out = capsys.readouterr().out
     assert publish_calls["count"] == 0
     assert blocked_status in out
+    assert str(run_dir) in out
     assert "auto-publish" in out.lower()
 
 
@@ -880,6 +881,74 @@ def test_cmd_start_auto_publish_keeps_labeling_only_runs_publishable(monkeypatch
     monkeypatch.setattr(
         "sft_label.cli.dispatch_command",
         lambda args, parser: {"run_dir": str(run_dir)},
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    assert publish_calls["count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("conversation_status", "dashboard_status"),
+    [
+        ("completed", "disabled"),
+        ("disabled", "completed"),
+    ],
+)
+def test_cmd_start_auto_publish_allows_scored_runs_when_pass2_postprocess_is_safe(
+    monkeypatch,
+    tmp_path,
+    conversation_status,
+    dashboard_status,
+):
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json", "--score"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {
+            "run_dir": str(run_dir),
+            "score_summary": {
+                "postprocess": {
+                    "conversation_scores": {"status": conversation_status},
+                    "dashboard": {"status": dashboard_status},
+                }
+            },
+        },
         raising=False,
     )
 
