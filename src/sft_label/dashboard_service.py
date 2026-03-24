@@ -29,6 +29,11 @@ _RUNS_DIRNAME = "runs"
 _RUNTIME_ASSET_FILENAMES = ("dashboard.js", "dashboard.css")
 _RUNTIME_SOURCE_DIR = Path(__file__).resolve().parent / "tools"
 _RUNTIME_PATH_RE = re.compile(r"(?P<quote>['\"])_dashboard_static/[^'\"]+(?P=quote)")
+_PUBLISH_LOCK_FILENAME = "publish.lock"
+_PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
+_PUBLISH_LOCK_POLL_SECONDS = 0.05
+_SCORING_REQUIRED_POSTPROCESS_KEYS = ("conversation_scores", "dashboard")
+_SCORING_ALLOWED_POSTPROCESS_STATUS = {"completed", "disabled"}
 
 
 @dataclass(eq=True)
@@ -173,13 +178,27 @@ def load_dashboard_service_store(config_path: str | Path | None = None) -> Dashb
     return DashboardServiceStore.from_dict(data)
 
 
+def _write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    try:
+        tmp_path.write_text(text, encoding=encoding)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
 def save_dashboard_service_store(
     store: DashboardServiceStore,
     config_path: str | Path | None = None,
 ) -> Path:
     path = Path(config_path) if config_path is not None else default_dashboard_service_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = json.dumps(store.to_dict(), ensure_ascii=False, indent=2)
+    _write_text_atomic(path, payload, encoding="utf-8")
     return path
 
 
@@ -780,59 +799,248 @@ def _copy_dashboard_bundle(src_html: Path, dest_root: Path) -> Path:
     return dest_html
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _publish_lock_path(service: DashboardServiceConfig) -> Path:
+    return service.service_meta_dir / _PUBLISH_LOCK_FILENAME
+
+
+def _acquire_publish_lock(
+    service: DashboardServiceConfig,
+    *,
+    timeout: float = _PUBLISH_LOCK_TIMEOUT_SECONDS,
+    poll_interval: float = _PUBLISH_LOCK_POLL_SECONDS,
+) -> Path:
+    lock_path = _publish_lock_path(service)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + max(timeout, 0.0)
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"Failed to acquire dashboard publish lock for service '{service.name}' at {lock_path}"
+                )
+            time.sleep(max(poll_interval, 0.01))
+            continue
+        except OSError as e:
+            raise RuntimeError(
+                f"Failed to establish dashboard publish lock for service '{service.name}' at {lock_path}: {e}"
+            ) from e
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+        return lock_path
+
+
+def _release_publish_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise ValueError(f"Failed to read scoring summary metadata: {path}: {e}") from e
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid scoring summary metadata: {path}: {e}") from e
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid scoring summary metadata: {path} (expected object)")
+    return payload
+
+
+def _iter_scoring_summary_candidates(run_dir: Path, dashboards_dir: Path) -> list[Path]:
+    roots = [run_dir, dashboards_dir.parent, dashboards_dir.parent.parent]
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for root in roots:
+        for path in (
+            root / "summary_stats_scoring.json",
+            root / "meta_label_data" / "summary_stats_scoring.json",
+        ):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidates.append(resolved)
+    return candidates
+
+
+def _scoring_dashboard_present(html_files: list[Path]) -> bool:
+    return any(_classify_dashboard_key(path.name) == "scoring" for path in html_files)
+
+
+def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_files: list[Path]) -> None:
+    if not _scoring_dashboard_present(html_files):
+        return
+
+    summary_payload = None
+    summary_path = None
+    for candidate in _iter_scoring_summary_candidates(run_dir, dashboards_dir):
+        payload = _load_json_if_exists(candidate)
+        if payload is None:
+            continue
+        summary_payload = payload
+        summary_path = candidate
+        break
+    if summary_payload is None:
+        raise ValueError(
+            "Scoring dashboards are not publishable yet: missing summary_stats_scoring.json metadata with "
+            "completed postprocess status."
+        )
+
+    postprocess = summary_payload.get("postprocess")
+    if not isinstance(postprocess, dict):
+        raise ValueError(
+            f"Scoring dashboards are not publishable yet: {summary_path} is missing postprocess status metadata."
+        )
+
+    for key in _SCORING_REQUIRED_POSTPROCESS_KEYS:
+        entry = postprocess.get(key)
+        status = str((entry or {}).get("status") or "").strip().lower() if isinstance(entry, dict) else ""
+        if status in _SCORING_ALLOWED_POSTPROCESS_STATUS:
+            continue
+        raise ValueError(
+            f"Scoring dashboards are not publishable yet: postprocess.{key}.status={status or 'missing'}"
+        )
+
+
+def _make_publish_staging_dir(service: DashboardServiceConfig, run_id: str) -> Path:
+    runs_root = service.web_root_path / _RUNS_DIRNAME
+    runs_root.mkdir(parents=True, exist_ok=True)
+    staging_root = runs_root / f".{run_id}.tmp-{os.getpid()}-{time.time_ns()}"
+    staging_root.mkdir(parents=True, exist_ok=False)
+    return staging_root
+
+
+def _swap_published_directory(staging_root: Path, published_root: Path) -> Path | None:
+    backup_root: Path | None = None
+    if published_root.exists():
+        backup_root = published_root.with_name(f".{published_root.name}.bak-{os.getpid()}-{time.time_ns()}")
+        os.replace(published_root, backup_root)
+    try:
+        os.replace(staging_root, published_root)
+    except Exception:
+        if backup_root is not None and backup_root.exists() and not published_root.exists():
+            os.replace(backup_root, published_root)
+        raise
+    return backup_root
+
+
+def _rollback_published_directory(published_root: Path, backup_root: Path | None) -> None:
+    try:
+        if published_root.exists():
+            _remove_path(published_root)
+    except OSError:
+        pass
+    if backup_root is not None and backup_root.exists():
+        try:
+            os.replace(backup_root, published_root)
+        except OSError:
+            pass
+
+
 def publish_run_dashboards(
     service: DashboardServiceConfig,
     run_dir: str | Path,
     *,
     config_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    store = load_dashboard_service_store(config_path)
-    configured = store.services.get(service.name)
+    preloaded = load_dashboard_service_store(config_path)
+    configured = preloaded.services.get(service.name)
     if configured is not None:
         service = configured
 
-    sync_dashboard_service_runtime_assets(service)
-    run_dir = Path(run_dir).expanduser().resolve()
-    dashboards_dir = _resolve_dashboards_dir(run_dir)
-    html_files = sorted(dashboards_dir.glob("*.html"))
-    if not html_files:
-        raise FileNotFoundError(f"No dashboard HTML files found under {dashboards_dir}")
+    lock_path = _acquire_publish_lock(service)
+    try:
+        store = load_dashboard_service_store(config_path)
+        configured = store.services.get(service.name)
+        if configured is not None:
+            service = configured
 
-    run_id = _allocate_run_id(service, run_dir)
-    published_root = service.web_root_path / _RUNS_DIRNAME / run_id
-    if published_root.exists():
-        shutil.rmtree(published_root)
-    published_root.mkdir(parents=True, exist_ok=True)
+        sync_dashboard_service_runtime_assets(service)
+        run_dir = Path(run_dir).expanduser().resolve()
+        dashboards_dir = _resolve_dashboards_dir(run_dir)
+        html_files = sorted(dashboards_dir.glob("*.html"))
+        if not html_files:
+            raise FileNotFoundError(f"No dashboard HTML files found under {dashboards_dir}")
 
-    dashboards: dict[str, dict[str, Any]] = {}
-    for src_html in html_files:
-        dest_html = _copy_dashboard_bundle(src_html, published_root)
-        key = _classify_dashboard_key(src_html.name)
-        candidate = {
-            "filename": dest_html.name,
-            "path": str(dest_html),
-            "url": f"{service.share_base_url()}/{_RUNS_DIRNAME}/{run_id}/{dest_html.name}",
-        }
-        existing = dashboards.get(key)
-        if existing is None or _dashboard_priority(candidate["filename"], key) < _dashboard_priority(existing["filename"], key):
-            dashboards[key] = candidate
+        _assert_scoring_publish_eligible(run_dir, dashboards_dir, html_files)
 
-    published_record = {
-        "run_id": run_id,
-        "source_run_dir": str(run_dir),
-        "dashboards_dir": str(dashboards_dir),
-        "published_dir": str(published_root),
-        "published_at": datetime.now().isoformat(),
-        "dashboards": dashboards,
-    }
+        run_id = _allocate_run_id(service, run_dir)
+        published_root = service.web_root_path / _RUNS_DIRNAME / run_id
+        staging_root = _make_publish_staging_dir(service, run_id)
+        previous_published_runs = list(service.published_runs)
+        previous_default_service = store.default_service
+        dashboards: dict[str, dict[str, Any]] = {}
+        backup_root: Path | None = None
+        swapped = False
 
-    service.published_runs = [
-        item for item in service.published_runs
-        if item.get("run_id") != run_id and item.get("source_run_dir") != str(run_dir)
-    ]
-    service.published_runs.append(published_record)
-    store.services[service.name] = service
-    if not store.default_service:
-        store.default_service = service.name
-    save_dashboard_service_store(store, config_path)
-    return published_record
+        try:
+            for src_html in html_files:
+                dest_html = _copy_dashboard_bundle(src_html, staging_root)
+                key = _classify_dashboard_key(src_html.name)
+                candidate = {
+                    "filename": dest_html.name,
+                    "path": str(dest_html),
+                    "url": f"{service.share_base_url()}/{_RUNS_DIRNAME}/{run_id}/{dest_html.name}",
+                }
+                existing = dashboards.get(key)
+                if existing is None or _dashboard_priority(candidate["filename"], key) < _dashboard_priority(existing["filename"], key):
+                    dashboards[key] = candidate
+
+            published_record = {
+                "run_id": run_id,
+                "source_run_dir": str(run_dir),
+                "dashboards_dir": str(dashboards_dir),
+                "published_dir": str(published_root),
+                "published_at": datetime.now().isoformat(),
+                "dashboards": dashboards,
+            }
+
+            backup_root = _swap_published_directory(staging_root, published_root)
+            swapped = True
+
+            service.published_runs = [
+                item for item in service.published_runs
+                if item.get("run_id") != run_id and item.get("source_run_dir") != str(run_dir)
+            ]
+            service.published_runs.append(published_record)
+            store.services[service.name] = service
+            if not store.default_service:
+                store.default_service = service.name
+            save_dashboard_service_store(store, config_path)
+        except Exception:
+            service.published_runs = previous_published_runs
+            store.services[service.name] = service
+            store.default_service = previous_default_service
+            if swapped:
+                _rollback_published_directory(published_root, backup_root)
+            else:
+                _remove_path(staging_root)
+            raise
+
+        if backup_root is not None and backup_root.exists():
+            _remove_path(backup_root)
+        return published_record
+    finally:
+        _release_publish_lock(lock_path)

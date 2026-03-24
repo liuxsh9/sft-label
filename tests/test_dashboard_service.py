@@ -62,6 +62,23 @@ def _write_dashboard_bundle(root: Path, filename: str, title: str = "Demo") -> P
     return html_path
 
 
+def _write_scoring_summary(
+    run_dir: Path,
+    *,
+    conversation_status: str,
+    dashboard_status: str,
+) -> Path:
+    payload = {
+        "postprocess": {
+            "conversation_scores": {"status": conversation_status},
+            "dashboard": {"status": dashboard_status},
+        }
+    }
+    path = run_dir / "summary_stats_scoring.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def test_dashboard_service_config_roundtrip(tmp_path, monkeypatch):
     config_path = tmp_path / "dashboard_services.json"
     monkeypatch.setenv("SFT_LABEL_DASHBOARD_SERVICE_CONFIG", str(config_path))
@@ -265,6 +282,7 @@ def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     run_dir = tmp_path / "demo_run"
     label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
     score_html = _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="completed")
 
     assets_dir = sync_dashboard_service_runtime_assets(service)
     assert (assets_dir / "dashboard.js").exists()
@@ -333,10 +351,135 @@ def test_publish_prefers_global_scoring_dashboard_for_primary_url(tmp_path):
     global_html = _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
     _write_dashboard_bundle(run_dir, "dashboard_scoring_code__part1.html")
     _write_dashboard_bundle(run_dir, "dashboard_scoring_demo_sidebar_b.html")
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="completed")
 
     published = publish_run_dashboards(service, run_dir, config_path=config_path)
 
     assert published["dashboards"]["scoring"]["filename"] == global_html.name
+
+
+def test_publish_run_dashboards_keeps_previous_publish_when_bundle_copy_fails(monkeypatch, tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="old")
+    first = publish_run_dashboards(service, run_dir, config_path=config_path)
+    published_root = Path(first["published_dir"])
+    manifest_path = published_root / f"{label_html.stem}.data" / "manifest.json"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["title"] == "old"
+
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="new")
+
+    def _boom(src_html, dest_root):
+        raise OSError("copy boom")
+
+    monkeypatch.setattr("sft_label.dashboard_service._copy_dashboard_bundle", _boom)
+
+    with pytest.raises(OSError, match="copy boom"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert (published_root / label_html.name).exists()
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["title"] == "old"
+
+
+@pytest.mark.parametrize(
+    ("conversation_status", "dashboard_status", "expected"),
+    [
+        ("deferred", "completed", "conversation_scores"),
+        ("completed", "failed", "dashboard"),
+    ],
+)
+def test_publish_run_dashboards_rejects_incomplete_scoring_postprocess_state(
+    tmp_path,
+    conversation_status,
+    dashboard_status,
+    expected,
+):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(
+        run_dir,
+        conversation_status=conversation_status,
+        dashboard_status=dashboard_status,
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
+def test_publish_run_dashboards_allows_labeling_only_when_pass2_not_applicable(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "label_only_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "labeling" in published["dashboards"]
+    assert "scoring" not in published["dashboards"]
+    assert (Path(published["published_dir"]) / label_html.name).exists()
+
+
+def test_publish_run_dashboards_fails_closed_when_publish_lock_conflicts(monkeypatch, tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="old")
+    first = publish_run_dashboards(service, run_dir, config_path=config_path)
+    published_root = Path(first["published_dir"])
+    manifest_path = published_root / f"{label_html.stem}.data" / "manifest.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="new")
+
+    def _lock_conflict(*args, **kwargs):
+        raise RuntimeError("publish lock busy")
+
+    monkeypatch.setattr(
+        "sft_label.dashboard_service._acquire_publish_lock",
+        _lock_conflict,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="publish lock busy"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == before
+    store = load_dashboard_service_store(config_path)
+    found = find_published_run(store.services["default"], run_id=first["run_id"])
+    assert found is not None
+    assert found["published_at"] == first["published_at"]
 
 
 def test_pm2_lifecycle_helpers_use_pm2_commands(monkeypatch, tmp_path):
