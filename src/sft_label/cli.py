@@ -488,6 +488,8 @@ def _load_regenerate_postprocess_payload(run_dir: str | os.PathLike[str] | None)
     candidates = (
         root / PASS2_SUMMARY_STATS_FILE,
         root / PASS2_SUMMARY_STATS_FILE_LEGACY,
+        root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE,
+        root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE_LEGACY,
     )
     for candidate in candidates:
         if not candidate.exists():
@@ -509,6 +511,9 @@ def _auto_publish_pass2_guard(
     lang: str,
     run_dir: str | None = None,
 ) -> tuple[bool, str | None]:
+    if launched_args.command == "regenerate-dashboard" and str(getattr(launched_args, "pass_num", "both")) == "1":
+        return True, None
+
     postprocess = _score_postprocess_payload_for_publish_guard(launched_args, result)
     if postprocess is None and launched_args.command == "regenerate-dashboard":
         postprocess = _load_regenerate_postprocess_payload(run_dir or getattr(launched_args, "input", None))
