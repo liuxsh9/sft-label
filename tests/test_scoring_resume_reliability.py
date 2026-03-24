@@ -5,7 +5,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sft_label.config import PipelineConfig
-from sft_label.scoring import _pass2_checkpoint_path, _resolve_pass2_resume_path, _run_scoring_file_chunked
+from sft_label.scoring import (
+    _pass2_checkpoint_path,
+    _pass2_working_path,
+    _resolve_pass2_resume_path,
+    _run_scoring_file_chunked,
+)
 
 
 def _sample(sample_id: str) -> dict:
@@ -157,6 +162,45 @@ def test_resolve_resume_path_ignores_empty_or_truncated_checkpoint_when_final_is
 
     checkpoint.write_text('{"id":"sample-final","value":', encoding="utf-8")
     assert _resolve_pass2_resume_path(tmp_path, "scored.jsonl") == tmp_path / "scored.jsonl"
+
+
+def test_resume_fastpath_ignores_single_corrupt_working_artifact(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    samples = [_sample("sample-0")]
+    _write_jsonl(labeled_path, samples)
+
+    checkpoint_scored_rows = [
+        {
+            **samples[0],
+            "value": _value_payload(score=9.4, rarity_score=5.1, confidence=0.93),
+        }
+    ]
+    checkpoint_monitor_rows = [_monitor(samples[0]["id"], status="checkpoint-source")]
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), checkpoint_scored_rows)
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"), checkpoint_monitor_rows)
+    _pass2_working_path(tmp_path, "scored.jsonl").write_text('{"id":"sample-0","value":', encoding="utf-8")
+
+    async def fail_score_one(*_args, **_kwargs):
+        raise AssertionError("score_one must not run during resume fast-path finalize")
+
+    with patch("sft_label.scoring.score_one", side_effect=fail_score_one):
+        asyncio.run(
+            _run_scoring_file_chunked(
+                labeled_path,
+                tmp_path,
+                None,
+                0,
+                _quiet_chunked_config(enable_stage_recovery_sweep=False),
+                resume=True,
+                generate_dashboard=False,
+                show_progress=False,
+                print_summary=False,
+                quiet=True,
+            )
+        )
+
+    final_scored_rows = _read_jsonl(tmp_path / "scored.jsonl")
+    assert [row["value"]["value_score"] for row in final_scored_rows] == [9.4]
 
 
 def test_resume_setup_preserves_checkpoint_over_final_when_no_working_exists(tmp_path):

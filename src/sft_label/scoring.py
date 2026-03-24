@@ -202,14 +202,14 @@ def _is_usable_pass2_jsonl_artifact(
                 line = line.strip()
                 if not line:
                     continue
-                has_row = True
                 try:
                     json.loads(line)
                 except json.JSONDecodeError:
                     if allow_trailing_corrupt_line and not f.read().strip():
                         return has_row
                     return False
-    except (OSError, json.JSONDecodeError):
+                has_row = True
+    except OSError:
         return False
     return has_row
 
@@ -240,6 +240,11 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
             except OSError:
                 continue
             if not is_failure_artifact and size <= 0:
+                continue
+            if not is_failure_artifact and not _is_usable_pass2_jsonl_artifact(
+                candidate,
+                allow_trailing_corrupt_line=True,
+            ):
                 continue
             chosen_path = candidate
             chosen_size = size
