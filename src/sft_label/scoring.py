@@ -760,7 +760,7 @@ def _accumulate_monitor_totals(monitor_totals, monitor):
         monitor_totals["prompt_bytes_hard_cap_hits"] = monitor_totals.get("prompt_bytes_hard_cap_hits", 0) + 1
 
 
-def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Path):
+def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Path, *, config=None):
     """Rebuild summaries + compact monitor totals after recovery sweep edits."""
     monitor_totals = _init_monitor_totals()
     summaries = []
@@ -770,7 +770,7 @@ def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Pat
             monitor = json.loads(line_m)
             _accumulate_monitor_totals(monitor_totals, monitor)
             if sample.get("value"):
-                summaries.append(_selection_summary_from_sample(sample))
+                summaries.append(_selection_summary_from_sample(sample, config=config))
     return summaries, monitor_totals
 
 
@@ -2619,7 +2619,7 @@ def _selection_dim_confidence(labels, dim):
 def _selection_summary_from_sample(sample, config=None):
     """Extract compact fields needed for global selection ranking."""
     value = sample.get("value") or {}
-    selection_view = _selection_view_from_sample(sample)
+    selection_view = _selection_view_from_sample(sample, config=config)
     metadata = sample.get("metadata") or {}
     labels = sample.get("labels") or {}
     selection_features = _infer_selection_features(
@@ -4296,6 +4296,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
                     scored_resume_path,
                     monitor_resume_path,
+                    config=config,
                 )
                 if len(score_summaries) == expected_total:
                     for failure_name in ("failed_value.jsonl", "score_failures.jsonl"):
@@ -4861,6 +4862,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
             scored_path,
             monitor_path,
+            config=config,
         )
 
     return _finalize_chunked_outputs(

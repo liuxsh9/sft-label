@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from sft_label.config import PipelineConfig
 from sft_label.scoring import (
+    _rebuild_chunked_summaries_and_monitors,
     _finalize_pass2_working_files,
     _pass2_checkpoint_path,
     _pass2_working_path,
     _resolve_pass2_resume_path,
+    _selection_summary_from_sample,
     _run_scoring_file_chunked,
 )
 
@@ -163,6 +165,45 @@ def test_resolve_resume_path_ignores_empty_or_truncated_checkpoint_when_final_is
 
     checkpoint.write_text('{"id":"sample-final","value":', encoding="utf-8")
     assert _resolve_pass2_resume_path(tmp_path, "scored.jsonl") == tmp_path / "scored.jsonl"
+
+
+def test_selection_summary_forwards_config_to_selection_view():
+    sample = {
+        **_sample("sample-0"),
+        "value": _value_payload(score=6.5, rarity_score=4.2, confidence=0.9),
+    }
+    config = PipelineConfig(value_truncation_budget=321)
+    mocked_view = {
+        "current_request": "request",
+        "trajectory": "trajectory",
+        "response": "response",
+        "trajectory_turn_count": 1,
+        "trajectory_tool_turns": 0,
+    }
+    with patch("sft_label.scoring._selection_view_from_sample", return_value=mocked_view) as patched_view:
+        _selection_summary_from_sample(sample, config=config)
+
+    patched_view.assert_called_once_with(sample, config=config)
+
+
+def test_rebuild_chunked_summaries_passes_config_to_selection_summary(tmp_path):
+    scored_path = tmp_path / "scored.jsonl"
+    monitor_path = tmp_path / "monitor_value.jsonl"
+    _write_jsonl(
+        scored_path,
+        [{**_sample("sample-0"), "value": _value_payload(score=7.0, rarity_score=4.1, confidence=0.8)}],
+    )
+    _write_jsonl(monitor_path, [_monitor("sample-0", status="success")])
+    config = PipelineConfig(value_truncation_budget=222)
+
+    with patch(
+        "sft_label.scoring._selection_summary_from_sample",
+        return_value={"labels": {}, "value_score": 7.0},
+    ) as patched_summary:
+        _rebuild_chunked_summaries_and_monitors(scored_path, monitor_path, config=config)
+
+    assert patched_summary.call_count == 1
+    assert patched_summary.call_args.kwargs["config"] is config
 
 
 def test_resume_fastpath_ignores_single_corrupt_working_artifact(tmp_path):
