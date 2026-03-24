@@ -78,3 +78,10 @@ def test_compute_value_stats_can_skip_raw_score_arrays():
 
     assert "_raw_scores" not in stats
     assert stats["total_scored"] == 1
+
+
+def test_directory_global_rewrite_execution_helper_respects_deferred_policy():
+    from sft_label.scoring_large_run import should_run_directory_global_selection_rewrite
+
+    assert should_run_directory_global_selection_rewrite({"defer": True}) is False
+    assert should_run_directory_global_selection_rewrite({"defer": False}) is True
