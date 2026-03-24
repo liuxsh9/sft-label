@@ -14,6 +14,7 @@ from sft_label.artifacts import (
 )
 from sft_label.tools.dashboard_scopes import build_scope_tree
 from sft_label.tools.dashboard_aggregation import (
+    build_pass1_conversation_mode,
     build_pass2_viz,
     build_scope_summary,
     infer_scope_turn_kind,
@@ -284,6 +285,45 @@ def _load_pass1_viz(run_dir: Path, is_global: bool):
         return None
 
 
+def _build_pass1_conversation_samples_from_records(conv_records: list[dict] | None) -> list[dict]:
+    samples = []
+    for idx, record in enumerate(conv_records or []):
+        labels = record.get("merged_labels")
+        if not isinstance(labels, dict) or not labels:
+            continue
+        conversation_id = record.get("conversation_id") or record.get("conversation_key") or f"conv-{idx}"
+        turn_count = record.get("turn_count")
+        if not isinstance(turn_count, int) or turn_count <= 0:
+            turn_count = 1
+        samples.append(
+            {
+                "id": record.get("conversation_key") or conversation_id,
+                "metadata": {
+                    "source_id": conversation_id,
+                    "source_file": record.get("source_file"),
+                    "total_turns": turn_count,
+                    "conversation_key": record.get("conversation_key"),
+                },
+                "labels": labels,
+            }
+        )
+    return samples
+
+
+def _inject_pass1_conversation_mode(pass1: dict | None, conv_records: list[dict] | None, stats: dict | None) -> dict | None:
+    if not isinstance(pass1, dict) or not isinstance(stats, dict):
+        return pass1
+    conv_samples = _build_pass1_conversation_samples_from_records(conv_records)
+    if not conv_samples:
+        return pass1
+    conversation_mode = build_pass1_conversation_mode(conv_samples, stats)
+    payload = dict(pass1)
+    modes = dict(payload.get("modes") or {})
+    modes["conversation"] = conversation_mode
+    payload["modes"] = modes
+    return payload
+
+
 def _scope_summary(scope: dict) -> dict:
     summary_modes = build_scope_summary(scope)
     scope["summary_modes"] = summary_modes
@@ -365,6 +405,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             run_dir=run_dir,
         )
         pass1 = compute_viz_data([], normalized_pass1_stats) if normalized_pass1_stats else None
+        pass1 = _inject_pass1_conversation_mode(pass1, conv_records, normalized_pass1_stats)
         pass2 = compute_value_viz_data([], normalized_pass2_stats, conv_records) if normalized_pass2_stats else None
         conversation = _compute_conv_viz_data(conv_records)
         if is_file:
