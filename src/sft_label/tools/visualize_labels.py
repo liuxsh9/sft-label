@@ -266,6 +266,18 @@ def _merge_pass1_conversation_modes(modes: list[dict], fallback: dict | None) ->
     overview = dict((fallback or {}).get("overview") or {})
     overview["success_rate"] = round(distribution_total / max(total, 1), 4)
     overview["unmapped_unique"] = sum(len(rows) for rows in unmapped_by_dimension.values())
+    llm_labeled_units = sum(
+        int(((mode.get("overview") or {}).get("llm_labeled_units", 0) or 0))
+        for mode in valid_modes
+    )
+    inherited_units = sum(
+        int(((mode.get("overview") or {}).get("inherited_units", 0) or 0))
+        for mode in valid_modes
+    )
+    if llm_labeled_units or any((mode.get("overview") or {}).get("llm_labeled_units") is not None for mode in valid_modes):
+        overview["llm_labeled_units"] = llm_labeled_units
+    if inherited_units or any((mode.get("overview") or {}).get("inherited_units") is not None for mode in valid_modes):
+        overview["inherited_units"] = inherited_units
 
     mode = dict(fallback or {})
     mode.update(

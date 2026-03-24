@@ -160,6 +160,7 @@ const I18N = {
     direct_children: "{count} direct children",
     items: "items",
     samples: "samples",
+    slices: "slices",
     units: "units",
     aggregation: "Aggregation",
     language: "Language",
@@ -168,7 +169,7 @@ const I18N = {
     english: "English",
     language_toggle_help: "Switch dashboard language",
     aggregation_help_title: "Aggregation mode",
-    aggregation_help_body: "Sample: every multi-turn slice contributes separately.\nConversation: multi-turn samples are merged into one unit; single-select tags use the last slice, multi-select tags use a union without duplicates.\n\nTokens, arbitration, and inherited slice counts remain process-level metrics and do not change with this toggle. Conversation Aggregation stays conversation-level in both modes.",
+    aggregation_help_body: "Sample: every multi-turn slice contributes separately.\nConversation: multi-turn samples are merged into one unit; single-select tags keep the final labeled state, while multi-select tags mean the tag appeared at least once in the conversation.\n\nTokens, arbitration, and inherited slice counts remain process-level metrics and do not change with this toggle. Conversation Aggregation stays conversation-level in both modes.",
     agg_sample: "Sample",
     agg_conversation: "Conversation",
     agg_sample_hint: "Count each multi-turn slice separately",
@@ -189,6 +190,12 @@ const I18N = {
     unmapped: "Unmapped",
     llm_labeled: "LLM Labeled",
     inherited: "Inherited",
+    llm_labeled_units: "With LLM labels",
+    inherited_units: "With inherited turns",
+    pass1_conversation_note: "Conversation mode merges one conversation into one unit. Single-select dimensions keep the final labeled state; multi-select dimensions mean the tag appeared at least once. 'With LLM labels' / 'With inherited turns' indicate whether a conversation contains at least one such turn.",
+    pass1_scoring_subset_note: "On scoring dashboards, this Pass 1 view follows the conversations that reached scoring in the current scope, not the full Pass 1 census.",
+    pass2_conversation_note: "Conversation-mode scoring aggregates one scored conversation per unit. Label breakdowns here reflect scored conversations, not the full Pass 1 census.",
+    conversation_panel_note: "Conversation Aggregation is always conversation-level. conv_value / conv_selection are ranking signals for filtering and prioritization, not raw expert quality labels.",
     unmapped_tags: "Unmapped Tags",
     top_10_per_dimension: "{count} occurrences · top 10 per dimension",
     tag: "Tag",
@@ -242,7 +249,7 @@ const I18N = {
     band: "Band",
     threshold: "Threshold",
     action: "Action",
-    inspect_samples: "Inspect Samples",
+    inspect_samples: "Inspect Slices",
     coverage_at_thresholds: "Coverage At Thresholds",
     value_min: "Value Min",
     retained: "Retained",
@@ -263,8 +270,8 @@ const I18N = {
     extension_source: "Spec Source",
     extension_field_type: "Field Type",
     extension_option_count: "Options",
-    inspect_matched_samples: "Inspect Matched Samples",
-    inspect_field_samples: "Inspect Field Samples",
+    inspect_matched_samples: "Inspect Matched Slices",
+    inspect_field_samples: "Inspect Field Slices",
     inspect_extension_value: "Inspect Value Samples",
     extension_configuration: "Extension Configuration",
     extension_details: "Extension Details",
@@ -326,11 +333,11 @@ const I18N = {
     long_multiturn: "Long Multi-turn",
     low_coverage: "Low Coverage",
     low_rarity_conf: "Low Rarity Conf",
-    sample_explorer: "Sample Explorer",
-    explorer_summary: "Progressively scan preview shards, stream large files chunk-by-chunk, keep the best {limit} matches in memory, and click tags / bars / threshold rows anywhere above to drill into the matching slices.",
-    status_ready_scan: "Ready to scan {count} indexed previews in this scope.",
+    sample_explorer: "Slice Explorer",
+    explorer_summary: "Progressively scan preview shards, stream large files chunk-by-chunk, keep the best {limit} matches in memory, and click tags / bars / threshold rows anywhere above to drill into matching slices. Explorer counts remain slice-based even when the rest of the dashboard is in conversation mode.",
+    status_ready_scan: "Ready to scan {count} indexed slices in this scope.",
     status_scanning: "Scanning {done}/{total} files · {rows} rows checked · {matches} matches",
-    status_done: "Done. Matched {matches} rows across {files} files.",
+    status_done: "Done. Matched {matches} slice rows across {files} files.",
     tags_comma: "Tags (comma)",
     source_file: "Source File",
     text_contains: "Text Contains",
@@ -351,7 +358,7 @@ const I18N = {
     confidence_le: "Confidence ≤",
     any: "Any",
     sort: "Sort",
-    only_samples_with_flags: "Only samples with flags",
+    only_samples_with_flags: "Only slices with flags",
     include_inherited_labels: "Include inherited labels",
     run_query: "Run Query",
     scanning: "Scanning…",
@@ -360,7 +367,7 @@ const I18N = {
     clear_all: "Clear All",
     remove_filter: "Remove filter",
     extension_short: "Ext",
-    current_scope_summary: "Current scope: {samples} indexed samples · {files} candidate files · showing top {limit} results sorted by {sort}",
+    current_scope_summary: "Current scope: {samples} indexed slices · {files} candidate files · showing top {limit} results sorted by {sort}",
     matches_retained: "{matches} matches retained after scanning {rows} rows",
     total: "Total",
     dim_intent: "Intent",
@@ -411,6 +418,7 @@ const I18N = {
     direct_children: "共 {count} 个直接子项",
     items: "条",
     samples: "样本",
+    slices: "切片",
     units: "单元",
     aggregation: "统计口径",
     language: "语言",
@@ -419,7 +427,7 @@ const I18N = {
     english: "English",
     language_toggle_help: "切换看板语言",
     aggregation_help_title: "统计口径",
-    aggregation_help_body: "样本：多轮数据按切片分别统计。\n会话：多轮数据先聚合成一条；单选维度取最后一个切片，多选维度做并集去重。\n\nTokens、仲裁率、继承切片数等仍然反映处理过程，因此不会随切换而变化。会话聚合面板始终按会话统计。",
+    aggregation_help_body: "样本：多轮数据按切片分别统计。\n会话：多轮数据先聚合成一条；单选维度保留最终标注状态，多选维度表示该标签在整段会话中至少出现过一次。\n\nTokens、仲裁率、继承切片数等仍然反映处理过程，因此不会随切换而变化。会话聚合面板始终按会话统计。",
     agg_sample: "样本",
     agg_conversation: "会话",
     agg_sample_hint: "多轮按切片分别计数",
@@ -440,6 +448,12 @@ const I18N = {
     unmapped: "未映射",
     llm_labeled: "LLM 标注",
     inherited: "继承",
+    llm_labeled_units: "含 LLM 标注",
+    inherited_units: "含继承轮次",
+    pass1_conversation_note: "会话口径下，一段对话只算一个单元。单选维度表示最终标注状态；多选维度表示该标签在会话中至少出现过一次。“含 LLM 标注” / “含继承轮次”表示该会话是否包含至少一轮此类标注。",
+    pass1_scoring_subset_note: "在评分看板中，这个 Pass 1 视图跟随“当前范围内进入评分阶段的会话”，而不是完整的 Pass 1 全量普查。",
+    pass2_conversation_note: "会话口径的评分是按“已评分会话”聚合而成。这里的标签分布反映的是 scored conversations，而不是完整的 Pass 1 全量普查。",
+    conversation_panel_note: "会话聚合面板始终按会话统计。conv_value / conv_selection 更适合做过滤和优先级排序，不应直接等同于专家主观质量结论。",
     unmapped_tags: "未映射标签",
     top_10_per_dimension: "{count} 次出现 · 每个维度展示前 10 个",
     tag: "标签",
@@ -493,7 +507,7 @@ const I18N = {
     band: "区间",
     threshold: "阈值",
     action: "操作",
-    inspect_samples: "查看样本",
+    inspect_samples: "查看切片",
     coverage_at_thresholds: "阈值覆盖率",
     value_min: "价值下限",
     retained: "保留数",
@@ -514,8 +528,8 @@ const I18N = {
     extension_source: "Spec 来源",
     extension_field_type: "字段类型",
     extension_option_count: "选项数",
-    inspect_matched_samples: "查看命中样本",
-    inspect_field_samples: "查看字段样本",
+    inspect_matched_samples: "查看命中切片",
+    inspect_field_samples: "查看字段切片",
     inspect_extension_value: "查看该值样本",
     extension_configuration: "扩展配置",
     extension_details: "扩展详情",
@@ -577,11 +591,11 @@ const I18N = {
     long_multiturn: "长多轮",
     low_coverage: "低覆盖",
     low_rarity_conf: "低稀有度置信度",
-    sample_explorer: "样本浏览器",
-    explorer_summary: "渐进扫描预览分片，按 chunk 流式读取大文件，仅在内存中保留最匹配的 {limit} 条结果；也可以点击上面的标签、柱状图和阈值行，继续向下钻取对应切片。",
-    status_ready_scan: "当前范围可扫描 {count} 条已索引预览。",
+    sample_explorer: "切片浏览器",
+    explorer_summary: "渐进扫描预览分片，按 chunk 流式读取大文件，仅在内存中保留最匹配的 {limit} 条结果；也可以点击上面的标签、柱状图和阈值行继续向下钻取对应切片。即使上方切换到会话口径，浏览器这里仍按切片索引和筛选。",
+    status_ready_scan: "当前范围可扫描 {count} 条已索引切片。",
     status_scanning: "正在扫描 {done}/{total} 个文件 · 已检查 {rows} 行 · 当前匹配 {matches} 条",
-    status_done: "完成：在 {files} 个文件中匹配到 {matches} 条记录。",
+    status_done: "完成：在 {files} 个文件中匹配到 {matches} 条切片记录。",
     tags_comma: "标签（逗号分隔）",
     source_file: "来源文件",
     text_contains: "文本包含",
@@ -602,7 +616,7 @@ const I18N = {
     confidence_le: "置信度 ≤",
     any: "任意",
     sort: "排序",
-    only_samples_with_flags: "只看带标记的样本",
+    only_samples_with_flags: "只看带标记的切片",
     include_inherited_labels: "包含继承标签",
     run_query: "运行查询",
     scanning: "扫描中…",
@@ -611,7 +625,7 @@ const I18N = {
     clear_all: "清空",
     remove_filter: "移除过滤条件",
     extension_short: "扩展",
-    current_scope_summary: "当前范围：{samples} 条已索引样本 · {files} 个候选文件 · 展示前 {limit} 条，排序方式：{sort}",
+    current_scope_summary: "当前范围：{samples} 条已索引切片 · {files} 个候选文件 · 展示前 {limit} 条，排序方式：{sort}",
     matches_retained: "扫描 {rows} 行后保留了 {matches} 条匹配结果",
     total: "总计",
     dim_intent: "意图",
@@ -1277,7 +1291,6 @@ function renderHero() {
   document.getElementById("hero-stats").innerHTML = heroStats
     .map(([label, value]) => `<div class="pill"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
     .join("");
-  document.getElementById("hero-toolbar").innerHTML = renderTagBarControlsInline();
 }
 
 function breadcrumbIds(scope) {
@@ -1955,7 +1968,8 @@ function renderChildren(scope) {
   );
 }
 
-function renderTagBarControlsInline() {
+function renderTagBarControlsInline(scope) {
+  if (!scope || (!scope.pass1 && !scope.pass2)) return "";
   const tagButtons = [
     ["hidden", t("hide"), t("hide_tag_bars")],
     ["relative", t("normalized"), t("relative_hint")],
@@ -1975,10 +1989,10 @@ function renderTagBarControlsInline() {
   ].map(([value, label]) => (
     `<button class="segmented-btn ${STATE.locale === value ? "active" : ""}" type="button" data-locale="${escapeHtml(value)}">${escapeHtml(label)}</button>`
   )).join("");
-  return `<div class="hero-toolbar-group"><div class="hero-toolbar-label toolbar-inline-copy" title="${escapeHtml(t("language_toggle_help"))}">${escapeHtml(t("language"))}</div><div class="hero-toolbar-body"><div class="segmented">${localeButtons}</div></div></div><div class="hero-toolbar-group"><div class="hero-toolbar-label">${escapeHtml(t("aggregation"))}</div><div class="hero-toolbar-body"><div class="segmented">${aggButtons}</div>${aggregationInfoHtml()}</div></div><div class="hero-toolbar-group"><div class="hero-toolbar-label toolbar-inline-copy" title="${escapeHtml(t("tag_bar_help"))}">${escapeHtml(t("tag_bars"))}</div><div class="hero-toolbar-body"><div class="segmented">${tagButtons}</div></div></div>`;
+  return `<div class="toolbar-inline-copy" title="${escapeHtml(t("language_toggle_help"))}">${escapeHtml(t("language"))}</div><div class="segmented">${localeButtons}</div><div class="toolbar-inline-copy">${escapeHtml(t("aggregation"))}</div><div class="segmented">${aggButtons}</div>${aggregationInfoHtml()}<div class="toolbar-inline-copy" title="${escapeHtml(t("tag_bar_help"))}">${escapeHtml(t("tag_bars"))}</div><div class="segmented">${tagButtons}</div>`;
 }
 
-function renderPass1(pass1) {
+function renderPass1(pass1, scope) {
   if (!pass1) return "";
   const pass1View = aggregationPayload(pass1);
   if (!pass1View) return "";
@@ -1996,11 +2010,22 @@ function renderPass1(pass1) {
   cards.push({label: "Prompt Mode", value: overview.prompt_mode || (overview.compact_prompt ? "compact" : "full")});
   if (overview.conversation_char_budget) cards.push({label: "Budget", value: Number(overview.conversation_char_budget || 0).toLocaleString()});
   if (overview.unmapped_unique) cards.push({label: t("unmapped"), value: overview.unmapped_unique});
-  if (overview.sparse_inherited) {
+  if (STATE.aggregationMode === "conversation" && (overview.llm_labeled_units || overview.inherited_units)) {
+    cards.push({label: t("llm_labeled_units"), value: overview.llm_labeled_units || 0});
+    cards.push({label: t("inherited_units"), value: overview.inherited_units || 0});
+  } else if (overview.sparse_inherited) {
     cards.push({label: t("llm_labeled"), value: overview.sparse_labeled || 0});
     cards.push({label: t("inherited"), value: overview.sparse_inherited || 0});
   }
-  sections.push(section(t("labeling_overview"), renderCards(cards), `${pass1View.total || 0} ${aggregationUnitLabel(pass1, "samples")}`, true));
+  const pass1Notes = [];
+  if (STATE.aggregationMode === "conversation") {
+    pass1Notes.push(`<div class="note">${escapeHtml(t("pass1_conversation_note"))}</div>`);
+    if (DATA && DATA.title_key === "dashboard_title_scoring") {
+      pass1Notes.push(`<div class="note">${escapeHtml(t("pass1_scoring_subset_note"))}</div>`);
+    }
+  }
+  const pass1Intro = pass1Notes.join("");
+  sections.push(section(t("labeling_overview"), `${pass1Intro}${renderCards(cards)}`, `${pass1View.total || 0} ${aggregationUnitLabel(pass1, "samples")}`, true));
 
   const unmappedDetails = pass1View.unmapped_details || {};
   const unmappedByDim = unmappedDetails.by_dimension || {};
@@ -2321,7 +2346,10 @@ function renderPass2(pass2) {
     ...(overview.extension_baseline_source ? [{label: t("extension_baseline_source"), value: overview.extension_baseline_source}] : []),
   ];
   if (overview.value_truncation_budget) cards.push({label: "Budget", value: Number(overview.value_truncation_budget || 0).toLocaleString()});
-  sections.push(section(t("scoring_overview"), renderCards(cards), `${overview.total_scored || 0} ${aggregationUnitLabel(pass2, "samples")}`, true));
+  const pass2Intro = STATE.aggregationMode === "conversation"
+    ? `<div class="note">${escapeHtml(t("pass2_conversation_note"))}</div>`
+    : "";
+  sections.push(section(t("scoring_overview"), `${pass2Intro}${renderCards(cards)}`, `${overview.total_scored || 0} ${aggregationUnitLabel(pass2, "samples")}`, true));
 
   const histograms = pass2View.histograms || {};
   const scoreDistributions = pass2View.score_distributions || {};
@@ -2494,7 +2522,7 @@ function renderConversations(conversation) {
     {label: t("rarity_confidence"), value: fmt((conversation.mean_rarity_confidence || 0), 2), sub: t("convs_lt_060_rarity_conf", { count: fmtInt(conversation.low_rarity_confidence_count || 0) })},
   ];
 
-  let body = renderCards(cards);
+  let body = `<div class="note">${escapeHtml(t("conversation_panel_note"))}</div>${renderCards(cards)}`;
   const histBlocks = [];
   for (const [label, bins, color] of [
     [t("conv_value"), conversation.conv_value_hist, "#2563eb"],
@@ -2828,7 +2856,7 @@ function renderExplorer(scope) {
     </div>
     ${renderExplorerResults(STATE.explorer.results)}
     ${renderExplorerDrawer()}</div>`,
-    `${fmtInt(totalSamples)} ${escapeHtml(t("samples"))}`,
+    `${fmtInt(totalSamples)} ${escapeHtml(t("slices"))}`,
     true,
   );
 }
@@ -2836,7 +2864,7 @@ function renderExplorer(scope) {
 function renderScopeContent(scope) {
   const chunks = [];
   chunks.push(renderChildren(scope));
-  chunks.push(renderPass1(scope.pass1));
+  chunks.push(renderPass1(scope.pass1, scope));
   chunks.push(renderPass2(scope.pass2));
   chunks.push(renderExplorer(scope));
   chunks.push(renderConversations(scope.conversation));
@@ -2851,6 +2879,7 @@ async function renderScope() {
 
   document.getElementById("scope-title").textContent = scope.label;
   document.getElementById("scope-path").textContent = scope.path || t("global_overview");
+  document.getElementById("scope-toolbar-extra").innerHTML = renderTagBarControlsInline(scope);
   renderBreadcrumbs(scope);
   document.getElementById("scope-content").innerHTML = renderScopeContent(scope);
 

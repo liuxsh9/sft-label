@@ -14,7 +14,10 @@ from sft_label.artifacts import (
 )
 from sft_label.tools.dashboard_scopes import build_scope_tree
 from sft_label.tools.dashboard_aggregation import (
-    build_pass1_conversation_mode,
+    DIMENSIONS,
+    _build_unmapped_details,
+    _coverage_from_distributions,
+    _cross_matrix_from_labels,
     build_pass2_viz,
     build_scope_summary,
     infer_scope_turn_kind,
@@ -23,6 +26,7 @@ from sft_label.tools.dashboard_aggregation import (
     merge_turn_kinds,
 )
 from sft_label.tools.visualize_labels import (
+    _inject_conversation_mode,
     _dashboard_subtitle,
     _write_dashboard_bundle,
     compute_viz_data,
@@ -129,6 +133,80 @@ def _normalized_dashboard_stats(
     if scope_kind == "global" and run_dir is not None:
         payload["input_path"] = payload.get("input_path") or str(run_dir)
     return payload
+
+
+def _pass1_conversation_mode_from_conv_records(conv_records, fallback: dict | None = None) -> dict | None:
+    if not conv_records:
+        return fallback
+
+    total = len(conv_records)
+    distributions = {dim: {} for dim in DIMENSIONS}
+    label_rows = []
+    unmapped_tags = {}
+    llm_labeled_units = 0
+    inherited_units = 0
+
+    for rec in conv_records:
+        labels = rec.get("merged_labels")
+        if not isinstance(labels, dict):
+            labels = {}
+        if labels:
+            label_rows.append(labels)
+
+        for dim in DIMENSIONS:
+            value = labels.get(dim)
+            if isinstance(value, list):
+                for item in value:
+                    if item:
+                        distributions[dim][item] = distributions[dim].get(item, 0) + 1
+            elif value:
+                distributions[dim][value] = distributions[dim].get(value, 0) + 1
+
+        for item in labels.get("unmapped") or []:
+            if isinstance(item, dict):
+                key = f"{item.get('dimension', '?')}:{item.get('value', '?')}"
+            else:
+                key = str(item)
+            unmapped_tags[key] = unmapped_tags.get(key, 0) + 1
+
+        detail = rec.get("detail") or {}
+        observed_turns = detail.get("observed_turns")
+        inherited_turns = detail.get("inherited_turns")
+        if isinstance(observed_turns, int):
+            if observed_turns > 0:
+                llm_labeled_units += 1
+        elif labels:
+            llm_labeled_units += 1
+        if isinstance(inherited_turns, int) and inherited_turns > 0:
+            inherited_units += 1
+
+    distributions = {
+        dim: dict(sorted(rows.items(), key=lambda item: (-item[1], item[0])))
+        for dim, rows in distributions.items()
+    }
+    distribution_total = len(label_rows)
+    overview = dict((fallback or {}).get("overview") or {})
+    overview["success_rate"] = round(distribution_total / max(total, 1), 4)
+    overview["unmapped_unique"] = len(unmapped_tags)
+    overview["llm_labeled_units"] = llm_labeled_units
+    overview["inherited_units"] = inherited_units
+
+    mode = dict(fallback or {})
+    mode.update(
+        {
+            "total": total,
+            "distribution_total": distribution_total,
+            "distributions": distributions,
+            "unmapped_details": _build_unmapped_details([], {"unmapped_tags": unmapped_tags}),
+            "confidence_stats": {},
+            "cross_matrix": _cross_matrix_from_labels(label_rows),
+            "coverage": _coverage_from_distributions(distributions),
+            "overview": overview,
+            "unit_label": "units",
+            "mode_id": "conversation",
+        }
+    )
+    return mode
 
 
 def _compute_conv_viz_data(conv_records):
@@ -285,45 +363,6 @@ def _load_pass1_viz(run_dir: Path, is_global: bool):
         return None
 
 
-def _build_pass1_conversation_samples_from_records(conv_records: list[dict] | None) -> list[dict]:
-    samples = []
-    for idx, record in enumerate(conv_records or []):
-        labels = record.get("merged_labels")
-        if not isinstance(labels, dict) or not labels:
-            continue
-        conversation_id = record.get("conversation_id") or record.get("conversation_key") or f"conv-{idx}"
-        turn_count = record.get("turn_count")
-        if not isinstance(turn_count, int) or turn_count <= 0:
-            turn_count = 1
-        samples.append(
-            {
-                "id": record.get("conversation_key") or conversation_id,
-                "metadata": {
-                    "source_id": conversation_id,
-                    "source_file": record.get("source_file"),
-                    "total_turns": turn_count,
-                    "conversation_key": record.get("conversation_key"),
-                },
-                "labels": labels,
-            }
-        )
-    return samples
-
-
-def _inject_pass1_conversation_mode(pass1: dict | None, conv_records: list[dict] | None, stats: dict | None) -> dict | None:
-    if not isinstance(pass1, dict) or not isinstance(stats, dict):
-        return pass1
-    conv_samples = _build_pass1_conversation_samples_from_records(conv_records)
-    if not conv_samples:
-        return pass1
-    conversation_mode = build_pass1_conversation_mode(conv_samples, stats)
-    payload = dict(pass1)
-    modes = dict(payload.get("modes") or {})
-    modes["conversation"] = conversation_mode
-    payload["modes"] = modes
-    return payload
-
-
 def _scope_summary(scope: dict) -> dict:
     summary_modes = build_scope_summary(scope)
     scope["summary_modes"] = summary_modes
@@ -405,7 +444,14 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
             run_dir=run_dir,
         )
         pass1 = compute_viz_data([], normalized_pass1_stats) if normalized_pass1_stats else None
-        pass1 = _inject_pass1_conversation_mode(pass1, conv_records, normalized_pass1_stats)
+        pass1_conversation_mode = _pass1_conversation_mode_from_conv_records(
+            conv_records,
+            fallback=((pass1 or {}).get("modes") or {}).get("conversation"),
+        )
+        if pass1_conversation_mode:
+            pass1 = _inject_conversation_mode(pass1, [pass1_conversation_mode]) if pass1 else {
+                "modes": {"conversation": pass1_conversation_mode}
+            }
         pass2 = compute_value_viz_data([], normalized_pass2_stats, conv_records) if normalized_pass2_stats else None
         conversation = _compute_conv_viz_data(conv_records)
         if is_file:

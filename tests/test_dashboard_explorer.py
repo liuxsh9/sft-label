@@ -122,6 +122,7 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
     manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
     detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+    runtime_js = (Path(__file__).resolve().parents[1] / "src" / "sft_label" / "tools" / "dashboard.js").read_text(encoding="utf-8")
 
     assert dashboard_path.exists()
     assert bootstrap["manifestUrl"] == "dashboard_scoring.data/manifest.json"
@@ -145,6 +146,11 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     assert '"turn_count": 4' in preview_text
     assert '"observed_turn_ratio": 0.5' in preview_text
     assert '"rarity_confidence": 0.62' in preview_text
+    assert 'sample_explorer: "Slice Explorer"' in runtime_js
+    assert 'current_scope_summary: "Current scope: {samples} indexed slices' in runtime_js
+    assert 'Single-select dimensions keep the final labeled state' in runtime_js
+    assert 'multi-select dimensions mean the tag appeared at least once' in runtime_js
+    assert 'Label breakdowns here reflect scored conversations, not the full Pass 1 census' in runtime_js
 
 
 def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Path) -> None:

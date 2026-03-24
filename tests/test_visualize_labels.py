@@ -199,6 +199,59 @@ def test_compute_viz_data_uses_stats_extension_payload_without_samples():
     assert viz["extensions"]["extensions"]["ui_fine_labels"]["status_counts"]["success"] == 2
 
 
+def test_compute_viz_data_conversation_mode_tracks_llm_and_inherited_units():
+    samples = [
+        {
+            "id": "conv-1-s1",
+            "conversations": [
+                {"from": "human", "value": "Write a parser."},
+                {"from": "gpt", "value": "Sure."},
+            ],
+            "metadata": {"source_id": "conv-1", "source_file": "train.jsonl", "turn_index": 1, "total_turns": 2},
+            "labels": {
+                "intent": "build",
+                "difficulty": "intermediate",
+                "language": ["python"],
+                "task": ["feature-implementation"],
+                "context": "snippet",
+            },
+        },
+        {
+            "id": "conv-1-s2",
+            "conversations": [
+                {"from": "human", "value": "Now add tests."},
+                {"from": "gpt", "value": "Ok."},
+            ],
+            "metadata": {"source_id": "conv-1", "source_file": "train.jsonl", "turn_index": 2, "total_turns": 2},
+            "labels": {
+                "intent": "build",
+                "difficulty": "intermediate",
+                "language": ["python"],
+                "task": ["testing"],
+                "context": "snippet",
+                "inherited": True,
+                "inherited_from": "conv-1-s1",
+            },
+        },
+    ]
+    stats = {
+        "total_samples": 2,
+        "tag_distributions": {"intent": {"build": 2}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+        "sparse_labeled": 1,
+        "sparse_inherited": 1,
+    }
+
+    viz = compute_viz_data(samples, stats)
+    conv_mode = viz["modes"]["conversation"]
+
+    assert conv_mode["total"] == 1
+    assert conv_mode["overview"]["llm_labeled_units"] == 1
+    assert conv_mode["overview"]["inherited_units"] == 1
+
+
 def test_compute_viz_data_preserves_extension_config_metadata():
     stats = {
         "total_samples": 2,

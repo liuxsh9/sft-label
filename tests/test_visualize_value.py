@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 import json
-from sft_label.artifacts import (
-    PASS1_STATS_FILE,
-    PASS1_SUMMARY_STATS_FILE,
-    PASS2_STATS_FILE,
-    PASS2_SUMMARY_STATS_FILE,
-)
+from sft_label.artifacts import PASS1_STATS_FILE, PASS1_SUMMARY_STATS_FILE, PASS2_STATS_FILE, PASS2_SUMMARY_STATS_FILE
 from sft_label.conversation import aggregate_conversations
 from sft_label.tools import visualize_value as visualize_value_module
 from sft_label.tools.visualize_value import compute_value_viz_data, _compute_conv_viz_data
@@ -423,6 +418,18 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
                     "conv_value": 6.5,
                     "conv_selection": 7.1,
                     "peak_complexity": 7,
+                    "merged_labels": {
+                        "intent": "build",
+                        "difficulty": "intermediate",
+                        "task": ["feature-implementation"],
+                        "context": "snippet",
+                    },
+                    "detail": {
+                        "quality_overall": 6.0,
+                        "reasoning_overall": 6.0,
+                        "observed_turns": 1,
+                        "inherited_turns": 1,
+                    },
                 }
             ]
         ),
@@ -449,6 +456,23 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
                 "thinking_mode_stats": {
                     "fast": {"count": 1, "mean_value": 6.5, "mean_quality": 6.0, "mean_reasoning": 6.0},
                 },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / PASS1_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample.jsonl",
+                "total_samples": 2,
+                "success": 2,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 2}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+                "sparse_labeled": 1,
+                "sparse_inherited": 1,
             }
         ),
         encoding="utf-8",
@@ -486,6 +510,23 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
         ),
         encoding="utf-8",
     )
+    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_samples": 2,
+                "success": 2,
+                "success_rate": 1.0,
+                "tag_distributions": {"intent": {"build": 2}},
+                "confidence_stats": {},
+                "cross_matrix": {},
+                "unmapped_tags": {},
+                "sparse_labeled": 1,
+                "sparse_inherited": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def _fail_load(_path):
         raise AssertionError("tree payload should not preload leaf sample files")
@@ -501,127 +542,14 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
     assert detail["conversation"]["mean_conv_value"] == 6.5
     assert detail["pass2"]["modes"]["sample"]["overview"]["input_file"] == "code/sample.jsonl"
     assert detail["pass2"]["modes"]["conversation"]["overview"]["input_file"] == "code/sample.jsonl"
+    assert detail["pass1"]["modes"]["conversation"]["total"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["overview"]["llm_labeled_units"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["overview"]["inherited_units"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["distributions"]["task"] == {"feature-implementation": 1}
     assert detail["pass2"]["modes"]["conversation"]["overview"]["mean_quality"] == 6.0
     assert detail["pass2"]["modes"]["conversation"]["score_distributions"]["reasoning_overall"]["mean"] == 6.0
     assert detail["pass2"]["modes"]["conversation"]["per_file_summary"][0]["mean_quality"] == 6.0
     assert detail["pass2"]["modes"]["conversation"]["thinking_mode_stats"]["fast"]["mean_quality"] == 6.0
-
-
-def test_generate_value_dashboard_tree_payload_uses_conversation_records_for_pass1_conversation_mode(tmp_path, monkeypatch):
-    meta_root = tmp_path / "meta_label_data"
-    artifact_dir = meta_root / "files" / "code" / "sample"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    (artifact_dir / PASS1_STATS_FILE).write_text(
-        json.dumps(
-            {
-                "input_file": str(artifact_dir / "labeled.jsonl"),
-                "total_samples": 2,
-                "success": 2,
-                "failed": 0,
-                "total_tokens": 10,
-                "tag_distributions": {
-                    "intent": {"build": 1, "debug": 1},
-                    "difficulty": {"intermediate": 1, "advanced": 1},
-                    "context": {"snippet": 1, "repository": 1},
-                },
-                "confidence_stats": {},
-                "cross_matrix": {},
-                "unmapped_tags": {},
-                "sparse_labeled": 2,
-                "sparse_inherited": 0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    (meta_root / PASS1_SUMMARY_STATS_FILE).write_text(
-        json.dumps(
-            {
-                "input_path": "dataset",
-                "total_samples": 2,
-                "success": 2,
-                "failed": 0,
-                "total_tokens": 10,
-                "tag_distributions": {
-                    "intent": {"build": 1, "debug": 1},
-                    "difficulty": {"intermediate": 1, "advanced": 1},
-                    "context": {"snippet": 1, "repository": 1},
-                },
-                "confidence_stats": {},
-                "cross_matrix": {},
-                "unmapped_tags": {},
-                "sparse_labeled": 2,
-                "sparse_inherited": 0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    (artifact_dir / "conversation_scores.json").write_text(
-        json.dumps(
-            [
-                {
-                    "conversation_id": "conv-1",
-                    "conversation_key": "code/sample.jsonl::conv-1",
-                    "source_file": "code/sample.jsonl",
-                    "turn_count": 2,
-                    "conv_value": 6.5,
-                    "conv_selection": 7.1,
-                    "peak_complexity": 7,
-                    "merged_labels": {
-                        "intent": "debug",
-                        "difficulty": "advanced",
-                        "context": "repository",
-                    },
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (artifact_dir / PASS2_STATS_FILE).write_text(
-        json.dumps(
-            {
-                "input_file": "code/sample.jsonl",
-                "total_scored": 1,
-                "total_failed": 0,
-                "score_distributions": {"value_score": {"mean": 6.5, "min": 6.5, "max": 6.5}},
-                "histograms": {},
-                "flag_counts": {},
-                "value_by_tag": {},
-                "selection_by_tag": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (meta_root / PASS2_SUMMARY_STATS_FILE).write_text(
-        json.dumps(
-            {
-                "input_path": "dataset",
-                "total_scored": 1,
-                "total_failed": 0,
-                "score_distributions": {"value_score": {"mean": 6.5, "min": 6.5, "max": 6.5}},
-                "histograms": {},
-                "flag_counts": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    def _fail_load(_path):
-        raise AssertionError("scoring tree payload should not preload pass1 leaf sample files")
-
-    monkeypatch.setattr(visualize_value_module, "load_data_file", _fail_load)
-
-    out = generate_value_dashboard(meta_root, scored_file=None, stats_file=PASS2_SUMMARY_STATS_FILE, quiet=True)
-    data_dir = out.with_name(f"{out.stem}.data")
-    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
-    file_scope_id = next(scope_id for scope_id, scope in manifest["scopes"].items() if scope.get("kind") == "file")
-    detail = json.loads((out.parent / manifest["scopes"][file_scope_id]["detail_path"]).read_text(encoding="utf-8"))
-    global_detail = json.loads((out.parent / manifest["scopes"]["global"]["detail_path"]).read_text(encoding="utf-8"))
-
-    assert detail["pass1"]["modes"]["sample"]["total"] == 2
-    assert detail["pass1"]["modes"]["conversation"]["total"] == 1
-    assert detail["pass1"]["modes"]["conversation"]["distributions"]["intent"] == {"debug": 1}
-    assert global_detail["pass1"]["modes"]["conversation"]["total"] == 1
 
 
 def test_generate_value_dashboard_single_scope_normalizes_input_file_to_source_path(tmp_path):
