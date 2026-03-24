@@ -187,19 +187,71 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
         "failed_value.jsonl",
         "score_failures.jsonl",
     )
+    failure_names = {"failed_value.jsonl", "score_failures.jsonl"}
+    path_priority = {"working": 3, "checkpoint": 2, "final": 1}
+
     for name in final_names:
         working_path = _pass2_working_path(output_dir, name)
+        checkpoint_path = _pass2_checkpoint_path(output_dir, name)
         final_path = Path(output_dir) / name
-        if working_path.exists():
-            if working_path.stat().st_size == 0 and name in {"failed_value.jsonl", "score_failures.jsonl"}:
-                working_path.unlink()
-                if final_path.exists():
-                    final_path.unlink()
+        is_failure_artifact = name in failure_names
+
+        candidates = []
+        for label, path in (
+            ("working", working_path),
+            ("checkpoint", checkpoint_path),
+            ("final", final_path),
+        ):
+            if not path.exists():
                 continue
-            os.replace(working_path, final_path)
-        elif name in {"failed_value.jsonl", "score_failures.jsonl"} and final_path.exists():
-            final_path.unlink()
-    _clear_pass2_checkpoint_files(output_dir)
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            candidates.append(
+                {
+                    "label": label,
+                    "path": path,
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                    "priority": path_priority[label],
+                }
+            )
+
+        if not candidates:
+            continue
+
+        if is_failure_artifact:
+            ordered = sorted(candidates, key=lambda c: (c["mtime_ns"], c["priority"]), reverse=True)
+            chosen = ordered[0]
+            if chosen["size"] == 0:
+                for path in (working_path, checkpoint_path, final_path):
+                    if path.exists():
+                        path.unlink()
+                continue
+        else:
+            non_empty = [c for c in candidates if c["size"] > 0]
+            if not non_empty:
+                for path in (working_path, checkpoint_path):
+                    if path.exists():
+                        path.unlink()
+                continue
+            chosen = sorted(non_empty, key=lambda c: (c["mtime_ns"], c["priority"]), reverse=True)[0]
+
+        chosen_path = chosen["path"]
+        if chosen_path != final_path:
+            os.replace(chosen_path, final_path)
+
+        for path in (working_path, checkpoint_path):
+            if path.exists():
+                path.unlink()
+
+        if is_failure_artifact and final_path.exists():
+            try:
+                if final_path.stat().st_size == 0:
+                    final_path.unlink()
+            except OSError:
+                pass
 
 
 def _postprocess_status(status: str, reason: str | None = None, **extra):
