@@ -9,6 +9,8 @@ def test_call1_compact_prompt_keeps_empty_output_guidance_without_growth():
     assert 'never use "none"' in CALL1_SYSTEM_COMPACT
     assert 'Multi-select=[] when none' in CALL1_SYSTEM_COMPACT
     assert 'single-select="" when none' in CALL1_SYSTEM_COMPACT
+    assert "process words like search/explore/analyze do not define intent" in CALL1_SYSTEM_COMPACT
+    assert 'never output placeholders like "unspecified", "unknown", or "no specific' in CALL1_SYSTEM_COMPACT
     assert len(CALL1_SYSTEM_COMPACT) <= COMPACT_CALL1_SYSTEM_BASELINE_LEN
 
 

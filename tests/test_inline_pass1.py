@@ -9,7 +9,12 @@ import pytest
 
 from sft_label.config import PipelineConfig
 from sft_label.inline_migration import InlineMigrationMatch
-from sft_label.inline_pass1 import InlineBundlePlan, merge_pass1_results, prepare_inline_pass1_batch
+from sft_label.inline_pass1 import (
+    InlineBundlePlan,
+    build_unmapped_event_records,
+    merge_pass1_results,
+    prepare_inline_pass1_batch,
+)
 from sft_label.inline_rows import RowSampleBundle, build_row_sample_bundle, flatten_row_sample_bundles
 from sft_label.label_extensions_schema import ExtensionSpec, SchemaField
 
@@ -257,6 +262,51 @@ def test_merge_pass1_results_promotes_label_extensions_to_samples_and_turns(tmp_
     data_label = result.rows[0]["extra_info"]["unique_info"]["data_label"]
     assert data_label["meta"]["extension_specs"]["ui_fine_labels"]["spec_hash"] == "sha256:ui-v1"
     assert data_label["turns"][0]["label_extensions"]["ui_fine_labels"]["labels"]["component_type"] == ["form"]
+
+
+def test_build_unmapped_event_records_flattens_lightweight_review_rows(tmp_path):
+    row = {
+        "id": "conv-1",
+        "conversations": [
+            {"from": "human", "value": "Please inspect this repository and fix the parser issue."},
+            {"from": "gpt", "value": "I will inspect the repository."},
+        ],
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+    labels = _full_labels("modify")
+    labels["task"] = ["code-exploration"]
+    labels["agentic"] = ["bash-execution", "multi-step-reasoning"]
+    labels["unmapped"] = [{"dimension": "intent", "value": "explore"}]
+    labels["canonicalized"] = [{
+        "source_dimension": "language",
+        "source_value": "bash",
+        "target_dimension": "language",
+        "canonical_value": "shell",
+        "reason": "alias",
+    }]
+
+    merged = merge_pass1_results(
+        [bundle],
+        samples,
+        [labels],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+    )
+
+    rows = build_unmapped_event_records(merged.samples)
+
+    assert len(rows) == 1
+    assert rows[0]["sample_id"]
+    assert rows[0]["dimension"] == "intent"
+    assert rows[0]["value"] == "explore"
+    assert rows[0]["query"] == "Please inspect this repository and fix the parser issue."
+    assert rows[0]["intent"] == "modify"
+    assert rows[0]["task"] == ["code-exploration"]
+    assert rows[0]["agentic"] == ["bash-execution", "multi-step-reasoning"]
+    assert rows[0]["monitor_status"] == "success"
+    assert rows[0]["canonicalized"][0]["canonical_value"] == "shell"
 
 
 def test_merge_pass1_results_preserves_pass2_when_only_extensions_change(tmp_path):
@@ -1132,6 +1182,48 @@ async def test_pass1_writes_conversation_stats_artifact_for_inline_jsonl(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_pass1_writes_unmapped_events_artifact_for_inline_jsonl(tmp_path):
+    from sft_label.pipeline import run
+
+    input_path = tmp_path / "train.jsonl"
+    rows = [
+        {
+            "id": "conv-1",
+            "conversations": [
+                {"from": "human", "value": "Please inspect this repository and fix the parser issue."},
+                {"from": "gpt", "value": "a1"},
+            ],
+        }
+    ]
+    input_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
+        labels = _full_labels("modify")
+        labels["unmapped"] = [{"dimension": "intent", "value": "explore"}]
+        return sample_idx, labels, _monitor()
+
+    with patch("sft_label.pipeline.label_one", side_effect=mock_label_one):
+        stats = await run(
+            input_path=str(input_path),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(concurrency=1, enable_adaptive_runtime=False),
+        )
+
+    artifact_dir = Path(stats["run_dir"]) / "meta_label_data" / "files" / "train"
+    events_path = artifact_dir / "unmapped_events.jsonl"
+    rows = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert len(rows) == 1
+    assert rows[0]["dimension"] == "intent"
+    assert rows[0]["value"] == "explore"
+    assert rows[0]["query"] == "Please inspect this repository and fix the parser issue."
+
+
+@pytest.mark.asyncio
 async def test_pass1_chunked_conversation_stats_artifact_deduplicates_same_source_across_rows(tmp_path):
     from sft_label.pipeline import _write_pass1_conversation_stats_from_path
 
@@ -1291,6 +1383,7 @@ def test_flush_file_and_chunk_collectors_release_heavy_references(tmp_path):
     out_labeled = open(tmp_path / "chunk_labeled.jsonl", "w", encoding="utf-8")
     out_monitor = open(tmp_path / "chunk_monitor.jsonl", "w", encoding="utf-8")
     out_failed = open(tmp_path / "chunk_failed.jsonl", "w", encoding="utf-8")
+    out_unmapped = open(tmp_path / "chunk_unmapped.jsonl", "w", encoding="utf-8")
     try:
         _flush_chunk(
             chunk,
@@ -1298,6 +1391,7 @@ def test_flush_file_and_chunk_collectors_release_heavy_references(tmp_path):
             out_labeled,
             out_monitor,
             out_failed,
+            out_unmapped,
             stats_acc,
             source_file,
             pprint=lambda _msg: None,
@@ -1308,6 +1402,7 @@ def test_flush_file_and_chunk_collectors_release_heavy_references(tmp_path):
         out_labeled.close()
         out_monitor.close()
         out_failed.close()
+        out_unmapped.close()
 
     assert chunk.completed is True
     assert chunk.samples is None

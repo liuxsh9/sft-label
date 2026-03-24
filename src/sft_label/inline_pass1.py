@@ -369,6 +369,71 @@ def _sample_monitor_summary(monitor: dict | None) -> dict | None:
     return compact_labeling_monitor_summary(monitor)
 
 
+def _extract_query_preview(sample: dict, max_len: int = 240) -> str:
+    conversations = sample.get("conversations")
+    if isinstance(conversations, list):
+        for msg in conversations:
+            if msg.get("from") == "human":
+                text = str(msg.get("value", "")).replace("\n", " ").replace("\r", "").strip()
+                return text[:max_len] + ("…" if len(text) > max_len else "")
+    data = sample.get("data")
+    if isinstance(data, list):
+        for msg in data:
+            if msg.get("role") == "user":
+                text = str(msg.get("content", "")).replace("\n", " ").replace("\r", "").strip()
+                return text[:max_len] + ("…" if len(text) > max_len else "")
+    return ""
+
+
+def build_unmapped_event_records(samples: list[dict]) -> list[dict]:
+    """Flatten per-sample unmapped labels into lightweight review rows."""
+    rows: list[dict] = []
+    for sample in samples:
+        labels = sample.get("labels") or {}
+        unmapped_items = labels.get("unmapped") or []
+        if not isinstance(unmapped_items, list) or not unmapped_items:
+            continue
+        metadata = sample.get("metadata") or {}
+        base = {
+            "sample_id": sample.get("id"),
+            "source_file": metadata.get("source_file"),
+            "source_id": metadata.get("source_id"),
+            "turn_index": metadata.get("turn_index"),
+            "total_turns": metadata.get("total_turns"),
+            "query": _extract_query_preview(sample),
+            "intent": labels.get("intent", ""),
+            "difficulty": labels.get("difficulty", ""),
+            "context": labels.get("context", ""),
+            "language": copy.deepcopy(labels.get("language", [])),
+            "domain": copy.deepcopy(labels.get("domain", [])),
+            "task": copy.deepcopy(labels.get("task", [])),
+            "concept": copy.deepcopy(labels.get("concept", [])),
+            "agentic": copy.deepcopy(labels.get("agentic", [])),
+            "constraint": copy.deepcopy(labels.get("constraint", [])),
+            "confidence": copy.deepcopy(labels.get("confidence", {})),
+            "canonicalized": copy.deepcopy(labels.get("canonicalized", [])),
+            "monitor_status": ((sample.get("labeling_monitor") or {}).get("status")),
+        }
+        if labels.get("inherited"):
+            base["inherited"] = True
+        if labels.get("inherited_from"):
+            base["inherited_from"] = labels.get("inherited_from")
+        for item in unmapped_items:
+            if isinstance(item, dict):
+                dim = str(item.get("dimension", "?"))
+                value = str(item.get("value", "")).strip()
+            else:
+                dim = "?"
+                value = str(item).strip()
+            if not value:
+                continue
+            row = copy.deepcopy(base)
+            row["dimension"] = dim
+            row["value"] = value
+            rows.append(row)
+    return rows
+
+
 def build_sample_artifacts(
     samples: list[dict],
     labels: list,
@@ -395,6 +460,7 @@ def build_sample_artifacts(
             monitor_record.setdefault("source_file", str(source_file))
             monitor_records.append(monitor_record)
             monitor_summary = {
+                "status": monitor.get("status"),
                 "llm_calls": monitor.get("llm_calls", 0),
                 "arbitrated": bool(monitor.get("arbitrated")),
                 "validation_issues": copy.deepcopy(monitor.get("validation_issues", [])),

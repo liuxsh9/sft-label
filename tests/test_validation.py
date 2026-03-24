@@ -109,6 +109,17 @@ class TestAliasResolution:
         assert "execute_python_code" not in cleaned["agentic"]
         assert len(issues) == 0
 
+    def test_agentic_aliases_tool_names_to_capabilities(self):
+        result = {"concept": [], "agentic": ["grep", "read", "mobile_list_apps", "run-script"],
+                  "constraint": [], "context": "repository",
+                  "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call2")
+        assert "static-analysis" in cleaned["agentic"]
+        assert "file-operations" in cleaned["agentic"]
+        assert "ui-automation" in cleaned["agentic"]
+        assert "code-execution" in cleaned["agentic"]
+        assert len(issues) == 0
+
     def test_task_alias_test_creation(self):
         result = {"intent": "build", "language": ["python"],
                   "domain": [], "task": ["test-creation"],
@@ -149,12 +160,69 @@ class TestAliasResolution:
         assert cleaned["unmapped"] == []
         assert len(issues) == 0
 
+    def test_placeholder_sentinels_are_treated_as_empty(self):
+        result = {
+            "intent": "unspecified",
+            "language": ["python", "no programming language detected"],
+            "domain": ["no specific domain detected"],
+            "task": ["no specific task detected"],
+            "difficulty": "unknown",
+            "confidence": {},
+            "unmapped": [
+                {"dimension": "intent", "value": "user query not present"},
+                {"dimension": "difficulty", "value": "no difficulty detected"},
+            ],
+        }
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["intent"] == ""
+        assert cleaned["language"] == ["python"]
+        assert cleaned["domain"] == []
+        assert cleaned["task"] == []
+        assert cleaned["difficulty"] == ""
+        assert cleaned["unmapped"] == []
+        assert len(issues) == 0
+
     def test_domain_alias_security_to_cybersecurity(self):
         result = {"intent": "build", "language": ["python"],
                   "domain": ["security"], "task": ["feature-implementation"],
                   "difficulty": "intermediate", "confidence": {}, "unmapped": []}
         cleaned, issues = validate_tags(result, "call1")
         assert "cybersecurity" in cleaned["domain"]
+        assert len(issues) == 0
+
+    def test_language_alias_bash_to_shell(self):
+        result = {"intent": "build", "language": ["bash", "python"],
+                  "domain": [], "task": ["feature-implementation"],
+                  "difficulty": "intermediate", "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call1")
+        assert "shell" in cleaned["language"]
+        assert "bash" not in cleaned["language"]
+        assert len(issues) == 0
+
+    def test_domain_alias_ml_to_machine_learning(self):
+        result = {"intent": "build", "language": ["python"],
+                  "domain": ["ml"], "task": ["feature-implementation"],
+                  "difficulty": "intermediate", "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["domain"] == ["machine-learning"]
+        assert len(issues) == 0
+
+    def test_difficulty_aliases_common_llm_levels(self):
+        result = {"intent": "build", "language": ["python"],
+                  "domain": [], "task": ["feature-implementation"],
+                  "difficulty": "medium", "confidence": {}, "unmapped": []}
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["difficulty"] == "intermediate"
+        assert len(issues) == 0
+
+        result["difficulty"] = "hard"
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["difficulty"] == "advanced"
+        assert len(issues) == 0
+
+        result["difficulty"] = "easy"
+        cleaned, issues = validate_tags(result, "call1")
+        assert cleaned["difficulty"] == "beginner"
         assert len(issues) == 0
 
     def test_concept_security_not_aliased(self):

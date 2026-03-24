@@ -44,6 +44,7 @@ from sft_label.inline_pass1 import (
     append_rows_jsonl,
     apply_inherited_labels,
     build_sample_artifacts,
+    build_unmapped_event_records,
     merge_pass1_results,
     prepare_inline_pass1_batch,
 )
@@ -1136,7 +1137,28 @@ def _is_empty_sentinel(value):
     """Return True for placeholder outputs that should mean empty."""
     if value is None:
         return True
-    return str(value).strip().lower() in {"", "none"}
+    normalized = str(value).strip().lower()
+    if normalized in {
+        "",
+        "none",
+        "unspecified",
+        "unknown",
+        "n/a",
+        "not applicable",
+        "multiple languages detected",
+        "user query not present",
+        "user context not provided",
+    }:
+        return True
+    return normalized.startswith((
+        "no specific ",
+        "no programming language ",
+        "no code ",
+        "no domain ",
+        "no task ",
+        "no difficulty ",
+        "no context ",
+    ))
 
 
 def _normalize_optional_single_value(value):
@@ -2338,6 +2360,8 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
     stats_file = pass1_stats_filename(suffix)
     dashboard_file = pass1_dashboard_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
+    unmapped_events_file = f"unmapped_events{suffix}.jsonl"
+    unmapped_events_file = f"unmapped_events{suffix}.jsonl"
 
     if collector.inline_output:
         merge_result = merge_pass1_results(
@@ -2355,6 +2379,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
         _write_json_atomic(output_dir / labeled_json, merge_result.samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
         _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
+        _write_jsonl_atomic(output_dir / unmapped_events_file, build_unmapped_event_records(merge_result.samples))
         labeled_samples_for_dashboard = merge_result.samples
         if merge_result.failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, merge_result.failed_samples)
@@ -2368,6 +2393,7 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
         _write_json_atomic(output_dir / labeled_json, rendered_samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, rendered_samples)
         _write_jsonl_atomic(output_dir / monitor_file, monitor_records)
+        _write_jsonl_atomic(output_dir / unmapped_events_file, build_unmapped_event_records(rendered_samples))
         labeled_samples_for_dashboard = rendered_samples
         if failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, failed_samples)
@@ -2950,7 +2976,7 @@ async def _run_pass1_recovery_sweep(
     return recovered_total
 
 
-def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_acc,
+def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, out_unmapped, stats_acc,
                  input_path, pprint=print, run_failure_log_path=None):
     """Finalize a completed chunk: inherit, attach labels, write, release memory."""
     samples = chunk.samples
@@ -2979,6 +3005,8 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, stats_ac
         out_monitor.write(json.dumps(monitor, ensure_ascii=False) + "\n")
     for failed in merge_result.failed_samples:
         out_failed.write(json.dumps(failed, ensure_ascii=False) + "\n")
+    for event in build_unmapped_event_records(merge_result.samples):
+        out_unmapped.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     if run_failure_log_path and merge_result.failed_samples:
         run_failure_log_path = Path(run_failure_log_path)
@@ -3097,6 +3125,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     out_labeled = open(output_dir / "labeled.jsonl", "w", encoding="utf-8")
     out_monitor = open(output_dir / "monitor.jsonl", "w", encoding="utf-8")
     out_failed = open(output_dir / "failed_samples.jsonl", "w", encoding="utf-8")
+    out_unmapped = open(output_dir / "unmapped_events.jsonl", "w", encoding="utf-8")
 
     try:
         # --- Helper: wrap label_one with chunk tracking ---
@@ -3267,7 +3296,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                             1 for i in range(len(c.labels))
                             if (c.labels[i] is None or is_partial_labels(c.labels[i])) and i not in inherited
                         )
-                _flush_chunk(c, out_rows, out_labeled, out_monitor, out_failed,
+                _flush_chunk(c, out_rows, out_labeled, out_monitor, out_failed, out_unmapped,
                              stats_acc, input_path, pprint=pprint,
                              run_failure_log_path=run_failure_log_path)
                 pprint(f"  [chunk {c.chunk_idx + 1}] ✓ {c.ok} ok, {c.fail} fail — flushed")
@@ -3337,6 +3366,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         out_labeled.close()
         out_monitor.close()
         out_failed.close()
+        out_unmapped.close()
 
     # Remove empty failed file
     failed_path = output_dir / "failed_samples.jsonl"
@@ -3595,6 +3625,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         _write_json_atomic(output_dir / labeled_json, merge_result.samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
         _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
+        _write_jsonl_atomic(output_dir / unmapped_events_file, build_unmapped_event_records(merge_result.samples))
         labeled_samples_for_dashboard = merge_result.samples
         if merge_result.failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, merge_result.failed_samples)
@@ -3608,6 +3639,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         _write_json_atomic(output_dir / labeled_json, rendered_samples)
         _write_jsonl_atomic(output_dir / labeled_jsonl, rendered_samples)
         _write_jsonl_atomic(output_dir / monitor_file, monitor_records)
+        _write_jsonl_atomic(output_dir / unmapped_events_file, build_unmapped_event_records(rendered_samples))
         labeled_samples_for_dashboard = rendered_samples
         if failed_samples:
             _write_jsonl_atomic(output_dir / failed_samples_file, failed_samples)
