@@ -3150,6 +3150,7 @@ class TestResumeScoringFile:
 
         recompute_started = False
         per_file_dashboard_calls = 0
+        global_dashboard_calls = 0
 
         def wrapped_rewrite(*args, **kwargs):
             nonlocal recompute_started
@@ -3157,14 +3158,18 @@ class TestResumeScoringFile:
             return _rewrite_directory_global_selection(*args, **kwargs)
 
         def fake_generate_value_dashboard(output_dir, scored_file=None, stats_file=None, output_file=None, quiet=False):
-            nonlocal per_file_dashboard_calls
+            nonlocal per_file_dashboard_calls, global_dashboard_calls
             output_dir = Path(output_dir)
             dashboard_name = output_file or PASS2_DASHBOARD_FILE
-            (output_dir / dashboard_name).write_text("<html></html>", encoding="utf-8")
-            if dashboard_name == PASS2_DASHBOARD_FILE:
+            out_path = output_dir / dashboard_name
+            out_path.write_text("<html></html>", encoding="utf-8")
+            if dashboard_name == PASS2_DASHBOARD_FILE and output_dir == tmp_path:
+                global_dashboard_calls += 1
+            if dashboard_name == PASS2_DASHBOARD_FILE and output_dir != tmp_path:
                 per_file_dashboard_calls += 1
                 assert recompute_started, "Per-file dashboards should be generated only during/after global recompute"
                 assert quiet is True, "Per-file dashboards should stay quiet during global recompute"
+            return out_path
 
         with patch("sft_label.scoring.score_one", side_effect=successful_score_one), \
                 patch("sft_label.scoring._rewrite_directory_global_selection", side_effect=wrapped_rewrite), \
@@ -3180,7 +3185,8 @@ class TestResumeScoringFile:
             )
 
         assert recompute_started is True
-        assert per_file_dashboard_calls == 2
+        assert global_dashboard_calls == 1
+        assert per_file_dashboard_calls == 0
 
     def test_resume_skips_prescored(self, tmp_path):
         """Partially scored.jsonl should let resume skip those samples."""

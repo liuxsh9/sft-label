@@ -68,12 +68,13 @@ from sft_label.config import (
     PipelineConfig,
 )
 from sft_label.artifacts import (
+    PASS1_DASHBOARD_FILE,
     PASS1_CONVERSATION_STATS_FILE,
     PASS1_STATS_FILE,
     PASS1_SUMMARY_STATS_FILE,
     pass1_stats_filename,
     pass1_dashboard_filename,
-    pass1_global_dashboard_filename,
+    prune_dashboard_bundles,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
 from sft_label.tag_canonicalization import (
@@ -2312,7 +2313,7 @@ def estimate_directory_workload(
     )
 
 
-def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
+def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generate_dashboard=True):
     """Write all outputs for a completed file and release memory.
 
     Writes labeled.json/jsonl, monitor.jsonl, stats_labeling.json, dashboard.
@@ -2426,13 +2427,14 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print):
     )
 
     # Per-file dashboard
-    try:
-        from sft_label.tools.visualize_labels import generate_dashboard
-        generate_dashboard(output_dir, labeled_file=labeled_json,
-                           stats_file=stats_file, output_file=dashboard_file,
-                           quiet=True)
-    except Exception:
-        pass
+    if generate_dashboard:
+        try:
+            from sft_label.tools.visualize_labels import generate_dashboard
+            generate_dashboard(output_dir, labeled_file=labeled_json,
+                               stats_file=stats_file, output_file=dashboard_file,
+                               quiet=True)
+        except Exception:
+            pass
 
     stats["success"]
     stats["total_tokens"]
@@ -4162,7 +4164,13 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
 
                 # Check if this file is fully done (compare against label_count, not total)
                 if c.done >= c.label_count and not c.completed:
-                    stats = flush_file_output(c, run_dir, checkpoint_path, pprint=pprint)
+                    stats = flush_file_output(
+                        c,
+                        run_dir,
+                        checkpoint_path,
+                        pprint=pprint,
+                        generate_dashboard=False,
+                    )
                     all_file_stats.append(stats)
 
                     if progress and file_task is not None:
@@ -4231,7 +4239,13 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     # Handle any files with 0 labels to submit (edge case: 0 samples or all inherited)
     for file_idx, c in list(collectors.items()):
         if not c.completed and c.label_count == 0:
-            stats = flush_file_output(c, run_dir, checkpoint_path, pprint=pprint)
+            stats = flush_file_output(
+                c,
+                run_dir,
+                checkpoint_path,
+                pprint=pprint,
+                generate_dashboard=False,
+            )
             all_file_stats.append(stats)
             if progress and file_task is not None:
                 progress.update(file_task, advance=1)
@@ -4353,14 +4367,12 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    input_name = input_path.name
-    global_dashboard = pass1_global_dashboard_filename(input_name)
     try:
         from sft_label.tools.visualize_labels import generate_dashboard
         dashboard_source = layout.meta_root if layout is not None else run_dir
         dashboard_output = (
-            layout.dashboard_path(global_dashboard) if layout is not None
-            else (run_dir / global_dashboard)
+            layout.dashboard_path(PASS1_DASHBOARD_FILE) if layout is not None
+            else (run_dir / "dashboards" / PASS1_DASHBOARD_FILE)
         )
         generated_output = run_with_heartbeat(
             "Generating labeling dashboard",
@@ -4372,6 +4384,13 @@ def _write_global_summary(all_file_stats, run_dir, input_path, model, concurrenc
                 quiet=True,
             ),
         )
+        if layout is None:
+            prune_dashboard_bundles(
+                run_dir,
+                keep_paths=[dashboard_output],
+                kind="labeling",
+                recursive=True,
+            )
         print(f"\nGlobal dashboard generated: {generated_output}")
     except Exception as e:
         print(f"\nGlobal dashboard generation skipped: {e}")

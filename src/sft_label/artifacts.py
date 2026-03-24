@@ -120,3 +120,51 @@ def find_first_existing(base_dir: Path, candidate_names: Iterable[str]) -> Path 
         if path.exists():
             return path
     return None
+
+
+def classify_dashboard_kind(filename: str | Path) -> str | None:
+    """Classify a dashboard filename as labeling/scoring for retention logic."""
+    name = Path(filename).name.lower()
+    if name.startswith("dashboard_scoring") or name.startswith("dashboard_value"):
+        return "scoring"
+    if name.startswith("dashboard_labeling") or name == PASS1_DASHBOARD_FILE_LEGACY or (
+        name.startswith("dashboard_") and not name.startswith("dashboard_scoring")
+    ):
+        return "labeling"
+    return None
+
+
+def remove_dashboard_bundle(html_path: Path | str) -> None:
+    """Delete one dashboard HTML file and its sidecar data directory if present."""
+    html_path = Path(html_path)
+    data_dir = html_path.with_name(dashboard_data_dirname(html_path.name))
+    if html_path.exists():
+        html_path.unlink()
+    if data_dir.is_dir():
+        shutil.rmtree(data_dir)
+
+
+def prune_dashboard_bundles(
+    root_dir: Path | str,
+    *,
+    keep_paths: Iterable[Path | str] = (),
+    kind: str | None = None,
+    recursive: bool = False,
+) -> list[Path]:
+    """Delete dashboard bundles under ``root_dir`` that are not explicitly kept.
+
+    When ``recursive`` is true, scans every ``dashboards/*.html`` bundle in the run.
+    This is used to retain only canonical run-level dashboards for directory runs.
+    """
+    root_dir = Path(root_dir)
+    keep = {Path(path).resolve() for path in keep_paths if path is not None}
+    pattern = f"**/{DASHBOARDS_DIRNAME}/*.html" if recursive else f"{DASHBOARDS_DIRNAME}/*.html"
+    removed: list[Path] = []
+    for html_path in sorted(root_dir.glob(pattern)):
+        if html_path.resolve() in keep:
+            continue
+        if kind is not None and classify_dashboard_kind(html_path.name) != kind:
+            continue
+        remove_dashboard_bundle(html_path)
+        removed.append(html_path)
+    return removed

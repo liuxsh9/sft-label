@@ -67,6 +67,7 @@ from sft_label.artifacts import (
     PASS2_SUMMARY_STATS_FILE,
     PASS2_DASHBOARD_FILE,
     pass2_global_dashboard_filename,
+    prune_dashboard_bundles,
 )
 from sft_label.inline_scoring import (
     InlineScoringTarget,
@@ -6666,7 +6667,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         input_dir=input_dir,
                         config=config,
                         pprint=pprint,
-                        generate_dashboard=not directory_postprocess_policy["defer"],
+                        generate_dashboard=False,
                     )
                     if rewritten_file_stats:
                         all_file_stats = rewritten_file_stats
@@ -6764,11 +6765,16 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         else:
             try:
                 from sft_label.tools.visualize_value import generate_value_dashboard
-                dir_name = input_dir.name
-                generate_value_dashboard(output_dir, scored_file=None,
-                                         stats_file=PASS2_SUMMARY_STATS_FILE,
-                                         output_file=pass2_global_dashboard_filename(dir_name),
-                                         quiet=True)
+                out_path = generate_value_dashboard(output_dir, scored_file=None,
+                                                    stats_file=PASS2_SUMMARY_STATS_FILE,
+                                                    output_file=PASS2_DASHBOARD_FILE,
+                                                    quiet=True)
+                prune_dashboard_bundles(
+                    output_dir,
+                    keep_paths=[out_path],
+                    kind="scoring",
+                    recursive=True,
+                )
                 summary["postprocess"]["dashboard"] = _postprocess_status("completed")
             except Exception as e:
                 summary["postprocess"]["dashboard"] = _postprocess_status("failed", str(e))

@@ -17,7 +17,16 @@ from pathlib import Path
 
 import pytest
 
-from sft_label.artifacts import PASS1_CONVERSATION_STATS_FILE, PASS1_STATS_FILE, DASHBOARDS_DIRNAME
+from sft_label.artifacts import (
+    PASS1_CONVERSATION_STATS_FILE,
+    PASS1_DASHBOARD_FILE,
+    PASS1_STATS_FILE,
+    PASS1_SUMMARY_STATS_FILE,
+    PASS2_DASHBOARD_FILE,
+    PASS2_STATS_FILE,
+    PASS2_SUMMARY_STATS_FILE,
+    DASHBOARDS_DIRNAME,
+)
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
 from sft_label.tools.recompute import (
@@ -1262,18 +1271,22 @@ class TestRegenerateDashboard:
             run_regenerate_dashboard(str(f))
 
     def test_batch_mode(self, tmp_path):
-        """Test with subdirectories (batch mode)."""
+        """Batch regenerate keeps only the canonical run-level dashboard."""
         sub = tmp_path / "code" / "file1"
         sub.mkdir(parents=True)
         samples = [_make_labeled_sample(f"s{i}") for i in range(3)]
         stats = recompute_stats_from_labeled(samples)
         (sub / PASS1_STATS_FILE).write_text(json.dumps(stats))
         (sub / "labeled.json").write_text(json.dumps(samples))
+        (tmp_path / PASS1_SUMMARY_STATS_FILE).write_text(json.dumps(stats))
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
-        assert len(generated) >= 1
+        assert [Path(path).name for path in generated] == [PASS1_DASHBOARD_FILE]
+        assert (tmp_path / DASHBOARDS_DIRNAME / PASS1_DASHBOARD_FILE).exists()
+        assert not (sub / DASHBOARDS_DIRNAME / PASS1_DASHBOARD_FILE).exists()
 
     def test_batch_mode_parallel_workers(self, tmp_path):
+        summary_total = 0
         for sub in ("code/file1", "code/file2"):
             sub_path = tmp_path / sub
             sub_path.mkdir(parents=True)
@@ -1281,9 +1294,20 @@ class TestRegenerateDashboard:
             stats = recompute_stats_from_labeled(samples)
             (sub_path / PASS1_STATS_FILE).write_text(json.dumps(stats))
             (sub_path / "labeled.json").write_text(json.dumps(samples))
+            summary_total += stats["total_samples"]
+
+        (tmp_path / PASS1_SUMMARY_STATS_FILE).write_text(
+            json.dumps({"total_samples": summary_total, "success": summary_total}),
+        )
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1", workers=4)
-        assert len(generated) >= 2
+        assert [Path(path).name for path in generated] == [PASS1_DASHBOARD_FILE]
+        assert (tmp_path / DASHBOARDS_DIRNAME / PASS1_DASHBOARD_FILE).exists()
+        nested = [
+            path for path in tmp_path.glob(f"**/{DASHBOARDS_DIRNAME}/{PASS1_DASHBOARD_FILE}")
+            if path.parent.parent != tmp_path
+        ]
+        assert nested == []
 
     def test_batch_mode_discovers_deeper_output_directories(self, tmp_path):
         sub = tmp_path / "nested" / "code" / "file1"
@@ -1292,11 +1316,63 @@ class TestRegenerateDashboard:
         stats = recompute_stats_from_labeled(samples)
         (sub / PASS1_STATS_FILE).write_text(json.dumps(stats))
         (sub / "labeled.json").write_text(json.dumps(samples))
+        (tmp_path / PASS1_SUMMARY_STATS_FILE).write_text(json.dumps(stats))
 
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")
 
-        assert len(generated) >= 1
-        assert any("file1" in str(path) for path in generated)
+        assert [Path(path).name for path in generated] == [PASS1_DASHBOARD_FILE]
+        assert (tmp_path / DASHBOARDS_DIRNAME / PASS1_DASHBOARD_FILE).exists()
+        assert not (sub / DASHBOARDS_DIRNAME / PASS1_DASHBOARD_FILE).exists()
+
+    def test_batch_pass2_regenerate_prunes_variants_and_keeps_file_scopes(self, tmp_path):
+        run_dir = tmp_path / "dataset_labeled_20260324_100000"
+        batch_a = run_dir / "batch_a"
+        batch_b = run_dir / "batch_b"
+        batch_a.mkdir(parents=True)
+        batch_b.mkdir(parents=True)
+
+        samples_a = _make_multiturn_scored_samples("conv-a", n_turns=2)
+        samples_b = _make_multiturn_scored_samples("conv-b", n_turns=2)
+        _write_jsonl(batch_a / "scored.jsonl", samples_a)
+        _write_jsonl(batch_b / "scored.jsonl", samples_b)
+
+        stats_a = recompute_value_stats_from_scored(samples_a)
+        stats_a["input_file"] = str(run_dir / "batch_a" / "labeled.jsonl")
+        (batch_a / PASS2_STATS_FILE).write_text(json.dumps(stats_a), encoding="utf-8")
+
+        stats_b = recompute_value_stats_from_scored(samples_b)
+        stats_b["input_file"] = str(run_dir / "batch_b" / "labeled.jsonl")
+        (batch_b / PASS2_STATS_FILE).write_text(json.dumps(stats_b), encoding="utf-8")
+
+        summary = recompute_value_stats_from_scored(samples_a + samples_b)
+        summary["files_processed"] = 2
+        (run_dir / PASS2_SUMMARY_STATS_FILE).write_text(json.dumps(summary), encoding="utf-8")
+
+        stale_root = run_dir / DASHBOARDS_DIRNAME / "dashboard_scoring_oldfix.html"
+        stale_root.parent.mkdir(parents=True, exist_ok=True)
+        stale_root.write_text("<html>old</html>", encoding="utf-8")
+        (stale_root.with_name(f"{stale_root.stem}.data")).mkdir(exist_ok=True)
+
+        stale_file = batch_a / DASHBOARDS_DIRNAME / PASS2_DASHBOARD_FILE
+        stale_file.parent.mkdir(parents=True, exist_ok=True)
+        stale_file.write_text("<html>old-file</html>", encoding="utf-8")
+        (stale_file.with_name(f"{stale_file.stem}.data")).mkdir(exist_ok=True)
+
+        generated = run_regenerate_dashboard(str(run_dir), pass_num="2", workers=4)
+
+        assert [Path(path).name for path in generated] == [PASS2_DASHBOARD_FILE]
+        dashboard_path = run_dir / DASHBOARDS_DIRNAME / PASS2_DASHBOARD_FILE
+        assert dashboard_path.exists()
+        assert not stale_root.exists()
+        assert not stale_root.with_name(f"{stale_root.stem}.data").exists()
+        assert not stale_file.exists()
+        assert not stale_file.with_name(f"{stale_file.stem}.data").exists()
+
+        manifest = json.loads(
+            (dashboard_path.with_name(f"{dashboard_path.stem}.data") / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert "file:batch_a" in manifest["scopes"]
+        assert "file:batch_b" in manifest["scopes"]
 
     def test_regenerate_for_dir_logs_failure_context(self, tmp_path, capsys):
         self._setup_stats_dir(tmp_path)
@@ -1571,7 +1647,7 @@ class TestCompletePostprocess:
         assert summary["postprocess"]["conversation_scores"]["status"] == "completed"
         assert summary["postprocess"]["dashboard"]["status"] == "completed"
         assert (run_dir / "conversation_scores.json").exists()
-        assert (run_dir / "dashboards" / f"dashboard_scoring_{run_dir.name}.html").exists()
+        assert (run_dir / "dashboards" / PASS2_DASHBOARD_FILE).exists()
         assert (run_dir / "batch_a" / "conversation_scores.json").exists()
         batch_a_stats = json.loads((run_dir / "batch_a" / "stats_scoring.json").read_text(encoding="utf-8"))
         assert batch_a_stats["postprocess"]["conversation_scores"]["status"] == "completed"

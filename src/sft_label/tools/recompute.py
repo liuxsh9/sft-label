@@ -30,6 +30,7 @@ from sft_label.artifacts import (
     PASS2_DASHBOARD_FILE,
     pass1_global_dashboard_filename,
     pass2_global_dashboard_filename,
+    prune_dashboard_bundles,
 )
 from sft_label.inline_scoring import (
     discover_inline_jsonl_files,
@@ -1468,18 +1469,15 @@ def _run_regenerate_dashboard_legacy(input_path, pass_num="both", open_browser=F
             _log_regenerate_dashboard(
                 f"Parallel mode enabled: workers={worker_count}"
             )
-        # Per-subdir dashboards
+        # Per-subdir maintenance only; batch runs retain run-level canonical dashboards.
         if worker_count > 1 and len(subdirs) > 1:
             done = 0
-            generated_by_index = {}
             with ThreadPoolExecutor(max_workers=worker_count) as pool:
                 futures = {
                     pool.submit(
-                        _regenerate_for_dir,
+                        _prepare_dir_for_global_dashboard,
                         subdir,
                         pass_num,
-                        generate_dashboard,
-                        generate_value_dashboard,
                     ): index
                     for index, subdir in enumerate(subdirs, start=1)
                 }
@@ -1487,23 +1485,19 @@ def _run_regenerate_dashboard_legacy(input_path, pass_num="both", open_browser=F
                     index = futures[fut]
                     subdir = subdirs[index - 1]
                     _log_regenerate_dashboard(
-                        f"[dir {index}/{len(subdirs)}] Regenerating dashboards for {subdir}"
+                        f"[dir {index}/{len(subdirs)}] Refreshing dashboard inputs for {subdir}"
                     )
-                    generated_by_index[index] = fut.result()
+                    fut.result()
                     done += 1
                     _log_regenerate_dashboard(
                         f"Parallel progress: {done}/{len(subdirs)} directory(ies) completed"
                     )
-            for index in range(1, len(subdirs) + 1):
-                generated.extend(generated_by_index.get(index, []))
         else:
             for index, subdir in enumerate(subdirs, start=1):
                 _log_regenerate_dashboard(
-                    f"[dir {index}/{len(subdirs)}] Regenerating dashboards for {subdir}"
+                    f"[dir {index}/{len(subdirs)}] Refreshing dashboard inputs for {subdir}"
                 )
-                generated.extend(
-                    _regenerate_for_dir(subdir, pass_num, generate_dashboard,
-                                        generate_value_dashboard))
+                _prepare_dir_for_global_dashboard(subdir, pass_num)
 
         # Global dashboards at top level
         _log_regenerate_dashboard(
@@ -1628,6 +1622,12 @@ def _regenerate_for_dir(dir_path, pass_num, gen_p1, gen_p2):
     return generated
 
 
+def _prepare_dir_for_global_dashboard(dir_path: Path, pass_num: str) -> None:
+    """Refresh per-file inputs needed by the canonical run-level dashboards."""
+    if pass_num in ("2", "both"):
+        _ensure_conversation_scores_current(dir_path)
+
+
 def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
     """Generate global/summary dashboards at the top-level run directory."""
     generated = []
@@ -1643,8 +1643,14 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                 )
                 out = gen_p1(run_dir, labeled_file=None,
                              stats_file=pass1_summary_path.name,
-                             output_file=pass1_global_dashboard_filename(run_dir.name))
+                             output_file=PASS1_DASHBOARD_FILE)
                 generated.append(out)
+                prune_dashboard_bundles(
+                    run_dir,
+                    keep_paths=[out],
+                    kind="labeling",
+                    recursive=True,
+                )
                 _log_regenerate_dashboard(f"{run_dir}: wrote global Pass 1 dashboard {out}")
             except Exception as e:
                 _log_regenerate_dashboard(
@@ -1674,10 +1680,17 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                 )
                 out_path = gen_p2(run_dir, scored_file=None,
                                   stats_file=pass2_summary_path.name,
-                                  output_file=pass2_global_dashboard_filename(run_dir.name),
+                                  output_file=PASS2_DASHBOARD_FILE,
                                   quiet=True)
                 if out_path:
-                    generated.append(Path(out_path) if not isinstance(out_path, Path) else out_path)
+                    out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
+                    generated.append(out_path)
+                    prune_dashboard_bundles(
+                        run_dir,
+                        keep_paths=[out_path],
+                        kind="scoring",
+                        recursive=True,
+                    )
                     _log_regenerate_dashboard(f"{run_dir}: wrote global Pass 2 dashboard {out_path}")
                 else:
                     _log_regenerate_dashboard(
@@ -1914,11 +1927,17 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
                 run_dir,
                 scored_file=None,
                 stats_file=summary_path.name,
-                output_file=pass2_global_dashboard_filename(run_dir.name),
+                output_file=PASS2_DASHBOARD_FILE,
                 quiet=True,
             )
             out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
             generated_dashboards.append(out_path)
+            prune_dashboard_bundles(
+                run_dir,
+                keep_paths=[out_path],
+                kind="scoring",
+                recursive=(scope == "global"),
+            )
             postprocess["dashboard"] = _completed_postprocess_payload(artifact=out_path)
             _log_complete_postprocess(f"Global Pass 2 dashboard -> {out_path}")
         except Exception as e:

@@ -1321,6 +1321,56 @@ def test_flush_file_and_chunk_collectors_release_heavy_references(tmp_path):
     assert chunk.plan_stats == {}
 
 
+def test_flush_file_output_can_skip_dashboard_generation(tmp_path):
+    from sft_label.inline_rows import build_row_sample_bundle
+    from sft_label.pipeline import FileCollector, flush_file_output
+
+    row = {
+        "meta_prompt": ["system"],
+        "data": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ],
+    }
+    source_file = tmp_path / "train.jsonl"
+    bundle = build_row_sample_bundle(row, source_file, 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+
+    collector = FileCollector(
+        file_idx=0,
+        abs_path=source_file,
+        rel_path=Path("train.jsonl"),
+        output_dir=tmp_path / "meta" / "train",
+        prefix="train",
+        total=len(samples),
+        samples=samples,
+        row_bundles=[bundle],
+        sample_to_bundle=sample_to_bundle,
+        dataset_output_path=tmp_path / "dataset" / "train.jsonl",
+        run_failure_log_path=tmp_path / "failures.jsonl",
+        config=PipelineConfig(enable_adaptive_runtime=False),
+        inline_output=True,
+        label_count=1,
+        inherit_map={},
+        updated_sample_indices={0},
+        bundle_plans=[],
+        plan_stats={},
+    )
+    collector.labels = [_full_labels()]
+    collector.monitors = [_monitor()]
+
+    flush_file_output(
+        collector,
+        tmp_path,
+        checkpoint_path=None,
+        pprint=lambda _msg: None,
+        generate_dashboard=False,
+    )
+
+    assert (collector.output_dir / "stats_labeling.json").exists()
+    assert not (collector.output_dir / "dashboards" / "dashboard_labeling.html").exists()
+
+
 def test_estimate_directory_workload_streams_inline_jsonl_planning(monkeypatch, tmp_path):
     from sft_label.pipeline import estimate_directory_workload
 
