@@ -620,6 +620,39 @@ def _find_matching_artifacts(root: Path, stem_prefix: str) -> list[Path]:
     return found
 
 
+def _find_pass2_resume_artifacts(root: Path) -> list[Path]:
+    stem_prefixes = ("scored", "monitor_value", "failed_value", "score_failures")
+    patterns: list[str] = []
+    for stem_prefix in stem_prefixes:
+        patterns.extend(
+            [
+                f"{stem_prefix}*.checkpoint.json",
+                f"{stem_prefix}*.checkpoint.jsonl",
+                f".{stem_prefix}*.checkpoint.json",
+                f".{stem_prefix}*.checkpoint.jsonl",
+                f".{stem_prefix}*.json.next",
+                f".{stem_prefix}*.jsonl.next",
+            ]
+        )
+
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        scoped_patterns = (
+            pattern,
+            f"*/{pattern}",
+            f"**/{pattern}",
+        )
+        for scoped_pattern in scoped_patterns:
+            for path in sorted(root.glob(scoped_pattern)):
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                found.append(path)
+    return found
+
+
 def _score_command_for_input(target: Path, *, resume: bool) -> list[str]:
     argv = ["score", "--concurrency", str(DEFAULT_CONCURRENCY), "--input", str(target)]
     if resume:
@@ -636,6 +669,7 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
     checkpoint, checkpoint_payload = _load_resume_checkpoint(target)
     labeled_files = _find_matching_artifacts(target, "labeled")
     scored_files = _find_matching_artifacts(target, "scored")
+    pass2_resume_artifacts = _find_pass2_resume_artifacts(target)
     checkpoint_status = (checkpoint_payload or {}).get("status")
 
     if checkpoint is not None and checkpoint_status != "done":
@@ -648,13 +682,22 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
         )
 
     if labeled_files:
-        argv = _score_command_for_input(target, resume=bool(scored_files))
+        resume_score = bool(scored_files or pass2_resume_artifacts)
+        argv = _score_command_for_input(target, resume=resume_score)
         if scored_files:
             return (
                 argv,
                 _msg(
                     f"检测到 {len(labeled_files)} 个 labeled 文件和 {len(scored_files)} 个 scored 文件，将续跑二阶段并跳过已完成样本。",
                     f"Detected {len(labeled_files)} labeled file(s) and {len(scored_files)} scored file(s); resuming Pass 2 and skipping completed samples.",
+                ),
+            )
+        if pass2_resume_artifacts:
+            return (
+                argv,
+                _msg(
+                    f"检测到 {len(labeled_files)} 个 labeled 文件，以及 {len(pass2_resume_artifacts)} 个二阶段中间产物（.next/.checkpoint），将续跑二阶段。",
+                    f"Detected {len(labeled_files)} labeled file(s) and {len(pass2_resume_artifacts)} Pass 2 intermediate artifact(s) (.next/.checkpoint); resuming Pass 2.",
                 ),
             )
         return (

@@ -460,6 +460,58 @@ def _extract_dashboard_publish_run_dir(launched_args, result):
     return None
 
 
+def _score_postprocess_payload_for_publish_guard(launched_args, result):
+    if launched_args.command == "run":
+        if not getattr(launched_args, "score", False):
+            return None
+        summary = (result or {}).get("score_summary") if isinstance(result, dict) else None
+    elif launched_args.command == "score":
+        summary = result if isinstance(result, dict) else None
+    else:
+        return None
+
+    if not isinstance(summary, dict):
+        return {}
+    postprocess = summary.get("postprocess")
+    return postprocess if isinstance(postprocess, dict) else {}
+
+
+def _auto_publish_pass2_guard(launched_args, result, lang: str) -> tuple[bool, str | None]:
+    postprocess = _score_postprocess_payload_for_publish_guard(launched_args, result)
+    if postprocess is None:
+        return True, None
+
+    blocked_statuses = {"deferred", "pending", "failed"}
+    safe_statuses = {"completed", "disabled"}
+    required_keys = ("conversation_scores", "dashboard")
+    observed: list[str] = []
+    failures: list[str] = []
+
+    for key in required_keys:
+        node = postprocess.get(key)
+        status = node.get("status") if isinstance(node, dict) else None
+        if not status:
+            failures.append(f"{key}=missing")
+            continue
+        observed.append(f"{key}={status}")
+        if status in blocked_statuses or status not in safe_statuses:
+            failures.append(f"{key}={status}")
+
+    if failures:
+        observed_text = ", ".join(observed) if observed else "none"
+        blocked_text = ", ".join(failures)
+        return (
+            False,
+            _start_msg(
+                lang,
+                f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。请先运行 `sft-label complete-postprocess --input <run_dir>`。",
+                f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. Run `sft-label complete-postprocess --input <run_dir>` first.",
+            ),
+        )
+
+    return True, None
+
+
 def _print_published_dashboard_urls(published, lang: str):
     dashboards = (published or {}).get("dashboards") or {}
     if not dashboards:
@@ -905,7 +957,7 @@ def cmd_run(args):
                 output_dir=run_dir,
                 tag_stats_path=getattr(args, "tag_stats", None),
                 config=config,
-                resume=args.mode in {"incremental", "migrate"},
+                resume=bool(args.resume) or args.mode in {"incremental", "migrate"},
                 llm_progress_cb=llm_progress_cb,
                 precomputed_workload_estimate=precomputed_scoring_workload_estimate,
             ))
@@ -1514,19 +1566,23 @@ def cmd_start(args, parser):
     if dashboard_service is not None:
         run_dir = _extract_dashboard_publish_run_dir(launched_args, result)
         if run_dir:
-            try:
-                published = run_with_heartbeat(
-                    _start_msg(lang, "正在发布 dashboards", "Publishing dashboards"),
-                    lambda: publish_run_dashboards(dashboard_service, run_dir),
-                )
-            except (FileNotFoundError, ValueError) as e:
-                print(_start_msg(
-                    lang,
-                    f"Dashboard 自动发布失败：{e}",
-                    f"Dashboard auto-publish failed: {e}",
-                ))
+            can_publish, guard_message = _auto_publish_pass2_guard(launched_args, result, lang)
+            if not can_publish:
+                print(guard_message)
             else:
-                _print_published_dashboard_urls(published, lang)
+                try:
+                    published = run_with_heartbeat(
+                        _start_msg(lang, "正在发布 dashboards", "Publishing dashboards"),
+                        lambda: publish_run_dashboards(dashboard_service, run_dir),
+                    )
+                except (FileNotFoundError, ValueError) as e:
+                    print(_start_msg(
+                        lang,
+                        f"Dashboard 自动发布失败：{e}",
+                        f"Dashboard auto-publish failed: {e}",
+                    ))
+                else:
+                    _print_published_dashboard_urls(published, lang)
         else:
             print(_start_msg(
                 lang,
