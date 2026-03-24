@@ -3608,6 +3608,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     stats_file = pass1_stats_filename(suffix)
     dashboard_file = pass1_dashboard_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
+    unmapped_events_file = f"unmapped_events{suffix}.jsonl"
 
     if inline_output:
         merge_result = merge_pass1_results(
