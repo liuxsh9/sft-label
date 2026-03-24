@@ -666,6 +666,27 @@ function loadSidebarPreference() {
   }
 }
 
+let stickyLayoutObserver = null;
+
+function updateStickyLayoutMetrics() {
+  const toolbarShell = document.getElementById("sticky-toolbar-shell");
+  if (!toolbarShell) return;
+  const toolbarHeight = Math.ceil(toolbarShell.getBoundingClientRect().height || toolbarShell.offsetHeight || 0);
+  if (toolbarHeight > 0) {
+    document.documentElement.style.setProperty("--toolbar-height", `${toolbarHeight}px`);
+  }
+}
+
+function ensureStickyLayoutObserver() {
+  const toolbarShell = document.getElementById("sticky-toolbar-shell");
+  if (!toolbarShell || stickyLayoutObserver) return;
+  if (typeof window.ResizeObserver === "function") {
+    stickyLayoutObserver = new window.ResizeObserver(() => updateStickyLayoutMetrics());
+    stickyLayoutObserver.observe(toolbarShell);
+  }
+  updateStickyLayoutMetrics();
+}
+
 function applySidebarState() {
   const shell = document.querySelector(".shell");
   const button = document.getElementById("sidebar-toggle");
@@ -1219,7 +1240,7 @@ function renderTreeNode(id, depth = 0) {
 
   let html = `<div class="tree-node ${isExpanded ? "expanded" : ""}">`;
   html += `<div class="tree-row ${STATE.currentId === id ? "active" : ""}" data-scope="${escapeHtml(id)}">`;
-  html += `<span class="tree-indent" style="margin-left:${depth * 6}px"></span>`;
+  html += `<span class="tree-indent" style="margin-left:${depth * 4}px"></span>`;
   if (hasChildren) {
     html += `<span class="tree-toggle" data-toggle="${escapeHtml(id)}">${isExpanded ? "▾" : "▸"}</span>`;
   } else {
@@ -1292,6 +1313,7 @@ function renderHero() {
     .map(([label, value]) => `<div class="pill"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
     .join("");
   document.getElementById("hero-toolbar").innerHTML = renderTagBarControlsInline();
+  window.requestAnimationFrame(updateStickyLayoutMetrics);
 }
 
 function breadcrumbIds(scope) {
@@ -3041,6 +3063,8 @@ document.querySelectorAll(".filter-btn").forEach((button) => {
 STATE.sidebarCollapsed = loadSidebarPreference();
 applySidebarState();
 document.getElementById("sidebar-toggle").addEventListener("click", toggleSidebar);
+ensureStickyLayoutObserver();
+window.addEventListener("resize", updateStickyLayoutMetrics);
 
 window.addEventListener("hashchange", () => {
   restoreDashboardState();

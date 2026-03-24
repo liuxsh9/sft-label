@@ -26,6 +26,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div class="hero-stats" id="hero-stats"></div>
     </div>
+  </div>
+  <div class="sticky-toolbar-shell" id="sticky-toolbar-shell">
     <div class="hero-toolbar" id="hero-toolbar"></div>
   </div>
   <div class="layout">

@@ -44,6 +44,7 @@ def test_render_dashboard_html_emits_bootstrap_shell_for_pass2_dashboard() -> No
     assert "dashboard_scoring.data/manifest.json" in html
     assert "/static/sft-label-dashboard/v1/dashboard.js" in html
     assert 'id="hero-toolbar"' in html
+    assert 'id="sticky-toolbar-shell"' in html
     assert 'id="scope-toolbar-extra"' not in html
     assert "Scope Navigator" in html
     assert "const DATA =" not in html
@@ -56,9 +57,10 @@ def test_dashboard_runtime_renders_global_controls_into_hero_toolbar() -> None:
     assert 'document.getElementById("scope-toolbar-extra").innerHTML = renderTagBarControlsInline(scope);' not in js
 
 
-def test_dashboard_styles_define_sticky_hero_toolbar_layout() -> None:
+def test_dashboard_styles_define_compact_sticky_toolbar_layout() -> None:
     css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
 
+    assert '.sticky-toolbar-shell {' in css
     assert '.hero-toolbar {' in css
     assert '.hero-toolbar-group {' in css
     assert '.hero-toolbar .toolbar-inline-copy {' in css
@@ -78,6 +80,25 @@ def test_dashboard_styles_toolbar_polish_define_glass_group_layout() -> None:
     assert '.hero-toolbar-body {' in css
     assert 'backdrop-filter: blur(14px);' in css
     assert '.hero-toolbar .segmented-btn { padding: 6px 10px;' in css
+
+
+def test_dashboard_styles_define_sidebar_offset_from_sticky_toolbar() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '--toolbar-height:' in css
+    assert '--sidebar-sticky-top:' in css
+    assert 'top: var(--sidebar-sticky-top);' in css
+    assert 'height: calc(100vh - var(--sidebar-sticky-top));' in css
+    assert 'min-height: calc(100vh - var(--sidebar-sticky-top));' in css
+
+
+def test_dashboard_runtime_updates_sticky_layout_metrics_from_toolbar_height() -> None:
+    js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'function updateStickyLayoutMetrics()' in js
+    assert '--toolbar-height' in js
+    assert 'sticky-toolbar-shell' in js
+    assert 'ResizeObserver' in js
 
 
 def test_dashboard_runtime_initializes_explorer_cache_before_manifest_load() -> None:
@@ -105,12 +126,37 @@ def test_dashboard_styles_define_compact_sidebar_row_layout() -> None:
     assert '.tree-sub {' in css
     assert '.tree-kind-dot {' in css
     assert '.tree-meta-pill {' in css
+    assert '.tree-row { display: flex; align-items: flex-start; gap: 6px; padding: 7px 8px;' in css
 
 
 def test_dashboard_runtime_uses_tighter_tree_indent_step() -> None:
     js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
 
-    assert 'margin-left:${depth * 6}px' in js
+    assert 'margin-left:${depth * 4}px' in js
+
+
+def test_dashboard_styles_use_shallower_tree_child_padding() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '.tree-children { display: none; padding-left: 6px; }' in css
+
+
+def test_dashboard_styles_define_full_height_sidebar_flex_layout() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '.sidebar { background:' in css
+    assert 'display: flex; flex-direction: column;' in css
+    assert '.sidebar-body { flex: 1 1 auto;' in css
+    assert 'overflow: auto;' in css
+
+
+def test_dashboard_styles_define_collapsed_sidebar_as_full_height_rail() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '.shell.sidebar-collapsed .sidebar { padding:' in css
+    assert 'align-items: center;' in css
+    assert '.shell.sidebar-collapsed .sidebar-header {' in css
+    assert 'flex-direction: column;' in css
 
 
 def test_dashboard_runtime_has_bilingual_turn_kind_tags_and_english_intent_matrix_title() -> None:
