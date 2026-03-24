@@ -25,6 +25,15 @@ body { min-height: 100vh; }
 .hero h1 { margin: 0; font-size: 1.7rem; letter-spacing: 0.02em; }
 .hero-sub { margin-top: 8px; color: rgba(249, 247, 240, 0.78); font-size: 0.96rem; }
 .hero-stats { display: flex; gap: 10px; flex-wrap: wrap; }
+.hero-toolbar { display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.14); }
+.hero-toolbar-group { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; padding: 8px 10px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.12); background: rgba(8,16,14,0.12); backdrop-filter: blur(14px); box-shadow: inset 0 1px 0 rgba(255,255,255,0.05); }
+.hero-toolbar-label { color: rgba(249, 247, 240, 0.66); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
+.hero-toolbar-body { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.hero-toolbar .toolbar-inline-copy { color: rgba(249, 247, 240, 0.72); }
+.hero-toolbar .segmented-btn { padding: 6px 10px; border-color: rgba(255,255,255,0.16); background: rgba(255,255,255,0.08); color: rgba(249, 247, 240, 0.84); font-size: 0.82rem; line-height: 1.1; }
+.hero-toolbar .segmented-btn:hover { border-color: rgba(255,255,255,0.38); color: #fff; background: rgba(255,255,255,0.14); }
+.hero-toolbar .segmented-btn.active { background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.34); color: #fff; }
+.hero-toolbar .info-btn { border-color: rgba(255,255,255,0.22); background: rgba(255,255,255,0.10); color: #fff; }
 .pill { display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 999px; background: rgba(255,255,255,0.12); font-size: 0.84rem; }
 .pill strong { font-size: 0.98rem; color: #fff; }
 .layout { display: grid; grid-template-columns: var(--sidebar-open) minmax(0, 1fr); gap: clamp(18px, 1.5vw, 28px); margin-top: 18px; align-items: start; transition: grid-template-columns 220ms ease, gap 220ms ease; }
