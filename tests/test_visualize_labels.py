@@ -959,8 +959,11 @@ def test_generate_dashboard_tree_payload_prefers_conversation_stats_artifact_ove
 
     out = generate_dashboard(meta_root, labeled_file=None, stats_file=PASS1_SUMMARY_STATS_FILE)
     data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
     detail = json.loads((data_dir / "scopes" / "file_code_sample_jsonl.json").read_text(encoding="utf-8"))
 
+    assert manifest["scopes"]["global"]["has_conversation"] is True
+    assert manifest["scopes"]["file:code/sample.jsonl"]["has_conversation"] is True
     assert detail["pass1"]["modes"]["conversation"]["total"] == 1
     assert detail["summary_modes"]["conversation"]["pass1_total"] == 1
 

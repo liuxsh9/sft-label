@@ -1076,12 +1076,28 @@ function getCurrentScope() {
 
 function scopeSummary(scope) {
   const modes = (scope || {}).summary_modes || {};
-  return modes[STATE.aggregationMode] || (scope || {}).summary || {};
+  const fallbackMode = Object.values(modes).find((value) => value && typeof value === "object");
+  return modes[STATE.aggregationMode] || modes.sample || fallbackMode || (scope || {}).summary || {};
 }
 
 function aggregationPayload(bucket) {
   if (!bucket) return null;
-  return (bucket.modes || {})[STATE.aggregationMode] || bucket;
+  const modes = bucket.modes || {};
+  const fallbackMode = Object.values(modes).find((value) => value && typeof value === "object");
+  if (modes[STATE.aggregationMode]) return modes[STATE.aggregationMode];
+  if (modes.sample) return modes.sample;
+  if (fallbackMode) return fallbackMode;
+  if (
+    bucket.mode_id
+    || bucket.overview
+    || bucket.total !== undefined
+    || bucket.distributions
+    || bucket.score_distributions
+    || bucket.extensions
+  ) {
+    return bucket;
+  }
+  return null;
 }
 
 function aggregationUnitLabel(bucket, fallback = "items") {
@@ -2018,6 +2034,7 @@ function renderPass1(pass1) {
   if (!pass1) return "";
   const pass1View = aggregationPayload(pass1);
   if (!pass1View) return "";
+  const pass1Mode = pass1View.mode_id || STATE.aggregationMode;
   const sections = [];
   const globalTagCountMax = Object.values(pass1View.distributions || {}).flatMap((dist) => (
     Object.values(dist || {}).map((value) => Number(value) || 0)
@@ -2025,14 +2042,14 @@ function renderPass1(pass1) {
 
   const cards = [];
   const overview = pass1View.overview || {};
-  cards.push({label: STATE.aggregationMode === "conversation" ? t("units_label") : t("samples"), value: pass1View.total || 0});
+  cards.push({label: pass1Mode === "conversation" ? t("units_label") : t("samples"), value: pass1View.total || 0});
   cards.push({label: t("success"), value: `${(((overview.success_rate || 0) * 100).toFixed(1))}%`});
   cards.push({label: t("tokens"), value: Number(overview.total_tokens || 0).toLocaleString()});
   cards.push({label: t("arbitrated"), value: `${(((overview.arbitrated_rate || 0) * 100).toFixed(1))}%`});
   cards.push({label: "Prompt Mode", value: overview.prompt_mode || (overview.compact_prompt ? "compact" : "full")});
   if (overview.conversation_char_budget) cards.push({label: "Budget", value: Number(overview.conversation_char_budget || 0).toLocaleString()});
   if (overview.unmapped_unique) cards.push({label: t("unmapped"), value: overview.unmapped_unique});
-  if (STATE.aggregationMode === "conversation" && (overview.llm_labeled_units || overview.inherited_units)) {
+  if (pass1Mode === "conversation" && (overview.llm_labeled_units || overview.inherited_units)) {
     cards.push({label: t("llm_labeled_units"), value: overview.llm_labeled_units || 0});
     cards.push({label: t("inherited_units"), value: overview.inherited_units || 0});
   } else if (overview.sparse_inherited) {
@@ -2040,7 +2057,7 @@ function renderPass1(pass1) {
     cards.push({label: t("inherited"), value: overview.sparse_inherited || 0});
   }
   const pass1Notes = [];
-  if (STATE.aggregationMode === "conversation") {
+  if (pass1Mode === "conversation") {
     pass1Notes.push(`<div class="note">${escapeHtml(t("pass1_conversation_note"))}</div>`);
     if (DATA && DATA.title_key === "dashboard_title_scoring") {
       pass1Notes.push(`<div class="note">${escapeHtml(t("pass1_scoring_subset_note"))}</div>`);
@@ -2348,6 +2365,7 @@ function renderPass2(pass2) {
   if (!pass2) return "";
   const pass2View = aggregationPayload(pass2);
   if (!pass2View) return "";
+  const pass2Mode = pass2View.mode_id || STATE.aggregationMode;
   const sections = [];
   const overview = pass2View.overview || {};
   const cards = [
@@ -2368,7 +2386,7 @@ function renderPass2(pass2) {
     ...(overview.extension_baseline_source ? [{label: t("extension_baseline_source"), value: overview.extension_baseline_source}] : []),
   ];
   if (overview.value_truncation_budget) cards.push({label: "Budget", value: Number(overview.value_truncation_budget || 0).toLocaleString()});
-  const pass2Intro = STATE.aggregationMode === "conversation"
+  const pass2Intro = pass2Mode === "conversation"
     ? `<div class="note">${escapeHtml(t("pass2_conversation_note"))}</div>`
     : "";
   sections.push(section(t("scoring_overview"), `${pass2Intro}${renderCards(cards)}`, `${overview.total_scored || 0} ${aggregationUnitLabel(pass2, "samples")}`, true));

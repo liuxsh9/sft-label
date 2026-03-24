@@ -432,6 +432,7 @@ def update_inline_row_with_scored_samples(
     """Write scored turn results back into one inline-labeled row."""
     row_copy = copy.deepcopy(row)
     data_label = get_data_label(row_copy, default={}) or {}
+    conversation_record: dict | None = None
     turns = data_label.setdefault("turns", [])
     turn_by_index = {
         turn.get("turn_index"): turn
@@ -484,6 +485,7 @@ def update_inline_row_with_scored_samples(
             conversation_update = _single_turn_conversation_update(updated_turn_samples[0])
 
         if conversation_update:
+            conversation_record = copy.deepcopy(conversation_update)
             set_conversation_record(
                 data_label,
                 compact_conversation_record(conversation_update),
@@ -498,7 +500,7 @@ def update_inline_row_with_scored_samples(
     data_label["turns"] = compact_turns
     compact_data_label(data_label)
 
-    return row_copy, data_label.get("conversation")
+    return row_copy, conversation_record
 
 
 def stream_inline_rows_with_scoring(input_path, limit: int = 0):

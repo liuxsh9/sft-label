@@ -107,6 +107,25 @@ def test_dashboard_runtime_initializes_explorer_cache_before_manifest_load() -> 
     assert js.index("const EXPLORER_CACHE =") < js.index("const DATA = await loadDashboardManifest();")
 
 
+def test_dashboard_runtime_falls_back_to_sample_aggregation_when_selected_mode_missing() -> None:
+    js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'const fallbackMode = Object.values(modes).find((value) => value && typeof value === "object");' in js
+    assert 'return modes[STATE.aggregationMode] || modes.sample || fallbackMode || (scope || {}).summary || {};' in js
+    assert 'if (modes.sample) return modes.sample;' in js
+    assert 'if (fallbackMode) return fallbackMode;' in js
+    assert 'return null;' in js
+
+
+def test_dashboard_runtime_uses_resolved_aggregation_mode_for_pass_copy() -> None:
+    js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'const pass1Mode = pass1View.mode_id || STATE.aggregationMode;' in js
+    assert 'if (pass1Mode === "conversation") {' in js
+    assert 'const pass2Mode = pass2View.mode_id || STATE.aggregationMode;' in js
+    assert 'const pass2Intro = pass2Mode === "conversation"' in js
+
+
 def test_dashboard_runtime_uses_compact_sidebar_meta_and_color_only_kind_markers() -> None:
     js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
 

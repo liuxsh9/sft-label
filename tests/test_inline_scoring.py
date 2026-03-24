@@ -437,6 +437,21 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
     assert "slices" in canonical_conv[0]
     assert canonical_conv[0]["detail"]["conv_intra_class_rank"] is not None
 
+    file_conv = json.loads(
+        (run_root / "meta_label_data" / "files" / "multi" / "b" / "conversation_scores.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert file_conv
+    assert file_conv[0]["merged_labels"]["intent"] in {"debug", "modify"}
+
+    scoring_dashboard = dashboards_dir / "dashboard_scoring_dataset.data"
+    manifest = json.loads((scoring_dashboard / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((scoring_dashboard / "scopes" / "global.json").read_text(encoding="utf-8"))
+    assert manifest["scopes"]["global"]["summary_modes"]["conversation"]["pass1_total"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["distribution_total"] == 1
+    assert detail["pass1"]["modes"]["conversation"]["distributions"]["intent"] in ({"debug": 1}, {"modify": 1})
+
     updated_b = [json.loads(line) for line in file_b.read_text(encoding="utf-8").splitlines()]
     turns = updated_b[0]["extra_info"]["unique_info"]["data_label"]["turns"]
     assert turns[0]["value"]["selection_score"] is not None

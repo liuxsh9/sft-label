@@ -1535,6 +1535,18 @@ def build_scope_detail_payload(scope: dict) -> dict:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+def _scope_has_conversation_data(scope: dict) -> bool:
+    if scope.get("conversation"):
+        return True
+    pass1_modes = ((scope.get("pass1") or {}).get("modes") or {})
+    if pass1_modes.get("conversation"):
+        return True
+    pass2_modes = ((scope.get("pass2") or {}).get("modes") or {})
+    if pass2_modes.get("conversation"):
+        return True
+    return False
+
+
 def build_dashboard_manifest(
     *,
     title: str,
@@ -1562,7 +1574,7 @@ def build_dashboard_manifest(
             "detail_script_path": scope.get("detail_script_path"),
             "has_pass1": bool(scope.get("pass1")),
             "has_pass2": bool(scope.get("pass2")),
-            "has_conversation": bool(scope.get("conversation")),
+            "has_conversation": _scope_has_conversation_data(scope),
         }
         if scope.get("explorer"):
             manifest_scopes[scope_id]["explorer"] = _round_numbers(scope["explorer"])
