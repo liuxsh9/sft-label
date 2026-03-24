@@ -43,9 +43,41 @@ def test_render_dashboard_html_emits_bootstrap_shell_for_pass2_dashboard() -> No
 
     assert "dashboard_scoring.data/manifest.json" in html
     assert "/static/sft-label-dashboard/v1/dashboard.js" in html
-    assert 'id="scope-toolbar-extra"' in html
+    assert 'id="hero-toolbar"' in html
+    assert 'id="scope-toolbar-extra"' not in html
     assert "Scope Navigator" in html
     assert "const DATA =" not in html
+
+
+def test_dashboard_runtime_renders_global_controls_into_hero_toolbar() -> None:
+    js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'document.getElementById("hero-toolbar").innerHTML = renderTagBarControlsInline();' in js
+    assert 'document.getElementById("scope-toolbar-extra").innerHTML = renderTagBarControlsInline(scope);' not in js
+
+
+def test_dashboard_styles_define_sticky_hero_toolbar_layout() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '.hero-toolbar {' in css
+    assert '.hero-toolbar-group {' in css
+    assert '.hero-toolbar .toolbar-inline-copy {' in css
+
+
+def test_dashboard_runtime_toolbar_polish_uses_compact_group_markup() -> None:
+    js = Path("src/sft_label/tools/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'hero-toolbar-label' in js
+    assert 'hero-toolbar-body' in js
+
+
+def test_dashboard_styles_toolbar_polish_define_glass_group_layout() -> None:
+    css = Path("src/sft_label/tools/dashboard.css").read_text(encoding="utf-8")
+
+    assert '.hero-toolbar-label {' in css
+    assert '.hero-toolbar-body {' in css
+    assert 'backdrop-filter: blur(14px);' in css
+    assert '.hero-toolbar .segmented-btn { padding: 6px 10px;' in css
 
 
 def test_dashboard_runtime_initializes_explorer_cache_before_manifest_load() -> None:

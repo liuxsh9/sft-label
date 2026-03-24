@@ -26,6 +26,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div class="hero-stats" id="hero-stats"></div>
     </div>
+    <div class="hero-toolbar" id="hero-toolbar"></div>
   </div>
   <div class="layout">
     <aside class="sidebar panel" id="sidebar">
@@ -55,7 +56,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="scope-path" id="scope-path"></div>
           </div>
           <div class="scope-actions">
-            <div class="scope-toolbar-extra" id="scope-toolbar-extra"></div>
             <button class="action-btn" id="go-parent">Up One Level</button>
             <button class="action-btn" id="go-global">Back To Global</button>
           </div>
