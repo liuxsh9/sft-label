@@ -24,6 +24,7 @@ import asyncio
 import argparse
 import random
 import re
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -90,7 +91,7 @@ from sft_label.llm_runtime import (
 from sft_label.label_extensions import run_label_extensions
 from sft_label.label_extensions_schema import load_extension_specs
 from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
-from sft_label.http_limits import resolve_httpx_connection_limits
+from sft_label.http_limits import estimate_pass1_extra_connections, resolve_httpx_connection_limits
 from sft_label.progress_display import create_pipeline_progress
 
 try:
@@ -185,10 +186,18 @@ def _update_llm_task_progress(progress, llm_task, run_info, eta_tracker=None):
         )
 
 
-def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits:
+def _build_http_client_limits(
+    concurrency: int,
+    *,
+    chunked_output_files: int = 0,
+    pprint=print,
+) -> httpx.Limits:
+    extra_connections = estimate_pass1_extra_connections(
+        chunked_output_files=chunked_output_files,
+    )
     max_connections, max_keepalive, capped = resolve_httpx_connection_limits(
         requested_concurrency=concurrency,
-        extra_connections=10,
+        extra_connections=extra_connections,
     )
     if capped:
         pprint(
@@ -200,6 +209,15 @@ def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits
         max_connections=max_connections,
         max_keepalive_connections=max_keepalive,
     )
+
+
+def _chunked_output_fd_budget(*, is_directory: bool, input_path: Path | None, config: PipelineConfig | None) -> int:
+    if is_directory:
+        max_files = config.dir_pipeline_max_files if config else DIR_PIPELINE_MAX_FILES
+        return max(int(max_files or 0), 0)
+    if input_path is not None and str(input_path).endswith(".jsonl"):
+        return 1
+    return 0
 
 
 # ─────────────────────────────────────────────────────────
@@ -280,6 +298,40 @@ def _numeric_summary(values):
         "min": round(min(cleaned), 3),
         "max": round(max(cleaned), 3),
     }
+
+
+class OnlineNumericSummary:
+    """Constant-memory numeric summary accumulator."""
+
+    __slots__ = ("count", "total", "minimum", "maximum")
+
+    def __init__(self):
+        self.count = 0
+        self.total = 0.0
+        self.minimum = None
+        self.maximum = None
+
+    def add(self, value):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return
+        num = float(value)
+        self.count += 1
+        self.total += num
+        if self.minimum is None or num < self.minimum:
+            self.minimum = num
+        if self.maximum is None or num > self.maximum:
+            self.maximum = num
+
+    def as_dict(self):
+        if self.count <= 0:
+            return {}
+        return {
+            "count": self.count,
+            "sum": round(self.total, 3),
+            "mean": round(self.total / self.count, 3),
+            "min": round(float(self.minimum), 3),
+            "max": round(float(self.maximum), 3),
+        }
 
 
 def _merge_numeric_summary(summaries):
@@ -525,6 +577,24 @@ def _write_jsonl_atomic(path, records):
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     tmp_path.replace(path)
+
+
+PASS1_CHUNKED_WORKING_SUFFIX = ".next"
+
+
+def _pass1_chunked_working_path(path: Path) -> Path:
+    path = Path(path)
+    return path.with_name(f".{path.name}{PASS1_CHUNKED_WORKING_SUFFIX}")
+
+
+def _finalize_pass1_chunked_working_files(path_pairs):
+    for final_path, working_path in path_pairs:
+        final_path = Path(final_path)
+        working_path = Path(working_path)
+        if not working_path.exists():
+            continue
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(working_path, final_path)
 
 
 # ─────────────────────────────────────────────────────────
@@ -2549,16 +2619,16 @@ class StatsAccumulator:
         self.planner_conversations_total = 0
         self.planner_conversations_with_metadata = 0
         self.planner_fallback_conversations = 0
-        self.planner_segment_counts = []
-        self.planner_boundary_scores = []
+        self.planner_segment_counts = OnlineNumericSummary()
+        self.planner_boundary_scores = OnlineNumericSummary()
         self.planner_anchor_priority_counts = {}
         self.planner_anchor_reason_counts = {}
         self.planner_inherit_edges = 0
         self.planner_cross_segment_inherit_edges = 0
 
         # Compact prompt byte tracking
-        self.prompt_bytes_call1 = []
-        self.prompt_bytes_call2 = []
+        self.prompt_bytes_call1 = OnlineNumericSummary()
+        self.prompt_bytes_call2 = OnlineNumericSummary()
         self.prompt_bytes_call1_hard_cap_hits = 0
         self.prompt_bytes_call2_hard_cap_hits = 0
 
@@ -2590,12 +2660,12 @@ class StatsAccumulator:
                 self.low_conf_freq[d] = self.low_conf_freq.get(d, 0) + 1
             call1_bytes = m.get("assembled_prompt_bytes")
             if isinstance(call1_bytes, (int, float)) and not isinstance(call1_bytes, bool):
-                self.prompt_bytes_call1.append(int(call1_bytes))
+                self.prompt_bytes_call1.add(int(call1_bytes))
                 if self.compact_labeling_request_bytes and int(call1_bytes) > self.compact_labeling_request_bytes:
                     self.prompt_bytes_call1_hard_cap_hits += 1
             call2_bytes = m.get("assembled_prompt_bytes_call2")
             if isinstance(call2_bytes, (int, float)) and not isinstance(call2_bytes, bool):
-                self.prompt_bytes_call2.append(int(call2_bytes))
+                self.prompt_bytes_call2.add(int(call2_bytes))
                 if self.compact_labeling_request_bytes and int(call2_bytes) > self.compact_labeling_request_bytes:
                     self.prompt_bytes_call2_hard_cap_hits += 1
 
@@ -2682,12 +2752,12 @@ class StatsAccumulator:
 
             segment_ids = {meta.get("segment_id") for meta in planner_metas if meta.get("segment_id") is not None}
             if segment_ids:
-                self.planner_segment_counts.append(len(segment_ids))
+                self.planner_segment_counts.add(len(segment_ids))
 
             for meta in planner_metas:
                 boundary_score = meta.get("boundary_score")
                 if isinstance(boundary_score, (int, float)) and not isinstance(boundary_score, bool):
-                    self.planner_boundary_scores.append(float(boundary_score))
+                    self.planner_boundary_scores.add(float(boundary_score))
                 anchor_priority = str(meta.get("anchor_priority") or "").strip().lower()
                 if anchor_priority:
                     self.planner_anchor_priority_counts[anchor_priority] = (
@@ -2776,17 +2846,17 @@ class StatsAccumulator:
             "anchor_priority_counts": dict(sorted(self.planner_anchor_priority_counts.items(), key=lambda item: (-item[1], item[0]))),
             "anchor_reason_counts": dict(sorted(self.planner_anchor_reason_counts.items(), key=lambda item: (-item[1], item[0]))),
         }
-        segments_summary = _numeric_summary(self.planner_segment_counts)
+        segments_summary = self.planner_segment_counts.as_dict()
         if segments_summary:
             planner_stats["segments_per_conversation"] = segments_summary
-        boundary_summary = _numeric_summary(self.planner_boundary_scores)
+        boundary_summary = self.planner_boundary_scores.as_dict()
         if boundary_summary:
             planner_stats["boundary_score"] = boundary_summary
         if self.planner_conversations_total:
             result["planner_stats"] = planner_stats
 
         compact_prompt_bytes = {}
-        call1_summary = _numeric_summary(self.prompt_bytes_call1)
+        call1_summary = self.prompt_bytes_call1.as_dict()
         if call1_summary:
             call1_summary["limit_bytes"] = self.compact_labeling_request_bytes
             call1_summary["hard_cap_hits"] = self.prompt_bytes_call1_hard_cap_hits
@@ -2794,7 +2864,7 @@ class StatsAccumulator:
                 self.prompt_bytes_call1_hard_cap_hits / max(call1_summary["count"], 1), 4
             )
             compact_prompt_bytes["call1"] = call1_summary
-        call2_summary = _numeric_summary(self.prompt_bytes_call2)
+        call2_summary = self.prompt_bytes_call2.as_dict()
         if call2_summary:
             call2_summary["limit_bytes"] = self.compact_labeling_request_bytes
             call2_summary["hard_cap_hits"] = self.prompt_bytes_call2_hard_cap_hits
@@ -3027,6 +3097,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  rate_limiter=None, llm_progress_cb=None,
                                  dataset_output_path=None,
                                  run_failure_log_path=None,
+                                 inline_output: bool = False,
                                  mode: str = "refresh",
                                  migration_index: dict | None = None,
                                  progress_event_cb=None):
@@ -3089,12 +3160,32 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     output_dir.mkdir(parents=True, exist_ok=True)
     if dataset_output_path is None:
         dataset_output_path = output_dir / input_path.name
-    dataset_output_path = Path(dataset_output_path)
-    dataset_output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_rows = open(dataset_output_path, "w", encoding="utf-8")
-    out_labeled = open(output_dir / "labeled.jsonl", "w", encoding="utf-8")
-    out_monitor = open(output_dir / "monitor.jsonl", "w", encoding="utf-8")
-    out_failed = open(output_dir / "failed_samples.jsonl", "w", encoding="utf-8")
+    final_dataset_path = Path(dataset_output_path)
+    final_labeled_path = output_dir / "labeled.jsonl"
+    final_monitor_path = output_dir / "monitor.jsonl"
+    final_failed_path = output_dir / "failed_samples.jsonl"
+
+    use_working_sidecars = not inline_output
+    if use_working_sidecars:
+        dataset_write_path = _pass1_chunked_working_path(final_dataset_path)
+        labeled_write_path = _pass1_chunked_working_path(final_labeled_path)
+        monitor_write_path = _pass1_chunked_working_path(final_monitor_path)
+        failed_write_path = _pass1_chunked_working_path(final_failed_path)
+    else:
+        dataset_write_path = final_dataset_path
+        labeled_write_path = final_labeled_path
+        monitor_write_path = final_monitor_path
+        failed_write_path = final_failed_path
+
+    dataset_write_path.parent.mkdir(parents=True, exist_ok=True)
+    labeled_write_path.parent.mkdir(parents=True, exist_ok=True)
+    monitor_write_path.parent.mkdir(parents=True, exist_ok=True)
+    failed_write_path.parent.mkdir(parents=True, exist_ok=True)
+
+    out_rows = open(dataset_write_path, "w", encoding="utf-8")
+    out_labeled = open(labeled_write_path, "w", encoding="utf-8")
+    out_monitor = open(monitor_write_path, "w", encoding="utf-8")
+    out_failed = open(failed_write_path, "w", encoding="utf-8")
 
     try:
         # --- Helper: wrap label_one with chunk tracking ---
@@ -3336,8 +3427,18 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         out_monitor.close()
         out_failed.close()
 
+    if use_working_sidecars:
+        _finalize_pass1_chunked_working_files(
+            (
+                (final_dataset_path, dataset_write_path),
+                (final_labeled_path, labeled_write_path),
+                (final_monitor_path, monitor_write_path),
+                (final_failed_path, failed_write_path),
+            )
+        )
+
     # Remove empty failed file
-    failed_path = output_dir / "failed_samples.jsonl"
+    failed_path = final_failed_path
     if failed_path.exists() and failed_path.stat().st_size == 0:
         failed_path.unlink()
 
@@ -3356,7 +3457,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     _write_json_atomic(stats_path, stats)
     _safe_write_pass1_conversation_stats(
         output_dir,
-        labeled_path=output_dir / "labeled.jsonl",
+        labeled_path=final_labeled_path,
         stats=stats,
         pprint=pprint,
     )
@@ -3396,6 +3497,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             rate_limiter=rate_limiter, llm_progress_cb=llm_progress_cb,
             dataset_output_path=dataset_output_path,
             run_failure_log_path=run_failure_log_path,
+            inline_output=inline_output,
             mode=mode,
             migration_index=migration_index,
         )
@@ -3917,6 +4019,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                         llm_progress_cb=llm_progress_cb,
                         dataset_output_path=dataset_output_path,
                         run_failure_log_path=run_failure_log_path,
+                        inline_output=inline_jsonl,
                         mode=mode,
                         migration_index=migration_index,
                         progress_event_cb=_chunked_progress_event,
@@ -4556,7 +4659,15 @@ async def run(
 
         batch_start = time.time()
 
-        client_limits = _build_http_client_limits(_concurrency, pprint=print)
+        client_limits = _build_http_client_limits(
+            _concurrency,
+            chunked_output_files=_chunked_output_fd_budget(
+                is_directory=True,
+                input_path=_input_path,
+                config=config,
+            ),
+            pprint=print,
+        )
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,
@@ -4684,7 +4795,15 @@ async def run(
         )
         batch_start = time.time()
 
-        client_limits = _build_http_client_limits(_concurrency, pprint=print)
+        client_limits = _build_http_client_limits(
+            _concurrency,
+            chunked_output_files=_chunked_output_fd_budget(
+                is_directory=True,
+                input_path=_input_path,
+                config=config,
+            ),
+            pprint=print,
+        )
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,
@@ -4733,7 +4852,15 @@ async def run(
     else:
         # ── Single-file mode: backward compatible ────────
         batch_start = time.time()
-        client_limits = _build_http_client_limits(_concurrency, pprint=print)
+        client_limits = _build_http_client_limits(
+            _concurrency,
+            chunked_output_files=_chunked_output_fd_budget(
+                is_directory=False,
+                input_path=_input_path,
+                config=config,
+            ),
+            pprint=print,
+        )
         async with httpx.AsyncClient(
             proxy=None,
             timeout=config.request_timeout,

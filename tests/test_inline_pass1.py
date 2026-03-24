@@ -572,6 +572,55 @@ async def test_run_single_jsonl_chunked_preserves_original_row_order(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_inline_chunked_durability_keeps_visible_dataset_path(tmp_path):
+    from sft_label.pipeline import run
+
+    input_path = tmp_path / "train.jsonl"
+    rows = [
+        {
+            "meta_prompt": ["system"],
+            "data": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+            ],
+        },
+        {
+            "meta_prompt": ["system"],
+            "data": [
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},
+            ],
+        },
+    ]
+    input_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def mock_label_one(http_client, sample, model, sample_idx, total, sem, enable_arbitration=True,
+                             config=None, rate_limiter=None, llm_progress_cb=None, progress_event_cb=None):
+        return sample_idx, _full_labels("inline"), _monitor()
+
+    with patch("sft_label.pipeline.label_one", side_effect=mock_label_one):
+        stats = await run(
+            input_path=str(input_path),
+            output=str(tmp_path / "inline-visible"),
+            config=PipelineConfig(
+                concurrency=1,
+                chunk_size=1,
+                max_active_chunks=1,
+                enable_adaptive_runtime=False,
+            ),
+        )
+
+    run_dir = Path(stats["run_dir"])
+    dataset_path = run_dir / "train" / "train.jsonl"
+    assert dataset_path.exists()
+    assert (run_dir / "meta_label_data" / "files" / "train" / "labeled.jsonl").exists()
+    assert not (dataset_path.parent / f".{dataset_path.name}.next").exists()
+
+
+@pytest.mark.asyncio
 async def test_run_directory_jsonl_mirrors_source_tree(tmp_path):
     from sft_label.pipeline import run
 

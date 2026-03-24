@@ -19,6 +19,19 @@ def _soft_nofile_limit() -> int | None:
     return int(soft)
 
 
+def estimate_pass1_extra_connections(
+    *,
+    chunked_output_files: int = 0,
+    base_extra_connections: int = 10,
+    per_chunked_file_output_handles: int = 4,
+) -> int:
+    """Estimate non-LLM FD overhead for Pass 1 chunked pipelines."""
+    base = max(int(base_extra_connections or 0), 0)
+    chunked_files = max(int(chunked_output_files or 0), 0)
+    handles_per_file = max(int(per_chunked_file_output_handles or 0), 0)
+    return base + chunked_files * handles_per_file
+
+
 def resolve_httpx_connection_limits(
     *,
     requested_concurrency: int,

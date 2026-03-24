@@ -7,6 +7,8 @@ import pytest
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
     RuntimeEtaEstimator,
+    StatsAccumulator,
+    _build_http_client_limits,
     _write_checkpoint,
     discover_input_files,
     estimate_directory_workload,
@@ -118,3 +120,90 @@ def test_write_checkpoint_keeps_existing_json_when_dump_fails(tmp_path, monkeypa
         )
 
     assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == original
+
+
+def _stats_labels() -> dict:
+    return {
+        "intent": "build",
+        "difficulty": "intermediate",
+        "context": "snippet",
+        "language": ["python"],
+        "domain": ["web-backend"],
+        "task": ["feature-implementation"],
+        "concept": ["algorithms"],
+        "agentic": [],
+        "constraint": [],
+        "confidence": {"intent": 0.8},
+        "unmapped": [],
+    }
+
+
+def _stats_monitor(call1_bytes: int, call2_bytes: int) -> dict:
+    return {
+        "sample_id": "sample-1",
+        "status": "success",
+        "llm_calls": 2,
+        "total_prompt_tokens": 10,
+        "total_completion_tokens": 6,
+        "validation_issues": [],
+        "consistency_warnings": [],
+        "low_confidence_dims": [],
+        "arbitrated": False,
+        "sample_attempt": 0,
+        "elapsed_seconds": 0.1,
+        "assembled_prompt_bytes": call1_bytes,
+        "assembled_prompt_bytes_call2": call2_bytes,
+    }
+
+
+def test_stats_accumulator_uses_online_numeric_summaries_for_chunked_metrics():
+    acc = StatsAccumulator(compact_labeling_request_bytes=120)
+
+    for idx, (call1_bytes, call2_bytes) in enumerate(((80, 90), (130, 100), (110, 150)), start=1):
+        acc.update(
+            [_stats_labels()],
+            [_stats_monitor(call1_bytes, call2_bytes)],
+            samples=[{
+                "metadata": {
+                    "source_id": "conv-1",
+                    "total_turns": 3,
+                    "planner_policy": "compact_semantic_anchor_v1",
+                    "segment_id": 1 if idx < 3 else 2,
+                    "boundary_score": float(idx),
+                    "anchor_priority": "high",
+                    "anchor_reason": "semantic",
+                }
+            }],
+        )
+
+    assert not isinstance(acc.prompt_bytes_call1, list)
+    assert not isinstance(acc.prompt_bytes_call2, list)
+    assert not isinstance(acc.planner_segment_counts, list)
+    assert not isinstance(acc.planner_boundary_scores, list)
+
+    stats = acc.finalize()
+    compact = stats["compact_prompt_bytes"]
+    assert compact["call1"]["count"] == 3
+    assert compact["call1"]["hard_cap_hits"] == 1
+    assert compact["call2"]["hard_cap_hits"] == 1
+    assert stats["planner_stats"]["segments_per_conversation"]["count"] >= 1
+    assert stats["planner_stats"]["boundary_score"]["count"] == 3
+
+
+def test_build_http_client_limits_includes_chunked_output_fd_budget(monkeypatch):
+    captured = {}
+
+    def fake_resolve_httpx_connection_limits(*, requested_concurrency, extra_connections):
+        captured["requested_concurrency"] = requested_concurrency
+        captured["extra_connections"] = extra_connections
+        return 64, 63, True
+
+    monkeypatch.setattr(
+        "sft_label.pipeline.resolve_httpx_connection_limits",
+        fake_resolve_httpx_connection_limits,
+    )
+
+    _build_http_client_limits(50, chunked_output_files=3)
+
+    assert captured["requested_concurrency"] == 50
+    assert captured["extra_connections"] > 10
