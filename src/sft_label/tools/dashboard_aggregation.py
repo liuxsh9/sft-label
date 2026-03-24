@@ -300,6 +300,21 @@ def _merge_unmapped(slices: list[dict]) -> list[dict]:
     return merged
 
 
+def _label_source_counts(labels: dict | None) -> tuple[int, int]:
+    if not is_usable_labels(labels):
+        return 0, 0
+    return (0, 1) if (labels or {}).get("inherited") else (1, 0)
+
+
+def _unit_label_source_counts(sample: dict) -> tuple[int, int]:
+    rollup = sample.get("_dashboard_rollup") or {}
+    observed = rollup.get("observed_label_units")
+    inherited = rollup.get("inherited_units")
+    if isinstance(observed, int) and isinstance(inherited, int):
+        return observed, inherited
+    return _label_source_counts(sample.get("labels") or {})
+
+
 def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
     if not samples:
         return []
@@ -317,6 +332,12 @@ def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
 
     for conv_key, slices in groups.items():
         merged_labels = _merge_labels(slices)
+        observed_label_units = 0
+        inherited_units = 0
+        for sample in slices:
+            observed, inherited = _label_source_counts(sample.get("labels") or {})
+            observed_label_units += observed
+            inherited_units += inherited
         for dim in DIMENSIONS:
             conf = _aggregate_dimension_confidence(slices, dim)
             if conf is not None:
@@ -333,6 +354,10 @@ def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
             "metadata": meta,
             "conversations": last.get("conversations") or [],
             "labels": merged_labels,
+            "_dashboard_rollup": {
+                "observed_label_units": min(observed_label_units, 1),
+                "inherited_units": min(inherited_units, 1),
+            },
         }
         units.append(unit)
 
@@ -348,6 +373,9 @@ def build_pass1_conversation_units_from_iter(samples_iter) -> list[dict]:
         labels = sample.get("labels") or {}
         meta = sample.get("metadata") or {}
         state["last"] = sample
+        observed, inherited = _label_source_counts(labels)
+        state["observed_label_units"] += observed
+        state["inherited_units"] += inherited
 
         merged = state["merged_labels"]
         for dim, val in labels.items():
@@ -427,6 +455,8 @@ def build_pass1_conversation_units_from_iter(samples_iter) -> list[dict]:
                     "unmapped_seen": set(),
                     "last": None,
                     "meta": {},
+                    "observed_label_units": 0,
+                    "inherited_units": 0,
                 }
                 group_order.append(conv_key)
             _update_group(grouped[conv_key], sample)
@@ -460,6 +490,10 @@ def build_pass1_conversation_units_from_iter(samples_iter) -> list[dict]:
                 "metadata": meta,
                 "conversations": last.get("conversations") or [],
                 "labels": merged_labels,
+                "_dashboard_rollup": {
+                    "observed_label_units": min(int(state["observed_label_units"]), 1),
+                    "inherited_units": min(int(state["inherited_units"]), 1),
+                },
             }
         )
 
@@ -497,6 +531,8 @@ def _compute_label_mode(all_units: list[dict], dist_units: list[dict], stats: di
 
     total = len(all_units)
     success = sum(1 for sample in all_units if is_usable_labels(sample.get("labels")))
+    llm_labeled_units = sum(1 for sample in all_units if _unit_label_source_counts(sample)[0] > 0)
+    inherited_units = sum(1 for sample in all_units if _unit_label_source_counts(sample)[1] > 0)
 
     distributions = {}
     for dim in DIMENSIONS:
@@ -575,6 +611,8 @@ def _compute_label_mode(all_units: list[dict], dist_units: list[dict], stats: di
             "unmapped_unique": len(all_unmapped),
             "sparse_labeled": stats.get("sparse_labeled", 0),
             "sparse_inherited": stats.get("sparse_inherited", 0),
+            "llm_labeled_units": llm_labeled_units if mode_id == "conversation" else None,
+            "inherited_units": inherited_units if mode_id == "conversation" else None,
         },
         "unit_label": unit_label,
         "mode_id": mode_id,
@@ -1324,7 +1362,7 @@ def build_pass2_viz(samples: list[dict], stats: dict, conv_records: list[dict] |
         unit_label="units",
         per_file_summary=_build_per_file_summary(conversation_units),
     )
-    if _conversation_units_missing_subscore_metrics(conversation_units):
+    if _conversation_units_missing_subscore_metrics(conversation_units) or not conversation_mode.get("thinking_mode_stats"):
         _backfill_conversation_mode_from_stats(conversation_mode, stats)
     payload = dict(sample_mode)
     payload["modes"] = {
