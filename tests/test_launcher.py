@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from sft_label.launcher import (
     LaunchPlan,
@@ -14,7 +16,7 @@ from sft_label.launcher import (
     set_language,
     sanitize_prompt_input,
 )
-from sft_label.cli import build_parser, cmd_dashboard_service, cmd_start
+from sft_label.cli import build_parser, cmd_dashboard_service, cmd_run, cmd_start
 from sft_label.config import DEFAULT_CONCURRENCY, DEFAULT_ROLLOUT_PRESET
 from sft_label.dashboard_service import (
     DashboardPortConflictError,
@@ -541,6 +543,66 @@ def test_build_smart_resume_plan_routes_to_resumed_score_when_scored_exists(tmp_
     assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
 
 
+def test_build_smart_resume_plan_routes_to_resumed_score_when_hidden_next_artifact_exists(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / ".scored.jsonl.next").write_text("", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
+
+
+def test_build_smart_resume_plan_routes_to_resumed_score_when_hidden_checkpoint_artifact_exists(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / ".scored.checkpoint.jsonl").write_text("", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
+
+
+def test_build_smart_resume_plan_routes_to_resumed_score_when_visible_checkpoint_artifact_exists(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.batch_a.checkpoint.jsonl").write_text("", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
+
+
 def test_build_smart_resume_plan_routes_to_run_resume_when_checkpoint_exists(tmp_path):
     (tmp_path / "checkpoint.json").write_text('{"status":"in_progress"}', encoding="utf-8")
     artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
@@ -579,6 +641,127 @@ def test_build_smart_resume_plan_checkpoint_done_routes_to_score(tmp_path):
     assert plan is not None
     assert plan.workflow_key == "smart-resume"
     assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path)]
+
+
+def test_build_smart_resume_plan_routes_to_complete_postprocess_when_pass2_is_deferred(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        '{"postprocess":{"conversation_scores":{"status":"deferred"},"dashboard":{"status":"completed"}}}',
+        encoding="utf-8",
+    )
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["complete-postprocess", "--input", str(tmp_path)]
+
+
+def test_build_smart_resume_plan_routes_to_complete_postprocess_when_pass2_is_incomplete(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        '{"postprocess":{"conversation_scores":{"status":"completed"},"dashboard":{"status":"failed"}}}',
+        encoding="utf-8",
+    )
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["complete-postprocess", "--input", str(tmp_path)]
+
+
+def test_build_smart_resume_plan_prefers_pass2_resume_when_hidden_artifacts_exist_even_if_postprocess_incomplete(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+    (artifact_dir / ".scored.jsonl.next").write_text("", encoding="utf-8")
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        '{"postprocess":{"conversation_scores":{"status":"deferred"},"dashboard":{"status":"completed"}}}',
+        encoding="utf-8",
+    )
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
+
+
+def test_build_smart_resume_plan_prefers_modern_postprocess_over_legacy_stats_without_postprocess(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "stats_scoring.json").write_text(
+        '{"total_scored": 12, "mean_value_score": 6.3}',
+        encoding="utf-8",
+    )
+    (tmp_path / "meta_label_data" / "summary_stats_scoring.json").write_text(
+        '{"postprocess":{"conversation_scores":{"status":"deferred"},"dashboard":{"status":"completed"}}}',
+        encoding="utf-8",
+    )
+
+    io = StubIO(
+        [
+            "2",
+            str(tmp_path),
+            "",
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["complete-postprocess", "--input", str(tmp_path)]
+
+
+def test_cmd_run_resume_with_score_forwards_resume_to_pass2(monkeypatch):
+    captured = {}
+
+    async def _fake_run(*args, **kwargs):
+        return {"run_dir": "/tmp/fake-run"}
+
+    async def _fake_score(*args, **kwargs):
+        captured["resume"] = kwargs.get("resume")
+        return {"run_dir": "/tmp/fake-run"}
+
+    monkeypatch.setitem(sys.modules, "sft_label.pipeline", SimpleNamespace(run=_fake_run))
+    monkeypatch.setitem(sys.modules, "sft_label.scoring", SimpleNamespace(run_scoring=_fake_score))
+
+    parser = build_parser()
+    args = parser.parse_args(["run", "--resume", "/tmp/existing-run", "--score"])
+    cmd_run(args)
+
+    assert captured["resume"] is True
 
 
 def test_build_filter_plan_enforces_at_least_one_criterion():

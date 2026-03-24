@@ -15,11 +15,13 @@ pipeline output). Recomputed files are marked with "recomputed": true.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from sft_label.config import CONFIDENCE_THRESHOLD
+from sft_label.config import CONFIDENCE_THRESHOLD, PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD
 from sft_label.artifacts import (
     PASS1_CONVERSATION_STATS_FILE,
     PASS1_STATS_FILE,
@@ -1628,6 +1630,18 @@ def _prepare_dir_for_global_dashboard(dir_path: Path, pass_num: str) -> None:
         _ensure_conversation_scores_current(dir_path)
 
 
+def _global_pass2_dashboard_output_name(run_dir: Path, stats: dict | None) -> str:
+    total_scored = int((stats or {}).get("total_scored") or 0)
+    threshold = max(int(PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD), 1)
+    postprocess = (stats or {}).get("postprocess") or {}
+    dashboard = postprocess.get("dashboard") if isinstance(postprocess, dict) else {}
+    status = str((dashboard or {}).get("status") or "").strip().lower() if isinstance(dashboard, dict) else ""
+    reason = str((dashboard or {}).get("reason") or "").strip() if isinstance(dashboard, dict) else ""
+    if total_scored >= threshold or (status == "deferred" and reason.startswith("samples=")):
+        return pass2_global_dashboard_filename(run_dir.name)
+    return PASS2_DASHBOARD_FILE
+
+
 def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
     """Generate global/summary dashboards at the top-level run directory."""
     generated = []
@@ -1678,9 +1692,10 @@ def _regenerate_global(run_dir, pass_num, gen_p1, gen_p2):
                 _log_regenerate_dashboard(
                     f"{run_dir}: generating global Pass 2 dashboard from {pass2_summary_path.name}"
                 )
+                summary_stats = _load_json_payload(pass2_summary_path)
                 out_path = gen_p2(run_dir, scored_file=None,
                                   stats_file=pass2_summary_path.name,
-                                  output_file=PASS2_DASHBOARD_FILE,
+                                  output_file=_global_pass2_dashboard_output_name(run_dir, summary_stats),
                                   quiet=True)
                 if out_path:
                     out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
@@ -1819,19 +1834,20 @@ def _complete_postprocess_conversations_for_file(run_dir: Path, scored_path: Pat
     rel_label = _relative_file_label(scored_path, run_dir)
     conv_records = _stream_conversation_records(scored_path)
     written = _write_conversation_records(conv_records, scored_path.parent)
+    conv_count = len(conv_records)
     stats_path = _per_file_pass2_stats_path(scored_path)
     if stats_path.exists():
         _update_pass2_postprocess_status(
             stats_path,
             conversation=_completed_postprocess_payload(
                 artifact=written.get("conversation_scores"),
-                count=len(conv_records),
+                count=conv_count,
             ),
         )
     return {
         "scored_path": scored_path,
         "rel_label": rel_label,
-        "conversation_records": conv_records,
+        "conversation_count": conv_count,
         "conversation_path": written.get("conversation_scores"),
         "stats_path": stats_path if stats_path.exists() else None,
     }
@@ -1860,7 +1876,8 @@ def _complete_postprocess_dashboard_for_file(scored_path: Path):
 
 def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=False, workers=1):
     import webbrowser
-    from sft_label.conversation import merge_conversation_record_batches
+    from sft_label.conversation import finalize_conversation_records
+    from sft_label.tools.dashboard_aggregation import iter_data_file
     from sft_label.tools.visualize_value import generate_value_dashboard
 
     scope = str(scope or "global").strip().lower()
@@ -1881,6 +1898,8 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
 
     generated_dashboards = []
     conversation_results = []
+    conversation_paths = []
+    merged_records = []
     conv_workers = _resolve_worker_count(workers, len(scored_files))
 
     if conv_workers > 1 and len(scored_files) > 1:
@@ -1891,24 +1910,36 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             }
             for index, fut in enumerate(as_completed(futures), start=1):
                 item = fut.result()
+                conv_count = int(item.get("conversation_count") or 0)
+                conv_path = item.get("conversation_path")
+                if conv_path:
+                    conversation_paths.append(Path(conv_path))
                 conversation_results.append(item)
                 _log_complete_postprocess(
                     f"[conv {index}/{len(scored_files)}] {item['rel_label']} -> "
-                    f"{len(item['conversation_records'])} conversation(s)"
+                    f"{conv_count} conversation(s)"
                 )
     else:
         for index, scored_path in enumerate(scored_files, start=1):
             item = _complete_postprocess_conversations_for_file(run_dir, scored_path)
+            conv_count = int(item.get("conversation_count") or 0)
+            conv_path = item.get("conversation_path")
+            if conv_path:
+                conversation_paths.append(Path(conv_path))
             conversation_results.append(item)
             _log_complete_postprocess(
                 f"[conv {index}/{len(scored_files)}] {item['rel_label']} -> "
-                f"{len(item['conversation_records'])} conversation(s)"
+                f"{conv_count} conversation(s)"
             )
 
     conversation_results.sort(key=lambda item: item["rel_label"])
-    merged_records = merge_conversation_record_batches(
-        [item["conversation_records"] for item in conversation_results if item["conversation_records"]]
-    )
+    for conv_path in sorted(conversation_paths):
+        if not conv_path.exists():
+            continue
+        for record in iter_data_file(conv_path):
+            if isinstance(record, dict):
+                merged_records.append(record)
+    merged_records = finalize_conversation_records(merged_records)
     global_conv_written = _write_conversation_records(merged_records, run_dir)
     _log_complete_postprocess(
         f"Global conversation aggregation -> {len(merged_records)} conversation(s)"
@@ -1922,12 +1953,15 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             artifact=global_conv_written.get("conversation_scores"),
             count=len(merged_records),
         )
+        postprocess["dashboard"] = _completed_postprocess_payload()
+        summary["postprocess"] = postprocess
+        _write_json(summary_path, summary)
         try:
             out_path = generate_value_dashboard(
                 run_dir,
                 scored_file=None,
                 stats_file=summary_path.name,
-                output_file=PASS2_DASHBOARD_FILE,
+                output_file=_global_pass2_dashboard_output_name(run_dir, summary),
                 quiet=True,
             )
             out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
@@ -1994,9 +2028,23 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
 
 def _write_json(path, data):
     """Write JSON file, stripping internal keys for dict payloads."""
+    path = Path(path)
     if isinstance(data, dict):
         clean = {k: v for k, v in data.items() if not k.startswith("_")}
     else:
         clean = data
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(clean, f, ensure_ascii=False, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(clean, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass

@@ -10,7 +10,9 @@ Runs after Pass 2 scoring. Pure computation — no LLM calls, no async.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -1642,6 +1644,51 @@ def merge_conversation_record_batches(record_batches):
             records.extend(batch)
     return finalize_conversation_records(records)
 
+
+def _aggregate_conversations_streaming(samples):
+    """Aggregate conversation records from a streaming iterator.
+
+    Assumes samples for the same conversation key are contiguous.
+    """
+    records = []
+    current_key = None
+    current_slices = []
+
+    def _flush_active():
+        nonlocal current_key, current_slices
+        if not current_slices or current_key is None:
+            current_key = None
+            current_slices = []
+            return
+        current_slices.sort(
+            key=lambda s: (s.get("metadata") or {}).get("turn_index", 0)
+        )
+        rec = aggregate_conversation(current_key, current_slices)
+        if rec is not None:
+            records.append(rec)
+        current_key = None
+        current_slices = []
+
+    for sample in samples:
+        meta = sample.get("metadata") or {}
+        conv_key = sample_conversation_key(sample)
+        if not conv_key or not is_conversation_object(meta):
+            continue
+        if current_key is None:
+            current_key = conv_key
+            current_slices = [sample]
+            continue
+        if conv_key != current_key:
+            _flush_active()
+            current_key = conv_key
+            current_slices = [sample]
+            continue
+        current_slices.append(sample)
+
+    _flush_active()
+    return finalize_conversation_records(records)
+
+
 def aggregate_conversations(samples):
     """Top-level: group → aggregate each → compute selection → return list.
 
@@ -1651,22 +1698,37 @@ def aggregate_conversations(samples):
     Returns:
         list of conversation record dicts, or empty list if no multi-turn.
     """
-    groups = group_by_conversation(samples)
-    if not groups:
-        return []
+    if isinstance(samples, (list, tuple)):
+        groups = group_by_conversation(samples)
+        if not groups:
+            return []
 
-    records = []
-    for source_id, slices in groups.items():
-        rec = aggregate_conversation(source_id, slices)
-        if rec is not None:
-            records.append(rec)
+        records = []
+        for source_id, slices in groups.items():
+            rec = aggregate_conversation(source_id, slices)
+            if rec is not None:
+                records.append(rec)
 
-    return finalize_conversation_records(records)
+        return finalize_conversation_records(records)
+
+    return _aggregate_conversations_streaming(samples)
 
 
 def write_conversation_scores(records, path):
     """Write conversation_scores.json."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 from pathlib import Path
 from urllib.request import urlopen
 
 import pytest
 
+import sft_label.dashboard_service as dashboard_service_module
 from sft_label.dashboard_service import (
     DashboardPortConflictError,
     _detect_port_conflict,
@@ -60,6 +62,24 @@ def _write_dashboard_bundle(root: Path, filename: str, title: str = "Demo") -> P
     )
     (data_dir / "manifest.json").write_text(json.dumps({"title": title}), encoding="utf-8")
     return html_path
+
+
+def _write_scoring_summary(
+    run_dir: Path,
+    *,
+    conversation_status: str,
+    dashboard_status: str,
+    filename: str = "summary_stats_scoring.json",
+) -> Path:
+    payload = {
+        "postprocess": {
+            "conversation_scores": {"status": conversation_status},
+            "dashboard": {"status": dashboard_status},
+        }
+    }
+    path = run_dir / filename
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def test_dashboard_service_config_roundtrip(tmp_path, monkeypatch):
@@ -265,6 +285,7 @@ def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     run_dir = tmp_path / "demo_run"
     label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
     score_html = _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="completed")
 
     assets_dir = sync_dashboard_service_runtime_assets(service)
     assert (assets_dir / "dashboard.js").exists()
@@ -281,6 +302,8 @@ def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     assert (Path(service.web_root) / "assets" / "v1" / "dashboard.js").exists()
     assert published["dashboards"]["labeling"]["url"] == f"https://dash.example.com/runs/{run_id}/{label_html.name}"
     assert published["dashboards"]["scoring"]["url"] == f"https://dash.example.com/runs/{run_id}/{score_html.name}"
+    assert published["dashboards"]["labeling"]["path"] == str(published_root / label_html.name)
+    assert published["dashboards"]["scoring"]["path"] == str(published_root / score_html.name)
 
     html = (published_root / label_html.name).read_text(encoding="utf-8")
     assert "../../assets/v1/dashboard.css" in html
@@ -292,6 +315,8 @@ def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     found = find_published_run(store.services["default"], run_id=run_id)
     assert found is not None
     assert found["source_run_dir"] == str(run_dir.resolve())
+    assert found["dashboards"]["labeling"]["path"] == str(published_root / label_html.name)
+    assert found["dashboards"]["scoring"]["path"] == str(published_root / score_html.name)
 
 
 def test_publish_registry_can_reuse_run_id_by_source_path(tmp_path):
@@ -333,10 +358,402 @@ def test_publish_prefers_global_scoring_dashboard_for_primary_url(tmp_path):
     global_html = _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
     _write_dashboard_bundle(run_dir, "dashboard_scoring_code__part1.html")
     _write_dashboard_bundle(run_dir, "dashboard_scoring_demo_sidebar_b.html")
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="completed")
 
     published = publish_run_dashboards(service, run_dir, config_path=config_path)
 
     assert published["dashboards"]["scoring"]["filename"] == global_html.name
+
+
+def test_publish_run_dashboards_keeps_previous_publish_when_bundle_copy_fails(monkeypatch, tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="old")
+    first = publish_run_dashboards(service, run_dir, config_path=config_path)
+    published_root = Path(first["published_dir"])
+    manifest_path = published_root / f"{label_html.stem}.data" / "manifest.json"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["title"] == "old"
+
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="new")
+
+    def _boom(src_html, dest_root):
+        raise OSError("copy boom")
+
+    monkeypatch.setattr("sft_label.dashboard_service._copy_dashboard_bundle", _boom)
+
+    with pytest.raises(OSError, match="copy boom"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert (published_root / label_html.name).exists()
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["title"] == "old"
+
+
+@pytest.mark.parametrize(
+    ("conversation_status", "dashboard_status", "expected"),
+    [
+        ("deferred", "completed", "conversation_scores"),
+        ("completed", "failed", "dashboard"),
+    ],
+)
+def test_publish_run_dashboards_rejects_incomplete_scoring_postprocess_state(
+    tmp_path,
+    conversation_status,
+    dashboard_status,
+    expected,
+):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(
+        run_dir,
+        conversation_status=conversation_status,
+        dashboard_status=dashboard_status,
+    )
+    assets_dir = Path(service.web_root) / "assets" / "v1"
+    assert not assets_dir.exists()
+
+    with pytest.raises(ValueError, match=expected):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+    assert not assets_dir.exists()
+
+
+def test_publish_run_dashboards_allows_labeling_only_when_pass2_not_applicable(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "label_only_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "labeling" in published["dashboards"]
+    assert "scoring" not in published["dashboards"]
+    assert (Path(published["published_dir"]) / label_html.name).exists()
+
+
+def test_publish_run_dashboards_rejects_labeling_only_when_scoring_metadata_is_incomplete(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "label_with_scoring_metadata"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_scoring_summary(run_dir, conversation_status="deferred", dashboard_status="deferred")
+    assets_dir = Path(service.web_root) / "assets" / "v1"
+    assert not assets_dir.exists()
+
+    with pytest.raises(ValueError, match="conversation_scores"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert not assets_dir.exists()
+    store = load_dashboard_service_store(config_path)
+    assert list_published_runs(store.services["default"]) == []
+
+
+def test_publish_run_dashboards_rejects_stale_scoring_dashboard_when_postprocess_dashboard_is_disabled(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "stale_scoring_dashboard"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="disabled")
+
+    with pytest.raises(ValueError, match="dashboard.status=disabled"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
+def test_publish_run_dashboards_accepts_file_scope_stats_scoring_metadata_without_summary_file(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "file_scope_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(
+        run_dir,
+        conversation_status="completed",
+        dashboard_status="completed",
+        filename="stats_scoring.json",
+    )
+    assert not (run_dir / "summary_stats_scoring.json").exists()
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "scoring" in published["dashboards"]
+    assert Path(published["dashboards"]["scoring"]["path"]).exists()
+
+
+def test_publish_run_dashboards_accepts_legacy_scoring_metadata_without_postprocess_block(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "legacy_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    (run_dir / "stats_scoring.json").write_text(
+        json.dumps({"total_scored": 12, "mean_value_score": 6.3}),
+        encoding="utf-8",
+    )
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "scoring" in published["dashboards"]
+    assert Path(published["dashboards"]["scoring"]["path"]).exists()
+
+
+def test_publish_run_dashboards_prefers_modern_incomplete_postprocess_over_legacy_stats(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "mixed_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    (run_dir / "stats_scoring.json").write_text(
+        json.dumps({"total_scored": 12, "mean_value_score": 6.3}),
+        encoding="utf-8",
+    )
+    _write_scoring_summary(run_dir, conversation_status="deferred", dashboard_status="completed")
+
+    with pytest.raises(ValueError, match="postprocess.conversation_scores.status=deferred"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
+def test_publish_run_dashboards_accepts_legacy_stats_when_modern_summary_is_completed(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "mixed_completed_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    (run_dir / "stats_scoring.json").write_text(
+        json.dumps({"total_scored": 12, "mean_value_score": 6.3}),
+        encoding="utf-8",
+    )
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="completed")
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "scoring" in published["dashboards"]
+    assert Path(published["dashboards"]["scoring"]["path"]).exists()
+
+
+def test_publish_run_dashboards_ignores_ancestor_scoring_metadata_outside_run_dir(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_dir = tmp_path / "nested" / "demo_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "dashboard_labeling_demo.html").write_text("<!DOCTYPE html><title>Labeling</title>", encoding="utf-8")
+    (run_dir / "dashboard_scoring_demo.html").write_text("<!DOCTYPE html><title>Scoring</title>", encoding="utf-8")
+    (run_dir / "dashboard_labeling_demo.data").mkdir()
+    (run_dir / "dashboard_scoring_demo.data").mkdir()
+
+    with pytest.raises(ValueError, match="missing Pass 2 scoring metadata"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
+def test_publish_run_dashboards_fails_closed_when_publish_lock_conflicts(monkeypatch, tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="old")
+    first = publish_run_dashboards(service, run_dir, config_path=config_path)
+    published_root = Path(first["published_dir"])
+    manifest_path = published_root / f"{label_html.stem}.data" / "manifest.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="new")
+
+    def _lock_conflict(*args, **kwargs):
+        raise RuntimeError("publish lock busy")
+
+    monkeypatch.setattr(
+        "sft_label.dashboard_service._acquire_publish_lock",
+        _lock_conflict,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="publish lock busy"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == before
+    store = load_dashboard_service_store(config_path)
+    found = find_published_run(store.services["default"], run_id=first["run_id"])
+    assert found is not None
+    assert found["published_at"] == first["published_at"]
+
+
+def test_publish_run_dashboards_copy_failure_does_not_mutate_live_runtime_assets(monkeypatch, tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    assets_dir = Path(service.web_root) / "assets" / "v1"
+    assert not assets_dir.exists()
+
+    def _boom(src_html, dest_root):
+        raise OSError("copy boom")
+
+    monkeypatch.setattr("sft_label.dashboard_service._copy_dashboard_bundle", _boom)
+
+    with pytest.raises(OSError, match="copy boom"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert not assets_dir.exists()
+
+
+def test_publish_run_dashboards_rejects_missing_companion_data_dir(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    html_path = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    data_dir = html_path.with_name(f"{html_path.stem}.data")
+    assert data_dir.exists()
+    shutil.rmtree(data_dir)
+
+    with pytest.raises(ValueError, match="missing companion data directory"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    store = load_dashboard_service_store(config_path)
+    assert list_published_runs(store.services["default"]) == []
+    runs_root = Path(service.web_root) / "runs"
+    assert not runs_root.exists() or list(runs_root.iterdir()) == []
+
+
+def test_publish_run_dashboards_suppresses_nonfatal_backup_cleanup_errors(monkeypatch, tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    label_html = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="old")
+    first = publish_run_dashboards(service, run_dir, config_path=config_path)
+    published_root = Path(first["published_dir"])
+    manifest_path = published_root / f"{label_html.stem}.data" / "manifest.json"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["title"] == "old"
+
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html", title="new")
+
+    original_remove_path = dashboard_service_module._remove_path
+
+    def _nonfatal_cleanup_failure(path):
+        if str(path).startswith(str(published_root.parent / f".{published_root.name}.bak-")):
+            raise OSError("cleanup boom")
+        return original_remove_path(path)
+
+    monkeypatch.setattr("sft_label.dashboard_service._remove_path", _nonfatal_cleanup_failure)
+
+    second = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert second["run_id"] == first["run_id"]
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["title"] == "new"
+    store = load_dashboard_service_store(config_path)
+    found = find_published_run(store.services["default"], run_id=first["run_id"])
+    assert found is not None
+    assert found["published_at"] == second["published_at"]
 
 
 def test_pm2_lifecycle_helpers_use_pm2_commands(monkeypatch, tmp_path):

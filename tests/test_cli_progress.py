@@ -1,5 +1,6 @@
 import asyncio
 import json
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from sft_label.cli import (
     cmd_refresh_rarity,
     cmd_run,
     cmd_score,
+    cmd_start,
 )
 from sft_label.config import PipelineConfig
 from sft_label.progress_heartbeat import HeartbeatFrames, run_with_heartbeat
@@ -773,6 +775,450 @@ def test_dispatch_dashboard_service_register_run(monkeypatch, capsys, tmp_path):
     assert calls["service"] == "default"
     assert calls["run_dir"] == str(tmp_path / "run")
     assert "dashboard_labeling.html" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("blocked_status", ["deferred", "pending", "failed"])
+def test_cmd_start_auto_publish_skips_when_pass2_postprocess_not_completed(
+    monkeypatch,
+    capsys,
+    tmp_path,
+    blocked_status,
+):
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json", "--score"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {
+            "run_dir": str(run_dir),
+            "score_summary": {
+                "postprocess": {
+                    "conversation_scores": {"status": blocked_status},
+                    "dashboard": {"status": "completed"},
+                }
+            },
+        },
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert publish_calls["count"] == 0
+    assert blocked_status in out
+    assert str(run_dir) in out
+    assert "auto-publish" in out.lower()
+
+
+def test_cmd_start_auto_publish_regenerate_dashboard_fail_closed_with_complete_postprocess_hint(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo run"
+    run_dir.mkdir()
+    (run_dir / PASS2_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "deferred"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["regenerate-dashboard", "--input", str(run_dir)]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {"command": "regenerate-dashboard", "run_dir": str(run_dir)},
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert publish_calls["count"] == 0
+    assert "deferred" in out
+    assert f"--input {shlex.quote(str(run_dir))}" in out
+
+
+def test_cmd_start_auto_publish_regenerate_dashboard_pass1_allows_labeling_only_publish(
+    monkeypatch,
+    tmp_path,
+):
+    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+    (run_dir / PASS2_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "deferred"},
+                    "dashboard": {"status": "failed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["regenerate-dashboard", "--input", str(run_dir), "--pass", "1"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {"command": "regenerate-dashboard", "run_dir": str(run_dir)},
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    assert publish_calls["count"] == 1
+
+
+def test_cmd_start_auto_publish_regenerate_dashboard_inline_run_uses_meta_summary_postprocess(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "inline run"
+    meta_dir = run_dir / "meta_label_data"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / PASS2_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "deferred"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["regenerate-dashboard", "--input", str(run_dir)]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {"command": "regenerate-dashboard", "run_dir": str(run_dir)},
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert publish_calls["count"] == 0
+    assert "deferred" in out
+    assert f"--input {shlex.quote(str(run_dir))}" in out
+
+
+def test_cmd_start_auto_publish_keeps_labeling_only_runs_publishable(monkeypatch, tmp_path):
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {"run_dir": str(run_dir)},
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    assert publish_calls["count"] == 1
+
+
+def test_cmd_start_auto_publish_skips_when_scoring_dashboard_is_stale_but_postprocess_disabled(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    dashboards_dir = run_dir / "meta_label_data" / "dashboards"
+    dashboards_dir.mkdir(parents=True)
+    (dashboards_dir / "dashboard_scoring_demo.html").write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json", "--score"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {
+            "run_dir": str(run_dir),
+            "score_summary": {
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "disabled"},
+                }
+            },
+        },
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert publish_calls["count"] == 0
+    assert "dashboard=disabled" in out
+
+
+@pytest.mark.parametrize(
+    ("conversation_status", "dashboard_status"),
+    [
+        ("completed", "disabled"),
+        ("disabled", "completed"),
+    ],
+)
+def test_cmd_start_auto_publish_allows_scored_runs_when_pass2_postprocess_is_safe(
+    monkeypatch,
+    tmp_path,
+    conversation_status,
+    dashboard_status,
+):
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json", "--score"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {
+            "run_dir": str(run_dir),
+            "score_summary": {
+                "postprocess": {
+                    "conversation_scores": {"status": conversation_status},
+                    "dashboard": {"status": dashboard_status},
+                }
+            },
+        },
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    assert publish_calls["count"] == 1
 
 
 def test_dispatch_dashboard_service_set_default_and_runs(monkeypatch, capsys, tmp_path):

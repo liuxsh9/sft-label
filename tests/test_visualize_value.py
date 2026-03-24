@@ -552,6 +552,74 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
     assert detail["pass2"]["modes"]["conversation"]["thinking_mode_stats"]["fast"]["mean_quality"] == 6.0
 
 
+def test_generate_value_dashboard_tree_resolves_deferred_policy_before_tree_loading(tmp_path, monkeypatch):
+    meta_root = tmp_path / "meta_label_data"
+    meta_root.mkdir(parents=True, exist_ok=True)
+    (meta_root / PASS2_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "total_scored": 25000,
+                "postprocess": {
+                    "conversation_scores": {"status": "deferred", "reason": "samples=25000>=20000"},
+                    "dashboard": {"status": "deferred", "reason": "samples=25000>=20000"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    def _fake_tree_payload(_run_dir, *, include_conversations=True):
+        captured["include_conversations"] = include_conversations
+        payload = {
+            "title": "SFT Labeling & Scoring Dashboard",
+            "title_key": "dashboard_title_scoring",
+            "subtitle": "test",
+            "root_id": "global",
+            "default_scope_id": "global",
+            "initially_expanded": ["global"],
+            "scopes": {
+                "global": {
+                    "id": "global",
+                    "label": "global",
+                    "kind": "global",
+                    "path": "",
+                    "parent_id": None,
+                    "children": [],
+                    "descendant_files": [],
+                    "pass1": None,
+                    "pass2": None,
+                    "conversation": None,
+                    "turn_kind": "mixed",
+                    "summary": {},
+                }
+            },
+        }
+        return payload, [], {"total_scored": 25000}
+
+    monkeypatch.setattr(visualize_value_module, "_tree_payload", _fake_tree_payload)
+    monkeypatch.setattr(visualize_value_module, "_write_dashboard_bundle", lambda *args, **kwargs: None)
+
+    generate_value_dashboard(meta_root, scored_file=None, stats_file=PASS2_SUMMARY_STATS_FILE, quiet=True)
+
+    assert captured["include_conversations"] is False
+
+
+def test_resolve_explorer_policy_keeps_completed_large_run_enabled():
+    policy = visualize_value_module._resolve_explorer_policy(
+        {
+            "total_scored": 25000,
+            "postprocess": {
+                "dashboard": {"status": "completed", "mode": "complete-postprocess"},
+                "conversation_scores": {"status": "completed", "mode": "complete-postprocess"},
+            },
+        }
+    )
+
+    assert policy["enabled"] is True
+
+
 def test_generate_value_dashboard_single_scope_normalizes_input_file_to_source_path(tmp_path):
     scored_row = {
         "id": "sample-1",

@@ -82,6 +82,12 @@ from sft_label.label_extensions_stats import aggregate_extension_stats
 from sft_label.http_limits import resolve_httpx_connection_limits
 from sft_label.progress_display import create_pipeline_progress
 from sft_label.score_confidence import apply_score_confidence, score_confidence
+from sft_label.scoring_large_run import (
+    rewrite_directory_global_selection as _large_run_rewrite_directory_global_selection,
+    rewrite_scored_jsonl_selection as _large_run_rewrite_scored_jsonl_selection,
+    should_run_directory_global_selection_rewrite,
+    stream_selection_summaries as _large_run_stream_selection_summaries,
+)
 
 
 def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits:
@@ -181,6 +187,40 @@ def _clear_pass2_checkpoint_files(output_dir: Path) -> None:
             path.unlink()
 
 
+def _is_usable_pass2_jsonl_artifact(
+    path: Path,
+    *,
+    allow_empty: bool = False,
+    allow_trailing_corrupt_line: bool = False,
+) -> bool:
+    if not path.exists():
+        return False
+    try:
+        size = int(path.stat().st_size)
+    except OSError:
+        return False
+    if size <= 0:
+        return allow_empty
+
+    has_row = False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError:
+                    if allow_trailing_corrupt_line and not f.read().strip():
+                        return has_row
+                    return False
+                has_row = True
+    except OSError:
+        return False
+    return has_row
+
+
 def _finalize_pass2_working_files(output_dir: Path) -> None:
     final_names = (
         "scored.jsonl",
@@ -188,19 +228,65 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
         "failed_value.jsonl",
         "score_failures.jsonl",
     )
+    failure_names = {"failed_value.jsonl", "score_failures.jsonl"}
+
     for name in final_names:
         working_path = _pass2_working_path(output_dir, name)
+        checkpoint_path = _pass2_checkpoint_path(output_dir, name)
         final_path = Path(output_dir) / name
-        if working_path.exists():
-            if working_path.stat().st_size == 0 and name in {"failed_value.jsonl", "score_failures.jsonl"}:
-                working_path.unlink()
-                if final_path.exists():
-                    final_path.unlink()
+        is_failure_artifact = name in failure_names
+        ordered_paths = (working_path, checkpoint_path, final_path)
+        chosen_path = None
+        chosen_size = 0
+
+        for candidate in ordered_paths:
+            if not candidate.exists():
                 continue
-            os.replace(working_path, final_path)
-        elif name in {"failed_value.jsonl", "score_failures.jsonl"} and final_path.exists():
-            final_path.unlink()
-    _clear_pass2_checkpoint_files(output_dir)
+            try:
+                size = int(candidate.stat().st_size)
+            except OSError:
+                continue
+            if is_failure_artifact:
+                if size <= 0:
+                    continue
+                if not _is_usable_pass2_jsonl_artifact(candidate):
+                    continue
+            else:
+                if size <= 0:
+                    continue
+                if not _is_usable_pass2_jsonl_artifact(candidate):
+                    continue
+            chosen_path = candidate
+            chosen_size = size
+            break
+
+        if chosen_path is None:
+            if is_failure_artifact:
+                has_empty_marker = False
+                for path in ordered_paths:
+                    if not path.exists():
+                        continue
+                    try:
+                        if int(path.stat().st_size) <= 0:
+                            has_empty_marker = True
+                    except OSError:
+                        continue
+                if has_empty_marker:
+                    for path in ordered_paths:
+                        if path.exists():
+                            path.unlink()
+            else:
+                for path in (working_path, checkpoint_path):
+                    if path.exists():
+                        path.unlink()
+            continue
+
+        if chosen_path != final_path:
+            os.replace(chosen_path, final_path)
+
+        for path in (working_path, checkpoint_path):
+            if path.exists():
+                path.unlink()
 
 
 def _postprocess_status(status: str, reason: str | None = None, **extra):
@@ -652,9 +738,48 @@ def _init_monitor_totals():
         "total_llm_calls": 0,
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
-        "prompt_bytes": [],
+        "prompt_bytes_summary": {
+            "count": 0,
+            "sum": 0.0,
+            "min": None,
+            "max": None,
+        },
         "prompt_bytes_hard_cap_hits": 0,
         "selective_reason_counts": {},
+    }
+
+
+def _accumulate_numeric_summary(summary, value):
+    if not isinstance(summary, dict):
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return
+    numeric = float(value)
+    summary["count"] = int(summary.get("count", 0) or 0) + 1
+    summary["sum"] = float(summary.get("sum", 0.0) or 0.0) + numeric
+    current_min = summary.get("min")
+    current_max = summary.get("max")
+    summary["min"] = numeric if current_min is None else min(float(current_min), numeric)
+    summary["max"] = numeric if current_max is None else max(float(current_max), numeric)
+
+
+def _materialize_numeric_summary(summary):
+    if not isinstance(summary, dict):
+        return {}
+    count = int(summary.get("count", 0) or 0)
+    if count <= 0:
+        return {}
+    total = float(summary.get("sum", 0.0) or 0.0)
+    min_value = summary.get("min")
+    max_value = summary.get("max")
+    if min_value is None or max_value is None:
+        return {}
+    return {
+        "count": count,
+        "sum": round(total, 3),
+        "mean": round(total / count, 3),
+        "min": round(float(min_value), 3),
+        "max": round(float(max_value), 3),
     }
 
 
@@ -674,24 +799,63 @@ def _accumulate_monitor_totals(monitor_totals, monitor):
     monitor_totals["total_prompt_tokens"] += monitor.get("prompt_tokens", 0) or 0
     monitor_totals["total_completion_tokens"] += monitor.get("completion_tokens", 0) or 0
     prompt_bytes = monitor.get("assembled_prompt_bytes")
-    if isinstance(prompt_bytes, (int, float)) and not isinstance(prompt_bytes, bool):
-        monitor_totals.setdefault("prompt_bytes", []).append(float(prompt_bytes))
+    _accumulate_numeric_summary(monitor_totals.setdefault("prompt_bytes_summary", {}), prompt_bytes)
     error = str(monitor.get("error") or "").lower()
     if "assembled scoring prompt exceeds" in error:
         monitor_totals["prompt_bytes_hard_cap_hits"] = monitor_totals.get("prompt_bytes_hard_cap_hits", 0) + 1
 
 
-def _rebuild_chunked_summaries_and_monitors(scored_path: Path, monitor_path: Path):
+def _load_selection_summaries(path: Path) -> list[dict]:
+    summaries = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            summaries.append(json.loads(line))
+    return summaries
+
+
+def _selection_summary_output(sample: dict, *, config=None) -> dict:
+    summary = _selection_summary_from_sample(sample, config=config)
+    value = sample.get("value") or {}
+    summary.update({
+        "flags": value.get("flags", []),
+        "thinking_mode": value.get("thinking_mode"),
+    })
+    return summary
+
+
+def _rebuild_chunked_summaries_and_monitors(
+    scored_path: Path,
+    monitor_path: Path,
+    *,
+    config=None,
+    summary_output_path: Path | None = None,
+):
     """Rebuild summaries + compact monitor totals after recovery sweep edits."""
     monitor_totals = _init_monitor_totals()
-    summaries = []
-    with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm:
-        for line_s, line_m in zip(fs, fm):
-            sample = json.loads(line_s)
-            monitor = json.loads(line_m)
-            _accumulate_monitor_totals(monitor_totals, monitor)
-            if sample.get("value"):
-                summaries.append(_selection_summary_from_sample(sample))
+    summaries = [] if summary_output_path is None else None
+    summary_out = (
+        open(summary_output_path, "w", encoding="utf-8")
+        if summary_output_path is not None
+        else None
+    )
+    try:
+        with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm:
+            for line_s, line_m in zip(fs, fm):
+                sample = json.loads(line_s)
+                monitor = json.loads(line_m)
+                _accumulate_monitor_totals(monitor_totals, monitor)
+                if sample.get("value"):
+                    summary = _selection_summary_output(sample, config=config)
+                    if summary_out is not None:
+                        summary_out.write(json.dumps(summary, ensure_ascii=False) + "\n")
+                    else:
+                        summaries.append(summary)
+    finally:
+        if summary_out is not None:
+            summary_out.close()
     return summaries, monitor_totals
 
 
@@ -704,10 +868,83 @@ def _count_nonempty_jsonl_lines(path: Path) -> int:
     return count
 
 
+def _rewrite_chunked_failure_artifacts(
+    *,
+    output_dir: Path,
+    scored_path: Path,
+    monitor_path: Path,
+) -> tuple[int, int]:
+    """Rebuild failure artifacts from scored/monitor truth for chunked runs."""
+    failed_working_path = _pass2_working_path(output_dir, "failed_value.jsonl")
+    failures_working_path = _pass2_working_path(output_dir, "score_failures.jsonl")
+    failed_tmp = failed_working_path.with_suffix(".tmp")
+    failures_tmp = failures_working_path.with_suffix(".tmp")
+    failed_written = 0
+    failures_written = 0
+
+    with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm, \
+         open(failed_tmp, "w", encoding="utf-8") as out_failed, open(failures_tmp, "w", encoding="utf-8") as out_failures:
+        for idx, (line_s, line_m) in enumerate(zip(fs, fm)):
+            sample = json.loads(line_s)
+            monitor = json.loads(line_m)
+            if sample.get("value") is not None:
+                continue
+            out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
+            failed_written += 1
+            record = {
+                "sample_id": sample.get("id", f"sample-{idx}"),
+                "status": monitor.get("status", "no_result") if isinstance(monitor, dict) else "no_result",
+                "error": (monitor.get("error", "") if isinstance(monitor, dict) else ""),
+                "error_response": (monitor.get("error_response", "")[:1000] if isinstance(monitor, dict) else ""),
+                "attempts": (monitor.get("attempts", 0) if isinstance(monitor, dict) else 0),
+                "error_class": (monitor.get("error_class") if isinstance(monitor, dict) else None),
+                "retryable_infra": (monitor.get("retryable_infra") if isinstance(monitor, dict) else None),
+                "http_status": (monitor.get("http_status") if isinstance(monitor, dict) else None),
+                "runtime_state": (monitor.get("runtime_state") if isinstance(monitor, dict) else None),
+            }
+            out_failures.write(json.dumps(record, ensure_ascii=False) + "\n")
+            failures_written += 1
+
+    if failed_written > 0:
+        os.replace(failed_tmp, failed_working_path)
+    else:
+        try:
+            failed_tmp.unlink()
+        except OSError:
+            pass
+        with open(failed_working_path, "w", encoding="utf-8"):
+            pass
+        for stale_path in (
+            _pass2_checkpoint_path(output_dir, "failed_value.jsonl"),
+            Path(output_dir) / "failed_value.jsonl",
+        ):
+            if stale_path.exists():
+                stale_path.unlink()
+
+    if failures_written > 0:
+        os.replace(failures_tmp, failures_working_path)
+    else:
+        try:
+            failures_tmp.unlink()
+        except OSError:
+            pass
+        with open(failures_working_path, "w", encoding="utf-8"):
+            pass
+        for stale_path in (
+            _pass2_checkpoint_path(output_dir, "score_failures.jsonl"),
+            Path(output_dir) / "score_failures.jsonl",
+        ):
+            if stale_path.exists():
+                stale_path.unlink()
+
+    return failed_written, failures_written
+
+
 async def _run_pass2_recovery_sweep_chunked(
     *,
     output_dir: Path,
-    raw_rarities: list,
+    raw_rarities,
+    total_samples: int | None = None,
     config: PipelineConfig,
 ) -> dict:
     """Retry infra failures for chunked Pass 2 outputs and patch scored/monitor files."""
@@ -726,7 +963,7 @@ async def _run_pass2_recovery_sweep_chunked(
             monitor = json.loads(line_m)
             if sample.get("value") is not None:
                 continue
-            if idx >= len(raw_rarities):
+            if isinstance(raw_rarities, list) and idx >= len(raw_rarities):
                 continue
             if not _should_recovery_retry(monitor):
                 continue
@@ -738,6 +975,38 @@ async def _run_pass2_recovery_sweep_chunked(
     max_passes = int(getattr(config, "recovery_sweep_max_passes", 1) or 1)
     attempted = 0
     recovered = 0
+    scoring_total = int(total_samples or 0)
+    if scoring_total <= 0 and isinstance(raw_rarities, list):
+        scoring_total = len(raw_rarities)
+    if scoring_total <= 0:
+        scoring_total = max((idx for idx, _sample in retry_items), default=-1) + 1
+
+    def _build_rarity_lookup(indices: list[int]) -> dict[int, dict]:
+        if not indices:
+            return {}
+        needed = set(indices)
+        lookup: dict[int, dict] = {}
+        if isinstance(raw_rarities, list):
+            for idx in indices:
+                if idx < len(raw_rarities) and raw_rarities[idx] is not None:
+                    lookup[idx] = raw_rarities[idx]
+            return lookup
+
+        rarity_path = Path(raw_rarities) if raw_rarities else None
+        if rarity_path is None or not rarity_path.exists():
+            return {}
+
+        with open(rarity_path, "r", encoding="utf-8") as fr:
+            for idx, line in enumerate(fr):
+                if idx not in needed:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                lookup[idx] = json.loads(line)
+                if len(lookup) == len(needed):
+                    break
+        return lookup
 
     # Only keep minimal sample payloads in memory during retries.
     for _pass in range(max_passes):
@@ -756,6 +1025,8 @@ async def _run_pass2_recovery_sweep_chunked(
         )
 
         recovered_map: dict[int, tuple[dict, dict]] = {}
+        retry_indices = [idx for idx, _sample in retry_items]
+        rarity_lookup = _build_rarity_lookup(retry_indices)
 
         client_limits = _build_http_client_limits(sweep_config.scoring_concurrency)
         async with httpx.AsyncClient(
@@ -767,14 +1038,14 @@ async def _run_pass2_recovery_sweep_chunked(
             async def _retry_one(idx: int, sample: dict):
                 nonlocal attempted, recovered
                 attempted += 1
-                rarity = raw_rarities[idx] if idx < len(raw_rarities) else {"score": None}
+                rarity = rarity_lookup.get(idx, {"score": None})
                 value, monitor = await score_one(
                     client,
                     sample,
                     sweep_config.scoring_model,
                     rarity,
                     idx,
-                    len(raw_rarities),
+                    scoring_total,
                     sem,
                     config=sweep_config,
                     rate_limiter=rate_limiter,
@@ -831,8 +1102,8 @@ async def _run_pass2_recovery_sweep_chunked(
         os.replace(scored_tmp, scored_path)
         os.replace(monitor_tmp, monitor_path)
 
-        failed_path = Path(output_dir) / "failed_value.jsonl"
-        failures_path = Path(output_dir) / "score_failures.jsonl"
+        failed_path = _pass2_working_path(output_dir, "failed_value.jsonl")
+        failures_path = _pass2_working_path(output_dir, "score_failures.jsonl")
         if failed_written > 0:
             os.replace(failed_tmp, failed_path)
         else:
@@ -840,8 +1111,8 @@ async def _run_pass2_recovery_sweep_chunked(
                 failed_tmp.unlink()
             except OSError:
                 pass
-            if failed_path.exists():
-                failed_path.unlink()
+            with open(failed_path, "w", encoding="utf-8"):
+                pass
         if failures_written > 0:
             os.replace(failures_tmp, failures_path)
         else:
@@ -849,8 +1120,8 @@ async def _run_pass2_recovery_sweep_chunked(
                 failures_tmp.unlink()
             except OSError:
                 pass
-            if failures_path.exists():
-                failures_path.unlink()
+            with open(failures_path, "w", encoding="utf-8"):
+                pass
 
         # Recompute retry set for next pass (based on patched monitors).
         retry_items = []
@@ -914,10 +1185,11 @@ def _finalize_chunked_outputs(
     sweep,
     print_summary,
 ):
-    selection_results = compute_selection_scores_from_summaries(score_summaries, config=config)
-    for summary, sel in zip(score_summaries, selection_results):
-        summary["selection_score"] = sel["selection_score"]
-        summary["intra_class_rank"] = sel["intra_class_rank"]
+    compute_selection_scores_from_summaries(
+        score_summaries,
+        config=config,
+        return_results=False,
+    )
 
     scored_tmp = Path(output_dir) / "scored.jsonl.tmp"
     scored_idx = 0
@@ -928,12 +1200,19 @@ def _finalize_chunked_outputs(
                 continue
             sample = json.loads(line)
             if sample.get("value"):
-                if scored_idx < len(selection_results):
-                    sample["value"]["selection_score"] = selection_results[scored_idx]["selection_score"]
-                    sample["value"]["intra_class_rank"] = selection_results[scored_idx]["intra_class_rank"]
-                    apply_v2_scores([sample], config=config)
-                    scored_idx += 1
+                if scored_idx >= len(score_summaries):
+                    raise ValueError(
+                        f"selection summary count mismatch for {scored_path}: expected at least {scored_idx + 1}, got {len(score_summaries)}"
+                    )
+                sample["value"]["selection_score"] = score_summaries[scored_idx]["selection_score"]
+                sample["value"]["intra_class_rank"] = score_summaries[scored_idx]["intra_class_rank"]
+                apply_v2_scores([sample], config=config)
+                scored_idx += 1
             fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    if scored_idx != len(score_summaries):
+        raise ValueError(
+            f"selection summary count mismatch for {scored_path}: rewrote {scored_idx}, got {len(score_summaries)} summaries"
+        )
     scored_tmp.rename(scored_path)
 
     _finalize_pass2_working_files(output_dir)
@@ -2537,12 +2816,49 @@ def _selection_dim_confidence(labels, dim):
     return max(_SELECTION_CONFIDENCE_FLOOR, _dimension_label_confidence(labels, dim))
 
 
+def _compact_selection_labels(labels):
+    if not isinstance(labels, dict):
+        return {}
+    compact = {}
+    for dim in _SELECTION_DIMS:
+        value = labels.get(dim)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            if not value:
+                continue
+            compact[dim] = list(value)
+        elif isinstance(value, str):
+            if not value:
+                continue
+            compact[dim] = value
+        else:
+            compact[dim] = value
+
+    confidence = labels.get("confidence")
+    if isinstance(confidence, dict):
+        compact_confidence = {}
+        for dim in _SELECTION_DIMS:
+            if dim not in compact:
+                continue
+            value = confidence.get(dim)
+            if value is None:
+                continue
+            compact_confidence[dim] = value
+        if compact_confidence:
+            compact["confidence"] = compact_confidence
+
+    if labels.get("inherited"):
+        compact["inherited"] = True
+    return compact
+
+
 def _selection_summary_from_sample(sample, config=None):
     """Extract compact fields needed for global selection ranking."""
     value = sample.get("value") or {}
-    selection_view = _selection_view_from_sample(sample)
+    selection_view = _selection_view_from_sample(sample, config=config)
     metadata = sample.get("metadata") or {}
-    labels = sample.get("labels") or {}
+    labels = _compact_selection_labels(sample.get("labels") or {})
     selection_features = _infer_selection_features(
         sample=sample,
         summary={
@@ -2716,7 +3032,8 @@ def apply_v2_scores(samples, config=None):
 
 def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                                              intra_weight=None,
-                                             min_group_size=None, config=None):
+                                             min_group_size=None, config=None,
+                                             return_results=True):
     """Compute selection scores from lightweight summary dicts (chunked mode).
 
     Same algorithm as compute_selection_scores but works on summary dicts
@@ -2740,25 +3057,33 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
                           else SELECTION_MIN_GROUP_SIZE)
 
     quality_weights = _selection_quality_weights(config)
-    normalized_labels = []
-    features_list = []
-    for summary in summaries:
-        labels = copy.deepcopy(summary.get("labels") or {})
-        inferred = summary.get("inferred_domain")
-        if not inferred:
-            inferred = _infer_domain_backfill(summary.get("selection_view"), labels)
-        if inferred and not labels.get("domain"):
-            labels["domain"] = inferred
-        normalized_labels.append(labels)
-        features = summary.get("selection_features")
-        if not isinstance(features, dict):
-            features = _infer_selection_features(summary=summary, config=config)
-        features_list.append(features)
+    global_percentiles = [None] * len(summaries)
+    weighted_sum = [0.0] * len(summaries)
+    weight_total = [0.0] * len(summaries)
 
-    label_confidences = [
-        {dim: _selection_dim_confidence(labels, dim) for dim in _SELECTION_DIMS}
-        for labels in normalized_labels
-    ]
+    def _labels_for(summary):
+        labels = summary.get("labels")
+        return labels if isinstance(labels, dict) else {}
+
+    def _tags_for(summary, dim):
+        labels = _labels_for(summary)
+        tags = labels.get(dim)
+        if dim == "domain":
+            if tags is None or (isinstance(tags, list) and not tags) or (isinstance(tags, str) and not tags):
+                inferred = summary.get("inferred_domain")
+                if not inferred:
+                    inferred = _infer_domain_backfill(summary.get("selection_view"), labels)
+                if inferred:
+                    return inferred
+        return tags
+
+    def _features_for(summary):
+        features = summary.get("selection_features")
+        if isinstance(features, dict):
+            return features
+        features = _infer_selection_features(summary=summary, config=config)
+        summary["selection_features"] = features
+        return features
 
     # Step 1: pure_quality from summary fields
     pure_qualities = []
@@ -2783,71 +3108,66 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
 
     # Step 2: Global percentile (needed for Bayesian shrinkage)
     valid_pq = [(i, pq) for i, pq in enumerate(pure_qualities) if pq is not None]
-    global_percentiles = _compute_percentiles(valid_pq)
+    for idx, percentile in _compute_percentiles(valid_pq).items():
+        global_percentiles[idx] = percentile
 
     # Step 3: Per-tag percentile with Bayesian shrinkage
     smoothing_prior = (config.selection_smoothing_prior if config
                        else SELECTION_SMOOTHING_PRIOR)
-    dim_percentiles = [{} for _ in summaries]
 
     for dim in _SELECTION_DIMS:
         tag_groups = {}
         for i, s in enumerate(summaries):
             if pure_qualities[i] is None:
                 continue
-            labels = normalized_labels[i]
+            labels = _labels_for(s)
             if not is_usable_labels(labels):
                 continue
-            tags = labels.get(dim)
+            tags = _tags_for(s, dim)
             if tags is None:
                 continue
+            label_confidence = _selection_dim_confidence(labels, dim)
             if isinstance(tags, list):
                 for t in tags:
-                    tag_groups.setdefault(t, []).append((i, pure_qualities[i]))
+                    tag_groups.setdefault(t, []).append((i, pure_qualities[i], label_confidence))
             else:
-                tag_groups.setdefault(tags, []).append((i, pure_qualities[i]))
+                tag_groups.setdefault(tags, []).append((i, pure_qualities[i], label_confidence))
+
+        dim_pct_sum = {}
+        dim_pct_count = {}
 
         for tag, members in tag_groups.items():
             if len(members) < min_group_size:
                 continue
-            effective_n = sum(label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
-                              for idx, _pq in members)
+            effective_n = sum(confidence for _idx, _pq, confidence in members)
             shrinkage = effective_n / (effective_n + smoothing_prior)
-            tag_percentiles = _compute_percentiles(members)
-            for idx, _pq in members:
+            tag_percentiles = _compute_percentiles([(idx, pq) for idx, pq, _confidence in members])
+            for idx, _pq, sample_conf in members:
                 tag_pct = tag_percentiles[idx]
-                g_pct = global_percentiles.get(idx, 0.5)
-                sample_conf = label_confidences[idx].get(dim, _SELECTION_CONFIDENCE_FLOOR)
+                g_pct = global_percentiles[idx] if global_percentiles[idx] is not None else 0.5
                 percentile = (
                     sample_conf * (shrinkage * tag_pct + (1 - shrinkage) * g_pct)
                     + (1 - sample_conf) * g_pct
                 )
                 # Multi-select: average across tags in this dimension
-                if dim in dim_percentiles[idx]:
-                    prev, cnt = dim_percentiles[idx][dim]
-                    dim_percentiles[idx][dim] = (prev + percentile, cnt + 1)
-                else:
-                    dim_percentiles[idx][dim] = (percentile, 1)
+                dim_pct_sum[idx] = dim_pct_sum.get(idx, 0.0) + percentile
+                dim_pct_count[idx] = dim_pct_count.get(idx, 0) + 1
+
+        for idx, pct_sum in dim_pct_sum.items():
+            pct_cnt = dim_pct_count[idx]
+            sample_conf = _selection_dim_confidence(_labels_for(summaries[idx]), dim)
+            weight = rarity_weights.get(dim, 1.0) * sample_conf
+            weighted_sum[idx] += weight * (pct_sum / pct_cnt)
+            weight_total[idx] += weight
 
     # Step 4: Fusion
-    results = []
+    results = [] if return_results else None
     for i, s in enumerate(summaries):
-        percs = dim_percentiles[i]
-
-        if percs:
-            weighted_sum = 0.0
-            weight_total = 0.0
-            for dim, (pct_sum, pct_cnt) in percs.items():
-                w = rarity_weights.get(dim, 1.0) * label_confidences[i].get(dim, _SELECTION_CONFIDENCE_FLOOR)
-                weighted_sum += w * (pct_sum / pct_cnt)  # mean percentile
-                weight_total += w
-            if weight_total > 0:
-                fused = weighted_sum / weight_total
-                intra_class_rank = round(fused * 9 + 1, 2)
-            else:
-                intra_class_rank = None
+        if weight_total[i] > 0:
+            fused = weighted_sum[i] / weight_total[i]
+            intra_class_rank = round(fused * 9 + 1, 2)
         else:
-            if i in global_percentiles:
+            if global_percentiles[i] is not None:
                 intra_class_rank = round(global_percentiles[i] * 9 + 1, 2)
             else:
                 intra_class_rank = None
@@ -2860,17 +3180,22 @@ def compute_selection_scores_from_summaries(summaries, rarity_weights=None,
             pq_scaled,
             rarity_score,
             s.get("value_score"),
-            features_list[i],
+            _features_for(s),
             config=config,
             intra_weight=intra_weight,
         )
+
+        if not return_results:
+            s["selection_score"] = selection_score
+            s["intra_class_rank"] = intra_class_rank
+            continue
 
         results.append({
             "selection_score": selection_score,
             "intra_class_rank": intra_class_rank,
         })
 
-    return results
+    return results if return_results else summaries
 
 
 # ─────────────────────────────────────────────────────────
@@ -3777,20 +4102,15 @@ def _load_monitor_lookup(path: Path) -> dict[str, dict]:
 def _resolve_pass2_resume_path(output_dir: Path, filename: str) -> Path | None:
     output_dir = Path(output_dir)
     working = _pass2_working_path(output_dir, filename)
-    if working.exists():
-        try:
-            if working.stat().st_size > 0:
-                return working
-        except OSError:
-            pass
-    candidates = [
-        _pass2_checkpoint_path(output_dir, filename),
-        output_dir / filename,
-        working,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    checkpoint = _pass2_checkpoint_path(output_dir, filename)
+    final = output_dir / filename
+
+    if _is_usable_pass2_jsonl_artifact(working):
+        return working
+    if _is_usable_pass2_jsonl_artifact(checkpoint):
+        return checkpoint
+    if _is_usable_pass2_jsonl_artifact(final):
+        return final
     return None
 
 
@@ -3798,6 +4118,16 @@ def _load_resumed_value_cache(output_dir: Path) -> dict[str, dict]:
     """Load existing scored values keyed by sample id from scored.jsonl."""
     resumed_values: dict[str, dict] = {}
     scored_jsonl_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+    if scored_jsonl_path is None:
+        output_dir = Path(output_dir)
+        for candidate in (
+            _pass2_working_path(output_dir, "scored.jsonl"),
+            _pass2_checkpoint_path(output_dir, "scored.jsonl"),
+            output_dir / "scored.jsonl",
+        ):
+            if _is_usable_pass2_jsonl_artifact(candidate, allow_trailing_corrupt_line=True):
+                scored_jsonl_path = candidate
+                break
     if scored_jsonl_path is None:
         return resumed_values
 
@@ -4197,47 +4527,10 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     resumed_values = _load_resumed_value_cache(output_dir) if resume else {}
+    summary_working_path = _pass2_working_path(output_dir, "score_summaries.jsonl")
+    rarity_working_path = _pass2_working_path(output_dir, "rarity_pass2.jsonl")
     if resumed_values and not quiet:
         print(f"  Resume: loaded {len(resumed_values)} pre-scored samples from scored.jsonl")
-
-    if resume:
-        scored_resume_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
-        monitor_resume_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl")
-        if scored_resume_path is not None and monitor_resume_path is not None:
-            existing_scored = _count_nonempty_jsonl_lines(scored_resume_path)
-            existing_monitors = _count_nonempty_jsonl_lines(monitor_resume_path)
-            expected_total = _count_scoring_samples_in_file(input_path, limit=limit)
-            if expected_total > 0 and existing_scored == expected_total and existing_monitors == expected_total:
-                if not quiet:
-                    print(
-                        "  Resume: detected complete prior scored/monitor artifacts; "
-                        "finalizing without rescoring"
-                    )
-                score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
-                    scored_resume_path,
-                    monitor_resume_path,
-                )
-                return _finalize_chunked_outputs(
-                    output_dir=output_dir,
-                    scored_path=scored_resume_path,
-                    score_summaries=score_summaries,
-                    monitor_totals=monitor_totals,
-                    total=expected_total,
-                    elapsed=0.0,
-                    config=config,
-                    file_label=file_label,
-                    input_path=input_path,
-                    stats_source=tag_stats_path,
-                    total_stats_samples=0,
-                    combo_mode="resume_finalize",
-                    rarity_mode=resolve_rarity_mode(config),
-                    generate_dashboard=generate_dashboard,
-                    quiet=quiet,
-                    rate_limiter=shared_rate_limiter,
-                    runtime=shared_runtime,
-                    sweep={"enabled": False, "attempted": 0, "recovered": 0, "resume_fast_path": True},
-                    print_summary=print_summary,
-                )
 
     chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
@@ -4385,6 +4678,65 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
         _refresh_augmented_rarity_after_core_normalization(rarity)
     total = len(raw_rarities)
 
+    if resume:
+        scored_resume_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+        monitor_resume_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl")
+        if scored_resume_path is not None and monitor_resume_path is not None:
+            existing_scored = _count_nonempty_jsonl_lines(scored_resume_path)
+            existing_monitors = _count_nonempty_jsonl_lines(monitor_resume_path)
+            if total > 0 and existing_scored == total and existing_monitors == total:
+                if not quiet:
+                    print(
+                        "  Resume: detected complete prior scored/monitor artifacts; "
+                        "finalizing without rescoring"
+                    )
+                sweep = {"enabled": False, "attempted": 0, "recovered": 0, "resume_fast_path": True}
+                if getattr(config, "enable_stage_recovery_sweep", True):
+                    sweep = await _run_pass2_recovery_sweep_chunked(
+                        output_dir=output_dir,
+                        raw_rarities=raw_rarities,
+                        total_samples=total,
+                        config=config,
+                    )
+                    sweep["resume_fast_path"] = True
+                    scored_resume_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+                    monitor_resume_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl")
+                    if scored_resume_path is None or monitor_resume_path is None:
+                        raise RuntimeError("resume fast-path lost scored/monitor artifacts after recovery sweep")
+                _, monitor_totals = _rebuild_chunked_summaries_and_monitors(
+                    scored_resume_path,
+                    monitor_resume_path,
+                    config=config,
+                    summary_output_path=summary_working_path,
+                )
+                score_summaries = _load_selection_summaries(summary_working_path)
+                _rewrite_chunked_failure_artifacts(
+                    output_dir=output_dir,
+                    scored_path=scored_resume_path,
+                    monitor_path=monitor_resume_path,
+                )
+                return _finalize_chunked_outputs(
+                    output_dir=output_dir,
+                    scored_path=scored_resume_path,
+                    score_summaries=score_summaries,
+                    monitor_totals=monitor_totals,
+                    total=total,
+                    elapsed=0.0,
+                    config=config,
+                    file_label=file_label,
+                    input_path=input_path,
+                    stats_source=stats_source,
+                    total_stats_samples=total_stats_samples,
+                    combo_mode=combo_mode,
+                    rarity_mode=rarity_mode,
+                    generate_dashboard=generate_dashboard,
+                    quiet=quiet,
+                    rate_limiter=shared_rate_limiter,
+                    runtime=shared_runtime,
+                    sweep=sweep,
+                    print_summary=print_summary,
+                )
+
     # ── Pass B: Chunked LLM scoring ──
     _rps = f"rps={config.rps_limit}(warmup={config.rps_warmup}s)" if config.rps_limit > 0 else "rps=unlimited"
     if not quiet:
@@ -4409,8 +4761,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     first_error_logged = False
     start_time = time.time()
 
-    # Lightweight per-sample summaries for final stats
-    score_summaries = []
+    # Lightweight per-sample summaries for final stats (spooled to disk)
     monitor_totals = _init_monitor_totals()
     scored_working_path = _pass2_working_path(output_dir, "scored.jsonl")
     monitor_working_path = _pass2_working_path(output_dir, "monitor_value.jsonl")
@@ -4418,6 +4769,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     failures_working_path = _pass2_working_path(output_dir, "score_failures.jsonl")
 
     if resume:
+        failure_names = {"failed_value.jsonl", "score_failures.jsonl"}
         for name in (
             "scored.jsonl",
             "monitor_value.jsonl",
@@ -4428,29 +4780,64 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             checkpoint_path = _pass2_checkpoint_path(output_dir, name)
             final_path = output_dir / name
             source_path = None
-            if working_path.exists():
-                try:
-                    if working_path.stat().st_size > 0:
+            if name in failure_names:
+                ordered_paths = (working_path, checkpoint_path, final_path)
+                empty_marker_path = None
+                for candidate in ordered_paths:
+                    if not candidate.exists():
+                        continue
+                    try:
+                        size = int(candidate.stat().st_size)
+                    except OSError:
+                        continue
+                    if size <= 0:
+                        if empty_marker_path is None:
+                            empty_marker_path = candidate
+                        continue
+                    if _is_usable_pass2_jsonl_artifact(candidate):
+                        source_path = candidate
+                        break
+                if source_path is None:
+                    source_path = empty_marker_path
+            else:
+                if working_path.exists():
+                    if _is_usable_pass2_jsonl_artifact(working_path):
                         source_path = working_path
                     else:
-                        working_path.unlink()
-                except OSError:
-                    pass
-            if source_path is None and final_path.exists():
-                source_path = final_path
+                        try:
+                            if working_path.stat().st_size <= 0:
+                                working_path.unlink()
+                        except OSError:
+                            pass
+                checkpoint_usable = _is_usable_pass2_jsonl_artifact(checkpoint_path)
+                final_usable = _is_usable_pass2_jsonl_artifact(final_path)
+                if source_path is None and checkpoint_usable:
+                    source_path = checkpoint_path
+                if source_path is None and final_usable:
+                    source_path = final_path
             if source_path is not None:
-                shutil.copyfile(source_path, checkpoint_path)
+                if source_path != checkpoint_path:
+                    shutil.copyfile(source_path, checkpoint_path)
             elif checkpoint_path.exists():
                 checkpoint_path.unlink()
     else:
         _clear_pass2_checkpoint_files(output_dir)
 
     _reset_pass2_working_files(output_dir)
+    for temp_path in (summary_working_path, rarity_working_path):
+        if temp_path.exists():
+            temp_path.unlink()
+    with open(rarity_working_path, "w", encoding="utf-8") as f_rarity:
+        for rarity in raw_rarities:
+            f_rarity.write(json.dumps(rarity, ensure_ascii=False) + "\n")
+    raw_rarities = None
 
     out_scored = open(scored_working_path, "w", encoding="utf-8")
     out_monitor = open(monitor_working_path, "w", encoding="utf-8")
     out_failed = open(failed_working_path, "w", encoding="utf-8")
     out_failures_log = open(failures_working_path, "w", encoding="utf-8")
+    out_summaries = open(summary_working_path, "w", encoding="utf-8")
+    rarity_stream = None
 
     try:
         client_ctx = (
@@ -4473,6 +4860,16 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             gen_exhausted = False
             next_chunk_to_flush = 0
             skipped_count = 0
+            rarity_stream = open(rarity_working_path, "r", encoding="utf-8")
+
+            def _next_rarity_result():
+                line = rarity_stream.readline()
+                if not line:
+                    return {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
+                line = line.strip()
+                if not line:
+                    return {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
+                return json.loads(line)
 
             async def _tagged_score(idx, chunk_idx, sample, rarity_result):
                 nonlocal scored_count, failed_count, first_error_logged
@@ -4495,6 +4892,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 for raw in raw_records:
                     _maybe_backfill_domain(raw, config=config)
                     samples.append(raw)
+                rarities = [_next_rarity_result() for _ in samples]
 
                 chunk_idx = chunks_loaded
                 offset = global_offset
@@ -4503,6 +4901,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
                 active_chunks[chunk_idx] = {
                     "samples": samples,
+                    "rarities": rarities,
                     "offset": offset,
                     "total": len(samples),
                     "done": 0,
@@ -4544,11 +4943,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         if chunk_data["values"][local_idx] is not None:
                             continue
                         abs_idx = chunk_data["offset"] + local_idx
-                        rarity_result = (
-                            raw_rarities[abs_idx]
-                            if abs_idx < len(raw_rarities)
-                            else {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": stats_ref_info}
-                        )
+                        rarity_result = chunk_data["rarities"][local_idx]
                         fut = asyncio.ensure_future(
                             _tagged_score(abs_idx, chunk_idx, chunk_data["samples"][local_idx], rarity_result)
                         )
@@ -4585,12 +4980,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         sample["value"] = value
                         scored_count += 1
                         # Summary for final stats
-                        summary = _selection_summary_from_sample(sample, config=config)
-                        summary.update({
-                            "flags": value.get("flags", []),
-                            "thinking_mode": value.get("thinking_mode"),
-                        })
-                        score_summaries.append(summary)
+                        summary = _selection_summary_output(sample, config=config)
+                        out_summaries.write(json.dumps(summary, ensure_ascii=False) + "\n")
                     else:
                         failed_count += 1
                         out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
@@ -4616,6 +5007,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
 
                 # Release
                 chunk_data["samples"] = None
+                chunk_data["rarities"] = None
                 chunk_data["values"] = None
                 chunk_data["monitors"] = None
                 chunk_data["flushed"] = True
@@ -4724,16 +5116,20 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                 flush_ready_scoring_chunks()
 
     finally:
+        if rarity_stream is not None:
+            rarity_stream.close()
         out_scored.close()
         out_monitor.close()
         out_failed.close()
         out_failures_log.close()
+        out_summaries.close()
 
     elapsed = time.time() - start_time
 
     sweep = await _run_pass2_recovery_sweep_chunked(
         output_dir=output_dir,
-        raw_rarities=raw_rarities,
+        raw_rarities=rarity_working_path,
+        total_samples=total,
         config=config,
     )
     scored_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl") or scored_working_path
@@ -4741,10 +5137,15 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
     if sweep and sweep.get("recovered"):
         # After patching scored/monitor files, rebuild summaries/monitors in file order
         # so selection/stats align with the rewritten outputs.
-        score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
+        _, monitor_totals = _rebuild_chunked_summaries_and_monitors(
             scored_path,
             monitor_path,
+            config=config,
+            summary_output_path=summary_working_path,
         )
+        score_summaries = _load_selection_summaries(summary_working_path)
+    else:
+        score_summaries = _load_selection_summaries(summary_working_path)
 
     return _finalize_chunked_outputs(
         output_dir=output_dir,
@@ -4776,6 +5177,7 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
     all scored samples in memory.
     """
     total_scored = len(summaries)
+    prompt_summary = {}
     if isinstance(monitor_totals, dict):
         total_failed = int(monitor_totals.get("total_failed", 0) or 0)
         total_estimated = int(monitor_totals.get("total_estimated", 0) or 0)
@@ -4783,7 +5185,10 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
         total_prompt_tokens = int(monitor_totals.get("total_prompt_tokens", 0) or 0)
         total_completion_tokens = int(monitor_totals.get("total_completion_tokens", 0) or 0)
         selective_reason_counts = dict(monitor_totals.get("selective_reason_counts") or {})
+        prompt_summary = _materialize_numeric_summary(monitor_totals.get("prompt_bytes_summary"))
         prompt_bytes = list(monitor_totals.get("prompt_bytes") or [])
+        if prompt_bytes and not prompt_summary:
+            prompt_summary = _numeric_summary(prompt_bytes)
         prompt_bytes_hard_cap_hits = int(monitor_totals.get("prompt_bytes_hard_cap_hits", 0) or 0)
     else:
         monitors = monitor_totals or []
@@ -4804,6 +5209,7 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
                 prompt_bytes.append(float(assembled_prompt_bytes))
             if "assembled scoring prompt exceeds" in str(monitor.get("error") or "").lower():
                 prompt_bytes_hard_cap_hits += 1
+        prompt_summary = _numeric_summary(prompt_bytes)
 
     # Score distributions
     def _gather(key):
@@ -4831,34 +5237,73 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
     histograms = {k: _histogram_bins(_gather(k)) for k in _hist_keys}
 
     # Thinking mode stats
-    slow = [s for s in summaries if s.get("thinking_mode") == "slow"]
-    fast = [s for s in summaries if s.get("thinking_mode") == "fast"]
+    thinking_acc = {
+        "slow": {"count": 0, "value_sum": 0.0, "quality_sum": 0.0, "reasoning_sum": 0.0},
+        "fast": {"count": 0, "value_sum": 0.0, "quality_sum": 0.0, "reasoning_sum": 0.0},
+    }
+    flag_counts = {}
+    flag_value_acc = {}
+    tag_dims = ["intent", "difficulty", "domain", "concept", "task",
+                "agentic", "constraint", "context"]
+    value_by_tag_acc = {dim: {} for dim in tag_dims}
+    selection_by_tag_acc = {dim: {} for dim in tag_dims}
+    selection_scores = []
+    turn_count_sum = 0
+    turn_count_n = 0
+    for s in summaries:
+        thinking_mode = s.get("thinking_mode")
+        if thinking_mode in thinking_acc:
+            bucket = thinking_acc[thinking_mode]
+            bucket["count"] += 1
+            bucket["value_sum"] += s.get("value_score", 0) or 0
+            bucket["quality_sum"] += s.get("quality_overall", 0) or 0
+            bucket["reasoning_sum"] += s.get("reasoning_overall", 0) or 0
+
+        value_score = s.get("value_score")
+        for flag in s.get("flags", []):
+            flag_counts[flag] = flag_counts.get(flag, 0) + 1
+            acc = flag_value_acc.setdefault(flag, {"sum": 0.0, "count": 0})
+            acc["sum"] += value_score or 0
+            acc["count"] += 1
+
+        selection_score = s.get("selection_score")
+        if selection_score is not None:
+            selection_scores.append(selection_score)
+
+        labels = s.get("labels") or {}
+        for dim in tag_dims:
+            tags = labels.get(dim)
+            if tags is None or value_score is None:
+                continue
+            if not isinstance(tags, list):
+                tags = [tags]
+            for tag in tags:
+                value_acc = value_by_tag_acc[dim].setdefault(tag, {"sum": 0.0, "count": 0})
+                value_acc["sum"] += value_score
+                value_acc["count"] += 1
+                if selection_score is not None:
+                    selection_acc = selection_by_tag_acc[dim].setdefault(tag, {"sum": 0.0, "count": 0})
+                    selection_acc["sum"] += selection_score
+                    selection_acc["count"] += 1
+
+        turn_count = _coerce_mean_turn_count((s.get("metadata") or {}))
+        if turn_count is not None:
+            turn_count_sum += turn_count
+            turn_count_n += 1
+
     thinking_mode_stats = {
-        "slow": {
-            "count": len(slow),
-            "mean_value": round(sum(s.get("value_score", 0) or 0 for s in slow) / max(len(slow), 1), 2),
-            "mean_quality": round(sum(s.get("quality_overall", 0) or 0 for s in slow) / max(len(slow), 1), 2),
-            "mean_reasoning": round(sum(s.get("reasoning_overall", 0) or 0 for s in slow) / max(len(slow), 1), 2),
-        },
-        "fast": {
-            "count": len(fast),
-            "mean_value": round(sum(s.get("value_score", 0) or 0 for s in fast) / max(len(fast), 1), 2),
-            "mean_quality": round(sum(s.get("quality_overall", 0) or 0 for s in fast) / max(len(fast), 1), 2),
-            "mean_reasoning": round(sum(s.get("reasoning_overall", 0) or 0 for s in fast) / max(len(fast), 1), 2),
-        },
+        mode: {
+            "count": bucket["count"],
+            "mean_value": round(bucket["value_sum"] / max(bucket["count"], 1), 2),
+            "mean_quality": round(bucket["quality_sum"] / max(bucket["count"], 1), 2),
+            "mean_reasoning": round(bucket["reasoning_sum"] / max(bucket["count"], 1), 2),
+        }
+        for mode, bucket in thinking_acc.items()
     }
 
-    # Flag counts
-    flag_counts = {}
-    flag_value_sums = {}
-    for s in summaries:
-        for f in s.get("flags", []):
-            flag_counts[f] = flag_counts.get(f, 0) + 1
-            flag_value_sums.setdefault(f, []).append(s.get("value_score", 0) or 0)
-
     flag_value_impact = {
-        f: {"mean_value": round(sum(vs) / len(vs), 2), "count": len(vs)}
-        for f, vs in flag_value_sums.items()
+        flag: {"mean_value": round(acc["sum"] / acc["count"], 2), "count": acc["count"]}
+        for flag, acc in flag_value_acc.items()
     }
 
     # Selection thresholds
@@ -4874,48 +5319,27 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
             selection_thresholds[pct_label] = {"threshold": round(threshold, 1), "count": count}
 
     # Value and selection by tag
-    tag_dims = ["intent", "difficulty", "domain", "concept", "task",
-                "agentic", "constraint", "context"]
     value_by_tag = {}
     selection_by_tag = {}
     for dim in tag_dims:
-        tag_values = {}
-        tag_selections = {}
-        for s in summaries:
-            vs = s.get("value_score")
-            ss = s.get("selection_score")
-            if vs is None:
-                continue
-            labels = s.get("labels") or {}
-            tags = labels.get(dim)
-            if tags is None:
-                continue
-            if isinstance(tags, list):
-                for t in tags:
-                    tag_values.setdefault(t, []).append(vs)
-                    if ss is not None:
-                        tag_selections.setdefault(t, []).append(ss)
-            else:
-                tag_values.setdefault(tags, []).append(vs)
-                if ss is not None:
-                    tag_selections.setdefault(tags, []).append(ss)
         value_by_tag[dim] = {
-            t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
-            for t, vs in sorted(tag_values.items(), key=lambda x: -sum(x[1]) / len(x[1]))
+            tag: {"mean": round(acc["sum"] / acc["count"], 2), "n": acc["count"]}
+            for tag, acc in sorted(
+                value_by_tag_acc[dim].items(),
+                key=lambda item: -(item[1]["sum"] / item[1]["count"]),
+            )
         }
         selection_by_tag[dim] = {
-            t: {"mean": round(sum(vs) / len(vs), 2), "n": len(vs)}
-            for t, vs in sorted(tag_selections.items(), key=lambda x: -sum(x[1]) / len(x[1]))
+            tag: {"mean": round(acc["sum"] / acc["count"], 2), "n": acc["count"]}
+            for tag, acc in sorted(
+                selection_by_tag_acc[dim].items(),
+                key=lambda item: -(item[1]["sum"] / item[1]["count"]),
+            )
         }
 
-    keep_rates = _compute_keep_rates([s.get("selection_score") for s in summaries])
+    keep_rates = _compute_keep_rates(selection_scores)
     keep_rate_7 = keep_rates.get(f"{FILE_RANKING_KEEP_RATE_THRESHOLD:.1f}", 0)
-    turn_counts = [
-        turn_count
-        for s in summaries
-        if (turn_count := _coerce_mean_turn_count((s.get("metadata") or {}))) is not None
-    ]
-    mean_turns = round(sum(turn_counts) / len(turn_counts), 2) if turn_counts else 0
+    mean_turns = round(turn_count_sum / turn_count_n, 2) if turn_count_n else 0
 
     stats = {
         "total_scored": total_scored,
@@ -4943,7 +5367,6 @@ def _compute_value_stats_from_summaries(summaries, monitor_totals, total_input):
             "planner_anchor_turns": selective_reason_counts.get("planner_anchor_turn", 0),
             "estimated_mid_turns": selective_reason_counts.get("inherited_mid_turn_estimate", 0),
         }
-    prompt_summary = _numeric_summary(prompt_bytes)
     if prompt_summary:
         prompt_summary["hard_cap_hits"] = prompt_bytes_hard_cap_hits
         prompt_summary["hard_cap_hit_rate"] = round(prompt_bytes_hard_cap_hits / max(prompt_summary["count"], 1), 4)
@@ -5783,151 +6206,61 @@ def _iter_scored_samples(path):
 
 
 def _stream_selection_summaries(scored_path, config=None):
-    """Collect lightweight selection summaries for a scored file."""
-    summaries = []
-    scored_count = 0
-    for sample in _iter_scored_samples(scored_path):
-        if sample.get("value"):
-            summaries.append(_selection_summary_from_sample(sample, config=config))
-            scored_count += 1
-    return summaries, scored_count
+    return _large_run_stream_selection_summaries(
+        scored_path,
+        config=config,
+        selection_summary_from_sample=_selection_summary_from_sample,
+        load_scored_samples=_load_scored_samples,
+    )
 
 
 def _rewrite_scored_jsonl_selection(scored_path, selection_results, cursor, config):
-    """Rewrite a scored.jsonl file in a streaming fashion."""
-    scored_path = Path(scored_path)
-    tmp_path = scored_path.with_name(f".{scored_path.name}.tmp")
-    with open(scored_path, "r", encoding="utf-8") as fin, open(tmp_path, "w", encoding="utf-8") as fout:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            sample = json.loads(line)
-            if sample.get("value"):
-                if cursor >= len(selection_results):
-                    raise ValueError(f"selection result underflow while rewriting {scored_path}")
-                selection = selection_results[cursor]
-                sample["value"]["selection_score"] = selection["selection_score"]
-                sample["value"]["intra_class_rank"] = selection["intra_class_rank"]
-                apply_v2_scores([sample], config=config)
-                cursor += 1
-            fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    os.replace(tmp_path, scored_path)
-    return cursor
+    return _large_run_rewrite_scored_jsonl_selection(
+        scored_path,
+        selection_results,
+        cursor,
+        config=config,
+        apply_v2_scores=apply_v2_scores,
+    )
 
 
 def _rewrite_directory_global_selection(output_dir, input_dir, config, pprint=print, generate_dashboard=True):
-    """Recompute selection globally across directory outputs and rewrite files."""
-    scored_files = _discover_scored_output_files(output_dir)
-    if not scored_files:
-        return []
+    try:
+        from sft_label.tools.visualize_value import generate_value_dashboard
+    except Exception:  # pragma: no cover - dashboard tool import failures are tolerated
+        generate_value_dashboard = None
 
-    pprint(f"  Recomputing global selection across {len(scored_files)} scored file(s)")
-
-    summaries = []
-    file_entries = []
-    for scored_path in scored_files:
-        file_summaries, scored_count = _stream_selection_summaries(scored_path, config=config)
-        summaries.extend(file_summaries)
-        file_entries.append({
-            "path": scored_path,
-            "scored_count": scored_count,
-            "summaries": file_summaries,
-            "monitor_totals": _load_monitor_totals(scored_path.parent),
-        })
-
-    selection_results = compute_selection_scores_from_summaries(summaries, config=config)
-
-    updated_stats = []
-    cursor = 0
-    for entry in file_entries:
-        scored_path = entry["path"]
-        file_summaries = entry["summaries"]
-        file_selection_results = selection_results[cursor: cursor + entry["scored_count"]]
-        if len(file_selection_results) != entry["scored_count"]:
-            raise ValueError(
-                f"selection result count mismatch for {scored_path}: "
-                f"expected {entry['scored_count']}, got {len(file_selection_results)}"
-            )
-        for summary, selection in zip(file_summaries, file_selection_results):
-            summary["selection_score"] = selection["selection_score"]
-            summary["intra_class_rank"] = selection["intra_class_rank"]
-            sample_stub = {"value": summary}
-            apply_v2_scores([sample_stub], config=config)
-            summary["value_score_v2"] = sample_stub["value"].get("value_score_v2")
-            summary["selection_score_v2"] = sample_stub["value"].get("selection_score_v2")
-
-        json_sibling = scored_path.parent / "scored.json"
-        if scored_path.suffix == ".jsonl" and not json_sibling.exists():
-            cursor = _rewrite_scored_jsonl_selection(scored_path, selection_results, cursor, config=config)
-        else:
-            samples = _load_scored_samples(scored_path)
-            for sample in samples:
-                value = sample.get("value")
-                if not value:
-                    continue
-                if cursor >= len(selection_results):
-                    raise ValueError(f"selection result underflow while rewriting {scored_path}")
-                selection = selection_results[cursor]
-                value["selection_score"] = selection["selection_score"]
-                value["intra_class_rank"] = selection["intra_class_rank"]
-                apply_v2_scores([sample], config=config)
-                cursor += 1
-            _write_scored_samples(scored_path, samples)
-
-        stats = _compute_value_stats_from_summaries(
-            file_summaries,
-            entry["monitor_totals"],
-            entry["scored_count"],
-        )
-        existing_stats = _load_existing_pass2_stats(scored_path.parent)
-        for key in (
-            "elapsed_seconds",
-            "model",
-            "input_file",
-            "http_request_stats",
-            "weights_used",
-            "rarity_config",
-            "extension_rarity_config",
-            "adaptive_runtime",
-            "recovery_sweep",
-            "postprocess",
-            "chunked",
-        ):
-            if key in existing_stats:
-                stats[key] = existing_stats[key]
-
-        input_file = existing_stats.get("input_file")
-        file_label_source = Path(input_file) if input_file else scored_path
-        stats["file"] = _relative_file_label(file_label_source, input_dir)
-
-        stats_path = scored_path.parent / PASS2_STATS_FILE
-        tmp_stats = stats_path.with_suffix(".tmp.json")
-        with open(tmp_stats, "w", encoding="utf-8") as f:
-            json.dump({k: v for k, v in stats.items() if k != "_raw_scores"},
-                      f, ensure_ascii=False, indent=2)
-        os.replace(tmp_stats, stats_path)
-
-        if generate_dashboard:
-            try:
-                from sft_label.tools.visualize_value import generate_value_dashboard
-                generate_value_dashboard(
-                    scored_path.parent,
-                    scored_file="scored.json" if (scored_path.parent / "scored.json").exists() else "scored.jsonl",
-                    stats_file=PASS2_STATS_FILE,
-                    output_file=PASS2_DASHBOARD_FILE,
-                    quiet=True,
-                )
-            except Exception:
-                pass
-        updated_stats.append(stats)
-
-    if cursor != len(selection_results):
-        raise ValueError(
-            f"global selection rewrite consumed {cursor} results, expected {len(selection_results)}"
+    def _dashboard_builder(output_dir, scored_file=None, stats_file=None, output_file=None, quiet=False):
+        if generate_value_dashboard is None:
+            return
+        return generate_value_dashboard(
+            output_dir,
+            scored_file=scored_file,
+            stats_file=stats_file,
+            output_file=output_file,
+            quiet=quiet,
         )
 
-    return updated_stats
+    return _large_run_rewrite_directory_global_selection(
+        output_dir=output_dir,
+        input_dir=input_dir,
+        config=config,
+        pass2_stats_file=PASS2_STATS_FILE,
+        pass2_dashboard_file=PASS2_DASHBOARD_FILE,
+        discover_scored_output_files=_discover_scored_output_files,
+        selection_summary_from_sample=_selection_summary_from_sample,
+        compute_selection_scores_from_summaries=compute_selection_scores_from_summaries,
+        apply_v2_scores=apply_v2_scores,
+        load_scored_samples=_load_scored_samples,
+        write_scored_samples=_write_scored_samples,
+        compute_value_stats_from_summaries=_compute_value_stats_from_summaries,
+        load_monitor_totals=_load_monitor_totals,
+        load_existing_pass2_stats=_load_existing_pass2_stats,
+        relative_file_label=_relative_file_label,
+        generate_dashboard_fn=_dashboard_builder,
+        pprint=pprint,
+        generate_dashboard=generate_dashboard,
+    )
 
 
 def _flush_scoring_file(collector, config, pprint=print, file_label=None, generate_dashboard=True):
@@ -6663,18 +6996,22 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
 
                 await flush_completed_collectors()
                 if all_file_stats:
-                    _update_post_processing_progress(
-                        "post: directory recompute global selection"
-                    )
-                    rewritten_file_stats = _rewrite_directory_global_selection(
-                        output_dir=output_dir,
-                        input_dir=input_dir,
-                        config=config,
-                        pprint=pprint,
-                        generate_dashboard=False,
-                    )
-                    if rewritten_file_stats:
-                        all_file_stats = rewritten_file_stats
+                    if should_run_directory_global_selection_rewrite(directory_postprocess_policy):
+                        _update_post_processing_progress(
+                            "post: directory recompute global selection"
+                        )
+                        rewritten_file_stats = _rewrite_directory_global_selection(
+                            output_dir=output_dir,
+                            input_dir=input_dir,
+                            config=config,
+                            pprint=pprint,
+                            generate_dashboard=False,
+                        )
+                        if rewritten_file_stats:
+                            all_file_stats = rewritten_file_stats
+                    else:
+                        reason = directory_postprocess_policy.get("reason") or "mode=defer"
+                        pprint(f"  Large-run mode: deferred directory global selection rewrite ({reason})")
                     _update_post_processing_progress(
                         "post: directory summary + aggregation + dashboard"
                     )

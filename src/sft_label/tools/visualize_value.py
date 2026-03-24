@@ -12,6 +12,7 @@ from sft_label.artifacts import (
     PASS2_SUMMARY_STATS_FILE,
     resolve_dashboard_output,
 )
+from sft_label.config import PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD
 from sft_label.tools.dashboard_scopes import build_scope_tree
 from sft_label.tools.dashboard_aggregation import (
     DIMENSIONS,
@@ -133,6 +134,40 @@ def _normalized_dashboard_stats(
     if scope_kind == "global" and run_dir is not None:
         payload["input_path"] = payload.get("input_path") or str(run_dir)
     return payload
+
+
+def _postprocess_dashboard_entry(stats: dict | None) -> dict:
+    if not isinstance(stats, dict):
+        return {}
+    postprocess = stats.get("postprocess")
+    if not isinstance(postprocess, dict):
+        return {}
+    dashboard = postprocess.get("dashboard")
+    return dashboard if isinstance(dashboard, dict) else {}
+
+
+def _resolve_explorer_policy(stats: dict | None) -> dict:
+    dashboard = _postprocess_dashboard_entry(stats)
+    status = str(dashboard.get("status") or "").strip().lower()
+    reason = dashboard.get("reason")
+    if status == "deferred":
+        policy = {"enabled": False, "mode": "deferred"}
+        if reason:
+            policy["reason"] = str(reason)
+        return policy
+    if status == "completed":
+        return {"enabled": True, "mode": "completed"}
+
+    total_scored = int((stats or {}).get("total_scored") or 0)
+    threshold = max(int(PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD), 1)
+    if total_scored >= threshold:
+        return {
+            "enabled": False,
+            "mode": "deferred",
+            "reason": f"samples={total_scored}>={threshold}",
+        }
+
+    return {"enabled": True}
 
 
 def _pass1_conversation_mode_from_conv_records(conv_records, fallback: dict | None = None) -> dict | None:
@@ -401,13 +436,18 @@ def _single_scope_payload(run_dir: Path, samples: list[dict], pass2_viz: dict, s
     }
 
 
-def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
+def _tree_payload(
+    run_dir: Path,
+    *,
+    include_conversations: bool = True,
+) -> tuple[dict, list[dict], dict | None]:
     tree = build_scope_tree(
         run_dir,
         pass1_stats_file=PASS1_STATS_FILE,
         pass1_summary_file=PASS1_SUMMARY_STATS_FILE,
         pass2_stats_file=PASS2_STATS_FILE,
         pass2_summary_file=PASS2_SUMMARY_STATS_FILE,
+        include_pass2_conversations=include_conversations,
     )
     scopes = {}
     explorer_sources = []
@@ -494,7 +534,7 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
         if scope["kind"] == "dir" and scope.get("parent_id") == "global"
     )
 
-    return {
+    payload = {
         "title": "SFT Labeling & Scoring Dashboard",
         "title_key": "dashboard_title_scoring",
         "subtitle": _dashboard_subtitle(run_dir, scopes[tree["root_id"]]["label"]),
@@ -502,7 +542,9 @@ def _tree_payload(run_dir: Path) -> tuple[dict, list[dict]]:
         "default_scope_id": tree["root_id"],
         "initially_expanded": initially_expanded,
         "scopes": scopes,
-    }, explorer_sources
+    }
+    root_pass2_stats = tree["scopes"][tree["root_id"]].get("raw_pass2")
+    return payload, explorer_sources, root_pass2_stats
 
 
 def generate_value_dashboard(run_dir, scored_file="scored.json",
@@ -518,7 +560,23 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
     if scored_file is None or stats_file == PASS2_SUMMARY_STATS_FILE:
         if not quiet:
             print("  Scoring dashboard: building scope tree")
-        payload, explorer_sources = _tree_payload(run_dir)
+        stats_hint = {}
+        stats_path = run_dir / stats_file
+        if stats_path.exists():
+            try:
+                with open(stats_path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    stats_hint = loaded
+            except (OSError, json.JSONDecodeError):
+                stats_hint = {}
+        explorer_policy = _resolve_explorer_policy(stats_hint)
+        payload, explorer_sources, root_pass2_stats = _tree_payload(
+            run_dir,
+            include_conversations=bool(explorer_policy.get("enabled", True)),
+        )
+        if not stats_hint and isinstance(root_pass2_stats, dict):
+            explorer_policy = _resolve_explorer_policy(root_pass2_stats)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
         conv_records = _load_conversation_scores(run_dir)
@@ -549,6 +607,7 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
                     "has_scores": True,
                 }
             )
+        explorer_policy = _resolve_explorer_policy(normalized_stats)
 
     if not quiet:
         print("  Scoring dashboard: writing dashboard bundle")
@@ -558,6 +617,7 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
         explorer_sources,
         dashboard_type="scoring",
         static_base_url=static_base_url,
+        explorer_policy=explorer_policy,
     )
     if not quiet:
         print(f"  Dashboard: {output_path}")

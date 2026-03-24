@@ -229,6 +229,67 @@ def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Pa
     assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
 
 
+def test_generate_value_dashboard_tree_disables_explorer_for_deferred_heavy_runs(tmp_path: Path) -> None:
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+    _write_jsonl(
+        artifact_dir / "scored.jsonl",
+        [_scored_sample("sample-1", "code/sample.jsonl", value=4.0, quality=3.0, source_id="conv-1")],
+    )
+    _write_json(
+        artifact_dir / PASS2_STATS_FILE,
+        {
+            "input_file": "code/sample.jsonl",
+            "total_scored": 1,
+            "total_failed": 0,
+            "score_distributions": {
+                "value_score": {"mean": 4.0, "min": 4.0, "max": 4.0},
+            },
+            "histograms": {},
+            "flag_counts": {},
+            "value_by_tag": {},
+            "selection_by_tag": {},
+        },
+    )
+    _write_json(
+        meta_root / PASS2_SUMMARY_STATS_FILE,
+        {
+            "input_path": str(tmp_path / "dataset"),
+            "total_scored": 25000,
+            "total_failed": 0,
+            "score_distributions": {
+                "value_score": {"mean": 4.0, "min": 4.0, "max": 4.0},
+            },
+            "histograms": {},
+            "flag_counts": {},
+            "per_file_summary": [
+                {
+                    "file": "code/sample.jsonl",
+                    "count": 1,
+                    "mean_value": 4.0,
+                    "mean_complexity": 6.0,
+                    "mean_quality": 3.0,
+                    "mean_selection": 4.5,
+                }
+            ],
+            "postprocess": {
+                "conversation_scores": {"status": "deferred", "reason": "samples=25000>=20000"},
+                "dashboard": {"status": "deferred", "reason": "samples=25000>=20000"},
+            },
+        },
+    )
+
+    dashboard_path = generate_value_dashboard(meta_root, scored_file=None, stats_file=PASS2_SUMMARY_STATS_FILE)
+    data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["explorer"]["enabled"] is False
+    assert manifest["explorer"]["mode"] == "deferred"
+    assert manifest["explorer"]["reason"] == "samples=25000>=20000"
+    assert "explorer" not in manifest["scopes"]["file:code/sample.jsonl"]
+    assert not (data_dir / "explorer").exists()
+
+
 def test_generate_label_dashboard_preview_assets_include_extension_tags(tmp_path: Path) -> None:
     sample = {
         "id": "sample-1",

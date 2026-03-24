@@ -445,14 +445,30 @@ def _write_dashboard_bundle(
     *,
     dashboard_type: str,
     static_base_url: str | None = None,
+    explorer_policy: dict | None = None,
 ) -> None:
     data_dir = output_path.with_name(dashboard_data_dirname(output_path.name))
     scopes_dir = data_dir / "scopes"
-    explorer_dir = data_dir / "explorer"
     shutil.rmtree(data_dir, ignore_errors=True)
     scopes_dir.mkdir(parents=True, exist_ok=True)
 
-    _attach_explorer_payload(payload, build_explorer_assets(output_path, explorer_sources, assets_dir=explorer_dir))
+    explorer_policy = dict(explorer_policy or {})
+    explorer_enabled = bool(explorer_policy.get("enabled", True))
+    if explorer_enabled:
+        explorer_dir = data_dir / "explorer"
+        _attach_explorer_payload(
+            payload,
+            build_explorer_assets(output_path, explorer_sources, assets_dir=explorer_dir),
+        )
+    else:
+        payload["explorer"] = {
+            "enabled": False,
+            "mode": explorer_policy.get("mode", "disabled"),
+        }
+        reason = explorer_policy.get("reason")
+        if reason:
+            payload["explorer"]["reason"] = str(reason)
+
     for scope_id, scope in payload.get("scopes", {}).items():
         scope["detail_path"] = f"{data_dir.name}/scopes/{_scope_detail_filename(scope_id)}"
         scope["detail_script_path"] = f"{data_dir.name}/scopes/{_scope_detail_script_filename(scope_id)}"

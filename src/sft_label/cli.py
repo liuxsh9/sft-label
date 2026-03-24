@@ -23,7 +23,9 @@ Selected runtime knobs (concurrency/rps/timeout/retries) can be overridden via C
 
 import argparse
 import asyncio
+import json
 import os
+import shlex
 import socket
 import sys
 import time
@@ -458,6 +460,120 @@ def _extract_dashboard_publish_run_dir(launched_args, result):
     if launched_args.command == "regenerate-dashboard":
         return launched_args.input
     return None
+
+
+def _score_postprocess_payload_for_publish_guard(launched_args, result):
+    if launched_args.command == "run":
+        if not getattr(launched_args, "score", False):
+            return None
+        summary = (result or {}).get("score_summary") if isinstance(result, dict) else None
+    elif launched_args.command == "score":
+        summary = result if isinstance(result, dict) else None
+    else:
+        return None
+
+    if not isinstance(summary, dict):
+        return {}
+    postprocess = summary.get("postprocess")
+    return postprocess if isinstance(postprocess, dict) else {}
+
+
+def _load_regenerate_postprocess_payload(run_dir: str | os.PathLike[str] | None):
+    if not run_dir:
+        return None
+
+    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE, PASS2_SUMMARY_STATS_FILE_LEGACY
+
+    root = Path(run_dir)
+    candidates = (
+        root / PASS2_SUMMARY_STATS_FILE,
+        root / PASS2_SUMMARY_STATS_FILE_LEGACY,
+        root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE,
+        root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE_LEGACY,
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        postprocess = payload.get("postprocess")
+        return postprocess if isinstance(postprocess, dict) else {}
+    return None
+
+
+def _auto_publish_pass2_guard(
+    launched_args,
+    result,
+    lang: str,
+    run_dir: str | None = None,
+) -> tuple[bool, str | None]:
+    if launched_args.command == "regenerate-dashboard" and str(getattr(launched_args, "pass_num", "both")) == "1":
+        return True, None
+
+    postprocess = _score_postprocess_payload_for_publish_guard(launched_args, result)
+    if postprocess is None and launched_args.command == "regenerate-dashboard":
+        postprocess = _load_regenerate_postprocess_payload(run_dir or getattr(launched_args, "input", None))
+    if postprocess is None:
+        return True, None
+
+    blocked_statuses = {"deferred", "pending", "failed"}
+    safe_statuses = {"completed", "disabled"}
+    required_keys = ("conversation_scores", "dashboard")
+    observed: list[str] = []
+    failures: list[str] = []
+    has_scoring_dashboard = _run_dir_has_scoring_dashboard(run_dir)
+
+    for key in required_keys:
+        node = postprocess.get(key)
+        status = node.get("status") if isinstance(node, dict) else None
+        if not status:
+            failures.append(f"{key}=missing")
+            continue
+        observed.append(f"{key}={status}")
+        if status in blocked_statuses or status not in safe_statuses:
+            failures.append(f"{key}={status}")
+            continue
+        if key == "dashboard" and status == "disabled" and has_scoring_dashboard:
+            failures.append("dashboard=disabled(stale-scoring-dashboard)")
+
+    if failures:
+        observed_text = ", ".join(observed) if observed else "none"
+        blocked_text = ", ".join(failures)
+        run_dir_arg = str(run_dir) if run_dir else "<run_dir>"
+        command_run_dir_arg = shlex.quote(run_dir_arg) if run_dir else run_dir_arg
+        return (
+            False,
+            _start_msg(
+                lang,
+                f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。请先运行 `sft-label complete-postprocess --input {command_run_dir_arg}`。",
+                f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. Run `sft-label complete-postprocess --input {command_run_dir_arg}` first.",
+            ),
+        )
+
+    return True, None
+
+
+def _run_dir_has_scoring_dashboard(run_dir: str | None) -> bool:
+    if not run_dir:
+        return False
+    root = Path(run_dir).expanduser().resolve()
+    candidates = (
+        root / "meta_label_data" / "dashboards",
+        root / "dashboards",
+        root,
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        html_files = sorted(candidate.glob("*.html"))
+        if not html_files:
+            continue
+        return any(("scoring" in path.name.lower() or "value" in path.name.lower()) for path in html_files)
+    return False
 
 
 def _print_published_dashboard_urls(published, lang: str):
@@ -905,7 +1021,7 @@ def cmd_run(args):
                 output_dir=run_dir,
                 tag_stats_path=getattr(args, "tag_stats", None),
                 config=config,
-                resume=args.mode in {"incremental", "migrate"},
+                resume=bool(args.resume) or args.mode in {"incremental", "migrate"},
                 llm_progress_cb=llm_progress_cb,
                 precomputed_workload_estimate=precomputed_scoring_workload_estimate,
             ))
@@ -1514,19 +1630,28 @@ def cmd_start(args, parser):
     if dashboard_service is not None:
         run_dir = _extract_dashboard_publish_run_dir(launched_args, result)
         if run_dir:
-            try:
-                published = run_with_heartbeat(
-                    _start_msg(lang, "正在发布 dashboards", "Publishing dashboards"),
-                    lambda: publish_run_dashboards(dashboard_service, run_dir),
-                )
-            except (FileNotFoundError, ValueError) as e:
-                print(_start_msg(
-                    lang,
-                    f"Dashboard 自动发布失败：{e}",
-                    f"Dashboard auto-publish failed: {e}",
-                ))
+            can_publish, guard_message = _auto_publish_pass2_guard(
+                launched_args,
+                result,
+                lang,
+                run_dir=str(run_dir),
+            )
+            if not can_publish:
+                print(guard_message)
             else:
-                _print_published_dashboard_urls(published, lang)
+                try:
+                    published = run_with_heartbeat(
+                        _start_msg(lang, "正在发布 dashboards", "Publishing dashboards"),
+                        lambda: publish_run_dashboards(dashboard_service, run_dir),
+                    )
+                except (FileNotFoundError, ValueError) as e:
+                    print(_start_msg(
+                        lang,
+                        f"Dashboard 自动发布失败：{e}",
+                        f"Dashboard auto-publish failed: {e}",
+                    ))
+                else:
+                    _print_published_dashboard_urls(published, lang)
         else:
             print(_start_msg(
                 lang,

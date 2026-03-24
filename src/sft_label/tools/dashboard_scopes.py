@@ -633,6 +633,7 @@ def build_scope_tree(
     pass1_summary_file: str | None = PASS1_SUMMARY_STATS_FILE,
     pass2_stats_file: str | None = PASS2_STATS_FILE,
     pass2_summary_file: str | None = PASS2_SUMMARY_STATS_FILE,
+    include_pass2_conversations: bool = True,
 ) -> dict:
     """Build a global/dir/file scope tree for interactive dashboards."""
     root_dir = Path(root_dir)
@@ -644,7 +645,7 @@ def build_scope_tree(
     pass2_leaves = _discover_leaf_records(
         root_dir,
         pass2_stats_file,
-        include_conversations=True,
+        include_conversations=include_pass2_conversations,
         data_candidates=["scored.jsonl", "scored.json"],
     )
     pass1_leaves, pass2_leaves = _normalize_leaf_records(pass1_leaves, pass2_leaves)
@@ -739,7 +740,7 @@ def build_scope_tree(
     if root_pass2 and merged_root_pass2 and merged_root_pass2.get("per_file_summary"):
         root_pass2 = dict(root_pass2)
         root_pass2["per_file_summary"] = merged_root_pass2["per_file_summary"]
-    root_conv = _summary_conversations(root_dir)
+    root_conv = _summary_conversations(root_dir) if include_pass2_conversations else []
 
     scopes["global"]["raw_pass1"] = root_pass1
     scopes["global"]["raw_pass2"] = root_pass2

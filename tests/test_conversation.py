@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import pytest
 
+import sft_label.conversation as conversation_module
 from sft_label.conversation import (
     build_conversation_key,
     group_by_conversation,
@@ -886,6 +887,25 @@ class TestAggregateConversations:
 
         assert merged == expected
 
+    def test_streaming_iterator_path_avoids_global_group_materialization(self, monkeypatch):
+        def _fail_group_by_conversation(_samples):
+            raise AssertionError("streaming aggregation should not call group_by_conversation")
+
+        monkeypatch.setattr(conversation_module, "group_by_conversation", _fail_group_by_conversation)
+
+        records = aggregate_conversations(
+            iter(
+                [
+                    _slice("c1", 1, 2, value_score=5.0),
+                    _slice("c1", 2, 2, value_score=7.0),
+                    _slice("c2", 1, 2, value_score=6.0),
+                    _slice("c2", 2, 2, value_score=8.0),
+                ]
+            )
+        )
+
+        assert [record["conversation_id"] for record in records] == ["c1", "c2"]
+
 
 # ── TestWriteConversationScores ──
 
@@ -902,3 +922,20 @@ class TestWriteConversationScores:
             loaded = json.load(f)
         assert len(loaded) == 1
         assert loaded[0]["conversation_id"] == "c1"
+
+    def test_write_is_atomic_when_json_dump_fails(self, tmp_path, monkeypatch):
+        existing = [{"conversation_id": "existing"}]
+        path = tmp_path / "conversation_scores.json"
+        path.write_text(json.dumps(existing), encoding="utf-8")
+        records = [{"conversation_id": "new"}]
+
+        def _crash_dump(payload, fp, *args, **kwargs):
+            fp.write("{\"partial\":")
+            raise RuntimeError("simulated conversation write failure")
+
+        monkeypatch.setattr(conversation_module.json, "dump", _crash_dump)
+
+        with pytest.raises(RuntimeError, match="simulated conversation write failure"):
+            write_conversation_scores(records, path)
+
+        assert json.loads(path.read_text(encoding="utf-8")) == existing

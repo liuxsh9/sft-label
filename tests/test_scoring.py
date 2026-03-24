@@ -14,6 +14,7 @@ import math
 import os
 import re
 import asyncio
+import copy
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -3787,6 +3788,50 @@ class TestComputeSelectionScores:
 
 
 class TestComputeSelectionScoresFromSummaries:
+    def test_summary_path_can_write_selection_scores_in_place(self):
+        summaries = [
+            {
+                "labels": {"intent": "build", "language": ["python"]},
+                "complexity_overall": 5,
+                "quality_overall": 2,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 4.0,
+                "selection_features": {"trajectory_stage": "implementation"},
+            },
+            {
+                "labels": {"intent": "build", "language": ["python"]},
+                "complexity_overall": 5,
+                "quality_overall": 3,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 5.0,
+                "selection_features": {"trajectory_stage": "implementation"},
+            },
+            {
+                "labels": {"intent": "learn", "language": ["go"]},
+                "complexity_overall": 5,
+                "quality_overall": 10,
+                "reasoning_overall": 5,
+                "rarity_score": 5.0,
+                "value_score": 9.0,
+                "selection_features": {"trajectory_stage": "implementation"},
+            },
+        ]
+
+        expected = compute_selection_scores_from_summaries(copy.deepcopy(summaries))
+        mutated = copy.deepcopy(summaries)
+        returned = compute_selection_scores_from_summaries(mutated, return_results=False)
+
+        assert returned is mutated
+        assert [
+            {
+                "selection_score": summary["selection_score"],
+                "intra_class_rank": summary["intra_class_rank"],
+            }
+            for summary in mutated
+        ] == expected
+
     def test_summary_path_respects_smoothing_prior(self):
         summaries = [
             {
