@@ -789,6 +789,78 @@ def _count_nonempty_jsonl_lines(path: Path) -> int:
     return count
 
 
+def _rewrite_chunked_failure_artifacts(
+    *,
+    output_dir: Path,
+    scored_path: Path,
+    monitor_path: Path,
+) -> tuple[int, int]:
+    """Rebuild failure artifacts from scored/monitor truth for chunked runs."""
+    failed_working_path = _pass2_working_path(output_dir, "failed_value.jsonl")
+    failures_working_path = _pass2_working_path(output_dir, "score_failures.jsonl")
+    failed_tmp = failed_working_path.with_suffix(".tmp")
+    failures_tmp = failures_working_path.with_suffix(".tmp")
+    failed_written = 0
+    failures_written = 0
+
+    with open(scored_path, "r", encoding="utf-8") as fs, open(monitor_path, "r", encoding="utf-8") as fm, \
+         open(failed_tmp, "w", encoding="utf-8") as out_failed, open(failures_tmp, "w", encoding="utf-8") as out_failures:
+        for idx, (line_s, line_m) in enumerate(zip(fs, fm)):
+            sample = json.loads(line_s)
+            monitor = json.loads(line_m)
+            if sample.get("value") is not None:
+                continue
+            out_failed.write(json.dumps(sample, ensure_ascii=False) + "\n")
+            failed_written += 1
+            record = {
+                "sample_id": sample.get("id", f"sample-{idx}"),
+                "status": monitor.get("status", "no_result") if isinstance(monitor, dict) else "no_result",
+                "error": (monitor.get("error", "") if isinstance(monitor, dict) else ""),
+                "error_response": (monitor.get("error_response", "")[:1000] if isinstance(monitor, dict) else ""),
+                "attempts": (monitor.get("attempts", 0) if isinstance(monitor, dict) else 0),
+                "error_class": (monitor.get("error_class") if isinstance(monitor, dict) else None),
+                "retryable_infra": (monitor.get("retryable_infra") if isinstance(monitor, dict) else None),
+                "http_status": (monitor.get("http_status") if isinstance(monitor, dict) else None),
+                "runtime_state": (monitor.get("runtime_state") if isinstance(monitor, dict) else None),
+            }
+            out_failures.write(json.dumps(record, ensure_ascii=False) + "\n")
+            failures_written += 1
+
+    if failed_written > 0:
+        os.replace(failed_tmp, failed_working_path)
+    else:
+        try:
+            failed_tmp.unlink()
+        except OSError:
+            pass
+        with open(failed_working_path, "w", encoding="utf-8"):
+            pass
+        for stale_path in (
+            _pass2_checkpoint_path(output_dir, "failed_value.jsonl"),
+            Path(output_dir) / "failed_value.jsonl",
+        ):
+            if stale_path.exists():
+                stale_path.unlink()
+
+    if failures_written > 0:
+        os.replace(failures_tmp, failures_working_path)
+    else:
+        try:
+            failures_tmp.unlink()
+        except OSError:
+            pass
+        with open(failures_working_path, "w", encoding="utf-8"):
+            pass
+        for stale_path in (
+            _pass2_checkpoint_path(output_dir, "score_failures.jsonl"),
+            Path(output_dir) / "score_failures.jsonl",
+        ):
+            if stale_path.exists():
+                stale_path.unlink()
+
+    return failed_written, failures_written
+
+
 async def _run_pass2_recovery_sweep_chunked(
     *,
     output_dir: Path,
@@ -4299,21 +4371,32 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         "  Resume: detected complete prior scored/monitor artifacts; "
                         "finalizing without rescoring"
                     )
+                sweep = {"enabled": False, "attempted": 0, "recovered": 0, "resume_fast_path": True}
+                if getattr(config, "enable_stage_recovery_sweep", True):
+                    placeholder_rarities = [
+                        {"score": None, "tag_rarity": None, "combo_rarity": None, "stats_ref": None}
+                        for _ in range(expected_total)
+                    ]
+                    sweep = await _run_pass2_recovery_sweep_chunked(
+                        output_dir=output_dir,
+                        raw_rarities=placeholder_rarities,
+                        config=config,
+                    )
+                    sweep["resume_fast_path"] = True
+                    scored_resume_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+                    monitor_resume_path = _resolve_pass2_resume_path(output_dir, "monitor_value.jsonl")
+                    if scored_resume_path is None or monitor_resume_path is None:
+                        raise RuntimeError("resume fast-path lost scored/monitor artifacts after recovery sweep")
                 score_summaries, monitor_totals = _rebuild_chunked_summaries_and_monitors(
                     scored_resume_path,
                     monitor_resume_path,
                     config=config,
                 )
-                if len(score_summaries) == expected_total:
-                    for failure_name in ("failed_value.jsonl", "score_failures.jsonl"):
-                        for stale_path in (
-                            _pass2_checkpoint_path(output_dir, failure_name),
-                            Path(output_dir) / failure_name,
-                        ):
-                            if stale_path.exists():
-                                stale_path.unlink()
-                        with open(_pass2_working_path(output_dir, failure_name), "w", encoding="utf-8"):
-                            pass
+                _rewrite_chunked_failure_artifacts(
+                    output_dir=output_dir,
+                    scored_path=scored_resume_path,
+                    monitor_path=monitor_resume_path,
+                )
                 return _finalize_chunked_outputs(
                     output_dir=output_dir,
                     scored_path=scored_resume_path,
@@ -4332,7 +4415,7 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                     quiet=quiet,
                     rate_limiter=shared_rate_limiter,
                     runtime=shared_runtime,
-                    sweep={"enabled": False, "attempted": 0, "recovered": 0, "resume_fast_path": True},
+                    sweep=sweep,
                     print_summary=print_summary,
                 )
 

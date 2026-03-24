@@ -580,6 +580,126 @@ def test_chunked_recovery_sweep_keeps_failure_outputs_consistent_after_recovery(
     assert failure_log_ids == {"sample-failed"}
 
 
+def test_resume_fastpath_runs_recovery_sweep_before_finalize(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    sample = _sample("sample-retryable")
+    _write_jsonl(labeled_path, [sample])
+
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), [dict(sample, value=None)])
+    _write_jsonl(
+        _pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"),
+        [
+            {
+                **_monitor(sample["id"], status="failed", retryable_infra=True),
+                "error": "timeout",
+                "error_class": "timeout",
+            }
+        ],
+    )
+    _write_jsonl(tmp_path / "failed_value.jsonl", [dict(sample, value=None)])
+    _write_jsonl(tmp_path / "score_failures.jsonl", [{"sample_id": sample["id"], "status": "stale"}])
+
+    calls = 0
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        nonlocal calls
+        calls += 1
+        return (
+            _value_payload(score=8.7, rarity_score=5.2, confidence=0.94),
+            _monitor(sample["id"], status="success", retryable_infra=False),
+        )
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        stats = asyncio.run(
+            _run_scoring_file_chunked(
+                labeled_path,
+                tmp_path,
+                None,
+                0,
+                _quiet_chunked_config(enable_stage_recovery_sweep=True, recovery_sweep_max_passes=1),
+                resume=True,
+                generate_dashboard=False,
+                show_progress=False,
+                print_summary=False,
+                quiet=True,
+            )
+        )
+
+    assert calls == 1
+    assert _read_jsonl(tmp_path / "scored.jsonl")[0]["value"]["value_score"] == 8.7
+    assert _read_jsonl(tmp_path / "monitor_value.jsonl")[0]["status"] == "success"
+    assert not (tmp_path / "failed_value.jsonl").exists()
+    assert not (tmp_path / "score_failures.jsonl").exists()
+    assert stats["recovery_sweep"]["attempted"] == 1
+    assert stats["recovery_sweep"]["recovered"] == 1
+
+
+def test_resume_fastpath_rebuilds_failure_outputs_from_scored_monitor_after_interruption(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    samples = [_sample("sample-recovered"), _sample("sample-failed")]
+    _write_jsonl(labeled_path, samples)
+
+    _write_jsonl(
+        _pass2_checkpoint_path(tmp_path, "scored.jsonl"),
+        [
+            {
+                **samples[0],
+                "value": _value_payload(score=7.9, rarity_score=5.3, confidence=0.9),
+            },
+            dict(samples[1], value=None),
+        ],
+    )
+    _write_jsonl(
+        _pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"),
+        [
+            _monitor(samples[0]["id"], status="success"),
+            {
+                **_monitor(samples[1]["id"], status="failed", retryable_infra=False),
+                "error": "invalid_request",
+                "error_class": "input_error",
+            },
+        ],
+    )
+
+    # Simulate stale contradiction left by an interrupted prior sweep.
+    _write_jsonl(
+        tmp_path / "failed_value.jsonl",
+        [dict(samples[0], value=None), dict(samples[1], value=None)],
+    )
+    _write_jsonl(
+        tmp_path / "score_failures.jsonl",
+        [
+            {"sample_id": samples[0]["id"], "status": "stale-failure"},
+            {"sample_id": samples[1]["id"], "status": "final-failure"},
+        ],
+    )
+
+    async def fail_score_one(*_args, **_kwargs):
+        raise AssertionError("score_one must not run during resume fast-path finalize")
+
+    with patch("sft_label.scoring.score_one", side_effect=fail_score_one):
+        asyncio.run(
+            _run_scoring_file_chunked(
+                labeled_path,
+                tmp_path,
+                None,
+                0,
+                _quiet_chunked_config(enable_stage_recovery_sweep=True, recovery_sweep_max_passes=1),
+                resume=True,
+                generate_dashboard=False,
+                show_progress=False,
+                print_summary=False,
+                quiet=True,
+            )
+        )
+
+    failed_rows = _read_jsonl(tmp_path / "failed_value.jsonl")
+    failure_log_rows = _read_jsonl(tmp_path / "score_failures.jsonl")
+    assert [row["id"] for row in failed_rows] == [samples[1]["id"]]
+    assert [row["sample_id"] for row in failure_log_rows] == [samples[1]["id"]]
+
+
 def test_chunked_resume_fastpath_honors_working_checkpoint_final_precedence(tmp_path):
     labeled_path = tmp_path / "labeled.jsonl"
     samples = [_sample(f"sample-{idx}") for idx in range(2)]
