@@ -300,6 +300,8 @@ def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     assert (Path(service.web_root) / "assets" / "v1" / "dashboard.js").exists()
     assert published["dashboards"]["labeling"]["url"] == f"https://dash.example.com/runs/{run_id}/{label_html.name}"
     assert published["dashboards"]["scoring"]["url"] == f"https://dash.example.com/runs/{run_id}/{score_html.name}"
+    assert published["dashboards"]["labeling"]["path"] == str(published_root / label_html.name)
+    assert published["dashboards"]["scoring"]["path"] == str(published_root / score_html.name)
 
     html = (published_root / label_html.name).read_text(encoding="utf-8")
     assert "../../assets/v1/dashboard.css" in html
@@ -311,6 +313,8 @@ def test_publish_run_dashboards_syncs_shared_assets_and_registry(tmp_path):
     found = find_published_run(store.services["default"], run_id=run_id)
     assert found is not None
     assert found["source_run_dir"] == str(run_dir.resolve())
+    assert found["dashboards"]["labeling"]["path"] == str(published_root / label_html.name)
+    assert found["dashboards"]["scoring"]["path"] == str(published_root / score_html.name)
 
 
 def test_publish_registry_can_reuse_run_id_by_source_path(tmp_path):

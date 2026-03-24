@@ -1004,7 +1004,7 @@ def publish_run_dashboards(
                 key = _classify_dashboard_key(src_html.name)
                 candidate = {
                     "filename": dest_html.name,
-                    "path": str(dest_html),
+                    "path": str(published_root / dest_html.name),
                     "url": f"{service.share_base_url()}/{_RUNS_DIRNAME}/{run_id}/{dest_html.name}",
                 }
                 existing = dashboards.get(key)
