@@ -4,8 +4,11 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from sft_label.config import PipelineConfig
 from sft_label.scoring import (
+    _finalize_chunked_outputs,
     _rebuild_chunked_summaries_and_monitors,
     _finalize_pass2_working_files,
     _pass2_checkpoint_path,
@@ -204,6 +207,59 @@ def test_rebuild_chunked_summaries_passes_config_to_selection_summary(tmp_path):
 
     assert patched_summary.call_count == 1
     assert patched_summary.call_args.kwargs["config"] is config
+
+
+def test_rebuild_chunked_summaries_preserves_flags_and_thinking_mode(tmp_path):
+    scored_path = tmp_path / "scored.jsonl"
+    monitor_path = tmp_path / "monitor_value.jsonl"
+    sample = {
+        **_sample("sample-flags"),
+        "value": {
+            **_value_payload(score=7.4, rarity_score=4.6, confidence=0.84),
+            "flags": ["has-bug"],
+            "thinking_mode": "slow",
+        },
+    }
+    _write_jsonl(scored_path, [sample])
+    _write_jsonl(monitor_path, [_monitor("sample-flags", status="success")])
+
+    summaries, _monitor_totals = _rebuild_chunked_summaries_and_monitors(scored_path, monitor_path)
+
+    assert len(summaries) == 1
+    assert summaries[0]["flags"] == ["has-bug"]
+    assert summaries[0]["thinking_mode"] == "slow"
+
+
+def test_finalize_chunked_outputs_fails_closed_on_scored_summary_count_mismatch(tmp_path):
+    scored_path = tmp_path / "scored.jsonl"
+    sample = {
+        **_sample("sample-mismatch"),
+        "value": _value_payload(score=7.4, rarity_score=4.6, confidence=0.84),
+    }
+    _write_jsonl(scored_path, [sample])
+
+    with pytest.raises(ValueError, match="selection summary count mismatch"):
+        _finalize_chunked_outputs(
+            output_dir=tmp_path,
+            scored_path=scored_path,
+            score_summaries=[],
+            monitor_totals=_monitor("sample-mismatch", status="success"),
+            total=1,
+            elapsed=0.0,
+            config=_quiet_chunked_config(enable_stage_recovery_sweep=False),
+            file_label=None,
+            input_path=scored_path,
+            stats_source=None,
+            total_stats_samples=0,
+            combo_mode="local",
+            rarity_mode="percentile",
+            generate_dashboard=False,
+            quiet=True,
+            rate_limiter=None,
+            runtime=None,
+            sweep=None,
+            print_summary=False,
+        )
 
 
 def test_resume_fastpath_ignores_single_corrupt_working_artifact(tmp_path):
@@ -633,6 +689,61 @@ def test_resume_fastpath_runs_recovery_sweep_before_finalize(tmp_path):
     assert not (tmp_path / "score_failures.jsonl").exists()
     assert stats["recovery_sweep"]["attempted"] == 1
     assert stats["recovery_sweep"]["recovered"] == 1
+
+
+def test_resume_fastpath_recovery_sweep_uses_real_rarity_inputs(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    sample = _sample("sample-rarity")
+    _write_jsonl(labeled_path, [sample])
+
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), [dict(sample, value=None)])
+    _write_jsonl(
+        _pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"),
+        [
+            {
+                **_monitor(sample["id"], status="failed", retryable_infra=True),
+                "error": "timeout",
+                "error_class": "timeout",
+            }
+        ],
+    )
+
+    seen_rarities: list[dict] = []
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        seen_rarities.append(rarity_result)
+        rarity_score = rarity_result.get("score")
+        return (
+            _value_payload(
+                score=8.9,
+                rarity_score=rarity_score if rarity_score is not None else -1.0,
+                confidence=0.95,
+            ),
+            _monitor(sample["id"], status="success", retryable_infra=False),
+        )
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        asyncio.run(
+            _run_scoring_file_chunked(
+                labeled_path,
+                tmp_path,
+                None,
+                0,
+                _quiet_chunked_config(enable_stage_recovery_sweep=True, recovery_sweep_max_passes=1),
+                resume=True,
+                generate_dashboard=False,
+                show_progress=False,
+                print_summary=False,
+                quiet=True,
+            )
+        )
+
+    assert len(seen_rarities) == 1
+    rarity = seen_rarities[0]
+    assert rarity.get("score") is not None
+    assert rarity.get("tag_rarity") is not None
+    assert _read_jsonl(tmp_path / "scored.jsonl")[0]["value"]["rarity"]["score"] == rarity["score"]
 
 
 def test_resume_fastpath_rebuilds_failure_outputs_from_scored_monitor_after_interruption(tmp_path):

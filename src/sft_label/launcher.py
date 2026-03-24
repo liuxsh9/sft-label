@@ -681,13 +681,12 @@ def _load_pass2_postprocess_status(root: Path) -> dict | None:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                return None
+                continue
             if not isinstance(payload, dict):
-                return None
+                continue
             postprocess = payload.get("postprocess")
             if isinstance(postprocess, dict):
                 return postprocess
-            return None
     return None
 
 
@@ -729,6 +728,16 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
         )
 
     if labeled_files:
+        resume_score = bool(scored_files or pass2_resume_artifacts)
+        argv = _score_command_for_input(target, resume=resume_score)
+        if pass2_resume_artifacts:
+            return (
+                argv,
+                _msg(
+                    f"检测到 {len(labeled_files)} 个 labeled 文件，以及 {len(pass2_resume_artifacts)} 个二阶段中间产物（.next/.checkpoint），将续跑二阶段。",
+                    f"Detected {len(labeled_files)} labeled file(s) and {len(pass2_resume_artifacts)} Pass 2 intermediate artifact(s) (.next/.checkpoint); resuming Pass 2.",
+                ),
+            )
         should_complete_postprocess, failures = _postprocess_requires_completion(postprocess)
         if scored_files and should_complete_postprocess:
             blocked = ", ".join(failures)
@@ -739,22 +748,12 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
                     f"Detected incomplete Pass 2 postprocess ({blocked}); running complete-postprocess to finalize aggregation and dashboards.",
                 ),
             )
-        resume_score = bool(scored_files or pass2_resume_artifacts)
-        argv = _score_command_for_input(target, resume=resume_score)
         if scored_files:
             return (
                 argv,
                 _msg(
                     f"检测到 {len(labeled_files)} 个 labeled 文件和 {len(scored_files)} 个 scored 文件，将续跑二阶段并跳过已完成样本。",
                     f"Detected {len(labeled_files)} labeled file(s) and {len(scored_files)} scored file(s); resuming Pass 2 and skipping completed samples.",
-                ),
-            )
-        if pass2_resume_artifacts:
-            return (
-                argv,
-                _msg(
-                    f"检测到 {len(labeled_files)} 个 labeled 文件，以及 {len(pass2_resume_artifacts)} 个二阶段中间产物（.next/.checkpoint），将续跑二阶段。",
-                    f"Detected {len(labeled_files)} labeled file(s) and {len(pass2_resume_artifacts)} Pass 2 intermediate artifact(s) (.next/.checkpoint); resuming Pass 2.",
                 ),
             )
         return (
@@ -779,8 +778,7 @@ def build_launch_plan(
     language: str | None = None,
 ) -> LaunchPlan | None:
     """Prompt for workflow/options and return executable launch plan."""
-    if language:
-        set_language(language)
+    set_language(language or DEFAULT_LANGUAGE)
 
     _say(output_fn, SECTION_DIVIDER)
     _say(output_fn, "交互式任务启动器 / Interactive task launcher")
@@ -2524,7 +2522,7 @@ def _ask_extension_spec_paths(input_fn: InputFn, output_fn: OutputFn) -> list[st
                     _say(
                         output_fn,
                         _msg(
-                            f"  提醒：extension id '{spec_id}' 已由 {seen_ids[spec_id]} 使用；请换一个 id 唯一的 spec。",
+                            f"  提醒：检测到重复的 extension id '{spec_id}'，已由 {seen_ids[spec_id]} 使用；请换一个 id 唯一的 spec。",
                             f"  Advisory: duplicate extension id '{spec_id}' already used by {seen_ids[spec_id]}; choose a spec with a unique id.",
                         ),
                     )

@@ -878,7 +878,8 @@ def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 
 def _iter_scoring_summary_candidates(run_dir: Path, dashboards_dir: Path) -> list[Path]:
-    roots = [run_dir, dashboards_dir.parent, dashboards_dir.parent.parent]
+    _ = dashboards_dir
+    roots = [run_dir]
     candidate_names = (
         PASS2_SUMMARY_STATS_FILE,
         PASS2_SUMMARY_STATS_FILE_LEGACY,
@@ -923,10 +924,20 @@ def _load_scoring_summary_metadata(run_dir: Path, dashboards_dir: Path) -> tuple
     return None, None
 
 
+def _load_all_scoring_summary_metadata(run_dir: Path, dashboards_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
+    payloads: list[tuple[Path, dict[str, Any]]] = []
+    for candidate in _iter_scoring_summary_candidates(run_dir, dashboards_dir):
+        payload = _load_json_if_exists(candidate)
+        if payload is None:
+            continue
+        payloads.append((candidate, payload))
+    return payloads
+
+
 def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_files: list[Path]) -> None:
     has_scoring_dashboard = _scoring_dashboard_present(html_files)
-    summary_path, summary_payload = _load_scoring_summary_metadata(run_dir, dashboards_dir)
-    if summary_payload is None:
+    summary_payloads = _load_all_scoring_summary_metadata(run_dir, dashboards_dir)
+    if not summary_payloads:
         if has_scoring_dashboard:
             raise ValueError(
                 "Scoring dashboards are not publishable yet: missing Pass 2 scoring metadata (summary_stats_scoring.json / stats_scoring.json) with "
@@ -934,27 +945,51 @@ def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_f
             )
         return
 
-    postprocess = summary_payload.get("postprocess")
-    if not isinstance(postprocess, dict):
-        raise ValueError(
-            f"Scoring dashboards are not publishable yet: {summary_path} is missing postprocess status metadata."
-        )
+    legacy_markers = (
+        "total_scored",
+        "total_failed",
+        "mean_value_score",
+        "score_distributions",
+        "selection_thresholds",
+    )
+    legacy_payload_seen = False
+    modern_payload_seen = False
 
-    observed_statuses: dict[str, str] = {}
-    for key in _SCORING_REQUIRED_POSTPROCESS_KEYS:
-        entry = postprocess.get(key)
-        status = str((entry or {}).get("status") or "").strip().lower() if isinstance(entry, dict) else ""
-        observed_statuses[key] = status
-        if status in _SCORING_ALLOWED_POSTPROCESS_STATUS:
-            continue
-        raise ValueError(
-            f"Scoring dashboards are not publishable yet: postprocess.{key}.status={status or 'missing'}"
-        )
+    for summary_path, summary_payload in summary_payloads:
+        postprocess = summary_payload.get("postprocess")
+        if not isinstance(postprocess, dict):
+            if any(key in summary_payload for key in legacy_markers):
+                legacy_payload_seen = True
+                continue
+            raise ValueError(
+                f"Scoring dashboards are not publishable yet: {summary_path} is missing postprocess status metadata."
+            )
 
-    if has_scoring_dashboard and observed_statuses.get("dashboard") == "disabled":
-        raise ValueError(
-            "Scoring dashboards are not publishable yet: postprocess.dashboard.status=disabled while scoring dashboard HTML files are present."
-        )
+        modern_payload_seen = True
+        observed_statuses: dict[str, str] = {}
+        for key in _SCORING_REQUIRED_POSTPROCESS_KEYS:
+            entry = postprocess.get(key)
+            status = str((entry or {}).get("status") or "").strip().lower() if isinstance(entry, dict) else ""
+            observed_statuses[key] = status
+            if status in _SCORING_ALLOWED_POSTPROCESS_STATUS:
+                continue
+            raise ValueError(
+                f"Scoring dashboards are not publishable yet: postprocess.{key}.status={status or 'missing'}"
+            )
+
+        if has_scoring_dashboard and observed_statuses.get("dashboard") == "disabled":
+            raise ValueError(
+                "Scoring dashboards are not publishable yet: postprocess.dashboard.status=disabled while scoring dashboard HTML files are present."
+            )
+
+    if modern_payload_seen:
+        return
+    if legacy_payload_seen:
+        return
+    summary_path, _summary_payload = summary_payloads[0]
+    raise ValueError(
+        f"Scoring dashboards are not publishable yet: {summary_path} is missing postprocess status metadata."
+    )
 
 
 def _stage_runtime_assets(service: DashboardServiceConfig) -> Path:

@@ -144,13 +144,23 @@ def rewrite_directory_global_selection(
             "monitor_totals": load_monitor_totals(scored_path.parent),
         })
 
-    selection_results = compute_selection_scores_from_summaries(summaries, config=config)
+    try:
+        compute_selection_scores_from_summaries(
+            summaries,
+            config=config,
+            return_results=False,
+        )
+    except TypeError:
+        selection_results = compute_selection_scores_from_summaries(summaries, config=config)
+        for summary, selection in zip(summaries, selection_results):
+            summary["selection_score"] = selection["selection_score"]
+            summary["intra_class_rank"] = selection["intra_class_rank"]
 
     updated_stats = []
     cursor = 0
     for entry in file_entries:
         scored_path = entry["path"]
-        file_selection_results = selection_results[cursor: cursor + entry["scored_count"]]
+        file_selection_results = summaries[cursor: cursor + entry["scored_count"]]
         if len(file_selection_results) != entry["scored_count"]:
             raise ValueError(
                 f"selection result count mismatch for {scored_path}: "
@@ -179,7 +189,7 @@ def rewrite_directory_global_selection(
         if scored_path.suffix == ".jsonl":
             cursor = rewrite_scored_jsonl_selection(
                 scored_path,
-                selection_results,
+                summaries,
                 cursor,
                 config=config,
                 apply_v2_scores=apply_v2_scores,
@@ -191,9 +201,9 @@ def rewrite_directory_global_selection(
                 value = sample.get("value")
                 if not value:
                     continue
-                if cursor >= len(selection_results):
+                if cursor >= len(summaries):
                     raise ValueError(f"selection result underflow while rewriting {scored_path}")
-                selection = selection_results[cursor]
+                selection = summaries[cursor]
                 value["selection_score"] = selection["selection_score"]
                 value["intra_class_rank"] = selection["intra_class_rank"]
                 apply_v2_scores([sample], config=config)
@@ -246,9 +256,9 @@ def rewrite_directory_global_selection(
                 pass
         updated_stats.append(stats)
 
-    if cursor != len(selection_results):
+    if cursor != len(summaries):
         raise ValueError(
-            f"global selection rewrite consumed {cursor} results, expected {len(selection_results)}"
+            f"global selection rewrite consumed {cursor} results, expected {len(summaries)}"
         )
 
     return updated_stats

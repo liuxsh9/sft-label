@@ -524,6 +524,111 @@ def test_publish_run_dashboards_accepts_file_scope_stats_scoring_metadata_withou
     assert Path(published["dashboards"]["scoring"]["path"]).exists()
 
 
+def test_publish_run_dashboards_accepts_legacy_scoring_metadata_without_postprocess_block(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "legacy_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    (run_dir / "stats_scoring.json").write_text(
+        json.dumps({"total_scored": 12, "mean_value_score": 6.3}),
+        encoding="utf-8",
+    )
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "scoring" in published["dashboards"]
+    assert Path(published["dashboards"]["scoring"]["path"]).exists()
+
+
+def test_publish_run_dashboards_prefers_modern_incomplete_postprocess_over_legacy_stats(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "mixed_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    (run_dir / "stats_scoring.json").write_text(
+        json.dumps({"total_scored": 12, "mean_value_score": 6.3}),
+        encoding="utf-8",
+    )
+    _write_scoring_summary(run_dir, conversation_status="deferred", dashboard_status="completed")
+
+    with pytest.raises(ValueError, match="postprocess.conversation_scores.status=deferred"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
+def test_publish_run_dashboards_accepts_legacy_stats_when_modern_summary_is_completed(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "mixed_completed_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    (run_dir / "stats_scoring.json").write_text(
+        json.dumps({"total_scored": 12, "mean_value_score": 6.3}),
+        encoding="utf-8",
+    )
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="completed")
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "scoring" in published["dashboards"]
+    assert Path(published["dashboards"]["scoring"]["path"]).exists()
+
+
+def test_publish_run_dashboards_ignores_ancestor_scoring_metadata_outside_run_dir(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_dir = tmp_path / "nested" / "demo_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "dashboard_labeling_demo.html").write_text("<!DOCTYPE html><title>Labeling</title>", encoding="utf-8")
+    (run_dir / "dashboard_scoring_demo.html").write_text("<!DOCTYPE html><title>Scoring</title>", encoding="utf-8")
+    (run_dir / "dashboard_labeling_demo.data").mkdir()
+    (run_dir / "dashboard_scoring_demo.data").mkdir()
+
+    with pytest.raises(ValueError, match="missing Pass 2 scoring metadata"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
 def test_publish_run_dashboards_fails_closed_when_publish_lock_conflicts(monkeypatch, tmp_path):
     config_path = tmp_path / "dashboard_services.json"
     service = init_dashboard_service(
