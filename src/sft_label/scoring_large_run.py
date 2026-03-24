@@ -6,9 +6,10 @@ from pathlib import Path
 
 
 def should_run_directory_global_selection_rewrite(postprocess_policy: dict | None) -> bool:
-    if not isinstance(postprocess_policy, dict):
-        return True
-    return not bool(postprocess_policy.get("defer"))
+    # Directory-global selection is core Pass 2 completion semantics, so it must
+    # always run even when heavy postprocessing is deferred.
+    _ = postprocess_policy
+    return True
 
 
 def _iter_scored_samples(path, *, load_scored_samples):
@@ -71,6 +72,32 @@ def rewrite_scored_jsonl_selection(
             fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
     os.replace(tmp_path, scored_path)
     return cursor
+
+
+def rewrite_scored_json_sibling_from_jsonl(scored_jsonl_path, scored_json_path):
+    """Keep scored.json in sync with rewritten scored.jsonl without full-file loads."""
+    scored_jsonl_path = Path(scored_jsonl_path)
+    scored_json_path = Path(scored_json_path)
+    if not scored_json_path.exists():
+        return
+
+    tmp_json = scored_json_path.with_suffix(".tmp.json")
+    with open(scored_jsonl_path, "r", encoding="utf-8") as fin, open(tmp_json, "w", encoding="utf-8") as fout:
+        fout.write("[")
+        wrote_any = False
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            if wrote_any:
+                fout.write(",")
+            fout.write("\n  ")
+            fout.write(line)
+            wrote_any = True
+        if wrote_any:
+            fout.write("\n")
+        fout.write("]\n")
+    os.replace(tmp_json, scored_json_path)
 
 
 def rewrite_directory_global_selection(
@@ -140,7 +167,7 @@ def rewrite_directory_global_selection(
             summary["selection_score_v2"] = sample_stub["value"].get("selection_score_v2")
 
         json_sibling = scored_path.parent / "scored.json"
-        if scored_path.suffix == ".jsonl" and not json_sibling.exists():
+        if scored_path.suffix == ".jsonl":
             cursor = rewrite_scored_jsonl_selection(
                 scored_path,
                 selection_results,
@@ -148,6 +175,7 @@ def rewrite_directory_global_selection(
                 config=config,
                 apply_v2_scores=apply_v2_scores,
             )
+            rewrite_scored_json_sibling_from_jsonl(scored_path, json_sibling)
         else:
             samples = load_scored_samples(scored_path)
             for sample in samples:
