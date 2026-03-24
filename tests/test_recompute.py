@@ -13,10 +13,18 @@ Covers:
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
+if "sft_label" not in sys.modules:
+    _pkg = types.ModuleType("sft_label")
+    _pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "src" / "sft_label")]
+    sys.modules["sft_label"] = _pkg
+
+import sft_label.tools.recompute as recompute_module
 from sft_label.artifacts import PASS1_CONVERSATION_STATS_FILE, PASS1_STATS_FILE, DASHBOARDS_DIRNAME
 from sft_label.inline_pass1 import merge_pass1_results
 from sft_label.inline_rows import build_row_sample_bundle, flatten_row_sample_bundles
@@ -34,6 +42,7 @@ from sft_label.tools.recompute import (
     _synthesize_monitor,
     _dedup_json_jsonl,
     _regenerate_for_dir,
+    _update_pass2_postprocess_status,
 )
 
 
@@ -1387,6 +1396,36 @@ class TestRegenerateDashboard:
         assert not any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
         assert manifest["scopes"]["global"]["explorer"]["detail_chunks"] == []
 
+    def test_regenerate_dashboard_disables_explorer_bundle_when_summary_marks_heavy_run(self, tmp_path):
+        batch = tmp_path / "batch_a"
+        batch.mkdir(parents=True, exist_ok=True)
+
+        scored = [_make_scored_sample("sample-1", value_score=6.0)]
+        (batch / "scored.json").write_text(json.dumps(scored, ensure_ascii=False), encoding="utf-8")
+        (batch / "stats_scoring.json").write_text(
+            json.dumps(recompute_value_stats_from_scored(scored), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        summary = recompute_value_stats_from_scored(scored)
+        summary["postprocess"] = {
+            "conversation_scores": {"status": "deferred", "reason": "samples=25000>=20000"},
+            "dashboard": {"status": "deferred", "reason": "samples=25000>=20000"},
+        }
+        (tmp_path / "summary_stats_scoring.json").write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
+
+        generated = run_regenerate_dashboard(str(tmp_path), pass_num="2")
+
+        global_dashboard = next(path for path in map(Path, generated) if path.name.startswith("dashboard_scoring_"))
+        data_dir = global_dashboard.with_name(f"{global_dashboard.stem}.data")
+        manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+        explorer_dir = data_dir / "explorer"
+
+        assert manifest["explorer"]["enabled"] is False
+        assert manifest["explorer"]["mode"] == "deferred"
+        assert manifest["explorer"]["reason"] == "samples=25000>=20000"
+        assert "explorer" not in manifest["scopes"]["global"]
+        assert not explorer_dir.exists()
+
     def test_inline_regenerate_pass2_preserves_existing_scored_cache(self, tmp_path):
         run_root = tmp_path / "dataset_labeled_20260324_120000"
         source_file = run_root / "dataset" / "sample.jsonl"
@@ -1591,3 +1630,43 @@ class TestCompletePostprocess:
         assert (run_dir / "batch_a" / "dashboards" / "dashboard_scoring.html").exists()
         assert (run_dir / "batch_b" / "dashboards" / "dashboard_scoring.html").exists()
         assert len(result["generated_dashboards"]) >= 3
+
+    def test_complete_postprocess_streams_global_merge_without_batch_retention(self, tmp_path, monkeypatch):
+        import sft_label.conversation as conversation_module
+
+        run_dir = self._setup_deferred_pass2_run(tmp_path)
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("complete-postprocess should not retain all per-file batches for one final merge")
+
+        monkeypatch.setattr(conversation_module, "merge_conversation_record_batches", _fail_if_called)
+
+        result = run_complete_postprocess(str(run_dir), scope="global")
+
+        assert result["files_processed"] == 2
+        assert (run_dir / "conversation_scores.json").exists()
+
+
+def test_update_pass2_postprocess_status_write_is_atomic(tmp_path, monkeypatch):
+    stats_path = tmp_path / "stats_scoring.json"
+    original = {
+        "postprocess": {
+            "conversation_scores": {"status": "deferred"},
+            "dashboard": {"status": "deferred"},
+        }
+    }
+    stats_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def _crash_dump(payload, fp, *args, **kwargs):
+        fp.write("{\"partial\":")
+        raise RuntimeError("simulated write failure")
+
+    monkeypatch.setattr(recompute_module.json, "dump", _crash_dump)
+
+    with pytest.raises(RuntimeError, match="simulated write failure"):
+        _update_pass2_postprocess_status(
+            stats_path,
+            dashboard={"status": "completed"},
+        )
+
+    assert json.loads(stats_path.read_text(encoding="utf-8")) == original

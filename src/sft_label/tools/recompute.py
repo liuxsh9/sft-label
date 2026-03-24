@@ -15,6 +15,8 @@ pipeline output). Recomputed files are marked with "recomputed": true.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1847,7 +1849,7 @@ def _complete_postprocess_dashboard_for_file(scored_path: Path):
 
 def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=False, workers=1):
     import webbrowser
-    from sft_label.conversation import merge_conversation_record_batches
+    from sft_label.conversation import finalize_conversation_records
     from sft_label.tools.visualize_value import generate_value_dashboard
 
     scope = str(scope or "global").strip().lower()
@@ -1868,6 +1870,7 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
 
     generated_dashboards = []
     conversation_results = []
+    merged_records = []
     conv_workers = _resolve_worker_count(workers, len(scored_files))
 
     if conv_workers > 1 and len(scored_files) > 1:
@@ -1878,24 +1881,28 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             }
             for index, fut in enumerate(as_completed(futures), start=1):
                 item = fut.result()
+                conv_records = item.pop("conversation_records", None) or []
+                if conv_records:
+                    merged_records.extend(conv_records)
                 conversation_results.append(item)
                 _log_complete_postprocess(
                     f"[conv {index}/{len(scored_files)}] {item['rel_label']} -> "
-                    f"{len(item['conversation_records'])} conversation(s)"
+                    f"{len(conv_records)} conversation(s)"
                 )
     else:
         for index, scored_path in enumerate(scored_files, start=1):
             item = _complete_postprocess_conversations_for_file(run_dir, scored_path)
+            conv_records = item.pop("conversation_records", None) or []
+            if conv_records:
+                merged_records.extend(conv_records)
             conversation_results.append(item)
             _log_complete_postprocess(
                 f"[conv {index}/{len(scored_files)}] {item['rel_label']} -> "
-                f"{len(item['conversation_records'])} conversation(s)"
+                f"{len(conv_records)} conversation(s)"
             )
 
     conversation_results.sort(key=lambda item: item["rel_label"])
-    merged_records = merge_conversation_record_batches(
-        [item["conversation_records"] for item in conversation_results if item["conversation_records"]]
-    )
+    merged_records = finalize_conversation_records(merged_records)
     global_conv_written = _write_conversation_records(merged_records, run_dir)
     _log_complete_postprocess(
         f"Global conversation aggregation -> {len(merged_records)} conversation(s)"
@@ -1975,9 +1982,23 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
 
 def _write_json(path, data):
     """Write JSON file, stripping internal keys for dict payloads."""
+    path = Path(path)
     if isinstance(data, dict):
         clean = {k: v for k, v in data.items() if not k.startswith("_")}
     else:
         clean = data
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(clean, f, ensure_ascii=False, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(clean, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass

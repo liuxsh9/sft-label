@@ -10,7 +10,9 @@ Runs after Pass 2 scoring. Pure computation — no LLM calls, no async.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -1668,5 +1670,17 @@ def write_conversation_scores(records, path):
     """Write conversation_scores.json."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass

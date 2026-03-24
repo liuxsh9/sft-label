@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 import pytest
 
+if "sft_label" not in sys.modules:
+    _pkg = types.ModuleType("sft_label")
+    _pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "src" / "sft_label")]
+    sys.modules["sft_label"] = _pkg
+
+import sft_label.conversation as conversation_module
 from sft_label.conversation import (
     build_conversation_key,
     group_by_conversation,
@@ -902,3 +910,20 @@ class TestWriteConversationScores:
             loaded = json.load(f)
         assert len(loaded) == 1
         assert loaded[0]["conversation_id"] == "c1"
+
+    def test_write_is_atomic_when_json_dump_fails(self, tmp_path, monkeypatch):
+        existing = [{"conversation_id": "existing"}]
+        path = tmp_path / "conversation_scores.json"
+        path.write_text(json.dumps(existing), encoding="utf-8")
+        records = [{"conversation_id": "new"}]
+
+        def _crash_dump(payload, fp, *args, **kwargs):
+            fp.write("{\"partial\":")
+            raise RuntimeError("simulated conversation write failure")
+
+        monkeypatch.setattr(conversation_module.json, "dump", _crash_dump)
+
+        with pytest.raises(RuntimeError, match="simulated conversation write failure"):
+            write_conversation_scores(records, path)
+
+        assert json.loads(path.read_text(encoding="utf-8")) == existing
