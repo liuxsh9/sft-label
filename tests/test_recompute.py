@@ -1639,6 +1639,25 @@ class TestCompletePostprocess:
         assert result["files_processed"] == 2
         assert (run_dir / "conversation_scores.json").exists()
 
+    def test_complete_postprocess_large_completed_run_keeps_explorer_enabled(self, tmp_path):
+        run_dir = self._setup_deferred_pass2_run(tmp_path)
+        summary_path = run_dir / "summary_stats_scoring.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["total_scored"] = 25000
+        summary["postprocess"] = {
+            "conversation_scores": {"status": "deferred", "reason": "samples=25000>=20000"},
+            "dashboard": {"status": "deferred", "reason": "samples=25000>=20000"},
+        }
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+        result = run_complete_postprocess(str(run_dir), scope="global")
+
+        global_dashboard = next(path for path in map(Path, result["generated_dashboards"]) if path.name.startswith("dashboard_scoring_"))
+        data_dir = global_dashboard.with_name(f"{global_dashboard.stem}.data")
+        manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        assert manifest["explorer"]["enabled"] is True
+
 
 def test_update_pass2_postprocess_status_write_is_atomic(tmp_path, monkeypatch):
     stats_path = tmp_path / "stats_scoring.json"

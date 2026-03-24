@@ -141,7 +141,6 @@ def rewrite_directory_global_selection(
         file_entries.append({
             "path": scored_path,
             "scored_count": scored_count,
-            "summaries": file_summaries,
             "monitor_totals": load_monitor_totals(scored_path.parent),
         })
 
@@ -151,12 +150,22 @@ def rewrite_directory_global_selection(
     cursor = 0
     for entry in file_entries:
         scored_path = entry["path"]
-        file_summaries = entry["summaries"]
         file_selection_results = selection_results[cursor: cursor + entry["scored_count"]]
         if len(file_selection_results) != entry["scored_count"]:
             raise ValueError(
                 f"selection result count mismatch for {scored_path}: "
                 f"expected {entry['scored_count']}, got {len(file_selection_results)}"
+            )
+        file_summaries, reread_scored_count = stream_selection_summaries(
+            scored_path,
+            config=config,
+            selection_summary_from_sample=selection_summary_from_sample,
+            load_scored_samples=load_scored_samples,
+        )
+        if reread_scored_count != entry["scored_count"]:
+            raise ValueError(
+                f"scored sample count changed while rewriting {scored_path}: "
+                f"expected {entry['scored_count']}, got {reread_scored_count}"
             )
         for summary, selection in zip(file_summaries, file_selection_results):
             summary["selection_score"] = selection["selection_score"]

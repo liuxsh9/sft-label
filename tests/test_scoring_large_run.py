@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sft_label.config import PipelineConfig
+from sft_label import scoring_large_run as scoring_large_run_module
 from sft_label.scoring import run_scoring
 
 
@@ -126,3 +127,69 @@ def test_directory_deferred_mode_preserves_finalized_global_selection_semantics(
     assert always_summary["postprocess"]["conversation_scores"]["status"] == "completed"
     assert always_summary["postprocess"]["dashboard"]["status"] == "completed"
     assert _selection_snapshot(defer_dir) == _selection_snapshot(always_dir)
+
+
+def test_directory_global_selection_rewrite_restreams_per_file_summaries(tmp_path, monkeypatch):
+    output_dir = tmp_path / "run"
+    batch_a = output_dir / "batch_a"
+    batch_b = output_dir / "batch_b"
+    batch_a.mkdir(parents=True)
+    batch_b.mkdir(parents=True)
+    scored_a = batch_a / "scored.jsonl"
+    scored_b = batch_b / "scored.jsonl"
+    scored_a.write_text("", encoding="utf-8")
+    scored_b.write_text("", encoding="utf-8")
+
+    stream_calls = {scored_a: 0, scored_b: 0}
+
+    def _stream(scored_path, **_kwargs):
+        path = Path(scored_path)
+        stream_calls[path] += 1
+        return [
+            {
+                "value_score": 5.0 if path == scored_a else 7.0,
+                "pure_quality": 5.0 if path == scored_a else 7.0,
+                "rarity_score": 5.0,
+                "labels": {"intent": "build"},
+            }
+        ], 1
+
+    monkeypatch.setattr(scoring_large_run_module, "stream_selection_summaries", _stream)
+    monkeypatch.setattr(
+        scoring_large_run_module,
+        "rewrite_scored_jsonl_selection",
+        lambda _scored_path, _selection_results, cursor, **_kwargs: cursor + 1,
+    )
+    monkeypatch.setattr(
+        scoring_large_run_module,
+        "rewrite_scored_json_sibling_from_jsonl",
+        lambda *_args, **_kwargs: None,
+    )
+
+    scoring_large_run_module.rewrite_directory_global_selection(
+        output_dir=output_dir,
+        input_dir=output_dir,
+        config=PipelineConfig(),
+        pass2_stats_file="stats_scoring.json",
+        pass2_dashboard_file="dashboard_scoring.html",
+        discover_scored_output_files=lambda _out: [scored_a, scored_b],
+        selection_summary_from_sample=lambda _sample, config=None: {},
+        compute_selection_scores_from_summaries=lambda summaries, config=None: [
+            {"selection_score": float(index + 1), "intra_class_rank": float(index + 1)}
+            for index, _ in enumerate(summaries)
+        ],
+        apply_v2_scores=lambda samples, config=None: None,
+        load_scored_samples=lambda _path: [],
+        write_scored_samples=lambda _path, _samples: None,
+        compute_value_stats_from_summaries=lambda file_summaries, monitor_totals, scored_count: {
+            "total_scored": scored_count,
+            "score_distributions": {},
+        },
+        load_monitor_totals=lambda _dir: {},
+        load_existing_pass2_stats=lambda _dir: {},
+        relative_file_label=lambda file_label_source, _input_dir: Path(file_label_source).name,
+        generate_dashboard=False,
+    )
+
+    assert stream_calls[scored_a] == 2
+    assert stream_calls[scored_b] == 2

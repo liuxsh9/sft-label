@@ -887,6 +887,25 @@ class TestAggregateConversations:
 
         assert merged == expected
 
+    def test_streaming_iterator_path_avoids_global_group_materialization(self, monkeypatch):
+        def _fail_group_by_conversation(_samples):
+            raise AssertionError("streaming aggregation should not call group_by_conversation")
+
+        monkeypatch.setattr(conversation_module, "group_by_conversation", _fail_group_by_conversation)
+
+        records = aggregate_conversations(
+            iter(
+                [
+                    _slice("c1", 1, 2, value_score=5.0),
+                    _slice("c1", 2, 2, value_score=7.0),
+                    _slice("c2", 1, 2, value_score=6.0),
+                    _slice("c2", 2, 2, value_score=8.0),
+                ]
+            )
+        )
+
+        assert [record["conversation_id"] for record in records] == ["c1", "c2"]
+
 
 # ── TestWriteConversationScores ──
 

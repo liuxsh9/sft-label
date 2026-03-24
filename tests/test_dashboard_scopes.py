@@ -236,6 +236,58 @@ def test_build_scope_tree_does_not_duplicate_leaf_conversations_into_parent_scop
     assert tree["scopes"]["global"]["raw_conversations"] == []
 
 
+def test_build_scope_tree_can_skip_loading_leaf_conversation_payloads(tmp_path):
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+
+    _write_json(
+        artifact_dir / PASS2_STATS_FILE,
+        {
+            "input_file": "code/sample.jsonl",
+            "total_scored": 1,
+            "total_failed": 0,
+            "score_distributions": {"value_score": {"mean": 6.0, "min": 6.0, "max": 6.0}},
+            "histograms": {},
+            "flag_counts": {},
+        },
+    )
+    _write_json(
+        artifact_dir / "conversation_scores.json",
+        [
+            {
+                "conversation_id": "conv-1",
+                "conversation_key": "code/sample.jsonl::conv-1",
+                "source_file": "code/sample.jsonl",
+                "turn_count": 2,
+                "conv_value": 6.0,
+                "conv_selection": 6.3,
+                "peak_complexity": 7,
+            }
+        ],
+    )
+    _write_json(
+        meta_root / PASS2_SUMMARY_STATS_FILE,
+        {
+            "input_path": "dataset",
+            "total_scored": 25000,
+            "total_failed": 0,
+            "score_distributions": {"value_score": {"mean": 6.0, "min": 6.0, "max": 6.0}},
+            "histograms": {},
+            "flag_counts": {},
+            "postprocess": {
+                "conversation_scores": {"status": "deferred", "reason": "samples=25000>=20000"},
+                "dashboard": {"status": "deferred", "reason": "samples=25000>=20000"},
+            },
+        },
+    )
+
+    tree = build_scope_tree(meta_root, include_pass2_conversations=False)
+
+    file_scope = tree["scopes"]["file:code/sample.jsonl"]
+    assert file_scope["raw_conversations"] == []
+    assert file_scope["conversation_data_path"] is None
+
+
 def test_build_scope_tree_on_run_root_prefers_real_source_paths_over_meta_artifacts(tmp_path):
     run_root = tmp_path / "dataset_labeled_20260324_120000"
     dataset_file = run_root / "dataset" / "code" / "sample.jsonl"

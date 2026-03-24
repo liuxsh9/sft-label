@@ -155,6 +155,8 @@ def _resolve_explorer_policy(stats: dict | None) -> dict:
         if reason:
             policy["reason"] = str(reason)
         return policy
+    if status == "completed":
+        return {"enabled": True, "mode": "completed"}
 
     total_scored = int((stats or {}).get("total_scored") or 0)
     threshold = max(int(PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD), 1)
@@ -434,13 +436,18 @@ def _single_scope_payload(run_dir: Path, samples: list[dict], pass2_viz: dict, s
     }
 
 
-def _tree_payload(run_dir: Path) -> tuple[dict, list[dict], dict | None]:
+def _tree_payload(
+    run_dir: Path,
+    *,
+    include_conversations: bool = True,
+) -> tuple[dict, list[dict], dict | None]:
     tree = build_scope_tree(
         run_dir,
         pass1_stats_file=PASS1_STATS_FILE,
         pass1_summary_file=PASS1_SUMMARY_STATS_FILE,
         pass2_stats_file=PASS2_STATS_FILE,
         pass2_summary_file=PASS2_SUMMARY_STATS_FILE,
+        include_pass2_conversations=include_conversations,
     )
     scopes = {}
     explorer_sources = []
@@ -553,8 +560,23 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
     if scored_file is None or stats_file == PASS2_SUMMARY_STATS_FILE:
         if not quiet:
             print("  Scoring dashboard: building scope tree")
-        payload, explorer_sources, root_pass2_stats = _tree_payload(run_dir)
-        explorer_policy = _resolve_explorer_policy(root_pass2_stats)
+        stats_hint = {}
+        stats_path = run_dir / stats_file
+        if stats_path.exists():
+            try:
+                with open(stats_path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    stats_hint = loaded
+            except (OSError, json.JSONDecodeError):
+                stats_hint = {}
+        explorer_policy = _resolve_explorer_policy(stats_hint)
+        payload, explorer_sources, root_pass2_stats = _tree_payload(
+            run_dir,
+            include_conversations=bool(explorer_policy.get("enabled", True)),
+        )
+        if not stats_hint and isinstance(root_pass2_stats, dict):
+            explorer_policy = _resolve_explorer_policy(root_pass2_stats)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
         conv_records = _load_conversation_scores(run_dir)

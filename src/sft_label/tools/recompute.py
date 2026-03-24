@@ -1808,19 +1808,20 @@ def _complete_postprocess_conversations_for_file(run_dir: Path, scored_path: Pat
     rel_label = _relative_file_label(scored_path, run_dir)
     conv_records = _stream_conversation_records(scored_path)
     written = _write_conversation_records(conv_records, scored_path.parent)
+    conv_count = len(conv_records)
     stats_path = _per_file_pass2_stats_path(scored_path)
     if stats_path.exists():
         _update_pass2_postprocess_status(
             stats_path,
             conversation=_completed_postprocess_payload(
                 artifact=written.get("conversation_scores"),
-                count=len(conv_records),
+                count=conv_count,
             ),
         )
     return {
         "scored_path": scored_path,
         "rel_label": rel_label,
-        "conversation_records": conv_records,
+        "conversation_count": conv_count,
         "conversation_path": written.get("conversation_scores"),
         "stats_path": stats_path if stats_path.exists() else None,
     }
@@ -1850,6 +1851,7 @@ def _complete_postprocess_dashboard_for_file(scored_path: Path):
 def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=False, workers=1):
     import webbrowser
     from sft_label.conversation import finalize_conversation_records
+    from sft_label.tools.dashboard_aggregation import iter_data_file
     from sft_label.tools.visualize_value import generate_value_dashboard
 
     scope = str(scope or "global").strip().lower()
@@ -1870,6 +1872,7 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
 
     generated_dashboards = []
     conversation_results = []
+    conversation_paths = []
     merged_records = []
     conv_workers = _resolve_worker_count(workers, len(scored_files))
 
@@ -1881,27 +1884,35 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             }
             for index, fut in enumerate(as_completed(futures), start=1):
                 item = fut.result()
-                conv_records = item.pop("conversation_records", None) or []
-                if conv_records:
-                    merged_records.extend(conv_records)
+                conv_count = int(item.get("conversation_count") or 0)
+                conv_path = item.get("conversation_path")
+                if conv_path:
+                    conversation_paths.append(Path(conv_path))
                 conversation_results.append(item)
                 _log_complete_postprocess(
                     f"[conv {index}/{len(scored_files)}] {item['rel_label']} -> "
-                    f"{len(conv_records)} conversation(s)"
+                    f"{conv_count} conversation(s)"
                 )
     else:
         for index, scored_path in enumerate(scored_files, start=1):
             item = _complete_postprocess_conversations_for_file(run_dir, scored_path)
-            conv_records = item.pop("conversation_records", None) or []
-            if conv_records:
-                merged_records.extend(conv_records)
+            conv_count = int(item.get("conversation_count") or 0)
+            conv_path = item.get("conversation_path")
+            if conv_path:
+                conversation_paths.append(Path(conv_path))
             conversation_results.append(item)
             _log_complete_postprocess(
                 f"[conv {index}/{len(scored_files)}] {item['rel_label']} -> "
-                f"{len(conv_records)} conversation(s)"
+                f"{conv_count} conversation(s)"
             )
 
     conversation_results.sort(key=lambda item: item["rel_label"])
+    for conv_path in sorted(conversation_paths):
+        if not conv_path.exists():
+            continue
+        for record in iter_data_file(conv_path):
+            if isinstance(record, dict):
+                merged_records.append(record)
     merged_records = finalize_conversation_records(merged_records)
     global_conv_written = _write_conversation_records(merged_records, run_dir)
     _log_complete_postprocess(
@@ -1916,6 +1927,9 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             artifact=global_conv_written.get("conversation_scores"),
             count=len(merged_records),
         )
+        postprocess["dashboard"] = _completed_postprocess_payload()
+        summary["postprocess"] = postprocess
+        _write_json(summary_path, summary)
         try:
             out_path = generate_value_dashboard(
                 run_dir,
