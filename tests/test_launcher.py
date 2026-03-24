@@ -583,6 +583,26 @@ def test_build_smart_resume_plan_routes_to_resumed_score_when_hidden_checkpoint_
     assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
 
 
+def test_build_smart_resume_plan_routes_to_resumed_score_when_visible_checkpoint_artifact_exists(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.batch_a.checkpoint.jsonl").write_text("", encoding="utf-8")
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path), "--resume"]
+
+
 def test_build_smart_resume_plan_routes_to_run_resume_when_checkpoint_exists(tmp_path):
     (tmp_path / "checkpoint.json").write_text('{"status":"in_progress"}', encoding="utf-8")
     artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"

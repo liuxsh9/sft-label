@@ -23,7 +23,9 @@ Selected runtime knobs (concurrency/rps/timeout/retries) can be overridden via C
 
 import argparse
 import asyncio
+import json
 import os
+import shlex
 import socket
 import sys
 import time
@@ -476,6 +478,31 @@ def _score_postprocess_payload_for_publish_guard(launched_args, result):
     return postprocess if isinstance(postprocess, dict) else {}
 
 
+def _load_regenerate_postprocess_payload(run_dir: str | os.PathLike[str] | None):
+    if not run_dir:
+        return None
+
+    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE, PASS2_SUMMARY_STATS_FILE_LEGACY
+
+    root = Path(run_dir)
+    candidates = (
+        root / PASS2_SUMMARY_STATS_FILE,
+        root / PASS2_SUMMARY_STATS_FILE_LEGACY,
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        postprocess = payload.get("postprocess")
+        return postprocess if isinstance(postprocess, dict) else {}
+    return None
+
+
 def _auto_publish_pass2_guard(
     launched_args,
     result,
@@ -483,6 +510,8 @@ def _auto_publish_pass2_guard(
     run_dir: str | None = None,
 ) -> tuple[bool, str | None]:
     postprocess = _score_postprocess_payload_for_publish_guard(launched_args, result)
+    if postprocess is None and launched_args.command == "regenerate-dashboard":
+        postprocess = _load_regenerate_postprocess_payload(run_dir or getattr(launched_args, "input", None))
     if postprocess is None:
         return True, None
 
@@ -506,12 +535,13 @@ def _auto_publish_pass2_guard(
         observed_text = ", ".join(observed) if observed else "none"
         blocked_text = ", ".join(failures)
         run_dir_arg = str(run_dir) if run_dir else "<run_dir>"
+        command_run_dir_arg = shlex.quote(run_dir_arg) if run_dir else run_dir_arg
         return (
             False,
             _start_msg(
                 lang,
-                f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。请先运行 `sft-label complete-postprocess --input {run_dir_arg}`。",
-                f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. Run `sft-label complete-postprocess --input {run_dir_arg}` first.",
+                f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。请先运行 `sft-label complete-postprocess --input {command_run_dir_arg}`。",
+                f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. Run `sft-label complete-postprocess --input {command_run_dir_arg}` first.",
             ),
         )
 
