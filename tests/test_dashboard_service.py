@@ -424,9 +424,12 @@ def test_publish_run_dashboards_rejects_incomplete_scoring_postprocess_state(
         conversation_status=conversation_status,
         dashboard_status=dashboard_status,
     )
+    assets_dir = Path(service.web_root) / "assets" / "v1"
+    assert not assets_dir.exists()
 
     with pytest.raises(ValueError, match=expected):
         publish_run_dashboards(service, run_dir, config_path=config_path)
+    assert not assets_dir.exists()
 
 
 def test_publish_run_dashboards_allows_labeling_only_when_pass2_not_applicable(tmp_path):

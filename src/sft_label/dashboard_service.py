@@ -892,6 +892,15 @@ def _scoring_dashboard_present(html_files: list[Path]) -> bool:
     return any(_classify_dashboard_key(path.name) == "scoring" for path in html_files)
 
 
+def _assert_dashboard_bundle_complete(html_files: list[Path]) -> None:
+    for src_html in html_files:
+        data_dir = src_html.with_name(f"{src_html.stem}.data")
+        if not data_dir.is_dir():
+            raise ValueError(
+                f"Dashboard bundle is incomplete for {src_html.name}: missing companion data directory {data_dir.name}"
+            )
+
+
 def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_files: list[Path]) -> None:
     if not _scoring_dashboard_present(html_files):
         return
@@ -980,14 +989,15 @@ def publish_run_dashboards(
         if configured is not None:
             service = configured
 
-        sync_dashboard_service_runtime_assets(service)
         run_dir = Path(run_dir).expanduser().resolve()
         dashboards_dir = _resolve_dashboards_dir(run_dir)
         html_files = sorted(dashboards_dir.glob("*.html"))
         if not html_files:
             raise FileNotFoundError(f"No dashboard HTML files found under {dashboards_dir}")
 
+        _assert_dashboard_bundle_complete(html_files)
         _assert_scoring_publish_eligible(run_dir, dashboards_dir, html_files)
+        sync_dashboard_service_runtime_assets(service)
 
         run_id = _allocate_run_id(service, run_dir)
         published_root = service.web_root_path / _RUNS_DIRNAME / run_id
