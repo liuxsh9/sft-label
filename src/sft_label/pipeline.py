@@ -2361,7 +2361,6 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
     dashboard_file = pass1_dashboard_filename(suffix)
     failed_samples_file = f"failed_samples{suffix}.jsonl"
     unmapped_events_file = f"unmapped_events{suffix}.jsonl"
-    unmapped_events_file = f"unmapped_events{suffix}.jsonl"
 
     if collector.inline_output:
         merge_result = merge_pass1_results(

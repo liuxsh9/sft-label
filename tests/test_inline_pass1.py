@@ -1505,3 +1505,12 @@ def test_estimate_directory_workload_streams_inline_jsonl_planning(monkeypatch, 
     assert estimate.total_samples == 3
     assert estimate.total_labeled_samples == 3
     assert events[:4] == [("yield", 0), ("prepare", 1), ("yield", 1), ("prepare", 1)]
+
+
+def test_flush_file_output_declares_unmapped_events_filename_once():
+    import inspect
+
+    from sft_label.pipeline import flush_file_output
+
+    source = inspect.getsource(flush_file_output)
+    assert source.count('unmapped_events_file = f"unmapped_events{suffix}.jsonl"') == 1
