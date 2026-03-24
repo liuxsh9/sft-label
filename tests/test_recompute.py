@@ -13,16 +13,9 @@ Covers:
 from __future__ import annotations
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import pytest
-
-if "sft_label" not in sys.modules:
-    _pkg = types.ModuleType("sft_label")
-    _pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "src" / "sft_label")]
-    sys.modules["sft_label"] = _pkg
 
 import sft_label.tools.recompute as recompute_module
 from sft_label.artifacts import PASS1_CONVERSATION_STATS_FILE, PASS1_STATS_FILE, DASHBOARDS_DIRNAME
