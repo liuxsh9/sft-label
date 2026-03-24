@@ -243,7 +243,6 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
                 continue
             if not is_failure_artifact and not _is_usable_pass2_jsonl_artifact(
                 candidate,
-                allow_trailing_corrupt_line=True,
             ):
                 continue
             chosen_path = candidate
@@ -3850,11 +3849,11 @@ def _resolve_pass2_resume_path(output_dir: Path, filename: str) -> Path | None:
     checkpoint = _pass2_checkpoint_path(output_dir, filename)
     final = output_dir / filename
 
-    if _is_usable_pass2_jsonl_artifact(working, allow_trailing_corrupt_line=True):
+    if _is_usable_pass2_jsonl_artifact(working):
         return working
     if _is_usable_pass2_jsonl_artifact(checkpoint):
         return checkpoint
-    if _is_usable_pass2_jsonl_artifact(final, allow_trailing_corrupt_line=True):
+    if _is_usable_pass2_jsonl_artifact(final):
         return final
     return None
 
@@ -3863,6 +3862,16 @@ def _load_resumed_value_cache(output_dir: Path) -> dict[str, dict]:
     """Load existing scored values keyed by sample id from scored.jsonl."""
     resumed_values: dict[str, dict] = {}
     scored_jsonl_path = _resolve_pass2_resume_path(output_dir, "scored.jsonl")
+    if scored_jsonl_path is None:
+        output_dir = Path(output_dir)
+        for candidate in (
+            _pass2_working_path(output_dir, "scored.jsonl"),
+            _pass2_checkpoint_path(output_dir, "scored.jsonl"),
+            output_dir / "scored.jsonl",
+        ):
+            if _is_usable_pass2_jsonl_artifact(candidate, allow_trailing_corrupt_line=True):
+                scored_jsonl_path = candidate
+                break
     if scored_jsonl_path is None:
         return resumed_values
 
@@ -4497,19 +4506,22 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
             final_path = output_dir / name
             source_path = None
             if working_path.exists():
-                try:
-                    if working_path.stat().st_size > 0:
-                        source_path = working_path
-                    else:
-                        working_path.unlink()
-                except OSError:
-                    pass
+                if _is_usable_pass2_jsonl_artifact(
+                    working_path,
+                    allow_empty=name in failure_names,
+                ):
+                    source_path = working_path
+                else:
+                    try:
+                        if working_path.stat().st_size <= 0:
+                            working_path.unlink()
+                    except OSError:
+                        pass
             allow_empty = name in failure_names
             checkpoint_usable = _is_usable_pass2_jsonl_artifact(checkpoint_path, allow_empty=allow_empty)
             final_usable = _is_usable_pass2_jsonl_artifact(
                 final_path,
                 allow_empty=allow_empty,
-                allow_trailing_corrupt_line=True,
             )
             if source_path is None and checkpoint_usable:
                 source_path = checkpoint_path

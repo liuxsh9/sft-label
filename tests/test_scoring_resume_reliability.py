@@ -203,6 +203,90 @@ def test_resume_fastpath_ignores_single_corrupt_working_artifact(tmp_path):
     assert [row["value"]["value_score"] for row in final_scored_rows] == [9.4]
 
 
+def test_resume_setup_does_not_copy_corrupt_nonempty_working_over_checkpoint(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    samples = [_sample("sample-0"), _sample("sample-1")]
+    _write_jsonl(labeled_path, samples)
+
+    checkpoint_scored_rows = [
+        {
+            **samples[0],
+            "value": _value_payload(score=8.8, rarity_score=5.2, confidence=0.94),
+        }
+    ]
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), checkpoint_scored_rows)
+    _pass2_working_path(tmp_path, "scored.jsonl").write_text('{"id":"sample-0","value":', encoding="utf-8")
+
+    with patch("sft_label.scoring._reset_pass2_working_files", side_effect=RuntimeError("stop-after-resume-setup")):
+        with patch("sft_label.scoring.score_one", side_effect=AssertionError("score_one should not run")):
+            try:
+                asyncio.run(
+                    _run_scoring_file_chunked(
+                        labeled_path,
+                        tmp_path,
+                        None,
+                        0,
+                        _quiet_chunked_config(enable_stage_recovery_sweep=False),
+                        resume=True,
+                        generate_dashboard=False,
+                        show_progress=False,
+                        print_summary=False,
+                        quiet=True,
+                    )
+                )
+            except RuntimeError as exc:
+                assert str(exc) == "stop-after-resume-setup"
+            else:
+                raise AssertionError("Expected resume setup interruption")
+
+    assert _read_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl")) == checkpoint_scored_rows
+
+
+def test_resume_fastpath_rejects_trailing_corrupt_working_and_uses_checkpoint(tmp_path):
+    labeled_path = tmp_path / "labeled.jsonl"
+    samples = [_sample("sample-0")]
+    _write_jsonl(labeled_path, samples)
+
+    checkpoint_scored_rows = [
+        {
+            **samples[0],
+            "value": _value_payload(score=8.2, rarity_score=5.0, confidence=0.92),
+        }
+    ]
+    checkpoint_monitor_rows = [_monitor(samples[0]["id"], status="checkpoint-source")]
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), checkpoint_scored_rows)
+    _write_jsonl(_pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"), checkpoint_monitor_rows)
+
+    working_scored = _pass2_working_path(tmp_path, "scored.jsonl")
+    working_scored.write_text(
+        json.dumps(checkpoint_scored_rows[0], ensure_ascii=False) + "\n" + '{"id":"sample-0","value":' + "\n",
+        encoding="utf-8",
+    )
+    _write_jsonl(_pass2_working_path(tmp_path, "monitor_value.jsonl"), checkpoint_monitor_rows)
+
+    async def fail_score_one(*_args, **_kwargs):
+        raise AssertionError("score_one must not run during resume fast-path finalize")
+
+    with patch("sft_label.scoring.score_one", side_effect=fail_score_one):
+        asyncio.run(
+            _run_scoring_file_chunked(
+                labeled_path,
+                tmp_path,
+                None,
+                0,
+                _quiet_chunked_config(enable_stage_recovery_sweep=False),
+                resume=True,
+                generate_dashboard=False,
+                show_progress=False,
+                print_summary=False,
+                quiet=True,
+            )
+        )
+
+    final_scored_rows = _read_jsonl(tmp_path / "scored.jsonl")
+    assert [row["value"]["value_score"] for row in final_scored_rows] == [8.2]
+
+
 def test_resume_setup_preserves_checkpoint_over_final_when_no_working_exists(tmp_path):
     labeled_path = tmp_path / "labeled.jsonl"
     samples = [_sample(f"sample-{idx}") for idx in range(2)]
