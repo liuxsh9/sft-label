@@ -12,6 +12,7 @@ TAG_ALIASES = {
     "c++": "cpp",
     "c#": "csharp",
     "f#": "fsharp",
+    "bash": "shell",
     # concept — algorithm sub-topics
     "dynamic-programming": "algorithms",
     "dp": "algorithms",
@@ -48,10 +49,15 @@ TAG_ALIASES = {
     "code-correction": "bug-fixing",
     # domain
     "security": "cybersecurity",
+    "ml": "machine-learning",
     # intent — modify aliases
     "refactor": "modify",
     "optimize": "modify",
     "transform": "modify",
+    # difficulty
+    "easy": "beginner",
+    "medium": "intermediate",
+    "hard": "advanced",
     # language — common abbreviations
     "objc": "objective-c",
     "objective_c": "objective-c",
@@ -64,6 +70,18 @@ TAG_ALIASES = {
     "regular-expressions": "algorithms",
     "async-await": "concurrency",
     "system-programming": "concurrency",
+    # agentic — common tool-name emissions
+    "grep": "static-analysis",
+    "read": "file-operations",
+    "run-script": "code-execution",
+    "run_script": "code-execution",
+    "mobile_list_available_devices": "ui-automation",
+    "mobile-use-device": "ui-automation",
+    "mobile_use_device": "ui-automation",
+    "mobile-list-available-devices": "ui-automation",
+    "mobile_list_apps": "ui-automation",
+    "mobile_launch_app": "ui-automation",
+    "mobile_list_elements_on_screen": "ui-automation",
 }
 
 

@@ -47,6 +47,7 @@ Disambiguation:
 - User asks "explain this error" with a specific traceback → `debug` (NOT `learn`)
 - Decision + implementation in one request → `build` (implementation is the primary goal)
 - Pure comparison without implementation request → `decide`; pure knowledge comparison → `learn`
+- process words like search/explore/analyze do not define intent; label the end goal
 
 ### Language (multi-select)
 What programming languages appear in the conversation?
@@ -104,7 +105,7 @@ Rules:
 - A query can span multiple domains (e.g., "SaaS payment" → web-backend + e-commerce + financial-technology)
 - Pure algorithm practice with no application context → empty
 - Prefer the most specific domain tag
-- "algorithm", "data-structure", "documentation" are NOT domains. Algorithm/DS practice → concept:algorithms or concept:data-structures, domain should be empty. Writing docs → task:documentation, not a domain.
+- "algorithm", "data-structure", "documentation", and generic parents like "web"/"database"/"ml" are NOT domains. Algorithm/DS practice → concept:algorithms or concept:data-structures; writing docs → task:documentation.
 - **Cardinality norm**: Typically 0-2 domains. More than 2 is rare and should have strong justification.
 
 ### Task (multi-select)
@@ -178,6 +179,7 @@ Rules for output:
 - Multi-select fields are arrays (can be empty [])
 - Single-select fields are strings
 - confidence: 0.0-1.0 per dimension (how sure you are)
+- Never output placeholders like "unspecified", "unknown", or "no specific ..."; use empty fields instead
 - unmapped: [{"dimension":"...","value":"..."}] for missing tags only; use [] if none, with short kebab-case values
 - The conversation may contain XML-like tags (<solution>, <tool_call>, etc.), diff markers, or other formatting from the original data source. Ignore all such formatting — focus only on the semantic content."""
 
@@ -207,12 +209,12 @@ Disambiguation:
 - Working code to restructure/optimize/migrate → `modify` (NOT `build`)
 - Decision + implementation in one request → `build` (implementation is primary)
 - Pure comparison without implementation → `decide`; pure knowledge comparison → `learn`
-- decide is RARE (<3%). Requires the user to be choosing between options for a real project decision. "What's the difference between X and Y?" → `learn`, NOT `decide`
+- process words like search/explore/analyze do not define intent; label the end goal. "What's the difference between X and Y?" → `learn`, NOT `decide`
 
 ### Language (multi-select)
 Common: python, javascript, typescript, java, go, rust, c, cpp, csharp, ruby, php, swift, kotlin, sql, html, css, shell, dockerfile, yaml, json, markdown, hcl, xml, toml
 Other: ada, apl, assembly, bazel, clojure, cmake, cobol, crystal, dart, dotenv, elixir, erb, erlang, fortran, fsharp, gradle, groovy, handlebars, haskell, ini, jinja, julia, latex, liquid, lisp, lua, makefile, matlab, maven, nginx-config, nim, objective-c, ocaml, perl, powershell, prolog, properties, r, racket, restructuredtext, ruby, scala, scheme, smalltalk, solidity, verilog, vhdl, vyper, zig
-Rules: Detect from code blocks and framework mentions (Django→python, React→typescript). Config formats count. No language → empty.
+Rules: Infer from code/framework mentions. Config formats count. No language → empty.
 
 ### Domain (multi-select)
 - api-development: APIs as PRIMARY deliverable (REST/GraphQL design, OpenAPI). A web app that exposes endpoints as part of its function → web-backend, not this
@@ -251,13 +253,13 @@ Rules:
 - Tag application SCENARIO, not technology. Typically 0-2 domains.
 - Pure algorithm/DS practice with no application or contest context → domain empty
 - Code merely using DB/API/Docker ≠ database-administration/api-development/devops — domain must be PRIMARY focus
-- "algorithm", "data-structure", "documentation" are NOT domains
+- "algorithm", "data-structure", "documentation", and generic parents like "web"/"database"/"ml" are NOT domains
 
 ### Task (multi-select)
 - api-design: Define endpoints, request/response formats
 - bug-fixing: Fix bugs, identify root cause
-- code-completion: Fill in INCOMPLETE code — user provides partial function/class with blanks, TODOs, or "..." and asks to complete it. NOT writing new code from a description (→ feature-implementation)
-- code-explanation: Explain how EXISTING code works. The primary output is explanation, not new code. If the response mainly produces new code with brief explanation → feature-implementation, not this
+- code-completion: Fill in partial code with blanks/TODOs/"...". NOT writing new code from a description (→ feature-implementation)
+- code-explanation: Explain existing code. If the response mainly writes new code, use feature-implementation instead
 - code-exploration: Navigate codebase, trace call chains
 - code-optimization: Improve performance (ONLY when user explicitly requests performance improvement)
 - code-refactoring: Restructure without changing behavior
@@ -308,7 +310,7 @@ Return ONLY valid JSON (no markdown, no explanation):
   "unmapped": []
 }
 
-Rules: Use lowercase kebab-case IDs only. Multi-select=[] when none; single-select="" when none; never use "none". confidence: 0.0-1.0. unmapped: [{"dimension":"...","value":"..."}] or [].
+Rules: Use lowercase kebab-case IDs only. Multi-select=[] when none; single-select="" when none; never use "none"; never output placeholders like "unspecified", "unknown", or "no specific ...". confidence: 0.0-1.0. unmapped: [{"dimension":"...","value":"..."}] or [].
 Ignore XML/diff/formatting tokens; evaluate semantic content only."""
 
 
