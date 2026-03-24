@@ -2568,6 +2568,8 @@ def _selection_summary_from_sample(sample, config=None):
         "value_score": value.get("value_score"),
         "value_score_v2": value.get("value_score_v2"),
         "confidence": value.get("confidence"),
+        "flags": list(value.get("flags") or []),
+        "thinking_mode": value.get("thinking_mode"),
         "selection_score_v2": value.get("selection_score_v2"),
         "selection_features": selection_features,
         "inferred_domain": inferred_domain,
@@ -4016,7 +4018,6 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
     )
 
     corrected_file_stats = []
-    all_conv_records = []
     for source_file in source_files:
         artifact_dir = target.layout.file_artifact_dir(source_file)
         scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
@@ -4024,8 +4025,6 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
             artifact_dir,
             limit=limit,
         )
-        if conv_records:
-            all_conv_records.extend(conv_records)
         _generate_inline_file_dashboard(target, source_file)
 
         stats = _load_existing_pass2_stats(artifact_dir)
@@ -4065,12 +4064,9 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
         _write_json_atomic(target.layout.meta_root / PASS2_SUMMARY_STATS_FILE, corrected_summary)
         summary = corrected_summary
 
-    if all_conv_records:
-        _write_json_atomic(target.layout.meta_root / "conversation_scores.json", all_conv_records)
-
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
-        generate_value_dashboard(
+        out_path = generate_value_dashboard(
             target.layout.meta_root,
             scored_file=None,
             stats_file=PASS2_SUMMARY_STATS_FILE,
@@ -4078,6 +4074,12 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
                 pass2_global_dashboard_filename(target.layout.dataset_root_name)
             )),
             quiet=True,
+        )
+        prune_dashboard_bundles(
+            target.layout.meta_root,
+            keep_paths=[out_path],
+            kind="scoring",
+            recursive=False,
         )
     except Exception:
         pass
@@ -4108,7 +4110,7 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
         config = PipelineConfig()
 
     input_path = Path(input_path)
-    if _looks_like_legacy_scoring_run_dir(input_path):
+    if _looks_like_legacy_scoring_run_dir(input_path) and not (input_path / "meta_label_data").is_dir():
         inline_target = None
         print(f"  Pass 2 input layout: standard run dir ({input_path.name})")
     else:
@@ -4123,6 +4125,8 @@ async def run_scoring(input_path, output_dir=None, tag_stats_path=None,
                 print(f"  Pass 2 input layout: inline mirrored run ({input_path.name})")
             else:
                 print(f"  Pass 2 input layout: inline mirrored dataset ({input_path.name})")
+        elif _looks_like_legacy_scoring_run_dir(input_path):
+            print(f"  Pass 2 input layout: standard run dir ({input_path.name})")
         elif input_path.is_dir():
             print(f"  Pass 2 input layout: standard directory ({input_path.name})")
         else:
@@ -6823,6 +6827,11 @@ def _merge_value_stats(file_stats_list):
         all_dist_keys.update(s.get("score_distributions", {}).keys())
     merged_distributions = {}
     for key in all_dist_keys:
+        if len(file_stats_list) == 1:
+            single_dist = (file_stats_list[0].get("score_distributions") or {}).get(key)
+            if isinstance(single_dist, dict) and single_dist:
+                merged_distributions[key] = dict(single_dist)
+                continue
         # Collect raw values from all files (attached by compute_value_stats)
         all_values = []
         for s in file_stats_list:
@@ -6943,6 +6952,23 @@ def _merge_value_stats(file_stats_list):
         for flag, count in s.get("flag_counts", {}).items():
             merged_flags[flag] = merged_flags.get(flag, 0) + count
     merged["flag_counts"] = dict(sorted(merged_flags.items(), key=lambda x: -x[1]))
+    merged_flag_impacts = {}
+    for s in file_stats_list:
+        for flag, info in (s.get("flag_value_impact") or {}).items():
+            count = int(info.get("count", 0) or 0)
+            if count <= 0:
+                continue
+            entry = merged_flag_impacts.setdefault(flag, {"sum": 0.0, "count": 0})
+            entry["sum"] += float(info.get("mean_value", 0) or 0) * count
+            entry["count"] += count
+    merged["flag_value_impact"] = {
+        flag: {
+            "mean_value": round(payload["sum"] / payload["count"], 2),
+            "count": payload["count"],
+        }
+        for flag, payload in merged_flag_impacts.items()
+        if payload["count"] > 0
+    }
 
     # Merge value_by_tag: weighted mean across files
     all_tag_dims = set()

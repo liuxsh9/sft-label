@@ -426,8 +426,16 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
     assert summary["files_processed"] == 2
     assert (run_root / "meta_label_data" / "summary_stats_scoring.json").exists()
     assert (run_root / "meta_label_data" / "conversation_scores.json").exists()
-    assert len(list((run_root / "meta_label_data" / DASHBOARDS_DIRNAME).glob("dashboard_scoring*.html"))) >= 1
+    dashboards_dir = run_root / "meta_label_data" / DASHBOARDS_DIRNAME
+    assert (dashboards_dir / "dashboard_scoring_dataset.html").exists()
+    assert not (dashboards_dir / "dashboard_scoring.html").exists()
     assert {row["file"] for row in summary.get("per_file_summary", [])} == {"code/a.jsonl", "multi/b.jsonl"}
+
+    canonical_conv = json.loads((run_root / "meta_label_data" / "conversation_scores.json").read_text(encoding="utf-8"))
+    assert canonical_conv
+    assert canonical_conv[0]["merged_labels"]["intent"] in {"debug", "modify"}
+    assert "slices" in canonical_conv[0]
+    assert canonical_conv[0]["detail"]["conv_intra_class_rank"] is not None
 
     updated_b = [json.loads(line) for line in file_b.read_text(encoding="utf-8").splitlines()]
     turns = updated_b[0]["extra_info"]["unique_info"]["data_label"]["turns"]
@@ -440,6 +448,70 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
         or conversation["conversation_key"].startswith("conversation_uid:")
     )
     assert conversation["detail"]["turn_value_std"] is not None
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_existing_inline_run_dir_prefers_inline_layout_over_legacy_root_markers(tmp_path):
+    from sft_label.artifacts import PASS1_SUMMARY_STATS_FILE, PASS2_SUMMARY_STATS_FILE
+    from sft_label.scoring import run_scoring
+
+    run_root = tmp_path / "dataset_labeled_20260311_120000"
+    source_file = run_root / "dataset" / "train.jsonl"
+    rows = _inline_rows_for_file(
+        source_file,
+        [{
+            "id": "conv-1",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "a1"},
+            ],
+        }],
+        [[_full_labels("build")]],
+    )
+    _write_jsonl(source_file, rows)
+
+    meta_root = run_root / "meta_label_data"
+    meta_root.mkdir(parents=True, exist_ok=True)
+    meta_summary = meta_root / PASS1_SUMMARY_STATS_FILE
+    meta_summary.write_text(
+        json.dumps({
+            "total_samples": 100,
+            "distribution_total_samples": 80,
+            "tag_distributions": {"intent": {"build": 80}},
+        }),
+        encoding="utf-8",
+    )
+
+    # Simulate a previously mis-run Pass 2 that left top-level legacy markers behind.
+    (run_root / PASS2_SUMMARY_STATS_FILE).write_text("{}", encoding="utf-8")
+    manifest_dir = run_root / "manifest"
+    manifest_dir.mkdir()
+    (manifest_dir / "stats_labeling_manifest.json").write_text(
+        json.dumps({
+            "total_samples": 1,
+            "distribution_total_samples": 1,
+            "tag_distributions": {"intent": {"build": 1}},
+        }),
+        encoding="utf-8",
+    )
+
+    async def _fake_inline(*args, **kwargs):
+        target = args[0]
+        assert target.layout.meta_root == meta_root.resolve()
+        return {
+            "files_processed": 1,
+            "rarity_config": {"stats_ref": str(meta_summary.resolve())},
+        }
+
+    with patch("sft_label.scoring._run_inline_scoring_directory", side_effect=_fake_inline) as mock_inline, \
+            patch("sft_label.scoring._run_scoring_directory", side_effect=AssertionError("standard directory scoring should not be used")):
+        summary = await run_scoring(
+            str(run_root),
+            config=PipelineConfig(scoring_concurrency=1),
+        )
+
+    assert mock_inline.call_count == 1
+    assert summary["rarity_config"]["stats_ref"] == str(meta_summary.resolve())
 
 
 @pytest.mark.asyncio
@@ -552,6 +624,81 @@ async def test_inline_directory_large_jsonl_chunked_smoke_scores_all_rows(tmp_pa
     assert per_file_stats["total_scored"] == row_count
     assert len(scored_lines) == row_count
     assert summary["files_processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_directory_chunked_summary_preserves_flags_thinking_mode_and_exact_single_file_means(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    run_root = tmp_path / "dataset_labeled_20260311_120000"
+    file_a = run_root / "dataset" / "code" / "a.jsonl"
+    rows_a = _inline_rows_for_file(
+        file_a,
+        [{
+            "id": "conv-a",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "a1"},
+                {"from": "human", "value": "q2"},
+                {"from": "gpt", "value": "a2"},
+            ],
+        }],
+        [[_full_labels("build"), _full_labels("modify")]],
+    )
+    _write_jsonl(file_a, rows_a)
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        is_second = sample_idx == 1
+        return {
+            "complexity": {"instruction": 6, "analytical_depth": 6, "implementation": 6, "overall": 6},
+            "quality": {"correctness": 7, "code_quality": 7, "explanation": 7, "completeness": 7, "overall": 7},
+            "reasoning": {"clarity": 6, "consistency": 6, "self_correction": False, "overall": 6},
+            "rarity": rarity_result or {"score": 5.0},
+            "flags": ["incomplete"] if is_second else ["has-bug"],
+            "thinking_mode": "fast" if is_second else "slow",
+            "value_score": 6.4 if is_second else 5.9,
+            "confidence": 0.85,
+        }, {
+            "sample_id": sample["id"],
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        summary = await run_scoring(
+            str(run_root),
+            config=PipelineConfig(
+                scoring_concurrency=1,
+                chunk_size=1,
+                max_active_chunks=1,
+                enable_adaptive_runtime=False,
+                enable_stage_recovery_sweep=False,
+            ),
+        )
+
+    stats_path = run_root / "meta_label_data" / "files" / "code" / "a" / "stats_scoring.json"
+    summary_path = run_root / "meta_label_data" / "summary_stats_scoring.json"
+    per_file_stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    summary_stats = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert per_file_stats["flag_counts"] == {"has-bug": 1, "incomplete": 1}
+    assert per_file_stats["flag_value_impact"] == {
+        "has-bug": {"mean_value": 5.9, "count": 1},
+        "incomplete": {"mean_value": 6.4, "count": 1},
+    }
+    assert per_file_stats["thinking_mode_stats"]["slow"]["count"] == 1
+    assert per_file_stats["thinking_mode_stats"]["fast"]["count"] == 1
+
+    assert summary_stats["flag_counts"] == per_file_stats["flag_counts"]
+    assert summary_stats["flag_value_impact"] == per_file_stats["flag_value_impact"]
+    assert summary_stats["thinking_mode_stats"] == per_file_stats["thinking_mode_stats"]
+    assert summary_stats["score_distributions"]["value_score"] == per_file_stats["score_distributions"]["value_score"]
+    assert summary["score_distributions"]["value_score"] == per_file_stats["score_distributions"]["value_score"]
 
 
 @pytest.mark.asyncio

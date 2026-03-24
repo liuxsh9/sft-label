@@ -56,6 +56,7 @@ from sft_label.scoring import (
     _count_scoring_samples_in_file,
     _count_required_llm_calls_in_file,
     _selection_summary_from_sample,
+    _merge_value_stats,
     _message_payload_bytes,
 )
 from sft_label.prompts_value import SCORING_SYSTEM, SCORING_SYSTEM_COMPACT, build_scoring_messages
@@ -1080,6 +1081,63 @@ class TestComputeValueStats:
         scored = [{"value": {"value_score": 5, "complexity": {}, "quality": {}, "reasoning": {}, "flags": [], "thinking_mode": "fast"}}]
         stats = compute_value_stats(scored, monitors)
         assert stats["total_failed"] == 1
+
+    def test_selection_summary_preserves_flags_and_thinking_mode(self):
+        sample = {
+            "labels": {"intent": "build"},
+            "metadata": {"turn_index": 1, "total_turns": 2},
+            "value": {
+                "complexity": {"overall": 6},
+                "quality": {"overall": 7},
+                "reasoning": {"overall": 6},
+                "rarity": {"score": 5.0},
+                "value_score": 6.4,
+                "flags": ["has-bug"],
+                "thinking_mode": "slow",
+            },
+        }
+
+        summary = _selection_summary_from_sample(sample)
+
+        assert summary["flags"] == ["has-bug"]
+        assert summary["thinking_mode"] == "slow"
+
+    def test_merge_value_stats_single_file_reuses_exact_score_distributions(self):
+        file_stats = {
+            "total_scored": 3,
+            "total_failed": 0,
+            "total_estimated": 0,
+            "total_llm_calls": 3,
+            "total_prompt_tokens": 30,
+            "total_completion_tokens": 15,
+            "total_tokens": 45,
+            "score_distributions": {
+                "value_score": {"mean": 6.35, "std": 1.13, "min": 2.0, "max": 8.3, "p50": 6.5},
+                "selection_score": {"mean": 5.41, "std": 1.37, "min": 1.98, "max": 8.32, "p50": 5.43},
+                "rarity_score": {"mean": 4.96, "std": 0.83, "min": 3.0, "max": 7.1, "p50": 5.0},
+            },
+            "histograms": {
+                "value_score": [0, 1, 0, 0, 0, 2, 0, 0, 0, 0],
+                "selection_score": [0, 1, 0, 0, 0, 2, 0, 0, 0, 0],
+                "rarity_score": [0, 0, 1, 0, 2, 0, 0, 0, 0, 0],
+            },
+            "thinking_mode_stats": {},
+            "flag_counts": {"has-bug": 2},
+            "flag_value_impact": {"has-bug": {"mean_value": 4.5, "count": 2}},
+            "value_by_tag": {},
+            "selection_by_tag": {},
+            "keep_rates": {"4.0": 1.0, "5.0": 0.67, "6.0": 0.33, "7.0": 0.0},
+            "keep_rate_7": 0.0,
+            "mean_turns": 1.0,
+        }
+
+        merged = _merge_value_stats([file_stats])
+
+        assert merged["score_distributions"]["value_score"] == file_stats["score_distributions"]["value_score"]
+        assert merged["score_distributions"]["selection_score"] == file_stats["score_distributions"]["selection_score"]
+        assert merged["score_distributions"]["rarity_score"] == file_stats["score_distributions"]["rarity_score"]
+        assert merged["flag_counts"] == {"has-bug": 2}
+        assert merged["flag_value_impact"] == {"has-bug": {"mean_value": 4.5, "count": 2}}
 
     def test_single_turn_samples_default_mean_turns_to_one(self):
         monitors = [{"status": "success", "llm_calls": 1, "prompt_tokens": 0, "completion_tokens": 0}]
