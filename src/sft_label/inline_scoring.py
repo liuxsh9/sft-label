@@ -51,11 +51,20 @@ def _contains_mirrored_jsonl(root: Path) -> bool:
     return any(path.is_file() and not is_ignored_fs_artifact(path) for path in root.rglob("*.jsonl"))
 
 
+def _looks_like_generated_run_dir(path: Path) -> bool:
+    """Return True for standard generated directories under a run root."""
+    return path.name in {
+        META_LABEL_DATA_DIRNAME,
+        "manifest",
+        "dashboards",
+    }
+
+
 def _single_dataset_root(run_root: Path) -> Path | None:
     """Infer the mirrored dataset root beneath a run root."""
     dataset_dirs = []
     for child in sorted(run_root.iterdir()):
-        if not child.is_dir() or child.name == META_LABEL_DATA_DIRNAME:
+        if not child.is_dir() or _looks_like_generated_run_dir(child):
             continue
         if _contains_mirrored_jsonl(child):
             dataset_dirs.append(child)

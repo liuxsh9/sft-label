@@ -146,7 +146,7 @@ def _load_conversation_lookup(path: Path | None) -> dict[str, dict]:
     return lookup
 
 
-def _preview_payload(sample: dict, *, doc_id: str, detail_chunk: str, scope_id: str, scope_path: str) -> dict:
+def _preview_payload(sample: dict, *, doc_id: str, detail_chunk: str | None, scope_id: str, scope_path: str) -> dict:
     labels = sample.get("labels") or {}
     value = sample.get("value") or {}
     metadata = sample.get("metadata") or {}
@@ -199,7 +199,13 @@ def _chunk_relpath(scope_slug: str, kind: str, chunk_index: int) -> str:
     return f"{kind}_{scope_slug}_{chunk_index:04d}.js"
 
 
-def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_dir: Path | None = None) -> dict[str, dict]:
+def build_explorer_assets(
+    output_path: Path,
+    scope_sources: list[dict],
+    assets_dir: Path | None = None,
+    *,
+    include_detail_assets: bool = False,
+) -> dict[str, dict]:
     """Write sidecar JS assets for the sample explorer.
 
     Returns explorer metadata keyed by scope id.
@@ -226,16 +232,16 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_d
 
         scope_slug = _scope_slug(scope_id)
         preview_rows = []
-        detail_rows = {}
         preview_chunks = []
         detail_chunks = []
-        detail_chunk_index = 0
         preview_chunk_index = 0
         sample_count = 0
+        detail_rows = {} if include_detail_assets else None
+        detail_chunk_index = 0
 
         def flush_detail():
             nonlocal detail_rows, detail_chunk_index
-            if not detail_rows:
+            if not include_detail_assets or not detail_rows:
                 return None
             chunk_key = f"{scope_id}:detail:{detail_chunk_index}"
             relpath = _chunk_relpath(scope_slug, "detail", detail_chunk_index)
@@ -254,34 +260,35 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_d
             detail_chunk_index += 1
             return chunk_key
 
-        current_detail_key = f"{scope_id}:detail:{detail_chunk_index}"
+        current_detail_key = f"{scope_id}:detail:{detail_chunk_index}" if include_detail_assets else None
         for sample_count, sample in enumerate(_iter_json_or_jsonl(data_path), start=1):
             doc_id = f"{scope_id}|{sample_count - 1}"
             meta = sample.get("metadata") or {}
             conversation_key = build_conversation_key(meta.get("source_id"), meta.get("source_file"))
             conversation = conversation_lookup.get(conversation_key) or {}
-            detail_payload = _detail_payload(sample)
-            if conversation:
-                detail_payload["conversation"] = {
-                    "conversation_id": conversation.get("conversation_id"),
-                    "conversation_key": conversation.get("conversation_key"),
-                    "turn_count": conversation.get("turn_count"),
-                    "conv_value": conversation.get("conv_value"),
-                    "conv_selection": conversation.get("conv_selection"),
-                    "peak_complexity": conversation.get("peak_complexity"),
-                    "conv_rarity": conversation.get("conv_rarity"),
-                    "observed_turn_ratio": conversation.get("observed_turn_ratio"),
-                    "inherited_turn_ratio": conversation.get("inherited_turn_ratio"),
-                    "rarity_confidence": conversation.get("rarity_confidence"),
-                    "compression_gap": conversation.get("compression_gap"),
-                    "late_turn_gain": conversation.get("late_turn_gain"),
-                    "tool_turn_ratio": conversation.get("tool_turn_ratio"),
-                    "unique_tool_count": conversation.get("unique_tool_count"),
-                    "unique_file_count": conversation.get("unique_file_count"),
-                    "thinking_mode": conversation.get("thinking_mode"),
-                    "detail": conversation.get("detail") or {},
-                }
-            detail_rows[doc_id] = detail_payload
+            if include_detail_assets:
+                detail_payload = _detail_payload(sample)
+                if conversation:
+                    detail_payload["conversation"] = {
+                        "conversation_id": conversation.get("conversation_id"),
+                        "conversation_key": conversation.get("conversation_key"),
+                        "turn_count": conversation.get("turn_count"),
+                        "conv_value": conversation.get("conv_value"),
+                        "conv_selection": conversation.get("conv_selection"),
+                        "peak_complexity": conversation.get("peak_complexity"),
+                        "conv_rarity": conversation.get("conv_rarity"),
+                        "observed_turn_ratio": conversation.get("observed_turn_ratio"),
+                        "inherited_turn_ratio": conversation.get("inherited_turn_ratio"),
+                        "rarity_confidence": conversation.get("rarity_confidence"),
+                        "compression_gap": conversation.get("compression_gap"),
+                        "late_turn_gain": conversation.get("late_turn_gain"),
+                        "tool_turn_ratio": conversation.get("tool_turn_ratio"),
+                        "unique_tool_count": conversation.get("unique_tool_count"),
+                        "unique_file_count": conversation.get("unique_file_count"),
+                        "thinking_mode": conversation.get("thinking_mode"),
+                        "detail": conversation.get("detail") or {},
+                    }
+                detail_rows[doc_id] = detail_payload
             preview = _preview_payload(
                 sample,
                 doc_id=doc_id,
@@ -311,7 +318,7 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_d
                 )
             preview_rows.append(preview)
 
-            if len(detail_rows) >= DETAIL_CHUNK_SIZE:
+            if include_detail_assets and len(detail_rows) >= DETAIL_CHUNK_SIZE:
                 flush_detail()
                 current_detail_key = f"{scope_id}:detail:{detail_chunk_index}"
 
@@ -332,7 +339,7 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_d
                 preview_rows = []
                 preview_chunk_index += 1
 
-        if detail_rows:
+        if include_detail_assets and detail_rows:
             flush_detail()
 
         if preview_rows:
@@ -358,6 +365,7 @@ def build_explorer_assets(output_path: Path, scope_sources: list[dict], assets_d
             "assets_dir": str(assets_dir.relative_to(output_dir)),
             "preview_chunks": preview_chunks,
             "detail_chunks": detail_chunks,
+            "detail_enabled": include_detail_assets,
             "has_scores": bool(scope_source.get("has_scores")),
             "default_sort": "quality_asc" if scope_source.get("has_scores") else "sample_id_asc",
         }

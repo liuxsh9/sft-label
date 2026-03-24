@@ -230,6 +230,23 @@ def test_infer_inline_scoring_target_ignores_sidecar_only_dataset_dir(tmp_path):
     assert target is None
 
 
+def test_infer_inline_scoring_target_ignores_generated_manifest_dir(tmp_path):
+    run_root = tmp_path / "dataset_labeled_20260318_120000"
+    dataset_dir = run_root / "dataset"
+    manifest_dir = run_root / "manifest"
+    dataset_dir.mkdir(parents=True)
+    manifest_dir.mkdir(parents=True)
+    (run_root / "meta_label_data").mkdir()
+    (dataset_dir / "train.jsonl").write_text('{"id":"ok"}\n', encoding="utf-8")
+    (manifest_dir / "monitor_value.jsonl").write_text('{"id":"generated"}\n', encoding="utf-8")
+
+    target = infer_inline_scoring_target(run_root)
+
+    assert target is not None
+    assert target.target_path == run_root.resolve()
+    assert target.layout.dataset_root == dataset_dir.resolve()
+
+
 def test_discover_inline_jsonl_files_ignores_macos_sidecars(tmp_path):
     run_root = tmp_path / "train_labeled_20260311_120000"
     dataset_root = run_root / "train"

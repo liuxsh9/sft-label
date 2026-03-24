@@ -327,7 +327,7 @@ const I18N = {
     low_coverage: "Low Coverage",
     low_rarity_conf: "Low Rarity Conf",
     sample_explorer: "Sample Explorer",
-    explorer_summary: "Progressively scan preview shards, stream large files chunk-by-chunk, keep the best {limit} matches in memory, load full sample details only when you open a drawer, and click tags / bars / threshold rows anywhere above to drill into the matching slices.",
+    explorer_summary: "Progressively scan preview shards, stream large files chunk-by-chunk, keep the best {limit} matches in memory, and click tags / bars / threshold rows anywhere above to drill into the matching slices.",
     status_ready_scan: "Ready to scan {count} indexed previews in this scope.",
     status_scanning: "Scanning {done}/{total} files · {rows} rows checked · {matches} matches",
     status_done: "Done. Matched {matches} rows across {files} files.",
@@ -578,7 +578,7 @@ const I18N = {
     low_coverage: "低覆盖",
     low_rarity_conf: "低稀有度置信度",
     sample_explorer: "样本浏览器",
-    explorer_summary: "渐进扫描预览分片，按 chunk 流式读取大文件，仅在内存中保留最匹配的 {limit} 条结果；打开抽屉时才加载完整样本；也可以点击上面的标签、柱状图和阈值行，继续向下钻取对应切片。",
+    explorer_summary: "渐进扫描预览分片，按 chunk 流式读取大文件，仅在内存中保留最匹配的 {limit} 条结果；也可以点击上面的标签、柱状图和阈值行，继续向下钻取对应切片。",
     status_ready_scan: "当前范围可扫描 {count} 条已索引预览。",
     status_scanning: "正在扫描 {done}/{total} 个文件 · 已检查 {rows} 行 · 当前匹配 {matches} 条",
     status_done: "完成：在 {files} 个文件中匹配到 {matches} 条记录。",
@@ -2627,8 +2627,11 @@ function renderExplorerResults(rows) {
       .map((tag) => `<span class="preview-tag extension-tag" title="${escapeHtml(tag)}">${escapeHtml(formatExplorerQueryToken(tag))}</span>`)
       .join("");
     const tags = [coreTags, extensionTags].filter(Boolean).join("");
+    const sampleCell = row.detail_chunk
+      ? `<button class="link-btn" data-explorer-detail="${escapeHtml(row.doc_id)}" data-explorer-scope="${escapeHtml(row.scope_id)}" data-explorer-detail-chunk="${escapeHtml(row.detail_chunk)}">${escapeHtml(row.sample_id || row.doc_id)}</button>`
+      : escapeHtml(row.sample_id || row.doc_id);
     return `<tr>
-      <td><button class="link-btn" data-explorer-detail="${escapeHtml(row.doc_id)}" data-explorer-scope="${escapeHtml(row.scope_id)}" data-explorer-detail-chunk="${escapeHtml(row.detail_chunk)}">${escapeHtml(row.sample_id || row.doc_id)}</button></td>
+      <td>${sampleCell}</td>
       <td class="preview-query" title="${escapeHtml(row.query_preview || "")}">${textPreview(row.query_preview)}</td>
       <td class="preview-response" title="${escapeHtml(row.response_preview || "")}">${textPreview(row.response_preview)}</td>
       <td><div class="preview-tags">${tags || `<span class="note">-</span>`}</div></td>

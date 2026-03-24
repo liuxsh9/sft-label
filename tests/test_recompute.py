@@ -1339,6 +1339,54 @@ class TestRegenerateDashboard:
         assert all(Path(path).parent == expected_dir for path in map(Path, generated))
         assert len(list(expected_dir.glob("dashboard_scoring*.html"))) >= 1
 
+    def test_pass2_dashboard_explorer_defaults_to_preview_only_assets(self, tmp_path):
+        scored = [
+            _make_scored_sample("sample-1", value_score=6.0),
+            _make_scored_sample("sample-2", value_score=7.0),
+        ]
+        (tmp_path / "scored.json").write_text(json.dumps(scored, ensure_ascii=False), encoding="utf-8")
+        (tmp_path / "conversation_scores.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "conversation_id": "sample-1",
+                        "conversation_key": "::sample-1",
+                        "source_file": "train.jsonl",
+                        "turn_count": 2,
+                        "conv_value": 6.0,
+                        "conv_selection": 6.1,
+                        "peak_complexity": 6.0,
+                        "conv_rarity": 5.0,
+                        "observed_turn_ratio": 1.0,
+                        "inherited_turn_ratio": 0.0,
+                        "rarity_confidence": 0.8,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "stats_scoring.json").write_text(
+            json.dumps(
+                recompute_value_stats_from_scored(scored),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        generated = run_regenerate_dashboard(str(tmp_path), pass_num="2")
+
+        assert len(generated) == 1
+        dashboard_path = Path(generated[0])
+        data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
+        explorer_dir = data_dir / "explorer"
+        manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        assert explorer_dir.exists()
+        assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
+        assert not any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
+        assert manifest["scopes"]["global"]["explorer"]["detail_chunks"] == []
+
 
 class TestCompletePostprocess:
     def _setup_deferred_pass2_run(self, tmp_path: Path) -> Path:

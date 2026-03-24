@@ -133,8 +133,9 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
     assert (data_dir / "manifest.js").exists()
     assert (data_dir / "scopes" / "global.js").exists()
     assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
-    assert any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
+    assert not any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
     assert manifest["scopes"]["global"]["explorer"]["sample_count"] == 2
+    assert manifest["scopes"]["global"]["explorer"]["detail_chunks"] == []
     assert detail["pass2"]["modes"]["sample"]["selection_thresholds"]["top_25pct"]["count"] == 1
     assert detail["pass2"]["modes"]["sample"]["coverage_at_thresholds"]["5.0"]["retained"] == 1
     assert detail["pass2"]["modes"]["sample"]["flag_value_impact"]["low-correctness"]["count"] == 1

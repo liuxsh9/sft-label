@@ -412,7 +412,7 @@ def _attach_explorer_payload(payload: dict, explorer_meta: dict[str, dict]) -> N
     payload["explorer"] = {
         "enabled": True,
         "result_limit": 200,
-        "detail_limit_notice": "Explorer scans preview shards progressively and loads full details on demand.",
+        "detail_limit_notice": "Explorer currently ships preview-only results for lightweight offline inspection.",
     }
 
 

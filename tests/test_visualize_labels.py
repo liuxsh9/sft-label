@@ -427,10 +427,11 @@ def test_generate_dashboard_stats_only_single_scope_uses_stats_and_explorer_asse
     assert "const DATA =" not in html
     assert explorer_dir.exists()
     assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
-    assert any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
+    assert not any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
     assert manifest["scopes"]["global"]["summary"]["pass1_total"] == 1
     assert manifest["explorer"]["enabled"] is True
     assert manifest["scopes"]["global"]["explorer"]["sample_count"] == 1
+    assert manifest["scopes"]["global"]["explorer"]["detail_chunks"] == []
     assert detail["pass1"]["modes"]["sample"]["unmapped_details"]["total_occurrences"] == 1
     assert detail["pass1"]["modes"]["sample"].get("conf_matrix") is None
     assert detail.get("pass2") is None
