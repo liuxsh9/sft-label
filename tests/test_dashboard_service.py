@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 from pathlib import Path
 from urllib.request import urlopen
@@ -480,6 +481,31 @@ def test_publish_run_dashboards_fails_closed_when_publish_lock_conflicts(monkeyp
     found = find_published_run(store.services["default"], run_id=first["run_id"])
     assert found is not None
     assert found["published_at"] == first["published_at"]
+
+
+def test_publish_run_dashboards_rejects_missing_companion_data_dir(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "demo_run"
+    html_path = _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    data_dir = html_path.with_name(f"{html_path.stem}.data")
+    assert data_dir.exists()
+    shutil.rmtree(data_dir)
+
+    with pytest.raises(ValueError, match="missing companion data directory"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    store = load_dashboard_service_store(config_path)
+    assert list_published_runs(store.services["default"]) == []
+    runs_root = Path(service.web_root) / "runs"
+    assert not runs_root.exists() or list(runs_root.iterdir()) == []
 
 
 def test_pm2_lifecycle_helpers_use_pm2_commands(monkeypatch, tmp_path):

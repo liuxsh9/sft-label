@@ -793,8 +793,11 @@ def _copy_dashboard_bundle(src_html: Path, dest_root: Path) -> Path:
     dest_html = dest_root / src_html.name
     shutil.copyfile(src_html, dest_html)
     data_dir = src_html.with_name(f"{src_html.stem}.data")
-    if data_dir.is_dir():
-        shutil.copytree(data_dir, dest_root / data_dir.name)
+    if not data_dir.is_dir():
+        raise ValueError(
+            f"Dashboard bundle is incomplete for {src_html.name}: missing companion data directory {data_dir.name}"
+        )
+    shutil.copytree(data_dir, dest_root / data_dir.name)
     _rewrite_dashboard_html_for_shared_assets(dest_html)
     return dest_html
 
