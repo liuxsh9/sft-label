@@ -69,6 +69,7 @@ def _write_scoring_summary(
     *,
     conversation_status: str,
     dashboard_status: str,
+    filename: str = "summary_stats_scoring.json",
 ) -> Path:
     payload = {
         "postprocess": {
@@ -76,7 +77,7 @@ def _write_scoring_summary(
             "dashboard": {"status": dashboard_status},
         }
     }
-    path = run_dir / "summary_stats_scoring.json"
+    path = run_dir / filename
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -475,6 +476,52 @@ def test_publish_run_dashboards_rejects_labeling_only_when_scoring_metadata_is_i
     assert not assets_dir.exists()
     store = load_dashboard_service_store(config_path)
     assert list_published_runs(store.services["default"]) == []
+
+
+def test_publish_run_dashboards_rejects_stale_scoring_dashboard_when_postprocess_dashboard_is_disabled(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "stale_scoring_dashboard"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(run_dir, conversation_status="completed", dashboard_status="disabled")
+
+    with pytest.raises(ValueError, match="dashboard.status=disabled"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
+
+
+def test_publish_run_dashboards_accepts_file_scope_stats_scoring_metadata_without_summary_file(tmp_path):
+    config_path = tmp_path / "dashboard_services.json"
+    service = init_dashboard_service(
+        name="default",
+        web_root=tmp_path / "web",
+        host="127.0.0.1",
+        port=_free_port(),
+        config_path=config_path,
+    )
+
+    run_dir = tmp_path / "file_scope_scoring_run"
+    _write_dashboard_bundle(run_dir, "dashboard_labeling_demo.html")
+    _write_dashboard_bundle(run_dir, "dashboard_scoring_demo.html")
+    _write_scoring_summary(
+        run_dir,
+        conversation_status="completed",
+        dashboard_status="completed",
+        filename="stats_scoring.json",
+    )
+    assert not (run_dir / "summary_stats_scoring.json").exists()
+
+    published = publish_run_dashboards(service, run_dir, config_path=config_path)
+
+    assert "scoring" in published["dashboards"]
+    assert Path(published["dashboards"]["scoring"]["path"]).exists()
 
 
 def test_publish_run_dashboards_fails_closed_when_publish_lock_conflicts(monkeypatch, tmp_path):

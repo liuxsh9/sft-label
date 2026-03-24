@@ -1089,6 +1089,70 @@ def test_cmd_start_auto_publish_keeps_labeling_only_runs_publishable(monkeypatch
     assert publish_calls["count"] == 1
 
 
+def test_cmd_start_auto_publish_skips_when_scoring_dashboard_is_stale_but_postprocess_disabled(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    from sft_label.dashboard_service import DashboardServiceConfig, DashboardServiceStore
+    from sft_label.launcher import LaunchPlan
+
+    parser = build_parser()
+    run_dir = tmp_path / "demo_run"
+    dashboards_dir = run_dir / "meta_label_data" / "dashboards"
+    dashboards_dir.mkdir(parents=True)
+    (dashboards_dir / "dashboard_scoring_demo.html").write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sft_label.launcher.build_launch_plan",
+        lambda **kwargs: LaunchPlan(argv=["run", "--input", "data.json", "--score"]),
+    )
+
+    answers = iter(["y", ""])  # auto-publish yes, execute yes
+    monkeypatch.setattr(
+        "sft_label.launcher.interactive_input",
+        lambda prompt: next(answers),
+        raising=False,
+    )
+
+    service = DashboardServiceConfig(name="default", web_root=str(tmp_path / "web"), host="127.0.0.1", port=8765)
+    store = DashboardServiceStore(default_service="default", services={"default": service})
+    monkeypatch.setattr("sft_label.cli.load_dashboard_service_store", lambda config_path=None: store, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dashboard_service_status",
+        lambda svc: {"state": "running", "reachable": True, "url": svc.base_url()},
+        raising=False,
+    )
+
+    publish_calls = {"count": 0}
+
+    def _fake_publish(*args, **kwargs):
+        publish_calls["count"] += 1
+        return {"run_id": "demo", "dashboards": {}}
+
+    monkeypatch.setattr("sft_label.cli.publish_run_dashboards", _fake_publish, raising=False)
+    monkeypatch.setattr(
+        "sft_label.cli.dispatch_command",
+        lambda args, parser: {
+            "run_dir": str(run_dir),
+            "score_summary": {
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "disabled"},
+                }
+            },
+        },
+        raising=False,
+    )
+
+    args = parser.parse_args(["start", "--en"])
+    cmd_start(args, parser)
+
+    out = capsys.readouterr().out
+    assert publish_calls["count"] == 0
+    assert "dashboard=disabled" in out
+
+
 @pytest.mark.parametrize(
     ("conversation_status", "dashboard_status"),
     [

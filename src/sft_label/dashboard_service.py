@@ -18,7 +18,13 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from sft_label.artifacts import DASHBOARD_RUNTIME_VERSION
+from sft_label.artifacts import (
+    DASHBOARD_RUNTIME_VERSION,
+    PASS2_STATS_FILE,
+    PASS2_STATS_FILE_LEGACY,
+    PASS2_SUMMARY_STATS_FILE,
+    PASS2_SUMMARY_STATS_FILE_LEGACY,
+)
 
 DASHBOARD_SERVICE_CONFIG_ENV = "SFT_LABEL_DASHBOARD_SERVICE_CONFIG"
 DEFAULT_DASHBOARD_SERVICE_NAME = "default"
@@ -873,18 +879,25 @@ def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 def _iter_scoring_summary_candidates(run_dir: Path, dashboards_dir: Path) -> list[Path]:
     roots = [run_dir, dashboards_dir.parent, dashboards_dir.parent.parent]
+    candidate_names = (
+        PASS2_SUMMARY_STATS_FILE,
+        PASS2_SUMMARY_STATS_FILE_LEGACY,
+        PASS2_STATS_FILE,
+        PASS2_STATS_FILE_LEGACY,
+    )
     seen: set[Path] = set()
     candidates: list[Path] = []
     for root in roots:
-        for path in (
-            root / "summary_stats_scoring.json",
-            root / "meta_label_data" / "summary_stats_scoring.json",
-        ):
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            candidates.append(resolved)
+        for name in candidate_names:
+            for path in (
+                root / name,
+                root / "meta_label_data" / name,
+            ):
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                candidates.append(resolved)
     return candidates
 
 
@@ -916,7 +929,7 @@ def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_f
     if summary_payload is None:
         if has_scoring_dashboard:
             raise ValueError(
-                "Scoring dashboards are not publishable yet: missing summary_stats_scoring.json metadata with "
+                "Scoring dashboards are not publishable yet: missing Pass 2 scoring metadata (summary_stats_scoring.json / stats_scoring.json) with "
                 "completed postprocess status."
             )
         return
@@ -927,13 +940,20 @@ def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_f
             f"Scoring dashboards are not publishable yet: {summary_path} is missing postprocess status metadata."
         )
 
+    observed_statuses: dict[str, str] = {}
     for key in _SCORING_REQUIRED_POSTPROCESS_KEYS:
         entry = postprocess.get(key)
         status = str((entry or {}).get("status") or "").strip().lower() if isinstance(entry, dict) else ""
+        observed_statuses[key] = status
         if status in _SCORING_ALLOWED_POSTPROCESS_STATUS:
             continue
         raise ValueError(
             f"Scoring dashboards are not publishable yet: postprocess.{key}.status={status or 'missing'}"
+        )
+
+    if has_scoring_dashboard and observed_statuses.get("dashboard") == "disabled":
+        raise ValueError(
+            "Scoring dashboards are not publishable yet: postprocess.dashboard.status=disabled while scoring dashboard HTML files are present."
         )
 
 

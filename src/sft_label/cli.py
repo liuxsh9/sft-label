@@ -525,6 +525,7 @@ def _auto_publish_pass2_guard(
     required_keys = ("conversation_scores", "dashboard")
     observed: list[str] = []
     failures: list[str] = []
+    has_scoring_dashboard = _run_dir_has_scoring_dashboard(run_dir)
 
     for key in required_keys:
         node = postprocess.get(key)
@@ -535,6 +536,9 @@ def _auto_publish_pass2_guard(
         observed.append(f"{key}={status}")
         if status in blocked_statuses or status not in safe_statuses:
             failures.append(f"{key}={status}")
+            continue
+        if key == "dashboard" and status == "disabled" and has_scoring_dashboard:
+            failures.append("dashboard=disabled(stale-scoring-dashboard)")
 
     if failures:
         observed_text = ", ".join(observed) if observed else "none"
@@ -551,6 +555,25 @@ def _auto_publish_pass2_guard(
         )
 
     return True, None
+
+
+def _run_dir_has_scoring_dashboard(run_dir: str | None) -> bool:
+    if not run_dir:
+        return False
+    root = Path(run_dir).expanduser().resolve()
+    candidates = (
+        root / "meta_label_data" / "dashboards",
+        root / "dashboards",
+        root,
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        html_files = sorted(candidate.glob("*.html"))
+        if not html_files:
+            continue
+        return any(("scoring" in path.name.lower() or "value" in path.name.lower()) for path in html_files)
+    return False
 
 
 def _print_published_dashboard_urls(published, lang: str):

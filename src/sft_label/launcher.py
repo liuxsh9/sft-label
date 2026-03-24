@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from sft_label.artifacts import (
+    PASS2_STATS_FILE,
+    PASS2_STATS_FILE_LEGACY,
+    PASS2_SUMMARY_STATS_FILE,
+    PASS2_SUMMARY_STATS_FILE_LEGACY,
+)
 from sft_label.config import (
     DEFAULT_ROLLOUT_PRESET,
     DEFAULT_CONCURRENCY,
@@ -660,6 +666,46 @@ def _score_command_for_input(target: Path, *, resume: bool) -> list[str]:
     return argv
 
 
+def _load_pass2_postprocess_status(root: Path) -> dict | None:
+    candidate_names = (
+        PASS2_SUMMARY_STATS_FILE,
+        PASS2_SUMMARY_STATS_FILE_LEGACY,
+        PASS2_STATS_FILE,
+        PASS2_STATS_FILE_LEGACY,
+    )
+    for base in (root, root / "meta_label_data"):
+        for name in candidate_names:
+            path = base / name
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            if not isinstance(payload, dict):
+                return None
+            postprocess = payload.get("postprocess")
+            if isinstance(postprocess, dict):
+                return postprocess
+            return None
+    return None
+
+
+def _postprocess_requires_completion(postprocess: dict | None) -> tuple[bool, list[str]]:
+    if not isinstance(postprocess, dict):
+        return False, []
+
+    blocked_statuses = {"deferred", "pending", "failed"}
+    required_keys = ("conversation_scores", "dashboard")
+    failures: list[str] = []
+    for key in required_keys:
+        node = postprocess.get(key)
+        status = str((node or {}).get("status") or "").strip().lower() if isinstance(node, dict) else ""
+        if status in blocked_statuses:
+            failures.append(f"{key}={status}")
+    return bool(failures), failures
+
+
 def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
     if not target.exists():
         raise ValueError(_msg(f"目录不存在：{target}", f"Path does not exist: {target}"))
@@ -670,6 +716,7 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
     labeled_files = _find_matching_artifacts(target, "labeled")
     scored_files = _find_matching_artifacts(target, "scored")
     pass2_resume_artifacts = _find_pass2_resume_artifacts(target)
+    postprocess = _load_pass2_postprocess_status(target)
     checkpoint_status = (checkpoint_payload or {}).get("status")
 
     if checkpoint is not None and checkpoint_status != "done":
@@ -682,6 +729,16 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
         )
 
     if labeled_files:
+        should_complete_postprocess, failures = _postprocess_requires_completion(postprocess)
+        if scored_files and should_complete_postprocess:
+            blocked = ", ".join(failures)
+            return (
+                ["complete-postprocess", "--input", str(target)],
+                _msg(
+                    f"检测到二阶段后处理未完成（{blocked}），将执行 complete-postprocess 以补全聚合与看板。",
+                    f"Detected incomplete Pass 2 postprocess ({blocked}); running complete-postprocess to finalize aggregation and dashboards.",
+                ),
+            )
         resume_score = bool(scored_files or pass2_resume_artifacts)
         argv = _score_command_for_input(target, resume=resume_score)
         if scored_files:

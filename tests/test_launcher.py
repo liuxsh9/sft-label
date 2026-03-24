@@ -643,6 +643,54 @@ def test_build_smart_resume_plan_checkpoint_done_routes_to_score(tmp_path):
     assert plan.argv == ["score", "--concurrency", "200", "--input", str(tmp_path)]
 
 
+def test_build_smart_resume_plan_routes_to_complete_postprocess_when_pass2_is_deferred(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        '{"postprocess":{"conversation_scores":{"status":"deferred"},"dashboard":{"status":"completed"}}}',
+        encoding="utf-8",
+    )
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["complete-postprocess", "--input", str(tmp_path)]
+
+
+def test_build_smart_resume_plan_routes_to_complete_postprocess_when_pass2_is_incomplete(tmp_path):
+    artifact_dir = tmp_path / "meta_label_data" / "files" / "demo"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "labeled.json").write_text("[]", encoding="utf-8")
+    (artifact_dir / "scored.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "summary_stats_scoring.json").write_text(
+        '{"postprocess":{"conversation_scores":{"status":"completed"},"dashboard":{"status":"failed"}}}',
+        encoding="utf-8",
+    )
+
+    io = StubIO(
+        [
+            "2",               # workflow: smart resume
+            str(tmp_path),     # run dir
+            "",                # extra flags
+        ]
+    )
+    plan = build_launch_plan(input_fn=io.input, output_fn=io.output)
+
+    assert plan is not None
+    assert plan.workflow_key == "smart-resume"
+    assert plan.argv == ["complete-postprocess", "--input", str(tmp_path)]
+
+
 def test_cmd_run_resume_with_score_forwards_resume_to_pass2(monkeypatch):
     captured = {}
 
