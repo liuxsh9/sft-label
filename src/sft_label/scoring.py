@@ -188,70 +188,52 @@ def _finalize_pass2_working_files(output_dir: Path) -> None:
         "score_failures.jsonl",
     )
     failure_names = {"failed_value.jsonl", "score_failures.jsonl"}
-    path_priority = {"working": 3, "checkpoint": 2, "final": 1}
 
     for name in final_names:
         working_path = _pass2_working_path(output_dir, name)
         checkpoint_path = _pass2_checkpoint_path(output_dir, name)
         final_path = Path(output_dir) / name
         is_failure_artifact = name in failure_names
+        ordered_paths = (working_path, checkpoint_path, final_path)
+        chosen_path = None
+        chosen_size = 0
 
-        candidates = []
-        for label, path in (
-            ("working", working_path),
-            ("checkpoint", checkpoint_path),
-            ("final", final_path),
-        ):
-            if not path.exists():
+        for candidate in ordered_paths:
+            if not candidate.exists():
                 continue
             try:
-                stat = path.stat()
+                size = int(candidate.stat().st_size)
             except OSError:
                 continue
-            candidates.append(
-                {
-                    "label": label,
-                    "path": path,
-                    "size": int(stat.st_size),
-                    "mtime_ns": int(stat.st_mtime_ns),
-                    "priority": path_priority[label],
-                }
-            )
+            if not is_failure_artifact and size <= 0:
+                continue
+            chosen_path = candidate
+            chosen_size = size
+            break
 
-        if not candidates:
-            continue
-
-        if is_failure_artifact:
-            ordered = sorted(candidates, key=lambda c: (c["mtime_ns"], c["priority"]), reverse=True)
-            chosen = ordered[0]
-            if chosen["size"] == 0:
-                for path in (working_path, checkpoint_path, final_path):
+        if chosen_path is None:
+            if is_failure_artifact:
+                for path in ordered_paths:
                     if path.exists():
                         path.unlink()
-                continue
-        else:
-            non_empty = [c for c in candidates if c["size"] > 0]
-            if not non_empty:
+            else:
                 for path in (working_path, checkpoint_path):
                     if path.exists():
                         path.unlink()
-                continue
-            chosen = sorted(non_empty, key=lambda c: (c["mtime_ns"], c["priority"]), reverse=True)[0]
+            continue
 
-        chosen_path = chosen["path"]
+        if is_failure_artifact and chosen_size == 0:
+            for path in ordered_paths:
+                if path.exists():
+                    path.unlink()
+            continue
+
         if chosen_path != final_path:
             os.replace(chosen_path, final_path)
 
         for path in (working_path, checkpoint_path):
             if path.exists():
                 path.unlink()
-
-        if is_failure_artifact and final_path.exists():
-            try:
-                if final_path.stat().st_size == 0:
-                    final_path.unlink()
-            except OSError:
-                pass
 
 
 def _postprocess_status(status: str, reason: str | None = None, **extra):
@@ -882,8 +864,8 @@ async def _run_pass2_recovery_sweep_chunked(
         os.replace(scored_tmp, scored_path)
         os.replace(monitor_tmp, monitor_path)
 
-        failed_path = Path(output_dir) / "failed_value.jsonl"
-        failures_path = Path(output_dir) / "score_failures.jsonl"
+        failed_path = _pass2_working_path(output_dir, "failed_value.jsonl")
+        failures_path = _pass2_working_path(output_dir, "score_failures.jsonl")
         if failed_written > 0:
             os.replace(failed_tmp, failed_path)
         else:
@@ -891,8 +873,8 @@ async def _run_pass2_recovery_sweep_chunked(
                 failed_tmp.unlink()
             except OSError:
                 pass
-            if failed_path.exists():
-                failed_path.unlink()
+            with open(failed_path, "w", encoding="utf-8"):
+                pass
         if failures_written > 0:
             os.replace(failures_tmp, failures_path)
         else:
@@ -900,8 +882,8 @@ async def _run_pass2_recovery_sweep_chunked(
                 failures_tmp.unlink()
             except OSError:
                 pass
-            if failures_path.exists():
-                failures_path.unlink()
+            with open(failures_path, "w", encoding="utf-8"):
+                pass
 
         # Recompute retry set for next pass (based on patched monitors).
         retry_items = []

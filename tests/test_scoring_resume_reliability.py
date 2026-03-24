@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -186,21 +187,21 @@ def test_chunked_recovery_sweep_keeps_failure_outputs_consistent_after_recovery(
     assert failure_log_ids == {"sample-failed"}
 
 
-def test_chunked_resume_fastpath_checkpoint_overwrites_stale_final_artifacts(tmp_path):
+def test_chunked_resume_fastpath_honors_working_checkpoint_final_precedence(tmp_path):
     labeled_path = tmp_path / "labeled.jsonl"
     samples = [_sample(f"sample-{idx}") for idx in range(2)]
     _write_jsonl(labeled_path, samples)
 
-    stale_final_scored = [
+    final_scored = [
         {
             **sample,
             "value": _value_payload(score=1.5, rarity_score=1.0, confidence=0.1),
         }
         for sample in samples
     ]
-    stale_final_monitors = [_monitor(sample["id"], status="stale-final") for sample in samples]
-    _write_jsonl(tmp_path / "scored.jsonl", stale_final_scored)
-    _write_jsonl(tmp_path / "monitor_value.jsonl", stale_final_monitors)
+    final_monitors = [_monitor(sample["id"], status="final-source") for sample in samples]
+    _write_jsonl(tmp_path / "scored.jsonl", final_scored)
+    _write_jsonl(tmp_path / "monitor_value.jsonl", final_monitors)
 
     checkpoint_scored = [
         {
@@ -212,6 +213,25 @@ def test_chunked_resume_fastpath_checkpoint_overwrites_stale_final_artifacts(tmp
     checkpoint_monitors = [_monitor(sample["id"], status="checkpoint-source") for sample in samples]
     _write_jsonl(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), checkpoint_scored)
     _write_jsonl(_pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"), checkpoint_monitors)
+
+    working_scored = [
+        {
+            **sample,
+            "value": _value_payload(score=9.6, rarity_score=7.0, confidence=0.97),
+        }
+        for sample in samples
+    ]
+    working_monitors = [_monitor(sample["id"], status="working-source") for sample in samples]
+    _write_jsonl(tmp_path / ".scored.jsonl.next", working_scored)
+    _write_jsonl(tmp_path / ".monitor_value.jsonl.next", working_monitors)
+
+    # Force freshness ordering opposite of precedence to ensure finalize order is authoritative.
+    os.utime(tmp_path / ".scored.jsonl.next", (100, 100))
+    os.utime(tmp_path / ".monitor_value.jsonl.next", (100, 100))
+    os.utime(_pass2_checkpoint_path(tmp_path, "scored.jsonl"), (200, 200))
+    os.utime(_pass2_checkpoint_path(tmp_path, "monitor_value.jsonl"), (200, 200))
+    os.utime(tmp_path / "scored.jsonl", (300, 300))
+    os.utime(tmp_path / "monitor_value.jsonl", (300, 300))
 
     async def fail_score_one(*_args, **_kwargs):
         raise AssertionError("score_one must not run during resume fast-path finalize")
@@ -232,5 +252,7 @@ def test_chunked_resume_fastpath_checkpoint_overwrites_stale_final_artifacts(tmp
             )
         )
 
-    final_monitors = _read_jsonl(tmp_path / "monitor_value.jsonl")
-    assert {row["status"] for row in final_monitors} == {"checkpoint-source"}
+    final_scored_rows = _read_jsonl(tmp_path / "scored.jsonl")
+    final_monitor_rows = _read_jsonl(tmp_path / "monitor_value.jsonl")
+    assert {row["value"]["value_score"] for row in final_scored_rows} == {9.6}
+    assert {row["status"] for row in final_monitor_rows} == {"working-source"}
