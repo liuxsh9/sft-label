@@ -81,7 +81,7 @@
 
 顶层格式识别与兼容优先级需要固定，避免同一条样本被多重解释。优先级采用“**先验形状校验 + 固定顺序**”原则：
 
-1. `data`：仅当值为 list[dict] 时视为 Pangu
+1. `data`：仅当值为非空或空 list[dict] 时视为 Pangu
 2. `conversations`：仅当值为 list[dict] 且 turn 字段满足支持 contract 时视为 conversation-based schema
 3. `messages`：仅当值为 list[dict] 且 turn 字段满足支持 contract 时视为 OpenAI-style schema
 4. 否则 `unknown`
@@ -91,6 +91,14 @@
 - `conversations` 结构合法时，优先使用 `conversations`；
 - `conversations` 存在但结构不合法，而 `messages` 合法时，回退使用 `messages`；
 - 两者都不合法时，视为 `unknown` 或在显式调用标准化 helper 时抛出清晰错误。
+
+这里“合法”的判定进一步明确为：
+
+- 顶层值允许空列表 `[]`，空列表视为合法但无 turn 内容；
+- 同一个 turn 若同时带 `from`/`value` 与 `role`/`content`，优先使用内部字段 `from`/`value`，并将其视为已是内部 schema；
+- 同一列表中允许混合 turn shape（部分 `from/value`、部分 `role/content`），标准化 helper 逐 turn 归一化；
+- 若某个 turn 既没有 `from`/`role`，也没有 `value`/`content`，该 turn 仍可标准化为 `{from: "", value: ""}`，保持当前宽松行为；
+- 若某个 turn 的 `value`/`content` 为 list/dict，则整个 top-level schema 视为非法，不应遮蔽后续可回退的 `messages`。
 
 ---
 
@@ -218,10 +226,12 @@ raw row
 |---|---|---|---|---|
 | `conversations` | `from/value` | string / `None` | 接受，幂等标准化 | `sharegpt` |
 | `conversations` | `role/content` | string / `None` | 接受，转为 `from/value` | `openai_conversations` |
+| `conversations` | mixed turn shape | string / `None` | 接受，逐 turn 归一化；同 turn 双字段时优先 `from/value` | `sharegpt` 或 `openai_conversations`（按首个合法 turn shape 记账） |
 | `messages` | `role/content` | string / `None` | 接受，转为 `conversations[].from/value` | `openai_messages` |
 | `data` | `role/content` | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
 | `conversations` / `messages` | 任意 | list / dict content blocks | 拒绝，显式报错 | 不写入新 metadata |
 | `conversations` + `messages` 同存 | `conversations` 非法、`messages` 合法 | 合法 | 回退到 `messages` | `openai_messages` |
+| 任意 top-level key | 空列表 | n/a | 接受，返回空 conversations / 不切片 | 对应 schema 名称 |
 
 ## 预处理设计
 
@@ -275,7 +285,11 @@ raw row
 - semantic clustering / conversation tools
 - 任何“不切片但要先标准化”的调用路径
 
-都能感知新 schema，而不是只有 `normalize_and_slice()` 支持。
+都能感知新 schema，而不是只有 `normalize_and_slice()` 支持。`normalize_sample()` 的 contract 也要与 `normalize_and_slice()` 对齐：
+
+- 支持 `conversations[].role/content` 与 `messages[].role/content`；
+- 对非法 list/dict content 同样显式拒绝；
+- 透传/补齐 `metadata.original_format`。
 
 ### 多轮切片逻辑保持不变
 
@@ -288,7 +302,13 @@ raw row
 
 对于 **至少包含 1 个 assistant/gpt 回复** 的样本：**assistant 回复数 = 输出切片数**。
 
-对 **0 assistant 回复** 的行，本次不改变现有兼容行为：仍按“未切片单样本”保留，以避免扩大本次改动范围；但该类样本不属于本次 OpenAI-style turn 兼容保证的重点场景。
+对 **0 assistant 回复** 的行，本次不改变现有兼容行为：仍按“未切片单样本”保留，以避免扩大本次改动范围；该 contract 需要在测试中被钉死：
+
+- 输出 sample 数为 1；
+- 保留全部 turns；
+- `metadata.original_format` / `source_format` 依旧可追踪。
+
+但该类样本不属于本次 OpenAI-style turn 兼容保证的重点标注场景。
 
 ---
 
@@ -303,6 +323,15 @@ raw row
 - inline Pass 1 merge
 
 都能自动继承支持，不需要额外 schema 分支。
+
+此外，`inline_pass1` 的 `source_format` 应与 `metadata.original_format` 保持一致并保留细粒度来源：
+
+- `sharegpt`
+- `openai_conversations`
+- `openai_messages`
+- `pangu`
+
+而不是把新 schema 一律折叠回 `sharegpt`。
 
 ### pipeline 目录模式
 
@@ -353,9 +382,15 @@ raw row
 
 7. `normalize_sample()` / `preprocess()` 路径
    - 至少 1 条 `messages[].role/content` 样本
+   - 至少 1 条 `conversations[].role/content` 样本
+   - 非法 list/dict content 在 no-slice 路径同样显式拒绝
    - 断言不切片路径也完成标准化
 
-8. 长轨迹样本
+8. 0 assistant 回复回归
+   - 例如 `system, user, tool`
+   - 断言输出 1 个未切片样本，保留 turns 与 metadata/original_format
+
+9. 长轨迹样本
    - 至少 5 个 assistant 回复
    - 断言 sample 数、`turn_index`、`total_turns`、最后一个 slice 上下文正确
 
@@ -381,8 +416,9 @@ raw row
 
 - `build_row_sample_bundle()` 不报错；
 - `iter_row_sample_bundles_from_jsonl()` 能逐行产出 bundle；
-- `flatten_row_sample_bundles()` 后 sample 数符合 assistant 回复数；
-- stable sample id / turn metadata 依旧正确。
+- `flatten_row_sample_bundles()` 后 sample 数符合 assistant 回复数（或 0 assistant 的单样本 contract）；
+- stable sample id / turn metadata 依旧正确；
+- `data_label.meta.source_format` 与 `metadata.original_format` 保持一致。
 
 ### 第 3 层：真实目录抽样验证
 
