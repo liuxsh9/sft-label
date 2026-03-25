@@ -1228,7 +1228,7 @@ async def test_directory_large_jsonl_reuses_chunked_path(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_directory_large_jsonl_chunked_files_are_admitted_with_rolling_overlap(tmp_path):
+async def test_directory_large_jsonl_chunked_files_are_admitted_conservatively(tmp_path):
     from sft_label.pipeline import run
 
     input_dir = tmp_path / "dataset"
@@ -1315,10 +1315,83 @@ async def test_directory_large_jsonl_chunked_files_are_admitted_with_rolling_ove
             ),
         )
 
-    assert peak_active == 2
-    assert started[:2] == ["train_0.jsonl", "train_1.jsonl"]
-    assert "train_2.jsonl" in started
-    assert events.index(("start", "train_2.jsonl")) < events.index(("finish", "train_0.jsonl"))
+    assert peak_active == 1
+    assert started == ["train_0.jsonl", "train_1.jsonl", "train_2.jsonl"]
+    assert events.index(("finish", "train_0.jsonl")) < events.index(("start", "train_1.jsonl"))
+    assert events.index(("finish", "train_1.jsonl")) < events.index(("start", "train_2.jsonl"))
+
+
+@pytest.mark.asyncio
+async def test_directory_large_jsonl_delegates_with_conservative_chunk_parallelism(tmp_path):
+    from sft_label.pipeline import run
+
+    input_dir = tmp_path / "dataset"
+    input_dir.mkdir()
+    input_file = input_dir / "train.jsonl"
+    rows = [
+        {
+            "meta_prompt": ["system"],
+            "data": [
+                {"role": "user", "content": f"q{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ],
+        }
+        for i in range(3)
+    ]
+    input_file.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    async def fake_chunked(*args, **kwargs):
+        assert kwargs["directory_delegate"] is True
+        return {
+            "total_samples": 3,
+            "distribution_total_samples": 3,
+            "success": 3,
+            "failed": 0,
+            "success_rate": 1.0,
+            "total_llm_calls": 6,
+            "avg_calls_per_sample": 2.0,
+            "total_prompt_tokens": 1,
+            "total_completion_tokens": 1,
+            "total_tokens": 2,
+            "arbitrated_count": 0,
+            "arbitrated_rate": 0.0,
+            "validation_issue_count": 0,
+            "consistency_warning_count": 0,
+            "unmapped_tags": {},
+            "unmapped_unique_count": 0,
+            "canonicalization_counts": {},
+            "canonicalization_total_count": 0,
+            "canonicalization_unique_count": 0,
+            "confidence_stats": {},
+            "low_confidence_frequency": {},
+            "tag_distributions": {},
+            "combo_distributions": {},
+            "cross_matrix": {},
+            "total_elapsed_seconds": 0.1,
+            "input_file": str(input_file),
+            "mode": "refresh",
+            "chunked": True,
+            "chunk_size": 1,
+            "chunks_processed": 3,
+        }
+
+    with patch("sft_label.pipeline._run_one_file_chunked", side_effect=fake_chunked) as mocked_chunked:
+        await run(
+            input_path=str(input_dir),
+            output=str(tmp_path / "out"),
+            config=PipelineConfig(
+                concurrency=2,
+                chunk_size=1,
+                max_active_chunks=3,
+                dir_pipeline_max_files=2,
+                enable_adaptive_runtime=False,
+            ),
+        )
+
+    assert mocked_chunked.await_count == 1
 
 
 @pytest.mark.asyncio

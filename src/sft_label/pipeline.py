@@ -3216,7 +3216,8 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  inline_output: bool = False,
                                  mode: str = "refresh",
                                  migration_index: dict | None = None,
-                                 progress_event_cb=None):
+                                 progress_event_cb=None,
+                                 directory_delegate: bool = False):
     """Chunked JSONL labeling: watermark-based processing for large files.
 
     Processes JSONL files in chunks to bound memory usage. Each chunk is
@@ -3232,6 +3233,11 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
     requested_chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
+    if directory_delegate:
+        # A directory-delegated JSONL file is already a heavyweight producer that
+        # can keep the global semaphore saturated on its own. Limit it to one
+        # active chunk so we do not multiply large-file memory/IO pressure.
+        max_active = min(max_active, 1)
     concurrency = config.concurrency if config else DEFAULT_CONCURRENCY
     watermark = max(
         int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK)),
@@ -4144,6 +4150,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                         mode=mode,
                         migration_index=migration_index,
                         progress_event_cb=_chunked_progress_event,
+                        directory_delegate=True,
                     ),
                     orig_idx,
                 )
@@ -4225,7 +4232,10 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         if c.completed:
             return 0
         if c.chunked_delegate:
-            return 1
+            # Large delegated JSONL files internally top up to the same request
+            # watermark as normal directory scheduling. Treat each as a full
+            # watermark unit so the outer scheduler admits them conservatively.
+            return max(watermark, 1)
         return max(c.label_count - c.done, 0)
 
     # --- Try to load more files if active work is below watermark ---
