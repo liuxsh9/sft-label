@@ -21,11 +21,13 @@ from sft_label.artifacts import (
 )
 from sft_label.config import (
     DEFAULT_ROLLOUT_PRESET,
+    DEFAULT_SPARSE_PRESET,
     DEFAULT_CONCURRENCY,
     DEFAULT_RPS_LIMIT,
     DEFAULT_RPS_WARMUP,
     MAX_RETRIES,
     ROLLOUT_PRESETS,
+    SPARSE_PRESETS,
     REQUEST_TIMEOUT,
 )
 from sft_label.label_extensions_guidance import summarize_extension_specs
@@ -151,11 +153,46 @@ def _rollout_preset_switch_field() -> SwitchField:
     )
 
 
+def _sparse_preset_switch_field() -> SwitchField:
+    return SwitchField(
+        key="sparse_preset",
+        label="多轮稀疏标注预设 / Sparse multi-turn labeling preset",
+        options=[
+            SwitchOption(
+                "current",
+                "current（现有参数） / current (existing defaults)",
+            ),
+            SwitchOption(
+                "a",
+                "A（保守） / A (conservative)",
+            ),
+            SwitchOption(
+                "b",
+                "B（默认推荐） / B (default recommended)",
+            ),
+            SwitchOption(
+                "c",
+                "C（激进） / C (aggressive)",
+            ),
+        ],
+        default_value=DEFAULT_SPARSE_PRESET,
+    )
+
+
 def _print_rollout_preset_note(output_fn: OutputFn):
     output_fn(
         _msg(
             "提示：预设控制多轮稀疏规划 / selective scoring；Prompt 模式仍单独控制请求大小。默认组合为 compact_safe + compact。",
             "Note: rollout preset controls multi-turn sparse planning / selective scoring; prompt mode still controls request size. Default pairing is compact_safe + compact.",
+        )
+    )
+
+
+def _print_sparse_preset_note(output_fn: OutputFn):
+    output_fn(
+        _msg(
+            "提示：稀疏预设只调整 Pass 1 多轮稀疏采样五个参数。默认使用 B（平衡档）；current 表示历史默认值。",
+            "Note: sparse presets only change the five Pass 1 multi-turn sparse-sampling knobs. Default is B (balanced); current keeps the historical defaults.",
         )
     )
 
@@ -999,8 +1036,10 @@ def _build_run_plan(
 
     _section(output_fn, "多轮优化 / Multi-turn rollout")
     _print_rollout_preset_note(output_fn)
+    _print_sparse_preset_note(output_fn)
     switch_fields = [
         _rollout_preset_switch_field(),
+        _sparse_preset_switch_field(),
         SwitchField(
             key="prompt_mode",
             label="Prompt 模式 / Prompt mode",
@@ -1153,6 +1192,7 @@ def _build_run_plan(
     switch_values = _resolve_switch_custom_numeric_values(input_fn, switch_values)
 
     argv.extend(["--rollout-preset", switch_values["rollout_preset"]])
+    argv.extend(["--sparse-preset", switch_values["sparse_preset"]])
     if switch_values["prompt_mode"] != "full":
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
     if switch_values["shuffle"] == "on":
@@ -1211,12 +1251,14 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
 
     _section(output_fn, "多轮优化 / Multi-turn rollout")
     _print_rollout_preset_note(output_fn)
+    _print_sparse_preset_note(output_fn)
     switch_values = _ask_switch_panel(
         input_fn,
         output_fn,
         "评分配置（上下选择，左右切值） / Score config (Up/Down select, Left/Right switch)",
         [
             _rollout_preset_switch_field(),
+            _sparse_preset_switch_field(),
             SwitchField(
                 key="prompt_mode",
                 label="Prompt 模式 / Prompt mode",
@@ -1363,6 +1405,7 @@ def _build_score_plan(input_fn: InputFn, output_fn: OutputFn) -> LaunchPlan:
     )
     switch_values = _resolve_switch_custom_numeric_values(input_fn, switch_values)
     argv.extend(["--rollout-preset", switch_values["rollout_preset"]])
+    argv.extend(["--sparse-preset", switch_values["sparse_preset"]])
     if switch_values["prompt_mode"] != "full":
         argv.extend(["--prompt-mode", switch_values["prompt_mode"]])
     if switch_values["resume"] == "on":
@@ -1505,6 +1548,42 @@ def _build_run_plan_legacy(
         argv.append("--no-adaptive-runtime")
     if not _ask_yes_no(input_fn, "阶段收尾执行恢复补跑 / Run end-of-phase recovery sweep", default=True):
         argv.append("--no-recovery-sweep")
+    _print_rollout_preset_note(output_fn)
+    rollout_preset = _ask_choice(
+        input_fn,
+        output_fn,
+        "多轮优化预设 / Multi-turn rollout preset",
+        [
+            ("compact_safe", "compact_safe（默认推荐） / compact_safe (default recommended)",
+             "推荐生产默认：legacy sparse planning + selective scoring / Recommended production default: legacy sparse planning + selective scoring"),
+            ("baseline_control", "baseline_control（回退 / 对照） / baseline_control (rollback / control)",
+             "关闭 selective scoring，作为回退/对照 / Disable selective scoring for rollback/control"),
+            ("planner_hybrid", "planner_hybrid（实验） / planner_hybrid (experimental)",
+             "启用 planner 驱动的多轮策略 / Enable planner-driven multi-turn behavior"),
+        ],
+        default_index=1,
+    )
+    if rollout_preset != DEFAULT_ROLLOUT_PRESET:
+        argv.extend(["--rollout-preset", rollout_preset])
+    _print_sparse_preset_note(output_fn)
+    sparse_preset = _ask_choice(
+        input_fn,
+        output_fn,
+        "多轮稀疏标注预设 / Sparse multi-turn labeling preset",
+        [
+            ("current", "current（现有参数） / current (existing defaults)",
+             "保持历史默认 sparse 参数 / Keep the historical sparse defaults"),
+            ("a", "A（保守） / A (conservative)",
+             "轻度降低多轮实际标注量 / Lightly reduce multi-turn labeling"),
+            ("b", "B（默认推荐） / B (default recommended)",
+             "平衡降低多轮实际标注量 / Balanced reduction in multi-turn labeling"),
+            ("c", "C（激进） / C (aggressive)",
+             "优先降低标注量，接受更高继承比例 / Maximize savings with more inheritance"),
+        ],
+        default_index=3,
+    )
+    if sparse_preset != DEFAULT_SPARSE_PRESET:
+        argv.extend(["--sparse-preset", sparse_preset])
     prompt_mode = _ask_choice(
         input_fn,
         output_fn,
@@ -1623,6 +1702,42 @@ def _build_score_plan_legacy(input_fn: InputFn, output_fn: OutputFn) -> LaunchPl
         argv.append("--no-adaptive-runtime")
     if not _ask_yes_no(input_fn, "阶段收尾执行恢复补跑 / Run end-of-phase recovery sweep", default=True):
         argv.append("--no-recovery-sweep")
+    _print_rollout_preset_note(output_fn)
+    rollout_preset = _ask_choice(
+        input_fn,
+        output_fn,
+        "多轮优化预设 / Multi-turn rollout preset",
+        [
+            ("compact_safe", "compact_safe（默认推荐） / compact_safe (default recommended)",
+             "推荐生产默认：legacy sparse planning + selective scoring / Recommended production default: legacy sparse planning + selective scoring"),
+            ("baseline_control", "baseline_control（回退 / 对照） / baseline_control (rollback / control)",
+             "关闭 selective scoring，作为回退/对照 / Disable selective scoring for rollback/control"),
+            ("planner_hybrid", "planner_hybrid（实验） / planner_hybrid (experimental)",
+             "启用 planner 驱动的多轮策略 / Enable planner-driven multi-turn behavior"),
+        ],
+        default_index=1,
+    )
+    if rollout_preset != DEFAULT_ROLLOUT_PRESET:
+        argv.extend(["--rollout-preset", rollout_preset])
+    _print_sparse_preset_note(output_fn)
+    sparse_preset = _ask_choice(
+        input_fn,
+        output_fn,
+        "多轮稀疏标注预设 / Sparse multi-turn labeling preset",
+        [
+            ("current", "current（现有参数） / current (existing defaults)",
+             "保持历史默认 sparse 参数 / Keep the historical sparse defaults"),
+            ("a", "A（保守） / A (conservative)",
+             "轻度降低多轮实际标注量 / Lightly reduce multi-turn labeling"),
+            ("b", "B（默认推荐） / B (default recommended)",
+             "平衡降低多轮实际标注量 / Balanced reduction in multi-turn labeling"),
+            ("c", "C（激进） / C (aggressive)",
+             "优先降低标注量，接受更高继承比例 / Maximize savings with more inheritance"),
+        ],
+        default_index=3,
+    )
+    if sparse_preset != DEFAULT_SPARSE_PRESET:
+        argv.extend(["--sparse-preset", sparse_preset])
 
     prompt_mode = _ask_choice(
         input_fn,

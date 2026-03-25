@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from sft_label.config import (
     DEFAULT_ROLLOUT_PRESET,
+    DEFAULT_SPARSE_PRESET,
     DEFAULT_CONCURRENCY,
     DEFAULT_RPS_LIMIT,
     DEFAULT_RPS_WARMUP,
@@ -43,7 +44,9 @@ from sft_label.config import (
     MAX_RETRIES,
     REQUEST_TIMEOUT,
     ROLLOUT_PRESETS,
+    SPARSE_PRESETS,
     apply_rollout_preset,
+    apply_sparse_preset,
 )
 from sft_label.dashboard_service import (
     DashboardPortConflictError,
@@ -664,6 +667,7 @@ def _runtime_summary_values(launched_args) -> dict[str, object]:
         "adaptive_runtime": ENABLE_ADAPTIVE_RUNTIME if getattr(launched_args, "adaptive_runtime", None) is None else bool(getattr(launched_args, "adaptive_runtime")),
         "recovery_sweep": ENABLE_STAGE_RECOVERY_SWEEP if getattr(launched_args, "recovery_sweep", None) is None else bool(getattr(launched_args, "recovery_sweep")),
         "rollout_preset": getattr(launched_args, "rollout_preset", None) or DEFAULT_ROLLOUT_PRESET,
+        "sparse_preset": getattr(launched_args, "sparse_preset", None) or DEFAULT_SPARSE_PRESET,
     }
 
 
@@ -693,6 +697,11 @@ def _print_start_plan_summary(plan, lang: str, *, launched_args=None, dashboard_
         print(f"  {_start_msg(lang, '多轮优化预设', 'Multi-turn rollout preset')}: {rollout_preset}")
         if preset_desc:
             print(f"    {_start_msg(lang, '说明', 'Note')}: {preset_desc}")
+        sparse_preset = runtime["sparse_preset"]
+        sparse_desc = (SPARSE_PRESETS.get(sparse_preset, {}) or {}).get("description", "")
+        print(f"  {_start_msg(lang, '多轮稀疏预设', 'Sparse labeling preset')}: {sparse_preset}")
+        if sparse_desc:
+            print(f"    {_start_msg(lang, '说明', 'Note')}: {sparse_desc}")
         if dashboard_plan is not None:
             print(_start_msg(lang, "Dashboard 计划：", "Dashboard plan:"))
             if not dashboard_plan.enabled:
@@ -766,6 +775,7 @@ def _run_dashboard_service_maintenance_session(
 def _apply_runtime_overrides(config, args):
     """Apply optional runtime overrides from CLI args onto PipelineConfig."""
     apply_rollout_preset(config, getattr(args, "rollout_preset", None))
+    apply_sparse_preset(config, getattr(args, "sparse_preset", None))
 
     shared_concurrency = getattr(args, "concurrency", None)
     legacy_scoring_concurrency = getattr(args, "scoring_concurrency", None)
@@ -1859,6 +1869,10 @@ def build_parser():
                             choices=sorted(ROLLOUT_PRESETS.keys()),
                             default=DEFAULT_ROLLOUT_PRESET,
                             help="Multi-turn rollout preset: compact_safe (default recommended), planner_hybrid (experimental), or baseline_control.")
+    run_parser.add_argument("--sparse-preset", type=str,
+                            choices=list(SPARSE_PRESETS.keys()),
+                            default=DEFAULT_SPARSE_PRESET,
+                            help="Sparse multi-turn labeling preset: current (existing defaults), a (conservative), b (balanced default), or c (aggressive).")
     run_parser.add_argument("--model", type=str, default=None,
                             help="LLM model name (default: gpt-4o-mini)")
     run_parser.add_argument("--concurrency", type=int, default=None,
@@ -1917,6 +1931,10 @@ def build_parser():
                                choices=sorted(ROLLOUT_PRESETS.keys()),
                                default=DEFAULT_ROLLOUT_PRESET,
                                help="Multi-turn rollout preset: compact_safe (default recommended), planner_hybrid (experimental), or baseline_control.")
+    score_parser.add_argument("--sparse-preset", type=str,
+                               choices=list(SPARSE_PRESETS.keys()),
+                               default=DEFAULT_SPARSE_PRESET,
+                               help="Sparse multi-turn labeling preset: current (existing defaults), a (conservative), b (balanced default), or c (aggressive).")
     score_parser.add_argument("--model", type=str, default=None,
                                help="LLM model name (default: gpt-4o-mini)")
     score_parser.add_argument("--concurrency", type=int, default=None,

@@ -357,8 +357,8 @@ Treat that as an environment-specific note, not a guaranteed path.
 
 - Taxonomy package data lives under `/Users/lxs/.codex/worktrees/e39f/sft-label/src/sft_label/taxonomy/` and should be loaded via `_resources.py`, not raw file-system assumptions.
 - Runtime defaults live in `/Users/lxs/.codex/worktrees/e39f/sft-label/src/sft_label/config.py`; CLI flags selectively override those defaults.
-- CLI / `sft-label start` default runtime is `prompt_mode=compact` plus `rollout_preset=compact_safe`.
-- Preset meanings: `compact_safe` = recommended production default, `planner_hybrid` = experimental, `baseline_control` = rollback/control.
+- CLI / `sft-label start` default runtime is `prompt_mode=compact`, `rollout_preset=compact_safe`, and sparse preset `b` (balanced sparse multi-turn labeling).
+- Preset meanings: `compact_safe` = recommended production default, `planner_hybrid` = experimental, `baseline_control` = rollback/control; sparse presets are `current` (historical defaults), `a` (conservative), `b` (balanced default), and `c` (aggressive).
 - Library mode is different: `PipelineConfig()` does not automatically inherit CLI prompt-mode defaults, so set `prompt_mode` explicitly when reproducing CLI behavior programmatically.
 - `LITELLM_BASE` and `LITELLM_KEY` configure the LLM endpoint.
 - Prompt budget is a production constraint, not a soft preference: when editing labeling/scoring prompts, **do not increase prompt length**, and treat **compact prompt length as a hard ceiling**. Prefer equal-or-shorter rewrites; if a change adds wording in one area, remove at least as much elsewhere first.

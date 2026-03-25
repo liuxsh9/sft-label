@@ -14,7 +14,7 @@ from sft_label.cli import (
     _mask_secret,
     build_parser,
 )
-from sft_label.config import PipelineConfig
+from sft_label.config import DEFAULT_SPARSE_PRESET, PipelineConfig
 
 
 def test_sensitive_env_key_detection():
@@ -75,6 +75,7 @@ def test_apply_runtime_overrides_updates_pipeline_config():
         adaptive_runtime=None,
         recovery_sweep=None,
         rollout_preset="compact_safe",
+        sparse_preset=DEFAULT_SPARSE_PRESET,
     )
     _apply_runtime_overrides(config, args)
     assert config.concurrency == 123
@@ -105,6 +106,7 @@ def test_apply_runtime_overrides_applies_rollout_preset():
         adaptive_runtime=None,
         recovery_sweep=None,
         rollout_preset="baseline_control",
+        sparse_preset=DEFAULT_SPARSE_PRESET,
     )
 
     _apply_runtime_overrides(config, args)
@@ -113,6 +115,32 @@ def test_apply_runtime_overrides_applies_rollout_preset():
     assert config.planner_enabled is False
     assert config.planner_metadata_only is True
     assert config.planner_pass2_enabled is False
+
+
+def test_apply_runtime_overrides_applies_sparse_preset():
+    config = PipelineConfig()
+    args = SimpleNamespace(
+        concurrency=None,
+        scoring_concurrency=None,
+        rps_limit=None,
+        rps_warmup=None,
+        request_timeout=None,
+        max_retries=None,
+        rarity_mode=None,
+        extension_rarity_mode=None,
+        adaptive_runtime=None,
+        recovery_sweep=None,
+        rollout_preset="compact_safe",
+        sparse_preset="b",
+    )
+
+    _apply_runtime_overrides(config, args)
+
+    assert config.sparse_full_label_count == 4
+    assert config.sparse_gap_multiplier == 1.7
+    assert config.sparse_min_gap == 3
+    assert config.sparse_max_gap == 10
+    assert config.sparse_threshold == 8
 
 
 def test_apply_runtime_overrides_uses_legacy_scoring_alias_when_needed():
@@ -129,6 +157,7 @@ def test_apply_runtime_overrides_uses_legacy_scoring_alias_when_needed():
         adaptive_runtime=None,
         recovery_sweep=None,
         rollout_preset="compact_safe",
+        sparse_preset=DEFAULT_SPARSE_PRESET,
     )
     _apply_runtime_overrides(config, args)
     assert config.concurrency == 220
@@ -158,6 +187,8 @@ def test_parser_accepts_runtime_override_flags():
             "percentile",
             "--rollout-preset",
             "planner_hybrid",
+            "--sparse-preset",
+            "current",
         ]
     )
     assert run_args.concurrency == 80
@@ -169,6 +200,7 @@ def test_parser_accepts_runtime_override_flags():
     assert run_args.recovery_sweep is False
     assert run_args.rarity_mode == "percentile"
     assert run_args.rollout_preset == "planner_hybrid"
+    assert run_args.sparse_preset == "current"
 
     score_args = parser.parse_args(
         [
@@ -191,6 +223,8 @@ def test_parser_accepts_runtime_override_flags():
             "percentile",
             "--rollout-preset",
             "baseline_control",
+            "--sparse-preset",
+            "c",
         ]
     )
     assert score_args.concurrency == 700
@@ -202,6 +236,7 @@ def test_parser_accepts_runtime_override_flags():
     assert score_args.recovery_sweep is True
     assert score_args.rarity_mode == "percentile"
     assert score_args.rollout_preset == "baseline_control"
+    assert score_args.sparse_preset == "c"
 
 
 def test_parser_keeps_scoring_concurrency_legacy_alias():

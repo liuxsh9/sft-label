@@ -246,6 +246,50 @@ PASS2_HEAVY_POSTPROCESS_MODE = "auto"          # auto | always | defer
 PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD = 20000
 PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD = 1_000_000_000
 
+DEFAULT_SPARSE_PRESET = "b"
+SPARSE_PRESETS = {
+    "current": {
+        "description": "Existing sparse schedule defaults before the new launcher presets.",
+        "overrides": {
+            "sparse_full_label_count": SPARSE_FULL_LABEL_COUNT,
+            "sparse_gap_multiplier": SPARSE_GAP_MULTIPLIER,
+            "sparse_min_gap": SPARSE_MIN_GAP,
+            "sparse_max_gap": SPARSE_MAX_GAP,
+            "sparse_threshold": SPARSE_THRESHOLD,
+        },
+    },
+    "a": {
+        "description": "Conservative reduction: lower Pass 1 multi-turn labeling while staying close to current behavior.",
+        "overrides": {
+            "sparse_full_label_count": 6,
+            "sparse_gap_multiplier": 1.5,
+            "sparse_min_gap": 2,
+            "sparse_max_gap": 8,
+            "sparse_threshold": 10,
+        },
+    },
+    "b": {
+        "description": "Balanced reduction (default): meaningfully cuts multi-turn labels without the most aggressive inheritance.",
+        "overrides": {
+            "sparse_full_label_count": 4,
+            "sparse_gap_multiplier": 1.7,
+            "sparse_min_gap": 3,
+            "sparse_max_gap": 10,
+            "sparse_threshold": 8,
+        },
+    },
+    "c": {
+        "description": "Aggressive reduction: maximize Pass 1 savings for long trajectories at higher quality risk.",
+        "overrides": {
+            "sparse_full_label_count": 3,
+            "sparse_gap_multiplier": 2.0,
+            "sparse_min_gap": 3,
+            "sparse_max_gap": 12,
+            "sparse_threshold": 6,
+        },
+    },
+}
+
 ROLLOUT_PRESETS = {
     "compact_safe": {
         "description": "Recommended default: compact prompts + legacy sparse planning + selective scoring.",
@@ -296,6 +340,28 @@ def apply_rollout_preset(config, preset: str | None = None) -> str:
     for key, value in (payload.get("overrides") or {}).items():
         setattr(config, key, value)
     setattr(config, "rollout_preset", resolved)
+    return resolved
+
+
+def normalize_sparse_preset_name(preset: str | None) -> str:
+    """Normalize sparse preset values to stable internal keys."""
+    if preset is None:
+        return DEFAULT_SPARSE_PRESET
+    normalized = str(preset).strip().lower().replace("-", "_")
+    if not normalized:
+        return DEFAULT_SPARSE_PRESET
+    if normalized not in SPARSE_PRESETS:
+        raise ValueError(f"Unknown sparse preset: {preset}")
+    return normalized
+
+
+def apply_sparse_preset(config, preset: str | None = None) -> str:
+    """Apply one sparse preset onto a PipelineConfig-like object."""
+    resolved = normalize_sparse_preset_name(preset)
+    payload = SPARSE_PRESETS[resolved]
+    for key, value in (payload.get("overrides") or {}).items():
+        setattr(config, key, value)
+    setattr(config, "sparse_preset", resolved)
     return resolved
 
 # ═══════════════════════════════════════════════════════════
@@ -437,6 +503,7 @@ class PipelineConfig:
     pass2_heavy_postprocess_sample_threshold: int = PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD
     pass2_heavy_postprocess_file_bytes_threshold: int = PASS2_HEAVY_POSTPROCESS_FILE_BYTES_THRESHOLD
     prompt_mode: str = "full"  # "full" or "compact" (compact reduces few-shot count)
+    sparse_preset: str = DEFAULT_SPARSE_PRESET
     enable_conversation_v2: bool = ENABLE_CONVERSATION_V2
     conversation_v2_turn_threshold: int = CONV_V2_TURN_THRESHOLD
     conversation_v2_tool_threshold: int = CONV_V2_TOOL_THRESHOLD
