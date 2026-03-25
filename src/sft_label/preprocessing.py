@@ -150,13 +150,257 @@ def _resolve_pangu_meta_prompt(leading_system_turns, metadata):
     return metadata.get("system_prompt", "")
 
 
+def _normalize_role_value(role):
+    role_text = str(role or "").strip().lower()
+    if role_text in {"user", "human"}:
+        return "human"
+    if role_text in {"assistant", "gpt"}:
+        return "gpt"
+    if role_text == "tool":
+        return "tool"
+    if role_text == "system":
+        return "system"
+    return role_text
+
+
+def _build_invalid_turn_error(message, *, source_name, turn_index, source_file=None, source_row=None):
+    bits = [f"{message} at {source_name}[{turn_index}]"]
+    if source_file is not None:
+        bits.append(f"source_file={source_file}")
+    if source_row is not None:
+        bits.append(f"source_row={source_row}")
+    return ValueError(", ".join(bits))
+
+
+def _coerce_selected_text(value, *, source_name, turn_index, field_name, source_file=None, source_row=None):
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        value_type = type(value).__name__
+        raise _build_invalid_turn_error(
+            f"invalid {field_name} type {value_type}",
+            source_name=source_name,
+            turn_index=turn_index,
+            source_file=source_file,
+            source_row=source_row,
+        )
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _normalize_role_content_turn(
+    turn,
+    *,
+    source_name,
+    turn_index,
+    source_file=None,
+    source_row=None,
+):
+    role = _normalize_role_value(turn.get("role"))
+    value = _coerce_selected_text(
+        turn.get("content"),
+        source_name=source_name,
+        turn_index=turn_index,
+        field_name="content",
+        source_file=source_file,
+        source_row=source_row,
+    )
+    return {"from": role, "value": value}
+
+
+def _normalize_internal_turn(
+    turn,
+    *,
+    source_name,
+    turn_index,
+    source_file=None,
+    source_row=None,
+):
+    role = _normalize_role_value(turn.get("from"))
+    value = _coerce_selected_text(
+        turn.get("value"),
+        source_name=source_name,
+        turn_index=turn_index,
+        field_name="value",
+        source_file=source_file,
+        source_row=source_row,
+    )
+    return {"from": role, "value": value}
+
+
+def _normalize_conversations_turns(turns, *, source_file=None, source_row=None):
+    normalized_turns = []
+    provenance = None
+
+    for idx, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise _build_invalid_turn_error(
+                f"turn must be object, got {type(turn).__name__}",
+                source_name="conversations",
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+
+        has_internal = ("from" in turn) or ("value" in turn)
+        has_role_content = ("role" in turn) or ("content" in turn)
+
+        if has_internal:
+            normalized_turn = _normalize_internal_turn(
+                turn,
+                source_name="conversations",
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+            turn_source = "sharegpt"
+        elif has_role_content:
+            normalized_turn = _normalize_role_content_turn(
+                turn,
+                source_name="conversations",
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+            turn_source = "openai_conversations"
+        else:
+            normalized_turn = {"from": "", "value": ""}
+            turn_source = None
+
+        if provenance is None and turn_source and normalized_turn["from"] and normalized_turn["value"]:
+            provenance = turn_source
+        normalized_turns.append(normalized_turn)
+
+    return normalized_turns, provenance or "sharegpt"
+
+
+def _normalize_declared_role_content_turns(source_name, turns, *, source_file=None, source_row=None):
+    normalized_turns = []
+    for idx, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise _build_invalid_turn_error(
+                f"turn must be object, got {type(turn).__name__}",
+                source_name=source_name,
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+        normalized_turns.append(
+            _normalize_role_content_turn(
+                turn,
+                source_name=source_name,
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+        )
+    return normalized_turns
+
+
+def _analyze_turn_source(sample, source_name, *, source_file=None, source_row=None):
+    if source_name not in sample:
+        return None
+
+    raw_turns = sample.get(source_name)
+    routing_format = "pangu" if source_name == "data" else "sharegpt" if source_name == "conversations" else "openai_messages"
+    provenance = "pangu" if source_name == "data" else "openai_messages"
+
+    if not isinstance(raw_turns, list):
+        return {
+            "source_name": source_name,
+            "routing_format": routing_format,
+            "legal": False,
+            "non_empty": False,
+            "error": ValueError(f"{source_name} must be a list"),
+        }
+
+    try:
+        if source_name == "conversations":
+            normalized_turns, provenance = _normalize_conversations_turns(
+                raw_turns,
+                source_file=source_file,
+                source_row=source_row,
+            )
+        else:
+            normalized_turns = _normalize_declared_role_content_turns(
+                source_name,
+                raw_turns,
+                source_file=source_file,
+                source_row=source_row,
+            )
+    except ValueError as exc:
+        return {
+            "source_name": source_name,
+            "routing_format": routing_format,
+            "legal": False,
+            "non_empty": False,
+            "error": exc,
+        }
+
+    return {
+        "source_name": source_name,
+        "routing_format": routing_format,
+        "provenance": provenance,
+        "legal": True,
+        "non_empty": bool(raw_turns),
+        "normalized_turns": normalized_turns,
+    }
+
+
+def _resolve_turn_source_and_provenance(sample, *, source_file=None, source_row=None):
+    analyses = []
+    for source_name in ("data", "conversations", "messages"):
+        analyzed = _analyze_turn_source(
+            sample,
+            source_name,
+            source_file=source_file,
+            source_row=source_row,
+        )
+        if analyzed is not None:
+            analyses.append(analyzed)
+
+    non_empty_legal = next((item for item in analyses if item["legal"] and item["non_empty"]), None)
+    if non_empty_legal:
+        return {
+            "routing_format": non_empty_legal["routing_format"],
+            "provenance": non_empty_legal["provenance"],
+            "normalized_turns": non_empty_legal["normalized_turns"],
+        }
+
+    first_illegal = next((item for item in analyses if not item["legal"]), None)
+    if first_illegal:
+        raise first_illegal["error"]
+
+    first_legal_empty = next((item for item in analyses if item["legal"]), None)
+    if first_legal_empty:
+        return {
+            "routing_format": first_legal_empty["routing_format"],
+            "provenance": first_legal_empty["provenance"],
+            "normalized_turns": first_legal_empty["normalized_turns"],
+        }
+
+    return {
+        "routing_format": "unknown",
+        "provenance": None,
+        "normalized_turns": [],
+    }
+
+
+def _normalize_non_pangu_sample(sample, resolved):
+    normalized = dict(sample)
+    normalized["conversations"] = list(resolved.get("normalized_turns", []))
+    metadata = dict(sample.get("metadata") or {})
+    if resolved.get("provenance"):
+        metadata.setdefault("original_format", resolved["provenance"])
+    normalized["metadata"] = metadata
+    return normalized
+
+
 def detect_format(sample):
-    """Detect whether sample is ShareGPT or Pangu format."""
-    if "conversations" in sample:
-        return "sharegpt"
-    if "data" in sample:
-        return "pangu"
-    return "unknown"
+    """Detect sample format using centralized routing rules."""
+    resolved = _resolve_turn_source_and_provenance(sample)
+    return resolved["routing_format"]
 
 
 def strip_cot(text):
@@ -271,6 +515,10 @@ def normalize_pangu(sample):
     for turn in data:
         role = PANGU_ROLE_MAP.get(turn.get("role", ""), turn.get("role", ""))
         content = turn.get("content", "")
+        if content is None:
+            content = ""
+        elif not isinstance(content, str):
+            content = str(content)
 
         # Detect pseudo multi-turn (don't expand, just strip tokens)
         if role == "human" and "[unused10]" in content:
@@ -326,30 +574,38 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
     True multi-turn returns [N samples], one per assistant reply.
     Each slice has id suffixed with turn number (e.g. "id_t1", "id_t2").
     """
-    fmt = detect_format(sample)
+    resolved = _resolve_turn_source_and_provenance(
+        sample,
+        source_file=source_file,
+        source_row=source_row,
+    )
+    fmt = resolved["routing_format"]
     if fmt == "pangu":
         normalized = normalize_pangu(sample)
+    elif fmt in {"sharegpt", "openai_messages"}:
+        normalized = _normalize_non_pangu_sample(sample, resolved)
     else:
         normalized = dict(sample)
-        if "conversations" in normalized:
-            raw_convs = normalized["conversations"]
-            reply_cot = []
-            # Detect and save COT metadata before stripping (Pangu parity)
-            thinking_mode = detect_thinking_mode(raw_convs)
-            if thinking_mode == "slow":
-                cot_text, _, _ = extract_cot_content(raw_convs)
-                normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
-                if cot_text:
-                    normalized["metadata"]["cot_text"] = cot_text
-            for turn in raw_convs:
-                if turn.get("from") == "gpt":
-                    reply_cot.append(extract_turn_cot_text(turn.get("value", "")))
-            if reply_cot:
-                normalized.setdefault("metadata", {})["assistant_cot_by_reply"] = reply_cot
-            # Strip CoT from conversations
-            for turn in raw_convs:
-                if turn.get("from") == "gpt" and turn.get("value"):
-                    turn["value"] = strip_cot(turn["value"])
+
+    if fmt != "pangu" and "conversations" in normalized:
+        raw_convs = normalized["conversations"]
+        reply_cot = []
+        # Detect and save COT metadata before stripping (Pangu parity)
+        thinking_mode = detect_thinking_mode(raw_convs)
+        if thinking_mode == "slow":
+            cot_text, _, _ = extract_cot_content(raw_convs)
+            normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
+            if cot_text:
+                normalized["metadata"]["cot_text"] = cot_text
+        for turn in raw_convs:
+            if turn.get("from") == "gpt":
+                reply_cot.append(extract_turn_cot_text(turn.get("value", "")))
+        if reply_cot:
+            normalized.setdefault("metadata", {})["assistant_cot_by_reply"] = reply_cot
+        # Strip CoT from conversations
+        for turn in raw_convs:
+            if turn.get("from") == "gpt" and turn.get("value"):
+                turn["value"] = strip_cot(turn["value"])
 
     conversations = normalized.get("conversations", [])
     is_pseudo = normalized.get("metadata", {}).get("is_pseudo_multiturn", False)
@@ -470,11 +726,18 @@ def build_conversation_uid(sample, *, source_file=None, source_row=None):
 
 
 # Keep backward-compatible alias
-def normalize_sample(sample):
+def normalize_sample(sample, *, source_file=None, source_row=None):
     """Normalize without slicing (for tools that don't need multi-turn expansion)."""
-    fmt = detect_format(sample)
+    resolved = _resolve_turn_source_and_provenance(
+        sample,
+        source_file=source_file,
+        source_row=source_row,
+    )
+    fmt = resolved["routing_format"]
     if fmt == "pangu":
         return normalize_pangu(sample)
+    if fmt in {"sharegpt", "openai_messages"}:
+        return _normalize_non_pangu_sample(sample, resolved)
     return sample
 
 

@@ -3,10 +3,13 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from sft_label.preprocessing import (
     detect_format,
     normalize_pangu,
     normalize_and_slice,
+    normalize_sample,
     slice_multiturn,
     strip_cot,
     detect_code_fence_languages,
@@ -40,12 +43,61 @@ class TestFormatDetection:
         sample = {"conversations": [{"from": "human", "value": "hi"}]}
         assert detect_format(sample) == "sharegpt"
 
+    def test_conversations_role_content_routes_sharegpt(self):
+        sample = {
+            "conversations": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+        }
+        assert detect_format(sample) == "sharegpt"
+
+    def test_messages_role_content_routes_openai_messages(self):
+        sample = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+        }
+        assert detect_format(sample) == "openai_messages"
+
     def test_pangu_format(self):
         sample = {"data": [{"role": "user", "content": "hi"}]}
         assert detect_format(sample) == "pangu"
 
+    def test_data_wins_over_lower_priority_non_empty_legal_sources(self):
+        sample = {
+            "data": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            "conversations": [{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}],
+            "messages": [{"role": "user", "content": "q3"}, {"role": "assistant", "content": "a3"}],
+        }
+        assert detect_format(sample) == "pangu"
+
+    def test_empty_high_priority_sources_fall_back_to_non_empty_legal_source(self):
+        sample = {
+            "data": [],
+            "conversations": [],
+            "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        }
+        assert detect_format(sample) == "openai_messages"
+
+    def test_illegal_conversations_fall_back_to_valid_non_empty_messages(self):
+        sample = {
+            "conversations": [{"role": "user", "content": ["bad"]}],
+            "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        }
+        assert detect_format(sample) == "openai_messages"
+
+    def test_illegal_high_priority_source_raises_without_non_empty_legal_fallback(self):
+        sample = {
+            "conversations": [{"role": "user", "content": ["bad"]}],
+            "messages": [],
+        }
+        with pytest.raises(ValueError):
+            detect_format(sample)
+
     def test_unknown_format(self):
-        sample = {"messages": []}
+        sample = {"foo": []}
         assert detect_format(sample) == "unknown"
 
 
@@ -314,6 +366,332 @@ class TestNormalizeAndSlice:
         assert first_uid.startswith("conversation_uid:")
         assert second_uid.startswith("conversation_uid:")
         assert first_uid != second_uid
+
+    def test_conversations_role_content_single_turn_normalizes_to_internal_roles(self):
+        sample = {
+            "id": "oa-conv-single",
+            "conversations": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert result[0]["metadata"]["original_format"] == "openai_conversations"
+
+    def test_selected_none_text_fields_normalize_to_empty_strings(self):
+        sample = {
+            "id": "none-text-fields",
+            "conversations": [
+                {"role": "user", "content": None},
+                {"role": "assistant", "content": None},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": ""},
+            {"from": "gpt", "value": ""},
+        ]
+
+    def test_turn_missing_both_field_pairs_normalizes_to_empty_turn(self):
+        sample = {"id": "missing-shape", "conversations": [{}]}
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == [{"from": "", "value": ""}]
+
+    def test_conversations_role_content_multi_turn_slices_with_context(self):
+        sample = {
+            "id": "oa-conv-multi",
+            "conversations": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 2
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q1"},
+            {"from": "gpt", "value": "a1"},
+        ]
+        assert result[1]["conversations"] == [
+            {"from": "human", "value": "q1"},
+            {"from": "gpt", "value": "a1"},
+            {"from": "human", "value": "q2"},
+            {"from": "gpt", "value": "a2"},
+        ]
+
+    def test_system_and_tool_turns_survive_normalization_and_slicing(self):
+        sample = {
+            "id": "oa-system-tool",
+            "conversations": [
+                {"role": "system", "content": "policy"},
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "tool", "content": "result"},
+                {"role": "assistant", "content": "a2"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 2
+        assert result[0]["conversations"][0] == {"from": "system", "value": "policy"}
+        assert result[1]["conversations"][-2] == {"from": "tool", "value": "result"}
+        assert result[1]["conversations"][-1] == {"from": "gpt", "value": "a2"}
+
+    def test_messages_role_content_single_turn_normalization(self):
+        sample = {
+            "id": "oa-msg-single",
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert result[0]["metadata"]["original_format"] == "openai_messages"
+
+    def test_messages_role_content_multi_turn_normalization(self):
+        sample = {
+            "id": "oa-msg-multi",
+            "messages": [
+                {"role": "system", "content": "policy"},
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 2
+        assert result[0]["conversations"][0] == {"from": "system", "value": "policy"}
+        assert result[1]["conversations"][-1] == {"from": "gpt", "value": "a2"}
+        assert all(s["metadata"]["original_format"] == "openai_messages" for s in result)
+
+    def test_mixed_conversations_provenance_uses_first_non_empty_complete_internal_turn(self):
+        sample = {
+            "id": "mixed-sharegpt",
+            "conversations": [
+                {},
+                {"role": "user", "content": ""},
+                {"from": "human", "value": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["metadata"]["original_format"] == "sharegpt"
+
+    def test_mixed_conversations_provenance_uses_first_non_empty_complete_openai_turn(self):
+        sample = {
+            "id": "mixed-openai",
+            "conversations": [
+                {},
+                {"from": "human", "value": ""},
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["metadata"]["original_format"] == "openai_conversations"
+
+    def test_unknown_roles_are_lowercased_and_preserved(self):
+        sample = {
+            "id": "unknown-roles",
+            "messages": [
+                {"role": "DEVELOPER", "content": "policy"},
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"][0] == {"from": "developer", "value": "policy"}
+
+    def test_openai_style_long_trajectory_keeps_turn_index_and_total_turns_stable(self):
+        sample = {
+            "id": "oa-long",
+            "messages": [
+                {"role": "system", "content": "policy"},
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "tool", "content": "r1"},
+                {"role": "assistant", "content": "a2"},
+                {"role": "tool", "content": "r2"},
+                {"role": "assistant", "content": "a3"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 3
+        for i, sliced in enumerate(result, start=1):
+            assert sliced["metadata"]["turn_index"] == i
+            assert sliced["metadata"]["total_turns"] == 3
+
+    def test_zero_assistant_rows_stay_as_one_unsliced_sample(self):
+        sample = {
+            "id": "zero-assistant",
+            "messages": [
+                {"role": "system", "content": "policy"},
+                {"role": "user", "content": "q"},
+                {"role": "tool", "content": "r"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["id"] == "zero-assistant"
+
+    def test_winning_empty_source_yields_one_unsliced_empty_conversation_sample(self):
+        sample = {"id": "empty-pangu", "data": []}
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == []
+        assert result[0]["metadata"]["original_format"] == "pangu"
+
+    def test_original_format_set_for_supported_sources(self):
+        sharegpt = normalize_and_slice(
+            {
+                "id": "fmt-sharegpt",
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+            }
+        )[0]
+        openai_conversations = normalize_and_slice(
+            {
+                "id": "fmt-openai-conv",
+                "conversations": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            }
+        )[0]
+        openai_messages = normalize_and_slice(
+            {
+                "id": "fmt-openai-msg",
+                "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            }
+        )[0]
+        pangu = normalize_and_slice(
+            {
+                "id": "fmt-pangu",
+                "data": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+            }
+        )[0]
+
+        assert sharegpt["metadata"]["original_format"] == "sharegpt"
+        assert openai_conversations["metadata"]["original_format"] == "openai_conversations"
+        assert openai_messages["metadata"]["original_format"] == "openai_messages"
+        assert pangu["metadata"]["original_format"] == "pangu"
+
+    def test_turn_with_both_turn_shapes_prefers_internal_fields(self):
+        sample = {
+            "id": "dual-shape-turn",
+            "conversations": [
+                {"from": "human", "value": "use-this", "role": "user", "content": "ignore-this"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"][0] == {"from": "human", "value": "use-this"}
+        assert result[0]["metadata"]["original_format"] == "sharegpt"
+
+    @pytest.mark.parametrize(
+        ("bad_content", "type_name"),
+        [
+            (["x"], "list"),
+            ({"k": "v"}, "dict"),
+        ],
+    )
+    def test_invalid_selected_text_fields_raise_value_error_with_location_clues(self, bad_content, type_name):
+        sample = {
+            "id": "bad-content",
+            "conversations": [{"role": "user", "content": bad_content}],
+        }
+        with pytest.raises(ValueError) as exc:
+            normalize_and_slice(sample, source_file="bad.jsonl", source_row=7)
+        message = str(exc.value)
+        assert "bad.jsonl" in message
+        assert "7" in message
+        assert "content" in message
+        assert "0" in message
+        assert type_name in message
+
+
+class TestNoSliceNormalizationPath:
+    def test_normalize_sample_handles_openai_style_conversations(self):
+        sample = {
+            "id": "no-slice-conv",
+            "conversations": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        normalized = normalize_sample(sample)
+        assert normalized["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert normalized["metadata"]["original_format"] == "openai_conversations"
+
+    def test_normalize_sample_handles_openai_style_messages(self):
+        sample = {
+            "id": "no-slice-msg",
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        normalized = normalize_sample(sample)
+        assert normalized["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert normalized["metadata"]["original_format"] == "openai_messages"
+
+    def test_preprocess_uses_normalized_messages_schema_without_slicing(self):
+        sample = {
+            "id": "preprocess-msg",
+            "messages": [
+                {"role": "user", "content": "Question about Python"},
+                {"role": "assistant", "content": "```python\nprint('ok')\n```"},
+            ],
+        }
+        signals = preprocess(sample)
+        assert signals["total_turns"] == 2
+        assert signals["last_query_preview"].startswith("Question about Python")
+        assert signals["last_response_length"] > 0
+        assert "python" in signals["detected_languages"]
+
+    def test_no_slice_path_keeps_provenance_parity_with_normalize_and_slice(self):
+        sample = {
+            "id": "provenance-parity",
+            "conversations": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        normalized = normalize_sample(sample)
+        sliced = normalize_and_slice(sample)[0]
+        assert normalized["metadata"]["original_format"] == sliced["metadata"]["original_format"]
+
+    @pytest.mark.parametrize("entrypoint", [normalize_sample, preprocess])
+    def test_no_slice_path_raises_value_error_for_invalid_content(self, entrypoint):
+        sample = {
+            "id": "bad-no-slice",
+            "messages": [{"role": "user", "content": ["not-supported"]}],
+        }
+        with pytest.raises(ValueError) as exc:
+            entrypoint(sample)
+        message = str(exc.value)
+        assert "content" in message
+        assert "0" in message
+        assert "list" in message
 
 
 class TestMultiturnRegressionFixtures:
