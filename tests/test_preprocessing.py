@@ -88,6 +88,14 @@ class TestFormatDetection:
         }
         assert detect_format(sample) == "openai_messages"
 
+    def test_empty_higher_priority_data_beats_later_illegal_sources_without_non_empty_fallback(self):
+        sample = {
+            "data": [],
+            "conversations": [{"role": "user", "content": ["bad"]}],
+            "messages": [],
+        }
+        assert detect_format(sample) == "pangu"
+
     def test_illegal_high_priority_source_raises_without_non_empty_legal_fallback(self):
         sample = {
             "conversations": [{"role": "user", "content": ["bad"]}],
@@ -95,6 +103,27 @@ class TestFormatDetection:
         }
         with pytest.raises(ValueError):
             detect_format(sample)
+
+    @pytest.mark.parametrize(
+        ("source_name", "turn"),
+        [
+            ("messages", {"from": "human", "value": "q"}),
+            ("messages", {"role": "user"}),
+            ("messages", {"content": "q"}),
+            ("messages", {"role": "user", "content": "q", "from": "human", "value": "q"}),
+            ("data", {"from": "human", "value": "q"}),
+            ("data", {"role": "user"}),
+            ("data", {"content": "q"}),
+            ("data", {"role": "user", "content": "q", "from": "human", "value": "q"}),
+        ],
+    )
+    def test_declared_role_content_sources_reject_hybrid_or_missing_role_content_rows(
+        self,
+        source_name,
+        turn,
+    ):
+        with pytest.raises(ValueError):
+            detect_format({source_name: [turn]})
 
     def test_unknown_format(self):
         sample = {"foo": []}
@@ -477,6 +506,54 @@ class TestNormalizeAndSlice:
         assert result[1]["conversations"][-1] == {"from": "gpt", "value": "a2"}
         assert all(s["metadata"]["original_format"] == "openai_messages" for s in result)
 
+    def test_invalid_conversations_can_fall_back_to_valid_non_empty_messages_during_normalization(self):
+        sample = {
+            "id": "fallback-messages",
+            "conversations": [{"role": "user", "content": ["bad"]}],
+            "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert result[0]["metadata"]["original_format"] == "openai_messages"
+
+    def test_empty_higher_priority_source_wins_over_later_illegal_sources_in_normalization(self):
+        sample = {
+            "id": "empty-data-wins",
+            "data": [],
+            "conversations": [{"role": "user", "content": ["bad"]}],
+            "messages": [],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == []
+        assert result[0]["metadata"]["original_format"] == "pangu"
+
+    def test_non_pangu_normalization_drops_raw_turn_source_keys(self):
+        sample = {
+            "id": "drop-raw-turn-keys",
+            "data": [],
+            "conversations": [
+                {"from": "human", "value": "q"},
+                {"from": "gpt", "value": "a"},
+            ],
+            "messages": [
+                {"role": "user", "content": "q-losing"},
+                {"role": "assistant", "content": "a-losing"},
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert "data" not in result[0]
+        assert "messages" not in result[0]
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+
     def test_mixed_conversations_provenance_uses_first_non_empty_complete_internal_turn(self):
         sample = {
             "id": "mixed-sharegpt",
@@ -653,6 +730,7 @@ class TestNoSliceNormalizationPath:
             {"from": "gpt", "value": "a"},
         ]
         assert normalized["metadata"]["original_format"] == "openai_messages"
+        assert "messages" not in normalized
 
     def test_preprocess_uses_normalized_messages_schema_without_slicing(self):
         sample = {

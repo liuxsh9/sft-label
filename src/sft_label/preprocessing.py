@@ -286,6 +286,33 @@ def _normalize_declared_role_content_turns(source_name, turns, *, source_file=No
                 source_file=source_file,
                 source_row=source_row,
             )
+        has_role = "role" in turn
+        has_content = "content" in turn
+        has_internal_fields = ("from" in turn) or ("value" in turn)
+
+        if has_internal_fields:
+            raise _build_invalid_turn_error(
+                "hybrid turn shape with from/value is not allowed",
+                source_name=source_name,
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+
+        if not has_role or not has_content:
+            missing_fields = []
+            if not has_role:
+                missing_fields.append("role")
+            if not has_content:
+                missing_fields.append("content")
+            raise _build_invalid_turn_error(
+                f"missing required field(s): {', '.join(missing_fields)}",
+                source_name=source_name,
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
+
         normalized_turns.append(
             _normalize_role_content_turn(
                 turn,
@@ -368,17 +395,27 @@ def _resolve_turn_source_and_provenance(sample, *, source_file=None, source_row=
             "normalized_turns": non_empty_legal["normalized_turns"],
         }
 
+    first_legal_empty = next(
+        ((idx, item) for idx, item in enumerate(analyses) if item["legal"]),
+        None,
+    )
+    if first_legal_empty:
+        legal_empty_idx, legal_empty_item = first_legal_empty
+        blocking_illegal = next(
+            (item for idx, item in enumerate(analyses) if idx < legal_empty_idx and not item["legal"]),
+            None,
+        )
+        if blocking_illegal:
+            raise blocking_illegal["error"]
+        return {
+            "routing_format": legal_empty_item["routing_format"],
+            "provenance": legal_empty_item["provenance"],
+            "normalized_turns": legal_empty_item["normalized_turns"],
+        }
+
     first_illegal = next((item for item in analyses if not item["legal"]), None)
     if first_illegal:
         raise first_illegal["error"]
-
-    first_legal_empty = next((item for item in analyses if item["legal"]), None)
-    if first_legal_empty:
-        return {
-            "routing_format": first_legal_empty["routing_format"],
-            "provenance": first_legal_empty["provenance"],
-            "normalized_turns": first_legal_empty["normalized_turns"],
-        }
 
     return {
         "routing_format": "unknown",
@@ -388,7 +425,11 @@ def _resolve_turn_source_and_provenance(sample, *, source_file=None, source_row=
 
 
 def _normalize_non_pangu_sample(sample, resolved):
-    normalized = dict(sample)
+    normalized = {
+        key: value
+        for key, value in sample.items()
+        if key not in {"data", "conversations", "messages"}
+    }
     normalized["conversations"] = list(resolved.get("normalized_turns", []))
     metadata = dict(sample.get("metadata") or {})
     if resolved.get("provenance"):
