@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 from sft_label.pipeline import discover_input_files, iter_samples_from_file
-from sft_label.preprocessing import detect_format
+from sft_label.preprocessing import detect_format, _resolve_turn_source_and_provenance
 
 
 @dataclass
@@ -27,14 +27,12 @@ class Candidate:
     raw_row: dict
 
 
-def _raw_turns(row: dict) -> list[dict]:
-    if isinstance(row.get("conversations"), list):
-        return [t for t in row["conversations"] if isinstance(t, dict)]
-    if isinstance(row.get("messages"), list):
-        return [t for t in row["messages"] if isinstance(t, dict)]
-    if isinstance(row.get("data"), list):
-        return [t for t in row["data"] if isinstance(t, dict)]
-    return []
+def _resolved_turns(row: dict) -> list[dict]:
+    try:
+        resolved = _resolve_turn_source_and_provenance(row)
+    except ValueError:
+        return []
+    return [t for t in resolved.get("normalized_turns", []) if isinstance(t, dict)]
 
 
 def _raw_role(turn: dict) -> str:
@@ -53,7 +51,7 @@ def _content_preview(turn: dict) -> str:
 
 
 def _categorize_row(row: dict) -> set[str]:
-    turns = _raw_turns(row)
+    turns = _resolved_turns(row)
     roles = [_raw_role(t) for t in turns]
     assistant_count = sum(r in {"assistant", "gpt"} for r in roles)
     has_system = "system" in roles
@@ -74,6 +72,20 @@ def _categorize_row(row: dict) -> set[str]:
     return categories
 
 
+def _iter_json_rows(path: Path, max_rows: int) -> Iterable[tuple[int, dict]]:
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return
+    for row_number, row in enumerate(payload, start=1):
+        if max_rows > 0 and row_number > max_rows:
+            break
+        if isinstance(row, dict):
+            yield row_number, row
+
+
 def _iter_jsonl_rows(path: Path, max_rows: int) -> Iterable[tuple[int, dict]]:
     with path.open("r", encoding="utf-8") as f:
         seen = 0
@@ -87,6 +99,13 @@ def _iter_jsonl_rows(path: Path, max_rows: int) -> Iterable[tuple[int, dict]]:
                 break
 
 
+def _iter_rows(path: Path, max_rows: int) -> Iterable[tuple[int, dict]]:
+    if path.suffix.lower() == ".json":
+        yield from _iter_json_rows(path, max_rows)
+        return
+    yield from _iter_jsonl_rows(path, max_rows)
+
+
 def _probe_candidate(candidate: Candidate) -> dict:
     with tempfile.TemporaryDirectory(prefix="turn-compat-probe-") as tmpdir:
         temp_path = Path(tmpdir) / "sample.jsonl"
@@ -96,12 +115,13 @@ def _probe_candidate(candidate: Candidate) -> dict:
     role_order = [str(t.get("from", "")) for t in normalized_turns]
     provenance = samples[0].get("metadata", {}).get("original_format") if samples else None
     assistant_samples = sum(1 for s in samples if (s.get("metadata") or {}).get("turn_index"))
+    raw_turns = _resolved_turns(candidate.raw_row)
     return {
         "category": candidate.category,
         "source_file": str(candidate.source_file),
         "row_number": candidate.row_number,
         "detected_format": detect_format(candidate.raw_row),
-        "assistant_replies_in_raw": sum(_raw_role(t) in {"assistant", "gpt"} for t in _raw_turns(candidate.raw_row)),
+        "assistant_replies_in_raw": sum(_raw_role(t) in {"assistant", "gpt"} for t in raw_turns),
         "n_raw": n_raw,
         "n_samples": len(samples),
         "assistant_samples_with_turn_index": assistant_samples,
@@ -109,10 +129,22 @@ def _probe_candidate(candidate: Candidate) -> dict:
         "bundle_count": len(bundles),
         "provenance": provenance,
         "role_order": role_order,
-        "raw_roles": [_raw_role(t) for t in _raw_turns(candidate.raw_row)],
-        "first_preview": _content_preview(_raw_turns(candidate.raw_row)[0]) if _raw_turns(candidate.raw_row) else "",
-        "last_preview": _content_preview(_raw_turns(candidate.raw_row)[-1]) if _raw_turns(candidate.raw_row) else "",
+        "raw_roles": [_raw_role(t) for t in raw_turns],
+        "first_preview": _content_preview(raw_turns[0]) if raw_turns else "",
+        "last_preview": _content_preview(raw_turns[-1]) if raw_turns else "",
     }
+
+
+def _probe_candidate_safely(candidate: Candidate) -> dict:
+    try:
+        return _probe_candidate(candidate)
+    except Exception as exc:
+        return {
+            "category": candidate.category,
+            "source_file": str(candidate.source_file),
+            "row_number": candidate.row_number,
+            "error": str(exc),
+        }
 
 
 def main() -> None:
@@ -130,9 +162,9 @@ def main() -> None:
     chosen: dict[str, Candidate] = {}
 
     for path in files:
-        if path.suffix.lower() != ".jsonl":
+        if path.suffix.lower() not in {".jsonl", ".json"}:
             continue
-        for row_number, row in _iter_jsonl_rows(path, args.max_rows_per_file):
+        for row_number, row in _iter_rows(path, args.max_rows_per_file):
             for category in _categorize_row(row):
                 if category in wanted and category not in chosen:
                     chosen[category] = Candidate(category=category, source_file=path, row_number=row_number, raw_row=row)
@@ -153,9 +185,13 @@ def main() -> None:
         if candidate is None:
             print(f"[{category}] not found")
             continue
-        result = _probe_candidate(candidate)
+        result = _probe_candidate_safely(candidate)
         print(f"[{category}]")
         print(f"  source: {result['source_file']}:{result['row_number']}")
+        if "error" in result:
+            print(f"  error: {result['error']}")
+            print()
+            continue
         print(f"  detect_format: {result['detected_format']}")
         print(f"  provenance: {result['provenance']}")
         print(f"  raw_roles: {result['raw_roles']}")
