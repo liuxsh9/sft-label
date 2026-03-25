@@ -23,6 +23,7 @@
     - `messages[].role/content` routing to `openai_messages`
     - `data` beating lower-priority keys when legal and non-empty
     - empty `data`/`conversations` falling back to a lower-priority non-empty legal source
+    - illegal `conversations` falling back to valid non-empty `messages`
     - illegal high-priority sources raising instead of silently downgrading when no non-empty legal fallback exists.
 
 - [ ] **Step 2: Write failing normalization/slicing tests**
@@ -39,7 +40,8 @@
     - zero-assistant rows staying as one unsliced sample
     - a winning empty source producing exactly one unsliced sample with `conversations == []`
     - `metadata.original_format` being set/preserved for `sharegpt`, `openai_conversations`, `openai_messages`, and `pangu`
-    - invalid selected text fields (`list`/`dict`) raising `ValueError` with source/turn/type clues.
+    - a `conversations` turn carrying both `from/value` and `role/content`, asserting `from/value` wins and extra `role/content` is ignored
+    - invalid selected text fields (`list`/`dict`) raising `ValueError` with `source_file`, `source_row`, offending field name, turn index, and type clues.
 
 - [ ] **Step 3: Write failing no-slice normalization tests**
   - Add `normalize_sample()` / `preprocess()` tests proving OpenAI-style schemas normalize even when the caller does not use `normalize_and_slice()`.
@@ -109,6 +111,7 @@ PASS
 
 - [ ] **Step 2: Write failing invalid-input file-reader tests**
   - Add an explicit JSONL row whose selected `content`/text field is a `list` or `dict` and assert it raises `ValueError` through the row-ingestion/file-reader path because no non-empty legal fallback exists.
+  - Add a 0-assistant JSONL row and assert file-reader / flattening preserves the single-sample contract end-to-end.
   - In the accepted row-bundle cases, assert stable sample IDs and turn metadata remain correct after flattening/file-reader expansion.
 
 - [ ] **Step 3: Run row-ingestion tests to verify RED**
