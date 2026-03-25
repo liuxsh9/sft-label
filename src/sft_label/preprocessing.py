@@ -334,7 +334,14 @@ def _normalize_declared_role_content_turns(source_name, turns, *, source_file=No
 
 
 def _has_semantically_non_empty_turns(normalized_turns):
-    return any(turn.get("from") and turn.get("value") for turn in normalized_turns)
+    for turn in normalized_turns:
+        role = str(turn.get("from") or "").strip()
+        value = turn.get("value")
+        if isinstance(value, str):
+            value = value.strip()
+        if role and value:
+            return True
+    return False
 
 
 def _analyze_turn_source(sample, source_name, *, source_file=None, source_row=None):

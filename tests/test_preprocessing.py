@@ -95,6 +95,13 @@ class TestFormatDetection:
         }
         assert detect_format(sample) == "openai_messages"
 
+    def test_whitespace_only_conversations_fall_back_to_valid_messages(self):
+        sample = {
+            "conversations": [{"role": "user", "content": "   "}],
+            "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        }
+        assert detect_format(sample) == "openai_messages"
+
     def test_empty_higher_priority_data_beats_later_illegal_sources_without_non_empty_fallback(self):
         sample = {
             "data": [],
@@ -541,6 +548,20 @@ class TestNormalizeAndSlice:
         ]
         assert result[0]["metadata"]["original_format"] == "openai_messages"
 
+    def test_whitespace_only_conversations_can_fall_back_to_valid_messages_during_normalization(self):
+        sample = {
+            "id": "blank-whitespace-fallback-messages",
+            "conversations": [{"role": "user", "content": "   "}],
+            "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert result[0]["metadata"]["original_format"] == "openai_messages"
+
     def test_empty_higher_priority_source_wins_over_later_illegal_sources_in_normalization(self):
         sample = {
             "id": "empty-data-wins",
@@ -776,6 +797,22 @@ class TestNoSliceNormalizationPath:
         sample = {
             "id": "no-slice-blank-fallback",
             "conversations": [{}],
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+        normalized = normalize_sample(sample)
+        assert normalized["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert normalized["metadata"]["original_format"] == "openai_messages"
+
+    def test_normalize_sample_falls_back_from_whitespace_only_conversations_to_messages(self):
+        sample = {
+            "id": "no-slice-blank-whitespace-fallback",
+            "conversations": [{"role": "user", "content": "   "}],
             "messages": [
                 {"role": "user", "content": "q"},
                 {"role": "assistant", "content": "a"},
