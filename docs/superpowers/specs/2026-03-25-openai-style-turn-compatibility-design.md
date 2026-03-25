@@ -360,6 +360,8 @@ raw row
 
 而不是把新 schema 一律折叠回 `sharegpt`。
 
+此外，merge-time contract 也要写清：无论是 refresh 还是 incremental / `use_existing_data_label=True` 路径，只要当前 batch 已重新推断出更准确的 `source_format`，`data_label.meta.source_format` 都必须被覆盖更新，不能让历史上误记为 `sharegpt` 的 provenance 因复用旧 data_label 而继续残留。
+
 ### pipeline 目录模式
 
 目录扫描和逐文件读取已经能发现目标目录中的 100 个 JSONL 文件；实际失败点仅在预处理。因此修复入口标准化后，目录模式可直接受益。
@@ -414,8 +416,15 @@ raw row
    - 至少 1 条 `conversations[].role/content` 样本
    - 非法 list/dict content 在 no-slice 路径同样显式拒绝
    - 断言不切片路径也完成标准化
+   - 断言 `metadata.original_format` 对 `sharegpt` / `openai_conversations` / `openai_messages` / `pangu` 设置或保留正确
 
-8. 0 assistant 回复回归
+8. inline provenance 回归
+   - 先构造历史上 `data_label.meta.source_format = sharegpt` 的旧行
+   - 再走 incremental / `use_existing_data_label=True` 合并路径处理 `conversations[].role/content` 样本
+   - 断言 merge 后 provenance 被覆盖为 `openai_conversations`（或对应真实来源）
+   - 至少 1 条 end-to-end JSONL case 走 `iter_samples_from_file(..., return_row_bundles=True)` 混合 schema 文件读入路径
+
+9. 0 assistant 回复回归
    - 例如 `system, user, tool`
    - 断言输出 1 个未切片样本，保留 turns 与 metadata/original_format
 
@@ -447,7 +456,8 @@ raw row
 - `iter_row_sample_bundles_from_jsonl()` 能逐行产出 bundle；
 - `flatten_row_sample_bundles()` 后 sample 数符合 assistant 回复数（或 0 assistant 的单样本 contract）；
 - stable sample id / turn metadata 依旧正确；
-- `data_label.meta.source_format` 与 `metadata.original_format` 保持一致。
+- `data_label.meta.source_format` 与 `metadata.original_format` 保持一致；
+- 对已有旧 `data_label` 的 incremental merge 路径，新的 `source_format` 会覆盖 stale provenance。
 
 ### 第 3 层：真实目录抽样验证
 
