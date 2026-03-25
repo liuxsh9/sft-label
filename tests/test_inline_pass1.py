@@ -282,6 +282,32 @@ def test_merge_pass1_results_openai_messages_sets_source_format(tmp_path):
     assert source_format == "openai_messages"
 
 
+def test_merge_pass1_results_refresh_overwrites_stale_sharegpt_source_format_for_openai_messages(tmp_path):
+    row = {
+        "id": "refresh-stale-openai-messages",
+        "metadata": {"original_format": "sharegpt"},
+        "messages": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [_full_labels("fresh")],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+        mode="refresh",
+    )
+
+    source_format = result.rows[0]["extra_info"]["unique_info"]["data_label"]["meta"]["source_format"]
+    assert source_format == "openai_messages"
+
+
 def test_merge_pass1_results_incremental_overwrites_stale_sharegpt_source_format_for_openai_conversations(tmp_path):
     row = {
         "id": "inc-stale-provenance",

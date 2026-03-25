@@ -777,6 +777,36 @@ class TestNoSliceNormalizationPath:
         sliced = normalize_and_slice(sample)[0]
         assert normalized["metadata"]["original_format"] == sliced["metadata"]["original_format"]
 
+    def test_no_slice_path_matches_slice_cot_semantics_for_openai_messages(self):
+        sample = {
+            "id": "cot-parity-msg",
+            "messages": [
+                {"role": "user", "content": "Solve this."},
+                {"role": "assistant", "content": "<think>Reason first</think>Final answer"},
+            ],
+        }
+
+        normalized = normalize_sample(sample)
+        sliced = normalize_and_slice(sample)[0]
+
+        assert normalized["conversations"] == sliced["conversations"]
+        assert normalized["metadata"]["thinking_mode"] == "slow"
+        assert normalized["metadata"]["cot_text"] == "Reason first"
+        assert normalized["metadata"]["assistant_cot_by_reply"] == ["Reason first"]
+        assert normalized["metadata"]["thinking_mode"] == sliced["metadata"]["thinking_mode"]
+        assert normalized["metadata"]["cot_text"] == sliced["metadata"]["cot_text"]
+
+    def test_preprocess_no_slice_matches_slice_cot_semantics(self):
+        sample = {
+            "id": "cot-parity-preprocess",
+            "messages": [
+                {"role": "user", "content": "Solve this."},
+                {"role": "assistant", "content": "<think>Reason first</think>Final answer"},
+            ],
+        }
+
+        assert preprocess(sample) == preprocess(normalize_and_slice(sample)[0])
+
     @pytest.mark.parametrize("entrypoint", [normalize_sample, preprocess])
     def test_no_slice_path_raises_value_error_for_invalid_content(self, entrypoint):
         sample = {

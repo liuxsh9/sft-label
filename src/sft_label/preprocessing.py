@@ -441,8 +441,35 @@ def _normalize_non_pangu_sample(sample, resolved):
     normalized["conversations"] = list(resolved.get("normalized_turns", []))
     metadata = dict(sample.get("metadata") or {})
     if resolved.get("provenance"):
-        metadata.setdefault("original_format", resolved["provenance"])
+        metadata["original_format"] = resolved["provenance"]
     normalized["metadata"] = metadata
+    return normalized
+
+
+def _apply_non_pangu_cot_semantics(normalized):
+    """Apply non-Pangu COT extraction/stripping semantics in-place."""
+    raw_convs = normalized.get("conversations")
+    if not isinstance(raw_convs, list):
+        return normalized
+
+    reply_cot = []
+    thinking_mode = detect_thinking_mode(raw_convs)
+    if thinking_mode == "slow":
+        cot_text, _, _ = extract_cot_content(raw_convs)
+        normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
+        if cot_text:
+            normalized["metadata"]["cot_text"] = cot_text
+
+    for turn in raw_convs:
+        if turn.get("from") != "gpt":
+            continue
+        reply_cot.append(extract_turn_cot_text(turn.get("value", "")))
+        if turn.get("value"):
+            turn["value"] = strip_cot(turn["value"])
+
+    if reply_cot:
+        normalized.setdefault("metadata", {})["assistant_cot_by_reply"] = reply_cot
+
     return normalized
 
 
@@ -633,28 +660,9 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
         normalized = normalize_pangu(sample)
     elif fmt in {"sharegpt", "openai_messages"}:
         normalized = _normalize_non_pangu_sample(sample, resolved)
+        _apply_non_pangu_cot_semantics(normalized)
     else:
         normalized = dict(sample)
-
-    if fmt != "pangu" and "conversations" in normalized:
-        raw_convs = normalized["conversations"]
-        reply_cot = []
-        # Detect and save COT metadata before stripping (Pangu parity)
-        thinking_mode = detect_thinking_mode(raw_convs)
-        if thinking_mode == "slow":
-            cot_text, _, _ = extract_cot_content(raw_convs)
-            normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
-            if cot_text:
-                normalized["metadata"]["cot_text"] = cot_text
-        for turn in raw_convs:
-            if turn.get("from") == "gpt":
-                reply_cot.append(extract_turn_cot_text(turn.get("value", "")))
-        if reply_cot:
-            normalized.setdefault("metadata", {})["assistant_cot_by_reply"] = reply_cot
-        # Strip CoT from conversations
-        for turn in raw_convs:
-            if turn.get("from") == "gpt" and turn.get("value"):
-                turn["value"] = strip_cot(turn["value"])
 
     conversations = normalized.get("conversations", [])
     is_pseudo = normalized.get("metadata", {}).get("is_pseudo_multiturn", False)
@@ -786,7 +794,11 @@ def normalize_sample(sample, *, source_file=None, source_row=None):
     if fmt == "pangu":
         return normalize_pangu(sample)
     if fmt in {"sharegpt", "openai_messages"}:
-        return _normalize_non_pangu_sample(sample, resolved)
+        normalized = _normalize_non_pangu_sample(sample, resolved)
+        _apply_non_pangu_cot_semantics(normalized)
+        if not normalized.setdefault("metadata", {}).get("thinking_mode"):
+            normalized["metadata"]["thinking_mode"] = "fast"
+        return normalized
     return sample
 
 
