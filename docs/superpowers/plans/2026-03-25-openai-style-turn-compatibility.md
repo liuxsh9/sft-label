@@ -19,7 +19,7 @@
 
 - [ ] **Step 1: Write failing format-detection tests**
   - Add direct `detect_format()` coverage for:
-    - `conversations[].role/content` routing to the non-Pangu path
+    - `conversations[].role/content` routing to `sharegpt`
     - `messages[].role/content` routing to `openai_messages`
     - `data` beating lower-priority keys when legal and non-empty
     - empty `data`/`conversations` falling back to a lower-priority non-empty legal source
@@ -33,6 +33,9 @@
     - `conversations[].role/content` multi-turn slicing with preserved context
     - leading `system` and inline `tool` turns surviving normalization and slicing
     - `messages[].role/content` single-turn and multi-turn normalization
+    - mixed `conversations` provenance choosing `sharegpt` vs `openai_conversations` from the first non-empty, fully-formed legal turn while ignoring leading empty/incomplete turns
+    - unknown roles lowercasing and preserving rather than remapping/dropping
+    - an OpenAI-style long trajectory preserving sample count plus `turn_index` / `total_turns` stability
     - zero-assistant rows staying as one unsliced sample
     - a winning empty source producing exactly one unsliced sample with `conversations == []`
     - `metadata.original_format` being set/preserved for `sharegpt`, `openai_conversations`, `openai_messages`, and `pangu`
@@ -40,6 +43,7 @@
 
 - [ ] **Step 3: Write failing no-slice normalization tests**
   - Add `normalize_sample()` / `preprocess()` tests proving OpenAI-style schemas normalize even when the caller does not use `normalize_and_slice()`.
+  - Include parity checks for invalid-content `ValueError` behavior and `metadata.original_format` / provenance behavior on the no-slice path.
 
 - [ ] **Step 4: Run focused preprocessing tests to verify RED**
 
@@ -104,7 +108,7 @@ PASS
     - fallback from invalid/empty higher-priority sources to lower-priority non-empty legal sources.
 
 - [ ] **Step 2: Write failing invalid-input file-reader tests**
-  - Add a JSONL row that should raise `ValueError` because no non-empty legal fallback exists.
+  - Add an explicit JSONL row whose selected `content`/text field is a `list` or `dict` and assert it raises `ValueError` through the row-ingestion/file-reader path because no non-empty legal fallback exists.
   - In the accepted row-bundle cases, assert stable sample IDs and turn metadata remain correct after flattening/file-reader expansion.
 
 - [ ] **Step 3: Run row-ingestion tests to verify RED**
@@ -124,7 +128,8 @@ FAIL on the new bundle / mixed-file assertions.
   - Add merge coverage showing `conversations[].role/content` writes `openai_conversations` and `messages[].role/content` writes `openai_messages` into `data_label.meta.source_format`.
 
 - [ ] **Step 2: Write a failing incremental-merge regression**
-  - Start from an existing row whose `data_label.meta.source_format` is stale (`sharegpt`), then run an incremental merge on a newly-normalized `openai_conversations` row and assert the stale provenance is overwritten.
+  - Start from an existing row whose `data_label.meta.source_format` is stale (`sharegpt`), then run an incremental merge on a newly-normalized `openai_conversations` row with `use_existing_data_label=True` and assert the stale provenance is overwritten.
+  - Add the matching refresh-path regression so both refresh and incremental merges rewrite newly inferred provenance.
 
 - [ ] **Step 3: Run inline-merge tests to verify RED**
 
