@@ -4704,7 +4704,7 @@ async def run(
             f"{workload_estimate.files_planned} pending files, "
             f"{workload_estimate.total_samples} samples "
             f"({workload_estimate.total_labeled_samples} labeled, {workload_estimate.total_inherited_samples} inherited), "
-            f"llm~{workload_estimate.initial_estimated_llm_calls}, "
+            f"pass1_llm~{workload_estimate.initial_estimated_llm_calls}, "
             f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
         )
 
@@ -4735,7 +4735,7 @@ async def run(
                     info="starting...",
                 )
                 llm_task = progress.add_task(
-                    "LLM",
+                    "LLM (P1+P2)",
                     total=max(workload_estimate.initial_estimated_llm_calls, 1),
                     visible=workload_estimate.total_labeled_samples > 0,
                     info="starting...",
@@ -4841,7 +4841,7 @@ async def run(
             f"{workload_estimate.files_planned} files, "
             f"{workload_estimate.total_samples} samples "
             f"({workload_estimate.total_labeled_samples} labeled, {workload_estimate.total_inherited_samples} inherited), "
-            f"llm~{workload_estimate.initial_estimated_llm_calls}, "
+            f"pass1_llm~{workload_estimate.initial_estimated_llm_calls}, "
             f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
         )
         batch_start = time.time()
@@ -4871,7 +4871,7 @@ async def run(
                     info="starting...",
                 )
                 llm_task = progress.add_task(
-                    "LLM",
+                    "LLM (P1+P2)",
                     total=max(workload_estimate.initial_estimated_llm_calls, 1),
                     visible=workload_estimate.total_labeled_samples > 0,
                     info="starting...",

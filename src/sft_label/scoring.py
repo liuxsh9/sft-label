@@ -5391,8 +5391,8 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
         print(f"Files:       {stats.get('files_processed', '?')}")
     print(f"Scored:      {total_scored}/{total} ({success_rate:.1f}%)")
     if total_estimated:
-        print(f"Estimated:   {total_estimated}")
-    print(f"LLM calls:   {stats.get('total_llm_calls', 0)}")
+        print(f"Selective-estimated samples: {total_estimated}")
+    print(f"LLM calls (Pass 2 actual): {stats.get('total_llm_calls', 0)}")
     total_tokens = stats.get('total_tokens', 0)
     print(f"Tokens:      {total_tokens:,}")
     if elapsed > 0 and total_scored > 0:
@@ -6438,7 +6438,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         "  Plan | "
         f"{workload_estimate.files_planned} files, "
         f"{workload_estimate.total_samples} samples, "
-        f"llm~{workload_estimate.initial_estimated_llm_calls}, "
+        f"pass2_llm~{workload_estimate.initial_estimated_llm_calls}, "
         f"scan {workload_estimate.scan_elapsed_seconds:.1f}s"
     )
 
@@ -6743,7 +6743,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                     info="starting...",
                 )
                 llm_task = progress.add_task(
-                    "LLM",
+                    "LLM (P1+P2)",
                     total=max(eta_tracker.estimated_total_calls, 1),
                     visible=bool(labeled_files),
                     info=eta_tracker.info_line(),

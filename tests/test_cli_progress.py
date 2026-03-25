@@ -153,7 +153,7 @@ def test_pass1_and_pass2_progress_factories_share_the_same_layout():
     ]
 
 
-def test_pipeline_directory_mode_creates_files_pass1_and_llm_tasks(monkeypatch, tmp_path):
+def test_pipeline_directory_mode_creates_files_pass1_and_llm_tasks(monkeypatch, tmp_path, capsys):
     from sft_label.pipeline import run
 
     input_dir = tmp_path / "dataset"
@@ -227,7 +227,9 @@ def test_pipeline_directory_mode_creates_files_pass1_and_llm_tasks(monkeypatch, 
     )
 
     assert result["run_dir"] == str(tmp_path / "run")
-    assert progress_tasks == ["Files", "Pass 1", "LLM"]
+    assert progress_tasks == ["Files", "Pass 1", "LLM (P1+P2)"]
+    out = capsys.readouterr().out
+    assert "Plan | 1 files, 2 samples (2 labeled, 0 inherited), pass1_llm~4, scan 0.0s" in out
 
 
 def test_cmd_run_semantic_cluster_failure_exits_cleanly(monkeypatch, capsys):
@@ -263,7 +265,7 @@ def test_cmd_run_recompute_rejects_score(monkeypatch):
     assert exc.value.code == 1
 
 
-def test_cmd_run_wraps_estimation_and_reuses_precomputed_estimates(monkeypatch):
+def test_cmd_run_wraps_estimation_and_reuses_precomputed_estimates(monkeypatch, capsys):
     captured = {}
 
     async def _fake_run(*args, **kwargs):
@@ -303,6 +305,10 @@ def test_cmd_run_wraps_estimation_and_reuses_precomputed_estimates(monkeypatch):
     assert captured["pipeline_workload"] is estimate_plan["pass1_workload_estimate"]
     assert captured["scoring_workload"] is estimate_plan["pass2_workload_estimate"]
     assert any("Estimating workload" in label for label in heartbeat_labels)
+    out = capsys.readouterr().out
+    assert "Run plan | total_llm~17 =" in out
+    assert "pass1_llm~9 (4 labeled)" in out
+    assert "pass2_llm~8 (7 samples)" in out
 
 
 def test_cmd_run_loads_label_extension_specs_before_pipeline(monkeypatch, tmp_path):

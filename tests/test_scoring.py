@@ -2478,7 +2478,7 @@ class TestResumeScoringFile:
 
         assert max_active_files == 2
         assert created_progress == ["entered"]
-        assert progress_tasks == ["Files", "Pass 2", "LLM"]
+        assert progress_tasks == ["Files", "Pass 2", "LLM (P1+P2)"]
         assert seen_concurrency == [4, 4]
         assert seen_show_progress == [False, False]
 

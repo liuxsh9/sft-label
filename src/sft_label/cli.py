@@ -983,12 +983,12 @@ def cmd_run(args):
             precomputed_workload_estimate = plan.get("pass1_workload_estimate")
             precomputed_scoring_workload_estimate = plan.get("pass2_workload_estimate")
             ext_calls = plan.get("pass1_extension_calls", 0)
-            ext_segment = f" + ext~{ext_calls}" if ext_calls else ""
+            ext_segment = f" + ext_llm~{ext_calls}" if ext_calls else ""
             print(
                 "Run plan | "
-                f"llm~{plan['total_est_calls']} = "
-                f"p1~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled){ext_segment} + "
-                f"p2~{plan['pass2_est_calls']} ({plan['pass2_samples']} samples)"
+                f"total_llm~{plan['total_est_calls']} = "
+                f"pass1_llm~{plan['pass1_est_calls']} ({plan['pass1_labeled_samples']} labeled){ext_segment} + "
+                f"pass2_llm~{plan['pass2_est_calls']} ({plan['pass2_samples']} samples)"
             )
             llm_progress_cb = global_tracker.update
     try:

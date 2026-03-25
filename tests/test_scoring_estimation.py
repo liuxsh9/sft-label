@@ -8,6 +8,7 @@ from sft_label.scoring import (
     _rewrite_directory_global_selection,
     compute_value_stats,
     estimate_scoring_directory_workload,
+    print_scoring_summary,
 )
 
 
@@ -156,3 +157,20 @@ def test_directory_global_rewrite_streams_jsonl_even_when_scored_json_exists(tmp
 
     rewritten_first = json.loads((batch_output / "scored.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert rewritten_first["value"]["selection_score"] is not None
+
+
+def test_print_scoring_summary_uses_clear_pass2_labels(capsys, tmp_path):
+    stats = {
+        "elapsed_seconds": 12.5,
+        "total_scored": 9,
+        "total_failed": 1,
+        "total_estimated": 3,
+        "total_llm_calls": 7,
+        "total_tokens": 1234,
+    }
+
+    print_scoring_summary(stats, tmp_path, is_batch=True)
+
+    out = capsys.readouterr().out
+    assert "Selective-estimated samples: 3" in out
+    assert "LLM calls (Pass 2 actual): 7" in out
