@@ -679,6 +679,25 @@ class TestNormalizeAndSlice:
         assert result[0]["metadata"]["original_format"] == "sharegpt"
 
     @pytest.mark.parametrize(
+        "hybrid_turn",
+        [
+            {"from": "gpt", "content": "assistant-answer"},
+            {"value": "assistant-answer", "role": "assistant"},
+        ],
+    )
+    def test_partial_hybrid_conversations_turn_uses_role_content_for_missing_internal_field(self, hybrid_turn):
+        sample = {
+            "id": "partial-hybrid-turn",
+            "conversations": [
+                {"role": "user", "content": "question"},
+                hybrid_turn,
+            ],
+        }
+        result = normalize_and_slice(sample)
+        assert len(result) == 1
+        assert result[0]["conversations"][1] == {"from": "gpt", "value": "assistant-answer"}
+
+    @pytest.mark.parametrize(
         ("bad_content", "type_name"),
         [
             (["x"], "list"),

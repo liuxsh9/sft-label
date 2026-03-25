@@ -232,6 +232,164 @@ def test_merge_pass1_results_refresh_replaces_old_scoring_state(tmp_path):
     assert "conv_value" not in merged["data_label"]["conversation"]
 
 
+def test_merge_pass1_results_openai_conversations_sets_source_format(tmp_path):
+    row = {
+        "id": "oa-conversations",
+        "conversations": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [_full_labels("fresh")],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+        mode="refresh",
+    )
+
+    source_format = result.rows[0]["extra_info"]["unique_info"]["data_label"]["meta"]["source_format"]
+    assert source_format == "openai_conversations"
+
+
+def test_merge_pass1_results_openai_messages_sets_source_format(tmp_path):
+    row = {
+        "id": "oa-messages",
+        "messages": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [_full_labels("fresh")],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+        mode="refresh",
+    )
+
+    source_format = result.rows[0]["extra_info"]["unique_info"]["data_label"]["meta"]["source_format"]
+    assert source_format == "openai_messages"
+
+
+def test_merge_pass1_results_incremental_overwrites_stale_sharegpt_source_format_for_openai_conversations(tmp_path):
+    row = {
+        "id": "inc-stale-provenance",
+        "conversations": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+        "extra_info": {
+            "unique_info": {
+                "data_label": {
+                    "meta": {
+                        "schema_version": "1",
+                        "label_version": "inline-v1",
+                        "source_format": "sharegpt",
+                        "mode": "incremental",
+                        "created_at": "2026-03-11T09:00:00",
+                        "updated_at": "2026-03-11T09:00:00",
+                        "pass1_at": "2026-03-11T09:00:00",
+                        "pass2_at": None,
+                        "recomputed_at": None,
+                        "migrated_at": None,
+                        "migration_source": None,
+                    },
+                    "turns": [{
+                        "turn_index": 1,
+                        "labels": _full_labels("stale"),
+                    }],
+                    "conversation": {"turn_count": 1},
+                }
+            }
+        },
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+    samples[0].setdefault("metadata", {})["turn_index"] = 1
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [_full_labels("fresh")],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+        mode="incremental",
+        bundle_plans=[InlineBundlePlan(
+            local_label_indices=[0],
+            local_inherit_map={},
+            preserved_labels=[],
+            use_existing_data_label=True,
+            pass1_changed=True,
+            invalidate_pass2=True,
+        )],
+        updated_sample_indices={0},
+    )
+
+    source_format = result.rows[0]["extra_info"]["unique_info"]["data_label"]["meta"]["source_format"]
+    assert source_format == "openai_conversations"
+
+
+def test_merge_pass1_results_refresh_overwrites_stale_sharegpt_source_format_for_openai_conversations(tmp_path):
+    row = {
+        "id": "refresh-stale-provenance",
+        "conversations": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ],
+        "extra_info": {
+            "unique_info": {
+                "data_label": {
+                    "meta": {
+                        "schema_version": "1",
+                        "label_version": "inline-v1",
+                        "source_format": "sharegpt",
+                        "mode": "refresh",
+                        "created_at": "2026-03-11T09:00:00",
+                        "updated_at": "2026-03-11T09:00:00",
+                        "pass1_at": "2026-03-11T09:00:00",
+                        "pass2_at": None,
+                        "recomputed_at": None,
+                        "migrated_at": None,
+                        "migration_source": None,
+                    },
+                    "turns": [{
+                        "turn_index": 1,
+                        "labels": _full_labels("stale"),
+                    }],
+                    "conversation": {"turn_count": 1},
+                }
+            }
+        },
+    }
+    bundle = build_row_sample_bundle(row, tmp_path / "train.jsonl", 1)
+    samples, sample_to_bundle = flatten_row_sample_bundles([bundle])
+
+    result = merge_pass1_results(
+        [bundle],
+        samples,
+        [_full_labels("fresh")],
+        [_monitor()],
+        sample_to_bundle,
+        source_file=tmp_path / "train.jsonl",
+        mode="refresh",
+    )
+
+    source_format = result.rows[0]["extra_info"]["unique_info"]["data_label"]["meta"]["source_format"]
+    assert source_format == "openai_conversations"
+
+
 def test_merge_pass1_results_promotes_label_extensions_to_samples_and_turns(tmp_path):
     row = {
         "meta_prompt": ["system"],

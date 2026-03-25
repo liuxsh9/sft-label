@@ -217,9 +217,17 @@ def _normalize_internal_turn(
     source_file=None,
     source_row=None,
 ):
-    role = _normalize_role_value(turn.get("from"))
+    role_value = turn.get("from")
+    if "from" not in turn and "role" in turn:
+        role_value = turn.get("role")
+
+    value_source = turn.get("value")
+    if "value" not in turn and "content" in turn:
+        value_source = turn.get("content")
+
+    role = _normalize_role_value(role_value)
     value = _coerce_selected_text(
-        turn.get("value"),
+        value_source,
         source_name=source_name,
         turn_index=turn_index,
         field_name="value",

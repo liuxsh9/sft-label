@@ -340,15 +340,17 @@ def prepare_inline_pass1_batch(
 
 
 def _infer_source_format(raw_row: dict, samples: list[dict]) -> str:
-    if "data" in raw_row:
-        return "pangu"
-    if "conversations" in raw_row:
-        return "sharegpt"
     for sample in samples:
         metadata = sample.get("metadata") or {}
         original_format = metadata.get("original_format")
         if original_format:
             return str(original_format)
+    if "data" in raw_row:
+        return "pangu"
+    if "messages" in raw_row:
+        return "openai_messages"
+    if "conversations" in raw_row:
+        return "sharegpt"
     return "unknown"
 
 
@@ -594,6 +596,7 @@ def merge_pass1_results(
                 conversation={},
                 meta_updates=meta_updates or None,
             )
+        set_meta_field(data_label, "source_format", source_format)
         data_labels.append(data_label)
 
     turns_by_bundle: list[dict[int, dict]] = [
