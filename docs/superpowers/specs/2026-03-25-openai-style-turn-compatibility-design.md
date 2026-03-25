@@ -218,6 +218,17 @@ raw row
 - **已知角色 canonical set** 为 `human/gpt/tool/system`；
 - **未知角色** 允许存在，但不会被视为 assistant 切片锚点。
 
+### 错误契约
+
+当标准化 helper 遇到本次明确不支持的 turn 结构（尤其是 list/dict content blocks）时，应抛出清晰错误，而不是静默强转。错误信息至少应包含：
+
+- `source_file`（若调用方提供）
+- `source_row`（若调用方提供）
+- 出错 turn 的索引
+- offending 字段名与其 Python/type 名称
+
+这样才能在大目录抽样和后续全量运行中快速定位坏样本。
+
 ---
 
 ## 标准化契约真值表
@@ -255,7 +266,12 @@ raw row
 
 ### `detect_format()` 调整
 
-当前 `detect_format()` 对 `messages` 返回 `unknown`。本次需要把其契约明确为：
+当前 `detect_format()` 对 `messages` 返回 `unknown`。本次需要把两个概念拆开写清：
+
+1. **处理路由值（routing format）**：供预处理入口分支使用
+2. **来源标记（provenance/source format）**：写入 metadata / inline provenance，保留原始输入语义
+
+`detect_format()` 的路由契约明确为：
 
 - `data` → `pangu`
 - 合法 `conversations` → `sharegpt`
@@ -263,6 +279,13 @@ raw row
 - 其余 → `unknown`
 
 其中“合法”指：顶层值为 `list[dict]`，且 turn 文本字段满足本设计定义的 contract（字符串或 `None`，不接受 list/dict content blocks）。
+
+与之对应的 provenance/source format 记录为：
+
+- `sharegpt` 路由 + `conversations[].from/value` → `sharegpt`
+- `sharegpt` 路由 + `conversations[].role/content` → `openai_conversations`
+- `openai_messages` 路由 + `messages[].role/content` → `openai_messages`
+- `pangu` 路由 + `data[].role/content` → `pangu`
 
 实现层面仍可保持：
 
@@ -322,9 +345,9 @@ raw row
 - row bundle 构建
 - inline Pass 1 merge
 
-都能自动继承支持，不需要额外 schema 分支。
+大部分 ingestion 能自动继承支持，但 inline provenance 仍需一处显式补强：`/Users/lxs/.codex/worktrees/e4c5/sft-label/src/sft_label/inline_pass1.py` 的 `_infer_source_format()` 目前只按原始顶层 key 判断，必须改为优先读取标准化后样本的 `metadata.original_format`，避免把 `conversations[].role/content` 误记为 `sharegpt`。
 
-此外，`inline_pass1` 的 `source_format` 应与 `metadata.original_format` 保持一致并保留细粒度来源：
+因此，`inline_pass1` 的 `source_format` 应与 `metadata.original_format` 保持一致并保留细粒度来源：
 
 - `sharegpt`
 - `openai_conversations`
