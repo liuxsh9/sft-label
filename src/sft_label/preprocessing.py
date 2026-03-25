@@ -333,6 +333,10 @@ def _normalize_declared_role_content_turns(source_name, turns, *, source_file=No
     return normalized_turns
 
 
+def _has_semantically_non_empty_turns(normalized_turns):
+    return any(turn.get("from") and turn.get("value") for turn in normalized_turns)
+
+
 def _analyze_turn_source(sample, source_name, *, source_file=None, source_row=None):
     if source_name not in sample:
         return None
@@ -378,7 +382,7 @@ def _analyze_turn_source(sample, source_name, *, source_file=None, source_row=No
         "routing_format": routing_format,
         "provenance": provenance,
         "legal": True,
-        "non_empty": bool(raw_turns),
+        "non_empty": _has_semantically_non_empty_turns(normalized_turns),
         "normalized_turns": normalized_turns,
     }
 
