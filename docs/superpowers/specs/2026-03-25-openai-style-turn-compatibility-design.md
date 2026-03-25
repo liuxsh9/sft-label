@@ -36,7 +36,7 @@
    - `conversations[].from/value`
    - `conversations[].role/content`
    - `messages[].role/content`
-2. 将上述 schema 统一标准化为内部格式：`from/value` + 规范化角色（`human/gpt/tool/system`）。
+2. 将上述 schema 统一标准化为内部 turn 结构：`from/value`；对已知角色规范化为 `human/gpt/tool/system`，未知角色保留为小写原值。
 3. 保持当前多轮切片语义不变：每个 assistant 回复生成一个训练样本，保留全部前文。
 4. 确保 `system` 与 `tool` turn 在标准化与切片后不丢失。
 5. 保证现有 ShareGPT 与 Pangu 路径不回归。
@@ -79,14 +79,18 @@
 
 ### 4. 兼容范围显式、优先级固定
 
-顶层格式识别与兼容优先级需要固定，避免同一条样本被多重解释：
+顶层格式识别与兼容优先级需要固定，避免同一条样本被多重解释。优先级采用“**先验形状校验 + 固定顺序**”原则：
 
-1. `data` → Pangu
-2. `conversations` → conversation-based schema
-3. `messages` → OpenAI-style schema
+1. `data`：仅当值为 list[dict] 时视为 Pangu
+2. `conversations`：仅当值为 list[dict] 且 turn 字段满足支持 contract 时视为 conversation-based schema
+3. `messages`：仅当值为 list[dict] 且 turn 字段满足支持 contract 时视为 OpenAI-style schema
 4. 否则 `unknown`
 
-若样本同时包含 `conversations` 与 `messages`，优先使用 `conversations`，避免歧义。
+若样本同时包含 `conversations` 与 `messages`：
+
+- `conversations` 结构合法时，优先使用 `conversations`；
+- `conversations` 存在但结构不合法，而 `messages` 合法时，回退使用 `messages`；
+- 两者都不合法时，视为 `unknown` 或在显式调用标准化 helper 时抛出清晰错误。
 
 ---
 
@@ -135,7 +139,7 @@ raw row
 }
 ```
 
-行为：保持现状，标准化应基本幂等。
+行为：保持现状，标准化应基本幂等，并在 metadata 中保持 `original_format: "sharegpt"`（若原先未设置则补齐）。
 
 #### B. 新增 conversations + role/content 风格
 
@@ -148,7 +152,7 @@ raw row
 }
 ```
 
-行为：转成内部 `from/value`，再走现有切片。
+行为：转成内部 `from/value`，记录 `original_format: "openai_conversations"`，再走现有切片。
 
 #### C. 新增 messages + role/content 风格
 
@@ -162,7 +166,7 @@ raw row
 }
 ```
 
-行为：先映射为 `conversations`，再走同一套标准化。
+行为：先映射为 `conversations`，记录 `original_format: "openai_messages"`；标准化后的样本仅保留 `conversations` 作为下游统一输入，不再保留原 `messages` 作为运行时主字段。
 
 #### D. 现有 Pangu 风格
 
@@ -175,7 +179,7 @@ raw row
 }
 ```
 
-行为：继续走 `normalize_pangu()`；其输出已经是内部 `from/value`。
+行为：继续走 `normalize_pangu()`；其输出已经是内部 `from/value`，并保留现有 `original_format: "pangu"` 语义。
 
 ### Turn 级角色映射
 
@@ -192,13 +196,32 @@ raw row
 
 - `value` 优先保留为内部字段
 - 若不存在 `value`，则读取 `content`
-- 若两者都不存在，则回退为空字符串 `""`
+- `None` 视为空字符串 `""`
+- list / dict / OpenAI 多模态 content blocks 等**非字符串结构本次不支持**；标准化 helper 应显式拒绝，并给出清晰错误，而不是隐式 `str(...)` 强转
+- 若 `value` 与 `content` 都不存在，则回退为空字符串 `""`
 
 ### 未知角色策略
 
 未知角色不进行“智能猜测”。保留其标准化后的原小写 role 值，使现有 `_canonical_role()`、轨迹检测和下游分析维持当前宽松行为，而不是静默丢弃 turn。
 
+换句话说：
+
+- **内部 turn 结构 contract** 固定为 `{from, value}`；
+- **已知角色 canonical set** 为 `human/gpt/tool/system`；
+- **未知角色** 允许存在，但不会被视为 assistant 切片锚点。
+
 ---
+
+## 标准化契约真值表
+
+| Top-level key | Turn shape | Content shape | 结果 | Metadata `original_format` |
+|---|---|---|---|---|
+| `conversations` | `from/value` | string / `None` | 接受，幂等标准化 | `sharegpt` |
+| `conversations` | `role/content` | string / `None` | 接受，转为 `from/value` | `openai_conversations` |
+| `messages` | `role/content` | string / `None` | 接受，转为 `conversations[].from/value` | `openai_messages` |
+| `data` | `role/content` | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
+| `conversations` / `messages` | 任意 | list / dict content blocks | 拒绝，显式报错 | 不写入新 metadata |
+| `conversations` + `messages` 同存 | `conversations` 非法、`messages` 合法 | 合法 | 回退到 `messages` | `openai_messages` |
 
 ## 预处理设计
 
@@ -222,16 +245,19 @@ raw row
 
 ### `detect_format()` 调整
 
-当前 `detect_format()` 对 `messages` 返回 `unknown`。本次应调整为显式识别 OpenAI-style，例如返回 `openai_messages` 或继续使用 `sharegpt` 但通过 helper 判断。关键是：
+当前 `detect_format()` 对 `messages` 返回 `unknown`。本次需要把其契约明确为：
 
-- `data` 优先视为 Pangu；
-- `conversations` 与 `messages` 都能进入标准化流程；
-- `unknown` 仅留给真正未支持的结构。
+- `data` → `pangu`
+- 合法 `conversations` → `sharegpt`
+- 合法 `messages` → `openai_messages`
+- 其余 → `unknown`
 
-为了减小下游改动，推荐：
+其中“合法”指：顶层值为 `list[dict]`，且 turn 文本字段满足本设计定义的 contract（字符串或 `None`，不接受 list/dict content blocks）。
 
-- 保持 `pangu` 分支不动；
-- 将 `conversations` / `messages` 两类都归入同一非-Pangu标准化分支。
+实现层面仍可保持：
+
+- `pangu` 分支继续走 `normalize_pangu()`；
+- `sharegpt` 与 `openai_messages` 最终汇入同一套非-Pangu turn 标准化 helper。
 
 ### `normalize_and_slice()` 调整
 
@@ -243,6 +269,14 @@ raw row
 
 这样可以保证 `slice_multiturn()` 永远面对标准的 `{from, value}` turn，而不再依赖外部 schema 是否碰巧匹配。
 
+同一套 turn 标准化 helper 还必须接入 `normalize_sample()`，确保：
+
+- `preprocess()`
+- semantic clustering / conversation tools
+- 任何“不切片但要先标准化”的调用路径
+
+都能感知新 schema，而不是只有 `normalize_and_slice()` 支持。
+
 ### 多轮切片逻辑保持不变
 
 `slice_multiturn()` 仍只根据最终标准化后的 `from == "gpt"` 来定位 assistant 回复。对于真实样本：
@@ -252,7 +286,9 @@ raw row
 - `system, user, assistant, tool, assistant` → 2 个 sample
 - 长轨迹（多个 assistant） → N 个 sample
 
-即：**assistant 回复数 = 输出切片数**。
+对于 **至少包含 1 个 assistant/gpt 回复** 的样本：**assistant 回复数 = 输出切片数**。
+
+对 **0 assistant 回复** 的行，本次不改变现有兼容行为：仍按“未切片单样本”保留，以避免扩大本次改动范围；但该类样本不属于本次 OpenAI-style turn 兼容保证的重点场景。
 
 ---
 
@@ -309,7 +345,17 @@ raw row
    - 单轮和多轮至少各 1 条
    - 断言最终行为与 `conversations[].role/content` 一致
 
-6. 长轨迹样本
+6. 顶层歧义与非法输入
+   - 同时存在 `conversations` 与 `messages` 时的优先级 / fallback
+   - `conversations` 存在但结构无效，而 `messages` 合法
+   - `content` 为 `None`
+   - `content` 为 list/dict 时应显式拒绝
+
+7. `normalize_sample()` / `preprocess()` 路径
+   - 至少 1 条 `messages[].role/content` 样本
+   - 断言不切片路径也完成标准化
+
+8. 长轨迹样本
    - 至少 5 个 assistant 回复
    - 断言 sample 数、`turn_index`、`total_turns`、最后一个 slice 上下文正确
 
@@ -328,6 +374,8 @@ raw row
 2. 写入多轮行（2 个 assistant）
 3. 写入含 `system/tool` 的长轨迹行
 4. 同一 JSONL 文件中混合多种 schema（如一行 `messages`、一行 `conversations role/content`）
+5. 双字段同存但 `conversations` 非法、`messages` 合法的 fallback case
+6. `content` 为 `None` 的 case，以及 `content` 为 list/dict 时的拒绝 case
 
 验证：
 
@@ -389,15 +437,15 @@ raw row
 - 对真实样本抽样验证 role 顺序；
 - 保持 turn 顺序不变，只做字段标准化。
 
-### 风险 4：`messages` 与 `conversations` 双字段歧义
+### 风险 4：`messages` 与 `conversations` 双字段歧义或非法 turn 结构
 
-**表现**：同一条样本被错误选择输入源。
+**表现**：同一条样本被错误选择输入源，或非字符串 content 被静默强转后污染下游。
 
 **缓解**：
 
-- 固定优先级：`data > conversations > messages`；
-- 测试显式覆盖该优先级；
-- 文档化该行为，避免未来误解。
+- 采用“形状校验后再按 `data > conversations > messages` 选择”的规则；
+- `None` 允许降级为空字符串，但 list/dict content 明确拒绝；
+- 测试显式覆盖优先级、fallback 和非法输入。
 
 ---
 
@@ -409,9 +457,10 @@ raw row
    - 单轮 / 多轮 / system / tool / 长轨迹
 2. 运行 focused tests，确认当前失败点真实存在。
 3. 在 `preprocessing.py` 中实现统一 turn 标准化 helper，并接入 `normalize_and_slice()`。
-4. 让 `detect_format()`/入口分支正确识别 `messages` 与 `conversations role/content`。
-5. 在 `tests/test_inline_pass1.py` 中补行级 JSONL ingestion 回归测试。
-6. 运行 focused verification：
+4. 让 `detect_format()`/入口分支按固定 contract 识别 `messages` 与 `conversations role/content`。
+5. 将同一套标准化 helper 接入 `normalize_sample()`，避免只在切片入口生效。
+6. 在 `tests/test_inline_pass1.py` 中补行级 JSONL ingestion 回归测试。
+7. 运行 focused verification：
    - `uv run pytest tests/test_preprocessing.py -q`
    - `uv run pytest tests/test_inline_pass1.py -q`
    - 若 sample counting / estimation 受影响，再补相应 focused tests。
