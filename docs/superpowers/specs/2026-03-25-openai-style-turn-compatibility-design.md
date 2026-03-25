@@ -79,16 +79,18 @@
 
 ### 4. 兼容范围显式、优先级固定
 
-顶层格式识别与兼容优先级需要固定，避免同一条样本被多重解释。优先级采用“**先验形状校验 + 固定顺序**”原则：
+顶层格式识别与兼容优先级需要固定，避免同一条样本被多重解释。优先级采用“**先验形状校验 + 非空优先 + 固定顺序**”原则：
 
-1. `data`：仅当值为非空或空 list[dict] 时视为 Pangu
-2. `conversations`：仅当值为 list[dict] 且 turn 字段满足支持 contract 时视为 conversation-based schema
-3. `messages`：仅当值为 list[dict] 且 turn 字段满足支持 contract 时视为 OpenAI-style schema
-4. 否则 `unknown`
+1. `data`：仅当值为 list[dict] 且通过内容 contract 校验时可候选
+2. `conversations`：仅当值为 list[dict] 且通过内容 contract 校验时可候选
+3. `messages`：仅当值为 list[dict] 且通过内容 contract 校验时可候选
+4. 在候选中优先选择**第一个非空合法源**；只有当更高优先级候选为空列表且后续也没有非空合法源时，才允许空列表胜出
+5. 若没有合法候选，则 `unknown`
 
 若样本同时包含 `conversations` 与 `messages`：
 
-- `conversations` 结构合法时，优先使用 `conversations`；
+- `conversations` 非空且结构合法时，优先使用 `conversations`；
+- `conversations` 为空列表，而 `messages` 非空且合法时，回退使用 `messages`；
 - `conversations` 存在但结构不合法，而 `messages` 合法时，回退使用 `messages`；
 - 两者都不合法时，视为 `unknown` 或在显式调用标准化 helper 时抛出清晰错误。
 
@@ -220,7 +222,9 @@ raw row
 
 ### 错误契约
 
-当标准化 helper 遇到本次明确不支持的 turn 结构（尤其是 list/dict content blocks）时，应抛出清晰错误，而不是静默强转。错误信息至少应包含：
+当标准化 helper 遇到本次明确不支持的 turn 结构（尤其是 list/dict content blocks）时，应抛出 `ValueError`，并让当前 row/文件读取路径按现有错误传播行为失败，而不是静默强转或降级为 `unknown`。这保证测试与目录运行语义一致：坏样本是显式失败而不是静默吞掉。
+
+错误信息至少应包含：
 
 - `source_file`（若调用方提供）
 - `source_row`（若调用方提供）
@@ -242,7 +246,7 @@ raw row
 | `data` | `role/content` | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
 | `conversations` / `messages` | 任意 | list / dict content blocks | 拒绝，显式报错 | 不写入新 metadata |
 | `conversations` + `messages` 同存 | `conversations` 非法、`messages` 合法 | 合法 | 回退到 `messages` | `openai_messages` |
-| 任意 top-level key | 空列表 | n/a | 接受，返回空 conversations / 不切片 | 对应 schema 名称 |
+| 任意 top-level key | 空列表 | n/a | 仅在无后续非空合法候选时接受，返回空 conversations / 不切片 | `sharegpt` / `openai_messages` / `pangu`（按胜出的路由值；空 `conversations` provenance 默认记为 `sharegpt`） |
 
 ## 预处理设计
 
@@ -273,9 +277,9 @@ raw row
 
 `detect_format()` 的路由契约明确为：
 
-- `data` → `pangu`
-- 合法 `conversations` → `sharegpt`
-- 合法 `messages` → `openai_messages`
+- 胜出的 `data` 候选 → `pangu`
+- 胜出的 `conversations` 候选 → `sharegpt`
+- 胜出的 `messages` 候选 → `openai_messages`
 - 其余 → `unknown`
 
 其中“合法”指：顶层值为 `list[dict]`，且 turn 文本字段满足本设计定义的 contract（字符串或 `None`，不接受 list/dict content blocks）。
@@ -399,9 +403,11 @@ raw row
 
 6. 顶层歧义与非法输入
    - 同时存在 `conversations` 与 `messages` 时的优先级 / fallback
+   - `conversations` 为空列表而 `messages` 非空合法
    - `conversations` 存在但结构无效，而 `messages` 合法
    - `content` 为 `None`
-   - `content` 为 list/dict 时应显式拒绝
+   - `content` 为 list/dict 时抛出 `ValueError`，并断言消息含 source/turn/type 线索
+   - 直接为 `detect_format()` 增加 `messages`、mixed-key fallback、empty-list coexistence case
 
 7. `normalize_sample()` / `preprocess()` 路径
    - 至少 1 条 `messages[].role/content` 样本
