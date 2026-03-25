@@ -85,14 +85,15 @@
 2. `conversations`：仅当值为 list[dict] 且通过内容 contract 校验时可候选
 3. `messages`：仅当值为 list[dict] 且通过内容 contract 校验时可候选
 4. 在候选中优先选择**第一个非空合法源**；只有当更高优先级候选为空列表且后续也没有非空合法源时，才允许空列表胜出
-5. 若没有合法候选，则 `unknown`
+5. 若不存在任何候选 top-level key，则 `unknown`
+6. 若存在候选 key 但均非法，且也没有更低优先级的非空合法 fallback，则直接抛出 `ValueError`
 
 若样本同时包含 `conversations` 与 `messages`：
 
 - `conversations` 非空且结构合法时，优先使用 `conversations`；
 - `conversations` 为空列表，而 `messages` 非空且合法时，回退使用 `messages`；
 - `conversations` 存在但结构不合法，而 `messages` 合法时，回退使用 `messages`；
-- 两者都不合法时，视为 `unknown` 或在显式调用标准化 helper 时抛出清晰错误。
+- 两者都不合法时：若存在更低优先级的**非空合法** fallback，则使用 fallback；否则对最高优先级的非法候选直接抛出清晰错误，不降级为 `unknown`。
 
 这里“合法”的判定进一步明确为：
 
@@ -100,7 +101,7 @@
 - 同一个 turn 若同时带 `from`/`value` 与 `role`/`content`，优先使用内部字段 `from`/`value`，并将其视为已是内部 schema；
 - 同一列表中允许混合 turn shape（部分 `from/value`、部分 `role/content`），标准化 helper 逐 turn 归一化；
 - 若某个 turn 既没有 `from`/`role`，也没有 `value`/`content`，该 turn 仍可标准化为 `{from: "", value: ""}`，保持当前宽松行为；
-- 若某个 turn 的 `value`/`content` 为 list/dict，则整个 top-level schema 视为非法，不应遮蔽后续可回退的 `messages`。
+- 若某个 turn 的 `value`/`content` 为 list/dict，则该 top-level schema 视为非法；只有存在更低优先级的非空合法 fallback 时才允许回退，否则直接失败。
 
 ---
 
@@ -222,7 +223,7 @@ raw row
 
 ### 错误契约
 
-当标准化 helper 遇到本次明确不支持的 turn 结构（尤其是 list/dict content blocks）时，应抛出 `ValueError`，并让当前 row/文件读取路径按现有错误传播行为失败，而不是静默强转或降级为 `unknown`。这保证测试与目录运行语义一致：坏样本是显式失败而不是静默吞掉。
+当标准化 helper 遇到本次明确不支持的 turn 结构（尤其是 list/dict content blocks）时，应抛出 `ValueError`，并让当前 row/文件读取路径按现有错误传播行为失败，而不是静默强转或降级为 `unknown`。唯一例外是：若当前非法候选之前/之后存在更低优先级的**非空合法** fallback，则允许回退到该 fallback。这样测试与目录运行语义保持一致：无合法非空 fallback 的坏样本一律显式失败。
 
 错误信息至少应包含：
 
@@ -241,12 +242,12 @@ raw row
 |---|---|---|---|---|
 | `conversations` | `from/value` | string / `None` | 接受，幂等标准化 | `sharegpt` |
 | `conversations` | `role/content` | string / `None` | 接受，转为 `from/value` | `openai_conversations` |
-| `conversations` | mixed turn shape | string / `None` | 接受，逐 turn 归一化；同 turn 双字段时优先 `from/value` | `sharegpt` 或 `openai_conversations`（按首个合法 turn shape 记账） |
+| `conversations` | mixed turn shape | string / `None` | 接受，逐 turn 归一化；同 turn 双字段时优先 `from/value` | `sharegpt` 或 `openai_conversations`（按首个**非空且字段完整**的合法 turn shape 记账；前导空/缺字段 turn 不参与 provenance 判定） |
 | `messages` | `role/content` | string / `None` | 接受，转为 `conversations[].from/value` | `openai_messages` |
 | `data` | `role/content` | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
 | `conversations` / `messages` | 任意 | list / dict content blocks | 拒绝，显式报错 | 不写入新 metadata |
 | `conversations` + `messages` 同存 | `conversations` 非法、`messages` 合法 | 合法 | 回退到 `messages` | `openai_messages` |
-| 任意 top-level key | 空列表 | n/a | 仅在无后续非空合法候选时接受，返回空 conversations / 不切片 | `sharegpt` / `openai_messages` / `pangu`（按胜出的路由值；空 `conversations` provenance 默认记为 `sharegpt`） |
+| 任意 top-level key | 空列表 | n/a | 仅在不存在后续**非空合法**候选且当前也不被更高优先级非法候选阻断时接受，返回空 conversations / 不切片 | `sharegpt` / `openai_messages` / `pangu`（按胜出的路由值；空 `conversations` provenance 默认记为 `sharegpt`） |
 
 ## 预处理设计
 
