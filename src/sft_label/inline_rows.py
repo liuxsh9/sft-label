@@ -23,13 +23,20 @@ class RowSampleBundle:
     samples: list[dict]
 
 
-def build_row_sample_bundle(raw_row: dict, source_path, row_number: int) -> RowSampleBundle:
+def build_row_sample_bundle(
+    raw_row: dict,
+    source_path,
+    row_number: int,
+    *,
+    annotate_planner_metadata: bool = True,
+) -> RowSampleBundle:
     """Create a row bundle with transient slice samples."""
     row_copy = copy.deepcopy(raw_row)
     bundle_samples = normalize_and_slice(
         copy.deepcopy(raw_row),
         source_file=source_path,
         source_row=row_number,
+        annotate_planner_metadata=annotate_planner_metadata,
     )
     return RowSampleBundle(
         raw_row=row_copy,
@@ -40,7 +47,12 @@ def build_row_sample_bundle(raw_row: dict, source_path, row_number: int) -> RowS
     )
 
 
-def iter_row_sample_bundles_from_jsonl(input_path, limit: int = 0):
+def iter_row_sample_bundles_from_jsonl(
+    input_path,
+    limit: int = 0,
+    *,
+    annotate_planner_metadata: bool = True,
+):
     """Yield row bundles from a JSONL file while preserving row order.
 
     `limit` follows the CLI's sample-oriented contract: it caps the number of
@@ -65,6 +77,7 @@ def iter_row_sample_bundles_from_jsonl(input_path, limit: int = 0):
                 json.loads(line),
                 input_path,
                 line_number,
+                annotate_planner_metadata=annotate_planner_metadata,
             )
             projected = sample_count + len(bundle.samples)
             if limit > 0 and yielded_rows > 0 and projected > limit:

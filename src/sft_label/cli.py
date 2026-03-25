@@ -915,6 +915,7 @@ def _estimate_end_to_end_llm_calls(args, config):
     from sft_label.scoring import ScoringDirectoryWorkloadEstimate
 
     spec_count = len(config.extension_spec_paths or [])
+    annotate_planner_metadata = bool(getattr(config, "planner_enabled", False))
 
     inline_target = infer_inline_scoring_target(input_path)
     if inline_target is not None and input_path.is_dir() and input_path == inline_target.layout.run_root:
@@ -942,6 +943,7 @@ def _estimate_end_to_end_llm_calls(args, config):
             dir_files,
             limit=args.limit,
             shuffle=args.shuffle,
+            parallelize=True,
             config=config,
             enable_arbitration=not args.no_arbitration,
             mode=getattr(args, "mode", "refresh"),
@@ -967,7 +969,13 @@ def _estimate_end_to_end_llm_calls(args, config):
             threshold=config.sparse_threshold,
         )
         if str(input_path).endswith(".jsonl"):
-            row_bundles = list(iter_row_sample_bundles_from_jsonl(input_path, limit=args.limit))
+            row_bundles = list(
+                iter_row_sample_bundles_from_jsonl(
+                    input_path,
+                    limit=args.limit,
+                    annotate_planner_metadata=annotate_planner_metadata,
+                )
+            )
             prepared = prepare_inline_pass1_batch(
                 row_bundles,
                 mode=getattr(args, "mode", "refresh"),
@@ -983,6 +991,7 @@ def _estimate_end_to_end_llm_calls(args, config):
                     input_path,
                     limit=args.limit,
                     shuffle=args.shuffle,
+                    annotate_planner_metadata=annotate_planner_metadata,
                 )
             finally:
                 random.setstate(rng_state)
@@ -1081,6 +1090,7 @@ def cmd_run(args):
             migrate_from=args.migrate_from,
             llm_progress_cb=llm_progress_cb,
             precomputed_workload_estimate=precomputed_workload_estimate,
+            parallelize_workload_estimation=True,
         ))
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from sft_label import scoring
 from sft_label.artifacts import PASS2_STATS_FILE
 from sft_label.config import PipelineConfig
 from sft_label.scoring import (
@@ -57,6 +58,32 @@ def test_estimate_scoring_directory_workload_retry_factor(tmp_path):
     assert est.baseline_total_llm_calls == 10
     assert est.initial_estimated_llm_calls == 12
 
+
+def test_estimate_scoring_directory_workload_streams_files_once(tmp_path):
+    f1 = tmp_path / "labeled_once_a.json"
+    f2 = tmp_path / "labeled_once_b.jsonl"
+    _write_labeled_json(f1, 2)
+    _write_labeled_jsonl(f2, 3)
+
+    counts: dict[Path, int] = {}
+    original_iter = scoring._iter_labeled_samples_streaming
+
+    def tracking_iter(path, limit=0):
+        key = Path(path).resolve()
+        counts[key] = counts.get(key, 0) + 1
+        yield from original_iter(path, limit=limit)
+
+    with patch.object(scoring, "_iter_labeled_samples_streaming", tracking_iter):
+        est = estimate_scoring_directory_workload(
+            [f1, f2],
+            config=PipelineConfig(enable_selective_scoring=False, sample_max_retries=1),
+        )
+
+    assert est.files_planned == 2
+    assert est.total_samples == 5
+    assert est.baseline_total_llm_calls == 5
+    assert counts[Path(f1).resolve()] == 1
+    assert counts[Path(f2).resolve()] == 1
 
 def test_compute_value_stats_can_skip_raw_score_arrays():
     scored = [{

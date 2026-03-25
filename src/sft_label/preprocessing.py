@@ -654,7 +654,7 @@ def normalize_pangu(sample):
     return normalized
 
 
-def normalize_and_slice(sample, *, source_file=None, source_row=None):
+def normalize_and_slice(sample, *, source_file=None, source_row=None, annotate_planner_metadata=True):
     """Auto-detect format, normalize, and slice multi-turn into training samples.
 
     Returns a list of samples. Single-turn and pseudo multi-turn return [1 sample].
@@ -754,7 +754,8 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None):
         }
         results.append(s)
 
-    annotate_multiturn_planner_metadata(results)
+    if annotate_planner_metadata:
+        annotate_multiturn_planner_metadata(results)
     return results
 
 

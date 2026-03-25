@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from sft_label import pipeline as pipeline_module
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
     RuntimeEtaEstimator,
@@ -80,6 +81,196 @@ def test_estimate_directory_workload_preserves_rng_state(tmp_path):
     actual_next = random.random()
 
     assert actual_next == expected_next
+
+
+def test_estimate_directory_workload_skips_planner_annotation_when_planner_disabled(tmp_path, monkeypatch):
+    path = tmp_path / "multi.jsonl"
+    row = {
+        "id": "conv-1",
+        "conversations": [
+            {"from": "human", "value": "first request"},
+            {"from": "gpt", "value": "first reply"},
+            {"from": "human", "value": "second request"},
+            {"from": "gpt", "value": "second reply"},
+        ],
+    }
+    path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    files = [(a, r) for a, r in discover_input_files(tmp_path) if r is not None]
+
+    def _unexpected_planner_call(_samples, **_kwargs):
+        raise AssertionError("planner annotation should be skipped during estimation")
+
+    monkeypatch.setattr(
+        "sft_label.preprocessing.annotate_multiturn_planner_metadata",
+        _unexpected_planner_call,
+    )
+
+    est = estimate_directory_workload(
+        files,
+        config=PipelineConfig(),
+        enable_arbitration=False,
+    )
+
+    assert est.total_raw_conversations == 1
+    assert est.total_samples == 2
+
+
+def test_resolve_workload_estimation_workers_targets_80_percent_cpu(monkeypatch):
+    monkeypatch.setattr("sft_label.pipeline.os.cpu_count", lambda: 10)
+
+    assert pipeline_module._resolve_workload_estimation_workers(20) == 8
+    assert pipeline_module._resolve_workload_estimation_workers(3) == 3
+
+
+def test_estimate_directory_workload_parallelizes_multiple_files(monkeypatch):
+    files = [
+        (Path("a.json"), Path("a.json")),
+        (Path("b.json"), Path("b.json")),
+    ]
+    seen = {"workers": [], "items": []}
+
+    monkeypatch.setattr("sft_label.pipeline._resolve_workload_estimation_workers", lambda file_count: 2)
+
+    def fake_estimate_file(item):
+        seen["items"].append(item["rel_path"])
+        return {
+            "total_raw_conversations": 1,
+            "total_samples": 2,
+            "total_labeled_samples": 2,
+            "total_inherited_samples": 0,
+        }
+
+    class FakeProcessPoolExecutor:
+        def __init__(self, max_workers):
+            seen["workers"].append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, fn, items):
+            return [fn(item) for item in items]
+
+    monkeypatch.setattr("sft_label.pipeline._estimate_directory_workload_for_file", fake_estimate_file)
+    monkeypatch.setattr("sft_label.pipeline.ProcessPoolExecutor", FakeProcessPoolExecutor)
+
+    est = estimate_directory_workload(
+        files,
+        config=PipelineConfig(),
+        enable_arbitration=False,
+        parallelize=True,
+    )
+
+    assert seen["workers"] == [2]
+    assert seen["items"] == ["a.json", "b.json"]
+    assert est.files_planned == 2
+    assert est.total_raw_conversations == 2
+    assert est.total_samples == 4
+    assert est.total_labeled_samples == 4
+
+
+def test_estimate_directory_workload_skips_process_pool_from_stdin(monkeypatch):
+    files = [
+        (Path("a.json"), Path("a.json")),
+        (Path("b.json"), Path("b.json")),
+    ]
+
+    monkeypatch.setattr(
+        "sft_label.pipeline._estimate_directory_workload_for_file",
+        lambda item: {
+            "total_raw_conversations": 1,
+            "total_samples": 1,
+            "total_labeled_samples": 1,
+            "total_inherited_samples": 0,
+        },
+    )
+    monkeypatch.setattr("sft_label.pipeline.os.cpu_count", lambda: 10)
+    monkeypatch.setattr(pipeline_module.sys.modules["__main__"], "__file__", "<stdin>", raising=False)
+
+    class UnexpectedProcessPoolExecutor:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("stdin execution should fall back to serial estimation")
+
+    monkeypatch.setattr("sft_label.pipeline.ProcessPoolExecutor", UnexpectedProcessPoolExecutor)
+
+    est = estimate_directory_workload(
+        files,
+        config=PipelineConfig(),
+        enable_arbitration=False,
+        parallelize=True,
+    )
+
+    assert est.files_planned == 2
+    assert est.total_samples == 2
+
+
+def test_estimate_directory_workload_defaults_to_serial_for_library_calls(monkeypatch):
+    files = [
+        (Path("a.json"), Path("a.json")),
+        (Path("b.json"), Path("b.json")),
+    ]
+
+    monkeypatch.setattr(
+        "sft_label.pipeline._estimate_directory_workload_for_file",
+        lambda item: {
+            "total_raw_conversations": 1,
+            "total_samples": 1,
+            "total_labeled_samples": 1,
+            "total_inherited_samples": 0,
+        },
+    )
+
+    class UnexpectedProcessPoolExecutor:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("library callers should stay serial unless they opt in")
+
+    monkeypatch.setattr("sft_label.pipeline.ProcessPoolExecutor", UnexpectedProcessPoolExecutor)
+
+    est = estimate_directory_workload(
+        files,
+        config=PipelineConfig(),
+        enable_arbitration=False,
+    )
+
+    assert est.files_planned == 2
+    assert est.total_samples == 2
+
+
+def test_estimate_directory_workload_keeps_migrate_index_serial(monkeypatch):
+    files = [
+        (Path("a.json"), Path("a.json")),
+        (Path("b.json"), Path("b.json")),
+    ]
+
+    monkeypatch.setattr("sft_label.pipeline.os.cpu_count", lambda: 10)
+    monkeypatch.setattr(
+        "sft_label.pipeline._estimate_directory_workload_for_file",
+        lambda item: {
+            "total_raw_conversations": 1,
+            "total_samples": 1,
+            "total_labeled_samples": 1,
+            "total_inherited_samples": 0,
+        },
+    )
+
+    class UnexpectedProcessPoolExecutor:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("migrate estimation should stay serial to avoid index fan-out")
+
+    monkeypatch.setattr("sft_label.pipeline.ProcessPoolExecutor", UnexpectedProcessPoolExecutor)
+
+    est = estimate_directory_workload(
+        files,
+        config=PipelineConfig(),
+        enable_arbitration=False,
+        parallelize=True,
+        migration_index={"row-1": {"match": True}},
+    )
+
+    assert est.files_planned == 2
+    assert est.total_samples == 2
 
 
 def test_discover_input_files_ignores_macos_sidecars(tmp_path):

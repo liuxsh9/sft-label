@@ -94,6 +94,64 @@ def test_estimate_end_to_end_llm_calls_accounts_for_extensions(tmp_path):
     )
 
 
+def test_estimate_end_to_end_llm_calls_single_jsonl_skips_planner_annotation_when_disabled(monkeypatch, tmp_path):
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text(
+        json.dumps({"id": "row-1", "conversations": [{"from": "human", "value": "Q"}, {"from": "gpt", "value": "A"}]})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(
+        input=str(input_file),
+        resume=None,
+        limit=0,
+        shuffle=False,
+        no_arbitration=False,
+        mode="refresh",
+        migrate_from=None,
+    )
+    config = PipelineConfig(sample_max_retries=1)
+
+    def fake_iter(_path, limit=0, **kwargs):
+        assert kwargs["annotate_planner_metadata"] is False
+        return iter([])
+
+    monkeypatch.setattr("sft_label.inline_rows.iter_row_sample_bundles_from_jsonl", fake_iter)
+
+    plan = _estimate_end_to_end_llm_calls(args, config)
+
+    assert plan is not None
+    assert plan["pass1_labeled_samples"] == 0
+
+
+def test_estimate_end_to_end_llm_calls_single_json_skips_planner_annotation_when_disabled(monkeypatch, tmp_path):
+    input_file = tmp_path / "input.json"
+    _write_input(input_file, 1)
+
+    args = SimpleNamespace(
+        input=str(input_file),
+        resume=None,
+        limit=0,
+        shuffle=False,
+        no_arbitration=False,
+        mode="refresh",
+        migrate_from=None,
+    )
+    config = PipelineConfig(sample_max_retries=1)
+
+    def fake_iter_samples(_path, limit=0, shuffle=False, **kwargs):
+        assert kwargs["annotate_planner_metadata"] is False
+        return [], 0
+
+    monkeypatch.setattr("sft_label.pipeline.iter_samples_from_file", fake_iter_samples)
+
+    plan = _estimate_end_to_end_llm_calls(args, config)
+
+    assert plan is not None
+    assert plan["pass1_labeled_samples"] == 0
+
+
 def test_combined_llm_progress_tracker_updates():
     tracker = _CombinedLLMProgressTracker(100)
     info = tracker.update(12, "pass1")

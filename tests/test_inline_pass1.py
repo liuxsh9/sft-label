@@ -1717,7 +1717,7 @@ def test_estimate_directory_workload_streams_inline_jsonl_planning(monkeypatch, 
         for idx in range(3)
     ]
 
-    def fake_iter(_input_path, limit=0):
+    def fake_iter(_input_path, limit=0, **_kwargs):
         for idx, bundle in enumerate(bundles):
             events.append(("yield", idx))
             yield bundle

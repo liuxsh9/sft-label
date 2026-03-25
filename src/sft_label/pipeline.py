@@ -26,6 +26,7 @@ import random
 import re
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -103,6 +104,7 @@ except Exception:  # pragma: no cover - optional dependency while feature is rol
 
 
 INLINE_RUN_MODES = {"incremental", "refresh", "migrate", "recompute"}
+WORKLOAD_ESTIMATION_CPU_FRACTION = 0.8
 
 
 def _resolved_extension_specs(config: PipelineConfig | None) -> list:
@@ -2062,7 +2064,14 @@ def compute_stats(all_monitors, all_labels, inherit_map=None, extension_specs=No
 # Streaming I/O + cross-file helpers
 # ─────────────────────────────────────────────────────────
 
-def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundles=False):
+def iter_samples_from_file(
+    input_path,
+    limit=0,
+    shuffle=False,
+    return_row_bundles=False,
+    *,
+    annotate_planner_metadata=True,
+):
     """Load and normalize samples from a file with minimal memory overhead.
 
     JSONL: line-by-line read + normalize_and_slice (memory = 1 raw line at a time).
@@ -2080,7 +2089,11 @@ def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundle
         if return_row_bundles:
             row_bundles = []
             sample_budget = 0
-            for bundle in iter_row_sample_bundles_from_jsonl(input_path, limit=0):
+            for bundle in iter_row_sample_bundles_from_jsonl(
+                input_path,
+                limit=0,
+                annotate_planner_metadata=annotate_planner_metadata,
+            ):
                 projected = sample_budget + len(bundle.samples)
                 if limit > 0 and row_bundles and projected > limit:
                     break
@@ -2103,6 +2116,7 @@ def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundle
                             raw,
                             source_file=input_path,
                             source_row=n_raw,
+                            annotate_planner_metadata=annotate_planner_metadata,
                         )
                     )
                     del raw
@@ -2118,6 +2132,7 @@ def iter_samples_from_file(input_path, limit=0, shuffle=False, return_row_bundle
                     s,
                     source_file=input_path,
                     source_row=row_idx,
+                    annotate_planner_metadata=annotate_planner_metadata,
                 )
             )
         del raw_samples
@@ -2305,6 +2320,7 @@ def estimate_directory_workload(
     *,
     limit=0,
     shuffle=False,
+    parallelize: bool = False,
     config=None,
     completed_set=None,
     enable_arbitration=True,
@@ -2339,51 +2355,53 @@ def estimate_directory_workload(
         )
 
     extension_specs = _resolved_extension_specs(config)
+    annotate_planner_metadata = bool(getattr(config, "planner_enabled", False))
+
+    pending_items = []
+    for abs_path, rel_path in dir_files:
+        rel_str = str(rel_path)
+        if rel_str in completed_set:
+            continue
+        files_planned += 1
+        pending_items.append(
+            {
+                "abs_path": str(abs_path),
+                "rel_path": rel_str,
+                "limit": limit,
+                "shuffle": shuffle,
+                "mode": mode,
+                "label_version": label_version,
+                "sparse_kwargs": dict(_sparse_kw),
+                "extension_specs": extension_specs,
+                "migration_index": migration_index,
+                "annotate_planner_metadata": annotate_planner_metadata,
+            }
+        )
+
+    workers = (
+        _resolve_workload_estimation_workers(files_planned)
+        if parallelize and migration_index is None
+        else 1
+    )
 
     # Preserve RNG state so pre-scan doesn't perturb runtime shuffle behavior.
     rng_state = random.getstate()
     try:
-        for abs_path, rel_path in dir_files:
-            rel_str = str(rel_path)
-            if rel_str in completed_set:
-                continue
-            files_planned += 1
-
-            if str(abs_path).endswith(".jsonl"):
-                n_raw = 0
-                samples = []
-                label_indices = []
-                inherit_map = {}
-                total_file_samples = 0
-                total_file_labeled = 0
-                total_file_inherited = 0
-                for row_bundle in iter_row_sample_bundles_from_jsonl(abs_path, limit=limit):
-                    prepared = prepare_inline_pass1_batch(
-                        [row_bundle],
-                        mode=mode,
-                        label_version=label_version,
-                        sparse_kwargs=_sparse_kw,
-                        extension_specs=extension_specs,
-                        migration_index=migration_index,
-                    )
-                    n_raw += len(prepared.bundles)
-                    total_file_samples += len(prepared.samples)
-                    total_file_labeled += len(prepared.label_indices)
-                    total_file_inherited += len(prepared.inherit_map)
-                total_raw += n_raw
-                total_samples += total_file_samples
-                total_labeled += total_file_labeled
-                total_inherited += total_file_inherited
-                continue
-            else:
-                samples, n_raw = iter_samples_from_file(abs_path, limit=limit, shuffle=shuffle)
-                label_indices, inherit_map = apply_sparse_sampling(samples, **_sparse_kw)
-
-            total_raw += n_raw
-            total_samples += len(samples)
-            total_labeled += len(label_indices)
-            total_inherited += len(inherit_map)
-            del samples
+        if workers > 1:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                file_results = executor.map(_estimate_directory_workload_for_file, pending_items)
+                for result in file_results:
+                    total_raw += result["total_raw_conversations"]
+                    total_samples += result["total_samples"]
+                    total_labeled += result["total_labeled_samples"]
+                    total_inherited += result["total_inherited_samples"]
+        else:
+            for item in pending_items:
+                result = _estimate_directory_workload_for_file(item)
+                total_raw += result["total_raw_conversations"]
+                total_samples += result["total_samples"]
+                total_labeled += result["total_labeled_samples"]
+                total_inherited += result["total_inherited_samples"]
     finally:
         random.setstate(rng_state)
 
@@ -2403,6 +2421,75 @@ def estimate_directory_workload(
         initial_estimated_llm_calls=initial_est_calls,
         scan_elapsed_seconds=round(time.time() - start, 2),
     )
+
+
+def _resolve_workload_estimation_workers(file_count: int) -> int:
+    """Auto-size Pass 1 estimation workers to ~80% of available CPUs."""
+    if file_count <= 1:
+        return 1
+    main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+    if not main_file or str(main_file).startswith("<"):
+        return 1
+    cpu_total = os.cpu_count() or 1
+    target = max(1, int(cpu_total * WORKLOAD_ESTIMATION_CPU_FRACTION))
+    return max(1, min(file_count, target))
+
+
+def _estimate_directory_workload_for_file(item: dict) -> dict:
+    """Estimate Pass 1 workload counts for a single input file."""
+    abs_path = Path(item["abs_path"])
+    limit = item.get("limit", 0)
+    shuffle = bool(item.get("shuffle", False))
+    mode = item.get("mode", "refresh")
+    label_version = item.get("label_version", DEFAULT_LABEL_VERSION)
+    sparse_kwargs = dict(item.get("sparse_kwargs") or {})
+    extension_specs = list(item.get("extension_specs") or [])
+    migration_index = item.get("migration_index")
+    annotate_planner_metadata = bool(item.get("annotate_planner_metadata", True))
+
+    total_raw = 0
+    total_samples = 0
+    total_labeled = 0
+    total_inherited = 0
+
+    if str(abs_path).endswith(".jsonl"):
+        for row_bundle in iter_row_sample_bundles_from_jsonl(
+            abs_path,
+            limit=limit,
+            annotate_planner_metadata=annotate_planner_metadata,
+        ):
+            prepared = prepare_inline_pass1_batch(
+                [row_bundle],
+                mode=mode,
+                label_version=label_version,
+                sparse_kwargs=sparse_kwargs,
+                extension_specs=extension_specs,
+                migration_index=migration_index,
+            )
+            total_raw += len(prepared.bundles)
+            total_samples += len(prepared.samples)
+            total_labeled += len(prepared.label_indices)
+            total_inherited += len(prepared.inherit_map)
+        return {
+            "total_raw_conversations": total_raw,
+            "total_samples": total_samples,
+            "total_labeled_samples": total_labeled,
+            "total_inherited_samples": total_inherited,
+        }
+
+    samples, n_raw = iter_samples_from_file(
+        abs_path,
+        limit=limit,
+        shuffle=shuffle,
+        annotate_planner_metadata=annotate_planner_metadata,
+    )
+    label_indices, inherit_map = apply_sparse_sampling(samples, **sparse_kwargs)
+    return {
+        "total_raw_conversations": n_raw,
+        "total_samples": len(samples),
+        "total_labeled_samples": len(label_indices),
+        "total_inherited_samples": len(inherit_map),
+    }
 
 
 def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generate_dashboard=True):
@@ -4560,6 +4647,7 @@ async def run(
     migrate_from: str | Path | None = None,
     llm_progress_cb=None,
     precomputed_workload_estimate=None,
+    parallelize_workload_estimation: bool = False,
 ) -> dict:
     """Library entry point for the labeling pipeline.
 
@@ -4693,6 +4781,7 @@ async def run(
             dir_files,
             limit=limit,
             shuffle=shuffle,
+            parallelize=parallelize_workload_estimation,
             config=config,
             completed_set=completed,
             enable_arbitration=enable_arbitration,
@@ -4829,6 +4918,7 @@ async def run(
                     dir_files,
                     limit=limit,
                     shuffle=shuffle,
+                    parallelize=parallelize_workload_estimation,
                     config=config,
                     completed_set=None,
                     enable_arbitration=enable_arbitration,

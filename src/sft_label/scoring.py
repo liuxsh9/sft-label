@@ -6042,23 +6042,38 @@ def _iter_labeled_samples_streaming(labeled_path, limit=0):
                 return
 
 
+def _count_scoring_samples_and_required_llm_calls_in_file(labeled_path, limit=0, config=None):
+    """Count samples and required LLM calls in a labeled file."""
+    total = 0
+    required_calls = 0
+    selective_policy = _resolve_selective_scoring_policy(config)
+    for sample in _iter_labeled_samples_streaming(labeled_path, limit=limit):
+        total += 1
+        if selective_policy is None:
+            required_calls += 1
+            continue
+        if _selective_scoring_decision(sample, config=config).get("requires_llm", True):
+            required_calls += 1
+    return total, required_calls
+
+
 def _count_scoring_samples_in_file(labeled_path, limit=0):
     """Count samples in a labeled file with per-file limit applied."""
-    count = 0
-    for _sample in _iter_labeled_samples_streaming(labeled_path, limit=limit):
-        count += 1
-    return count
+    total, _ = _count_scoring_samples_and_required_llm_calls_in_file(
+        labeled_path,
+        limit=limit,
+        config=None,
+    )
+    return total
 
 
 def _count_required_llm_calls_in_file(labeled_path, limit=0, config=None):
     """Count samples that still require an LLM scoring call."""
-    if _resolve_selective_scoring_policy(config) is None:
-        return _count_scoring_samples_in_file(labeled_path, limit=limit)
-
-    calls = 0
-    for sample in _iter_labeled_samples_streaming(labeled_path, limit=limit):
-        if _selective_scoring_decision(sample, config=config).get("requires_llm", True):
-            calls += 1
+    _, calls = _count_scoring_samples_and_required_llm_calls_in_file(
+        labeled_path,
+        limit=limit,
+        config=config,
+    )
     return calls
 
 
@@ -6089,12 +6104,13 @@ def estimate_scoring_directory_workload(labeled_files, *, limit=0, config=None):
     total_samples = 0
     required_llm_calls = 0
     for labeled_path in labeled_files:
-        total_samples += _count_scoring_samples_in_file(labeled_path, limit=limit)
-        required_llm_calls += _count_required_llm_calls_in_file(
+        file_total, file_calls = _count_scoring_samples_and_required_llm_calls_in_file(
             labeled_path,
             limit=limit,
             config=config,
         )
+        total_samples += file_total
+        required_llm_calls += file_calls
 
     baseline_calls = required_llm_calls
     # Pass 2 has at most one scoring call per selected slice; retries may increase calls.
