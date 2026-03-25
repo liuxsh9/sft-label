@@ -247,7 +247,7 @@ raw row
 | `data` | `role/content` | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
 | `conversations` / `messages` | 任意 | list / dict content blocks | 拒绝，显式报错 | 不写入新 metadata |
 | `conversations` + `messages` 同存 | `conversations` 非法、`messages` 合法 | 合法 | 回退到 `messages` | `openai_messages` |
-| 任意 top-level key | 空列表 | n/a | 仅在不存在后续**非空合法**候选且当前也不被更高优先级非法候选阻断时接受，返回空 conversations / 不切片 | `sharegpt` / `openai_messages` / `pangu`（按胜出的路由值；空 `conversations` provenance 默认记为 `sharegpt`） |
+| 任意 top-level key | 空列表 | n/a | 仅在不存在后续**非空合法**候选且当前也不被更高优先级非法候选阻断时接受；输出 **1 个未切片样本**，其 `conversations == []` | `sharegpt` / `openai_messages` / `pangu`（按胜出的路由值；空 `conversations` provenance 默认记为 `sharegpt`） |
 
 ## 预处理设计
 
@@ -330,7 +330,7 @@ raw row
 
 对于 **至少包含 1 个 assistant/gpt 回复** 的样本：**assistant 回复数 = 输出切片数**。
 
-对 **0 assistant 回复** 的行，本次不改变现有兼容行为：仍按“未切片单样本”保留，以避免扩大本次改动范围；该 contract 需要在测试中被钉死：
+对 **0 assistant 回复** 的行，以及“胜出的 top-level source 本身为空列表”的行，本次不改变现有兼容行为：都按“未切片单样本”保留，以避免扩大本次改动范围；该 contract 需要在测试中被钉死：
 
 - 输出 sample 数为 1；
 - 保留全部 turns；
@@ -405,6 +405,9 @@ raw row
    - 断言最终行为与 `conversations[].role/content` 一致
 
 6. 顶层歧义与非法输入
+   - `data` 非空合法，且同时存在较低优先级 `conversations/messages` 时，必须由 `data` 胜出
+   - `data` 为空列表，而较低优先级存在非空合法候选时，必须回退到较低优先级非空合法源
+   - `data` 非法，而较低优先级存在非空合法候选时，允许回退到较低优先级非空合法源
    - 同时存在 `conversations` 与 `messages` 时的优先级 / fallback
    - `conversations` 为空列表而 `messages` 非空合法
    - `conversations` 存在但结构无效，而 `messages` 合法
