@@ -1023,6 +1023,7 @@ def _recompute_single_file(file_path, pass_num, out_dir):
         if has_scores:
             stats = recompute_value_stats_from_scored(samples)
             stats_path = out_dir / PASS2_STATS_FILE
+            _preserve_existing_pass2_postprocess(stats_path, stats)
             _write_json(stats_path, stats)
             written["stats_value"] = str(stats_path)
             print(f"  Pass 2 stats: {stats_path} "
@@ -1045,19 +1046,102 @@ def _recompute_conversations(samples, out_dir):
         write_conversation_scores(records, conv_path)
         print(f"  Conversations: {conv_path} ({len(records)} conversations)")
         return {"conversation_scores": str(conv_path)}
+    conv_path = Path(out_dir) / "conversation_scores.json"
+    if conv_path.exists():
+        conv_path.unlink()
     return {}
 
 
-def _write_conversation_records(records, out_dir):
+def _write_conversation_records(records, out_dir, *, clear_when_empty=False):
     """Persist pre-aggregated conversation records when present."""
     from sft_label.conversation import write_conversation_scores
 
+    conv_path = Path(out_dir) / "conversation_scores.json"
     if not records:
+        if clear_when_empty and conv_path.exists():
+            conv_path.unlink()
         return {}
 
-    conv_path = out_dir / "conversation_scores.json"
     write_conversation_scores(records, conv_path)
     return {"conversation_scores": str(conv_path)}
+
+
+def _extract_postprocess_payload(stats: dict | None) -> dict | None:
+    if not isinstance(stats, dict):
+        return None
+    postprocess = stats.get("postprocess")
+    if isinstance(postprocess, dict) and postprocess:
+        normalized: dict[str, dict] = {}
+        for key in ("conversation_scores", "dashboard"):
+            node = postprocess.get(key)
+            status = (
+                str((node or {}).get("status") or "").strip().lower()
+                if isinstance(node, dict)
+                else ""
+            )
+            normalized[key] = dict(node) if status else {"status": "missing"}
+        return normalized
+    return None
+
+
+def _preserve_existing_pass2_postprocess(stats_path: Path, stats: dict) -> None:
+    existing = _load_json_payload(stats_path) if Path(stats_path).exists() else {}
+    postprocess = _extract_postprocess_payload(existing)
+    if postprocess:
+        stats["postprocess"] = postprocess
+
+
+def _merge_summary_postprocess_from_file_stats(all_pass2_stats: list[dict]) -> dict | None:
+    """Fail-closed summary postprocess reconstruction from per-file metadata."""
+    status_priority = {
+        "failed": 7,
+        "conflict": 6,
+        "missing": 5,
+        "pending": 4,
+        "deferred": 3,
+        "completed": 2,
+        "disabled": 1,
+    }
+    merged: dict[str, dict] = {}
+
+    for field in ("conversation_scores", "dashboard"):
+        candidates: list[dict] = []
+        for stats in all_pass2_stats:
+            postprocess = _extract_postprocess_payload(stats)
+            if not postprocess:
+                continue
+            payload = postprocess.get(field)
+            if isinstance(payload, dict):
+                candidates.append(dict(payload))
+        if not candidates:
+            continue
+        chosen = max(
+            candidates,
+            key=lambda payload: status_priority.get(str(payload.get("status") or "").strip().lower(), 0),
+        )
+        merged[field] = chosen
+
+    return merged or None
+
+
+def _refresh_inline_pass2_stats_from_cache(stats_path: Path) -> dict:
+    existing = _load_json_payload(stats_path) if Path(stats_path).exists() else {}
+    refreshed = recompute_value_stats_from_scored([])
+    for key in (
+        "input_file",
+        "input_path",
+        "run_dir",
+        "mirrored_file",
+        "file",
+        "prompt_mode",
+        "compact_prompt",
+        "value_truncation_budget",
+    ):
+        if key in existing:
+            refreshed[key] = existing[key]
+    _preserve_existing_pass2_postprocess(stats_path, refreshed)
+    _write_json(stats_path, refreshed)
+    return refreshed
 
 
 def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
@@ -1159,6 +1243,9 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
     if pass_num in ("2", "both"):
         scored_files = discover_scored_files(input_dir)
         if scored_files:
+            existing_summary_postprocess = _extract_postprocess_payload(
+                _load_json_payload(out_dir / PASS2_SUMMARY_STATS_FILE)
+            )
             print(f"\nFound {len(scored_files)} scored file(s)")
             all_conv_batches = []
             p2_workers = _resolve_worker_count(workers, len(scored_files))
@@ -1180,9 +1267,14 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                     if sf.parent != input_dir else out_dir
                 file_out_dir.mkdir(parents=True, exist_ok=True)
                 stats_path = file_out_dir / PASS2_STATS_FILE
+                _preserve_existing_pass2_postprocess(stats_path, stats)
                 _write_json(stats_path, stats)
                 conversation_records = aggregate_conversations(samples)
-                _write_conversation_records(conversation_records, file_out_dir)
+                _write_conversation_records(
+                    conversation_records,
+                    file_out_dir,
+                    clear_when_empty=True,
+                )
                 return {
                     "idx": idx,
                     "rel_label": rel_label,
@@ -1238,6 +1330,12 @@ def _recompute_directory(input_dir, pass_num, out_dir, workers=1):
                 summary = merge_value_stats(all_pass2_stats)
                 summary["recomputed"] = True
                 summary["recomputed_at"] = datetime.now().isoformat()
+                summary_postprocess = (
+                    existing_summary_postprocess
+                    or _merge_summary_postprocess_from_file_stats(all_pass2_stats)
+                )
+                if summary_postprocess:
+                    summary["postprocess"] = summary_postprocess
                 summary_path = out_dir / PASS2_SUMMARY_STATS_FILE
                 _write_json(summary_path, summary)
                 written["summary_stats_value"] = str(summary_path)
@@ -1326,14 +1424,28 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
         if pass_num in ("2", "both"):
             pass2_stats_path = artifact_dir / PASS2_STATS_FILE
             if pass2_stats_path.exists():
+                source_has_scores = inline_source_has_embedded_scores(source_file)
                 cache_has_scores = _artifact_cache_has_scored_values(artifact_dir)
-                if not cache_has_scores and inline_source_has_embedded_scores(source_file):
+                if source_has_scores and not cache_has_scores:
                     write_inline_scored_cache(source_file, artifact_dir)
                     cache_has_scores = _artifact_cache_has_scored_values(artifact_dir)
+                if not source_has_scores:
+                    if cache_has_scores:
+                        write_inline_scored_cache(source_file, artifact_dir)
+                        cache_has_scores = _artifact_cache_has_scored_values(artifact_dir)
+                        _log_regenerate_dashboard(
+                            f"{rel_label}: invalidated stale scored cache "
+                            "because source no longer embeds Pass 2 values"
+                        )
+                    _write_conversation_records([], artifact_dir, clear_when_empty=True)
+                    _refresh_inline_pass2_stats_from_cache(pass2_stats_path)
+                    _log_regenerate_dashboard(
+                        f"{rel_label}: refreshed {pass2_stats_path.name} to empty Pass 2 state"
+                    )
                 if not cache_has_scores:
                     _log_regenerate_dashboard(
                         f"{rel_label}: no embedded Pass 2 values found in source; "
-                        "reusing existing scored cache state"
+                        "using empty scored cache state"
                     )
                 _ensure_conversation_scores_current(artifact_dir)
                 _log_regenerate_dashboard(
@@ -1421,9 +1533,11 @@ def run_complete_postprocess(input_path, scope="global", open_browser=False, wor
     """
     inline_target = infer_inline_scoring_target(input_path)
     if inline_target is not None:
-        raise ValueError(
-            "complete-postprocess currently supports run directories only; "
-            "inline mirrored datasets are not yet supported"
+        return _run_complete_postprocess_inline(
+            inline_target,
+            scope=scope,
+            open_browser=open_browser,
+            workers=workers,
         )
     return _run_complete_postprocess_legacy(
         input_path,
@@ -1796,6 +1910,15 @@ def _completed_postprocess_payload(*, artifact=None, count=None):
     return payload
 
 
+def _pending_dashboard_postprocess_payload(*, reason="pending-dashboard-generation"):
+    return {
+        "status": "pending",
+        "reason": str(reason),
+        "completed_at": datetime.now().isoformat(),
+        "mode": "complete-postprocess",
+    }
+
+
 def _failed_postprocess_payload(reason):
     return {
         "status": "failed",
@@ -1819,6 +1942,27 @@ def _update_pass2_postprocess_status(stats_path, *, conversation=None, dashboard
     return stats
 
 
+def _mark_dashboard_pending(stats_path):
+    stats_path = Path(stats_path)
+    if not stats_path.exists():
+        return
+    _update_pass2_postprocess_status(
+        stats_path,
+        dashboard=_pending_dashboard_postprocess_payload(),
+    )
+
+
+def _dashboard_generation_stats_hint(stats_path, *, artifact=None):
+    stats_path = Path(stats_path)
+    stats_hint = _load_json_payload(stats_path) if stats_path.exists() else {}
+    if not isinstance(stats_hint, dict):
+        stats_hint = {}
+    postprocess = dict(stats_hint.get("postprocess") or {})
+    postprocess["dashboard"] = _completed_postprocess_payload(artifact=artifact)
+    stats_hint["postprocess"] = postprocess
+    return stats_hint
+
+
 def _stream_conversation_records(scored_path):
     from sft_label.conversation import aggregate_conversations
     from sft_label.tools.dashboard_aggregation import iter_data_file
@@ -1833,7 +1977,11 @@ def _per_file_pass2_stats_path(scored_path: Path) -> Path:
 def _complete_postprocess_conversations_for_file(run_dir: Path, scored_path: Path):
     rel_label = _relative_file_label(scored_path, run_dir)
     conv_records = _stream_conversation_records(scored_path)
-    written = _write_conversation_records(conv_records, scored_path.parent)
+    written = _write_conversation_records(
+        conv_records,
+        scored_path.parent,
+        clear_when_empty=True,
+    )
     conv_count = len(conv_records)
     stats_path = _per_file_pass2_stats_path(scored_path)
     if stats_path.exists():
@@ -1860,18 +2008,248 @@ def _complete_postprocess_dashboard_for_file(scored_path: Path):
     if not stats_path.exists():
         raise FileNotFoundError(f"Missing {PASS2_STATS_FILE} for {scored_path.parent}")
 
+    _mark_dashboard_pending(stats_path)
+    output_path = scored_path.parent / PASS2_DASHBOARD_FILE
     out_path = generate_value_dashboard(
         scored_path.parent,
         scored_file=scored_path.name,
         stats_file=stats_path.name,
         output_file=PASS2_DASHBOARD_FILE,
         quiet=True,
+        stats_hint_override=_dashboard_generation_stats_hint(
+            stats_path,
+            artifact=str(output_path),
+        ),
     )
     _update_pass2_postprocess_status(
         stats_path,
         dashboard=_completed_postprocess_payload(artifact=out_path),
     )
     return Path(out_path) if not isinstance(out_path, Path) else out_path
+
+
+def _complete_postprocess_inline_dashboard_for_file(target, source_file: Path):
+    from sft_label.tools.visualize_value import generate_value_dashboard
+
+    artifact_dir = target.layout.file_artifact_dir(source_file)
+    stats_path = artifact_dir / PASS2_STATS_FILE
+    if not stats_path.exists():
+        raise FileNotFoundError(f"Missing {PASS2_STATS_FILE} for {artifact_dir}")
+
+    _mark_dashboard_pending(stats_path)
+    output_path = target.layout.dashboard_path(
+        _inline_file_dashboard_name("dashboard_scoring", target, source_file)
+    )
+    out_path = generate_value_dashboard(
+        artifact_dir,
+        scored_file="scored.json",
+        stats_file=stats_path.name,
+        output_file=str(output_path),
+        quiet=True,
+        stats_hint_override=_dashboard_generation_stats_hint(
+            stats_path,
+            artifact=str(output_path),
+        ),
+    )
+    _update_pass2_postprocess_status(
+        stats_path,
+        dashboard=_completed_postprocess_payload(artifact=out_path),
+    )
+    return Path(out_path) if not isinstance(out_path, Path) else out_path
+
+
+def _run_complete_postprocess_inline(target, scope="global", open_browser=False, workers=1):
+    import webbrowser
+    from sft_label.conversation import merge_conversation_record_batches, write_conversation_scores
+    from sft_label.scoring import _sync_inline_scored_cache_to_dataset
+    from sft_label.tools.visualize_value import generate_value_dashboard
+
+    scope = str(scope or "global").strip().lower()
+    if scope not in {"global", "all"}:
+        raise ValueError(f"scope must be 'global' or 'all', got {scope!r}")
+
+    selected = _materialize_inline_recompute_artifacts(target, pass_num="2")
+    if target.target_path.is_file():
+        selected = [target.target_path.resolve()]
+
+    _log_complete_postprocess(
+        f"Starting inline Pass 2 postprocess: input={target.target_path} scope={scope} files={len(selected)}"
+    )
+
+    summary_path = target.layout.meta_root / PASS2_SUMMARY_STATS_FILE
+    _mark_dashboard_pending(summary_path)
+
+    recompute_input = (
+        target.layout.file_artifact_dir(target.target_path)
+        if target.target_path.is_file()
+        else target.layout.meta_root
+    )
+    written = _run_recompute_legacy(
+        recompute_input,
+        pass_num="2",
+        output_dir=recompute_input,
+        workers=workers,
+    )
+
+    generated_dashboards: list[Path] = []
+
+    if target.target_path.is_file():
+        artifact_dir = recompute_input
+        _scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
+            target.target_path.resolve(),
+            artifact_dir,
+            strict=False,
+        )
+        conv_path = artifact_dir / "conversation_scores.json"
+        conv_count = len(conv_records)
+        stats_path = artifact_dir / PASS2_STATS_FILE
+        if stats_path.exists():
+            _update_pass2_postprocess_status(
+                stats_path,
+                conversation=_completed_postprocess_payload(
+                    artifact=str(conv_path) if conv_path.exists() else None,
+                    count=conv_count,
+                ),
+            )
+        dashboard_path = _complete_postprocess_inline_dashboard_for_file(target, target.target_path.resolve())
+        generated_dashboards.append(dashboard_path)
+        if open_browser:
+            webbrowser.open(dashboard_path.resolve().as_uri())
+        _log_complete_postprocess(
+            f"Completed inline Pass 2 postprocess: dashboards={len(generated_dashboards)} "
+            f"conversations={conv_count}"
+        )
+        return {
+            "command": "complete-postprocess",
+            "run_dir": str(target.layout.run_root),
+            "scope": scope,
+            "files_processed": 1,
+            "conversation_scores": str(conv_path) if conv_path.exists() else None,
+            "generated_dashboards": [str(path) for path in generated_dashboards],
+        }
+
+    if "summary_stats_value" in written:
+        _rewrite_inline_per_file_summary(written["summary_stats_value"])
+
+    corrected_conv_batches = []
+    for source_file in selected:
+        artifact_dir = target.layout.file_artifact_dir(source_file)
+        stats_path = artifact_dir / PASS2_STATS_FILE
+        scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
+            source_file,
+            artifact_dir,
+            strict=False,
+        )
+        conv_path = artifact_dir / "conversation_scores.json"
+        conv_count = len(conv_records)
+        if stats_path.exists():
+            stats = _load_json_payload(stats_path)
+            stats["input_file"] = str(source_file)
+            stats["mirrored_file"] = str(source_file)
+            stats["file"] = target.layout.relative_source_path(source_file).as_posix()
+            stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
+            if conv_records:
+                stats["conversation_records"] = conv_count
+            postprocess = dict(stats.get("postprocess") or {})
+            postprocess["conversation_scores"] = _completed_postprocess_payload(
+                artifact=str(conv_path) if conv_path.exists() else None,
+                count=conv_count,
+            )
+            if scope == "global":
+                postprocess["dashboard"] = {
+                    "status": "deferred",
+                    "reason": "scope=global",
+                    "mode": "complete-postprocess",
+                    "completed_at": datetime.now().isoformat(),
+                }
+            stats["postprocess"] = postprocess
+            _write_json(stats_path, stats)
+        if conv_records:
+            corrected_conv_batches.append(conv_records)
+        if scope == "all":
+            try:
+                dashboard_path = _complete_postprocess_inline_dashboard_for_file(target, source_file)
+                generated_dashboards.append(dashboard_path)
+                _log_complete_postprocess(
+                    f"[dash {len(generated_dashboards)}/{len(selected)}] "
+                    f"{target.layout.relative_source_path(source_file)} -> {dashboard_path}"
+                )
+            except Exception as e:
+                if stats_path.exists():
+                    _update_pass2_postprocess_status(
+                        stats_path,
+                        dashboard=_failed_postprocess_payload(e),
+                    )
+                _log_complete_postprocess(
+                    f"Warning: inline per-file Pass 2 dashboard failed for "
+                    f"{target.layout.relative_source_path(source_file)}: {type(e).__name__}: {e}"
+                )
+
+    global_conv_path = target.layout.meta_root / "conversation_scores.json"
+    merged_conv_records = merge_conversation_record_batches(corrected_conv_batches)
+    if merged_conv_records:
+        write_conversation_scores(merged_conv_records, global_conv_path)
+    elif global_conv_path.exists():
+        global_conv_path.unlink()
+    global_conv_count = len(merged_conv_records)
+    if summary_path.exists():
+        summary = _load_json_payload(summary_path)
+        summary["run_dir"] = str(target.layout.run_root)
+        postprocess = dict(summary.get("postprocess") or {})
+        postprocess["conversation_scores"] = _completed_postprocess_payload(
+            artifact=str(global_conv_path) if global_conv_path.exists() else None,
+            count=global_conv_count,
+        )
+        postprocess["dashboard"] = _pending_dashboard_postprocess_payload()
+        summary["postprocess"] = postprocess
+        _write_json(summary_path, summary)
+        try:
+            output_path = target.layout.dashboard_path(
+                pass2_global_dashboard_filename(target.layout.dataset_root_name)
+            )
+            dashboard_stats_hint = dict(summary)
+            dashboard_postprocess = dict(dashboard_stats_hint.get("postprocess") or {})
+            dashboard_postprocess["dashboard"] = _completed_postprocess_payload(artifact=str(output_path))
+            dashboard_stats_hint["postprocess"] = dashboard_postprocess
+            out_path = generate_value_dashboard(
+                target.layout.meta_root,
+                scored_file=None,
+                stats_file=summary_path.name,
+                output_file=str(output_path),
+                quiet=True,
+                stats_hint_override=dashboard_stats_hint,
+            )
+            out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
+            generated_dashboards.append(out_path)
+            postprocess["dashboard"] = _completed_postprocess_payload(artifact=out_path)
+            summary["postprocess"] = postprocess
+            _write_json(summary_path, summary)
+            _log_complete_postprocess(f"Global inline Pass 2 dashboard -> {out_path}")
+        except Exception as e:
+            postprocess["dashboard"] = _failed_postprocess_payload(e)
+            summary["postprocess"] = postprocess
+            _write_json(summary_path, summary)
+            _log_complete_postprocess(
+                f"Warning: global inline Pass 2 dashboard failed: {type(e).__name__}: {e}"
+            )
+
+    if open_browser and generated_dashboards:
+        latest = Path(generated_dashboards[-1]).resolve()
+        _log_complete_postprocess(f"Opening dashboard in browser: {latest}")
+        webbrowser.open(latest.as_uri())
+
+    _log_complete_postprocess(
+        f"Completed inline Pass 2 postprocess: dashboards={len(generated_dashboards)} "
+        f"conversations={global_conv_count}"
+    )
+    return {
+        "command": "complete-postprocess",
+        "run_dir": str(target.layout.run_root),
+        "scope": scope,
+        "files_processed": len(selected),
+        "conversation_scores": str(global_conv_path) if global_conv_path.exists() else None,
+        "generated_dashboards": [str(path) for path in generated_dashboards],
+    }
 
 
 def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=False, workers=1):
@@ -1895,6 +2273,8 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
     _log_complete_postprocess(
         f"Starting deferred Pass 2 postprocess: input={run_dir} scope={scope} files={len(scored_files)}"
     )
+
+    _mark_dashboard_pending(run_dir / PASS2_SUMMARY_STATS_FILE)
 
     generated_dashboards = []
     conversation_results = []
@@ -1940,7 +2320,11 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             if isinstance(record, dict):
                 merged_records.append(record)
     merged_records = finalize_conversation_records(merged_records)
-    global_conv_written = _write_conversation_records(merged_records, run_dir)
+    global_conv_written = _write_conversation_records(
+        merged_records,
+        run_dir,
+        clear_when_empty=True,
+    )
     _log_complete_postprocess(
         f"Global conversation aggregation -> {len(merged_records)} conversation(s)"
     )
@@ -1953,16 +2337,22 @@ def _run_complete_postprocess_legacy(input_path, scope="global", open_browser=Fa
             artifact=global_conv_written.get("conversation_scores"),
             count=len(merged_records),
         )
-        postprocess["dashboard"] = _completed_postprocess_payload()
+        postprocess["dashboard"] = _pending_dashboard_postprocess_payload()
         summary["postprocess"] = postprocess
         _write_json(summary_path, summary)
         try:
+            output_name = _global_pass2_dashboard_output_name(run_dir, summary)
+            output_path = run_dir / "dashboards" / output_name
             out_path = generate_value_dashboard(
                 run_dir,
                 scored_file=None,
                 stats_file=summary_path.name,
-                output_file=_global_pass2_dashboard_output_name(run_dir, summary),
+                output_file=output_name,
                 quiet=True,
+                stats_hint_override=_dashboard_generation_stats_hint(
+                    summary_path,
+                    artifact=str(output_path),
+                ),
             )
             out_path = Path(out_path) if not isinstance(out_path, Path) else out_path
             generated_dashboards.append(out_path)

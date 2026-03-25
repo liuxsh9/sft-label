@@ -305,6 +305,10 @@ def test_generate_value_dashboard_stats_only_single_scope_uses_serialized_stats(
         "total_failed": 1,
         "total_tokens": 123,
         "input_file": "demo.jsonl",
+        "postprocess": {
+            "conversation_scores": {"status": "completed"},
+            "dashboard": {"status": "completed"},
+        },
         "weights_used": {"quality": 0.4},
         "selection_thresholds": {"top_10pct": {"threshold": 8.0, "count": 1}},
         "score_distributions": {
@@ -358,6 +362,10 @@ def test_generate_value_dashboard_stats_only_summary_scope_uses_serialized_stats
         "total_failed": 0,
         "total_tokens": 555,
         "input_path": "dataset",
+        "postprocess": {
+            "conversation_scores": {"status": "completed"},
+            "dashboard": {"status": "completed"},
+        },
         "score_distributions": {
             "value_score": {"mean": 6.9, "min": 4.0, "max": 9.0, "p50": 7.0},
             "selection_score": {"mean": 7.4, "min": 5.0, "max": 9.0, "p50": 7.0},
@@ -379,7 +387,8 @@ def test_generate_value_dashboard_stats_only_summary_scope_uses_serialized_stats
     assert detail["summary"]["scored_total"] == 5
     assert detail["pass2"]["modes"]["sample"]["overview"]["total_scored"] == 5
     assert detail["pass2"]["modes"]["sample"]["overview"]["mean_value"] == 6.9
-    assert detail["pass2"]["modes"]["conversation"]["overview"]["mean_selection"] == 7.4
+    assert "conversation" not in ((detail.get("pass2") or {}).get("modes") or {})
+    assert detail["summary_modes"]["conversation"]["scored_total"] == 0
 
 
 def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_leaf_samples(tmp_path, monkeypatch):
@@ -483,6 +492,10 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
                 "input_path": "dataset",
                 "total_scored": 1,
                 "total_failed": 0,
+                "postprocess": {
+                    "dashboard": {"status": "completed"},
+                    "conversation_scores": {"status": "completed"},
+                },
                 "score_distributions": {
                     "value_score": {"mean": 6.5, "min": 6.5, "max": 6.5},
                     "selection_score": {"mean": 7.1, "min": 7.1, "max": 7.1},
@@ -606,6 +619,105 @@ def test_generate_value_dashboard_tree_resolves_deferred_policy_before_tree_load
     assert captured["include_conversations"] is False
 
 
+def test_generate_value_dashboard_tree_fail_closes_when_completed_metadata_has_no_conversation_artifact(tmp_path):
+    meta_root = tmp_path / "meta_label_data"
+    artifact_dir = meta_root / "files" / "code" / "sample"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    (artifact_dir / PASS2_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_file": "code/sample.jsonl",
+                "total_scored": 1,
+                "total_failed": 0,
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "completed"},
+                },
+                "score_distributions": {
+                    "value_score": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "selection_score": {"mean": 6.5, "min": 6.5, "max": 6.5},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (meta_root / PASS2_SUMMARY_STATS_FILE).write_text(
+        json.dumps(
+            {
+                "input_path": "dataset",
+                "total_scored": 1,
+                "total_failed": 0,
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "completed"},
+                },
+                "score_distributions": {
+                    "value_score": {"mean": 6.0, "min": 6.0, "max": 6.0},
+                    "selection_score": {"mean": 6.5, "min": 6.5, "max": 6.5},
+                },
+                "per_file_summary": [
+                    {"file": "code/sample.jsonl", "count": 1, "mean_value": 6.0, "mean_selection": 6.5}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = generate_value_dashboard(meta_root, scored_file=None, stats_file=PASS2_SUMMARY_STATS_FILE, quiet=True)
+    data_dir = out.with_name(f"{out.stem}.data")
+    manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+    detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
+
+    assert manifest["scopes"]["global"]["has_conversation"] is False
+    assert detail["summary_modes"]["conversation"]["scored_total"] == 0
+    assert "conversation" not in ((detail.get("pass2") or {}).get("modes") or {})
+
+
+def test_compute_value_viz_data_conversation_mode_deduplicates_single_reply_conv_records():
+    samples = [
+        {
+            "id": "row-1",
+            "metadata": {
+                "source_id": "inline-row-1",
+                "source_file": "inline.jsonl",
+                "turn_index": 1,
+                "total_turns": 1,
+            },
+            "labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
+            "value": {
+                "value_score": 6.0,
+                "selection_score": 6.2,
+                "thinking_mode": "fast",
+                "confidence": 0.8,
+                "quality": {"overall": 6.0},
+                "complexity": {"overall": 5.0},
+                "reasoning": {"overall": 5.0},
+                "rarity": {"score": 4.0},
+            },
+        }
+    ]
+    conv_records = [
+        {
+            "conversation_id": "inline-row-1",
+            "conversation_key": "inline.jsonl::inline-row-1",
+            "source_file": "inline.jsonl",
+            "turn_count": 1,
+            "conv_value": 6.1,
+            "conv_selection": 6.3,
+            "peak_complexity": 5,
+            "merged_labels": {"intent": "build", "difficulty": "beginner", "context": "snippet"},
+            "detail": {"score_confidence": 0.8},
+        }
+    ]
+
+    viz = compute_value_viz_data(samples, {"total_scored": 1, "total_failed": 0}, conv_records)
+
+    assert viz["modes"]["sample"]["overview"]["total_scored"] == 1
+    assert viz["modes"]["conversation"]["overview"]["total_scored"] == 1
+    assert viz["modes"]["conversation"]["per_file_summary"][0]["count"] == 1
+
+
 def test_resolve_explorer_policy_keeps_completed_large_run_enabled():
     policy = visualize_value_module._resolve_explorer_policy(
         {
@@ -618,6 +730,57 @@ def test_resolve_explorer_policy_keeps_completed_large_run_enabled():
     )
 
     assert policy["enabled"] is True
+
+
+def test_resolve_explorer_policy_fail_closed_for_missing_pending_and_failed_metadata():
+    missing_policy = visualize_value_module._resolve_explorer_policy({"total_scored": 1})
+    pending_policy = visualize_value_module._resolve_explorer_policy(
+        {"total_scored": 1, "postprocess": {"dashboard": {"status": "pending"}}}
+    )
+    failed_policy = visualize_value_module._resolve_explorer_policy(
+        {"total_scored": 1, "postprocess": {"dashboard": {"status": "failed", "reason": "worker-crashed"}}}
+    )
+
+    assert missing_policy["enabled"] is False
+    assert missing_policy["mode"] == "missing"
+    assert pending_policy == {"enabled": False, "mode": "pending"}
+    assert failed_policy == {"enabled": False, "mode": "failed", "reason": "worker-crashed"}
+
+
+def test_turn_kind_treats_inline_single_reply_source_id_as_single():
+    assert visualize_value_module.infer_scope_turn_kind(
+        [
+            {
+                "metadata": {
+                    "source_id": "inline-row-1",
+                    "source_file": "inline.jsonl",
+                    "turn_index": 1,
+                    "total_turns": 1,
+                }
+            }
+        ]
+    ) == "single"
+
+
+def test_turn_kind_from_path_treats_inline_single_reply_source_id_as_single(tmp_path):
+    data_path = tmp_path / "scored.jsonl"
+    data_path.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "source_id": "inline-row-1",
+                    "source_file": "inline.jsonl",
+                    "turn_index": 1,
+                    "total_turns": 1,
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert visualize_value_module.infer_scope_turn_kind_from_path(data_path) == "single"
 
 
 def test_generate_value_dashboard_single_scope_normalizes_input_file_to_source_path(tmp_path):
@@ -659,11 +822,15 @@ def test_generate_value_dashboard_single_scope_normalizes_input_file_to_source_p
     )
     (tmp_path / PASS2_STATS_FILE).write_text(
         json.dumps(
-            {
-                "input_file": str(tmp_path / "labeled.jsonl"),
-                "total_scored": 1,
-                "total_failed": 0,
-                "score_distributions": {
+                {
+                    "input_file": str(tmp_path / "labeled.jsonl"),
+                    "total_scored": 1,
+                    "total_failed": 0,
+                    "postprocess": {
+                        "conversation_scores": {"status": "completed"},
+                        "dashboard": {"status": "completed"},
+                    },
+                    "score_distributions": {
                     "value_score": {"mean": 6.5, "min": 6.5, "max": 6.5},
                     "selection_score": {"mean": 7.1, "min": 7.1, "max": 7.1},
                     "complexity_overall": {"mean": 6.0, "min": 6.0, "max": 6.0},
@@ -827,6 +994,10 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
         json.dumps(
             {
                 "input_path": "dataset",
+                    "postprocess": {
+                        "dashboard": {"status": "completed"},
+                        "conversation_scores": {"status": "completed"},
+                    },
                     "total_scored": 4,
                     "total_failed": 0,
                     "score_distributions": {

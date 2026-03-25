@@ -150,24 +150,24 @@ def _resolve_explorer_policy(stats: dict | None) -> dict:
     dashboard = _postprocess_dashboard_entry(stats)
     status = str(dashboard.get("status") or "").strip().lower()
     reason = dashboard.get("reason")
-    if status == "deferred":
-        policy = {"enabled": False, "mode": "deferred"}
+    if status in {"deferred", "pending", "failed"}:
+        policy = {"enabled": False, "mode": status}
         if reason:
             policy["reason"] = str(reason)
         return policy
     if status == "completed":
         return {"enabled": True, "mode": "completed"}
+    if status:
+        policy = {"enabled": False, "mode": "missing"}
+        policy["reason"] = f"dashboard_status={status}"
+        return policy
 
     total_scored = int((stats or {}).get("total_scored") or 0)
     threshold = max(int(PASS2_HEAVY_POSTPROCESS_SAMPLE_THRESHOLD), 1)
+    reason = "dashboard postprocess metadata missing"
     if total_scored >= threshold:
-        return {
-            "enabled": False,
-            "mode": "deferred",
-            "reason": f"samples={total_scored}>={threshold}",
-        }
-
-    return {"enabled": True}
+        reason = f"{reason}; samples={total_scored}>={threshold}"
+    return {"enabled": False, "mode": "missing", "reason": reason}
 
 
 def _pass1_conversation_mode_from_conv_records(conv_records, fallback: dict | None = None) -> dict | None:
@@ -469,6 +469,7 @@ def _tree_payload(
             conv_records = []
             for leaf_path in raw_scope.get("descendant_files", []):
                 conv_records.extend(file_conversations.get(f"file:{leaf_path}", []))
+        has_conv_records = bool(conv_records)
         normalized_pass1_stats = _normalized_dashboard_stats(
             raw_scope.get("raw_pass1"),
             scope_kind=raw_scope["kind"],
@@ -484,16 +485,24 @@ def _tree_payload(
             run_dir=run_dir,
         )
         pass1 = compute_viz_data([], normalized_pass1_stats) if normalized_pass1_stats else None
-        pass1_conversation_mode = _pass1_conversation_mode_from_conv_records(
-            conv_records,
-            fallback=((pass1 or {}).get("modes") or {}).get("conversation"),
-        )
-        if pass1_conversation_mode:
-            pass1 = _inject_conversation_mode(pass1, [pass1_conversation_mode]) if pass1 else {
-                "modes": {"conversation": pass1_conversation_mode}
-            }
+        if include_conversations and has_conv_records:
+            pass1_conversation_mode = _pass1_conversation_mode_from_conv_records(
+                conv_records,
+                fallback=((pass1 or {}).get("modes") or {}).get("conversation"),
+            )
+            if pass1_conversation_mode:
+                pass1 = _inject_conversation_mode(pass1, [pass1_conversation_mode]) if pass1 else {
+                    "modes": {"conversation": pass1_conversation_mode}
+                }
+        elif isinstance((pass1 or {}).get("modes"), dict):
+            pass1["modes"].pop("conversation", None)
         pass2 = compute_value_viz_data([], normalized_pass2_stats, conv_records) if normalized_pass2_stats else None
-        conversation = _compute_conv_viz_data(conv_records)
+        if not include_conversations or not has_conv_records:
+            if isinstance((pass2 or {}).get("modes"), dict):
+                pass2["modes"].pop("conversation", None)
+            conversation = None
+        else:
+            conversation = _compute_conv_viz_data(conv_records)
         if is_file:
             turn_kind = file_turn_kind.get(scope_id)
         else:
@@ -551,7 +560,8 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
                              stats_file=PASS2_STATS_FILE,
                              output_file="dashboard_scoring.html",
                              quiet=False,
-                             static_base_url: str | None = None):
+                             static_base_url: str | None = None,
+                             stats_hint_override: dict | None = None):
     """Generate an interactive Pass 2 dashboard."""
     run_dir = Path(run_dir)
     output_path = resolve_dashboard_output(run_dir, output_file)
@@ -560,16 +570,17 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
     if scored_file is None or stats_file == PASS2_SUMMARY_STATS_FILE:
         if not quiet:
             print("  Scoring dashboard: building scope tree")
-        stats_hint = {}
-        stats_path = run_dir / stats_file
-        if stats_path.exists():
-            try:
-                with open(stats_path, encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    stats_hint = loaded
-            except (OSError, json.JSONDecodeError):
-                stats_hint = {}
+        stats_hint = dict(stats_hint_override) if isinstance(stats_hint_override, dict) else {}
+        if not stats_hint:
+            stats_path = run_dir / stats_file
+            if stats_path.exists():
+                try:
+                    with open(stats_path, encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        stats_hint = loaded
+                except (OSError, json.JSONDecodeError):
+                    stats_hint = {}
         explorer_policy = _resolve_explorer_policy(stats_hint)
         payload, explorer_sources, root_pass2_stats = _tree_payload(
             run_dir,
@@ -579,7 +590,8 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
             explorer_policy = _resolve_explorer_policy(root_pass2_stats)
     else:
         samples, stats = load_value_run(run_dir, scored_file=scored_file, stats_file=stats_file)
-        conv_records = _load_conversation_scores(run_dir)
+        explorer_policy = _resolve_explorer_policy(stats)
+        conv_records = _load_conversation_scores(run_dir) if explorer_policy.get("enabled", True) else []
         normalized_stats = _normalized_dashboard_stats(
             stats,
             scope_kind="file",
@@ -594,10 +606,18 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
             compute_value_viz_data(samples, normalized_stats, conv_records),
             normalized_stats,
         )
+        if not explorer_policy.get("enabled", True):
+            global_scope = payload.get("scopes", {}).get("global") or {}
+            if isinstance((global_scope.get("pass1") or {}).get("modes"), dict):
+                global_scope["pass1"]["modes"].pop("conversation", None)
+            if isinstance((global_scope.get("pass2") or {}).get("modes"), dict):
+                global_scope["pass2"]["modes"].pop("conversation", None)
+            global_scope["conversation"] = None
+            global_scope["summary"] = _scope_summary(global_scope)
         explorer_sources = []
         data_path = run_dir / scored_file if scored_file else None
         conv_path = run_dir / "conversation_scores.json"
-        if data_path and data_path.exists():
+        if explorer_policy.get("enabled", True) and data_path and data_path.exists():
             explorer_sources.append(
                 {
                     "scope_id": "global",
@@ -607,7 +627,6 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
                     "has_scores": True,
                 }
             )
-        explorer_policy = _resolve_explorer_policy(normalized_stats)
 
     if not quiet:
         print("  Scoring dashboard: writing dashboard bundle")

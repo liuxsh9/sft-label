@@ -482,18 +482,31 @@ def _load_regenerate_postprocess_payload(run_dir: str | os.PathLike[str] | None)
     if not run_dir:
         return None
 
-    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE, PASS2_SUMMARY_STATS_FILE_LEGACY
+    from sft_label.artifacts import (
+        PASS2_STATS_FILE,
+        PASS2_STATS_FILE_LEGACY,
+        PASS2_SUMMARY_STATS_FILE,
+        PASS2_SUMMARY_STATS_FILE_LEGACY,
+    )
 
     root = Path(run_dir)
-    candidates = (
-        root / PASS2_SUMMARY_STATS_FILE,
-        root / PASS2_SUMMARY_STATS_FILE_LEGACY,
-        root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE,
-        root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE_LEGACY,
+    candidate_names = (
+        PASS2_SUMMARY_STATS_FILE,
+        PASS2_SUMMARY_STATS_FILE_LEGACY,
+        PASS2_STATS_FILE,
+        PASS2_STATS_FILE_LEGACY,
     )
+    payloads: list[dict] = []
+    saw_candidate = False
+    candidates = [
+        base / name
+        for base in (root, root / "meta_label_data")
+        for name in candidate_names
+    ]
     for candidate in candidates:
         if not candidate.exists():
             continue
+        saw_candidate = True
         try:
             payload = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -501,8 +514,37 @@ def _load_regenerate_postprocess_payload(run_dir: str | os.PathLike[str] | None)
         if not isinstance(payload, dict):
             return {}
         postprocess = payload.get("postprocess")
-        return postprocess if isinstance(postprocess, dict) else {}
-    return None
+        if isinstance(postprocess, dict):
+            payloads.append(postprocess)
+    if not payloads:
+        return {} if saw_candidate else None
+    return _merge_postprocess_status_blocks(payloads)
+
+
+def _merge_postprocess_status_blocks(payloads: list[dict]) -> dict:
+    required_keys = ("conversation_scores", "dashboard")
+    merged: dict[str, dict[str, str]] = {}
+    for key in required_keys:
+        statuses: set[str] = set()
+        missing = False
+        for payload in payloads:
+            node = payload.get(key)
+            status = (
+                str((node or {}).get("status") or "").strip().lower()
+                if isinstance(node, dict)
+                else ""
+            )
+            if not status:
+                missing = True
+                continue
+            statuses.add(status)
+        if missing:
+            merged[key] = {"status": "missing"}
+        elif len(statuses) > 1:
+            merged[key] = {"status": "conflict"}
+        elif statuses:
+            merged[key] = {"status": next(iter(statuses))}
+    return merged
 
 
 def _auto_publish_pass2_guard(
@@ -511,12 +553,19 @@ def _auto_publish_pass2_guard(
     lang: str,
     run_dir: str | None = None,
 ) -> tuple[bool, str | None]:
-    if launched_args.command == "regenerate-dashboard" and str(getattr(launched_args, "pass_num", "both")) == "1":
+    has_scoring_dashboard = _run_dir_has_scoring_dashboard(run_dir)
+    if (
+        launched_args.command == "regenerate-dashboard"
+        and str(getattr(launched_args, "pass_num", "both")) == "1"
+        and not has_scoring_dashboard
+    ):
         return True, None
 
     postprocess = _score_postprocess_payload_for_publish_guard(launched_args, result)
     if postprocess is None and launched_args.command == "regenerate-dashboard":
         postprocess = _load_regenerate_postprocess_payload(run_dir or getattr(launched_args, "input", None))
+        if postprocess is None and has_scoring_dashboard:
+            postprocess = {}
     if postprocess is None:
         return True, None
 
@@ -525,8 +574,6 @@ def _auto_publish_pass2_guard(
     required_keys = ("conversation_scores", "dashboard")
     observed: list[str] = []
     failures: list[str] = []
-    has_scoring_dashboard = _run_dir_has_scoring_dashboard(run_dir)
-
     for key in required_keys:
         node = postprocess.get(key)
         status = node.get("status") if isinstance(node, dict) else None
@@ -545,6 +592,15 @@ def _auto_publish_pass2_guard(
         blocked_text = ", ".join(failures)
         run_dir_arg = str(run_dir) if run_dir else "<run_dir>"
         command_run_dir_arg = shlex.quote(run_dir_arg) if run_dir else run_dir_arg
+        if _run_dir_uses_inline_mirrored_layout(run_dir):
+            return (
+                False,
+                _start_msg(
+                    lang,
+                    f"Dashboard 自动发布已跳过（安全兜底）：Pass 2 后处理状态未完成（{blocked_text}）。当前状态：{observed_text}。这是 inline mirrored run。请先运行 `sft-label complete-postprocess --input {command_run_dir_arg}`。",
+                    f"Dashboard auto-publish skipped (fail-closed): Pass 2 postprocess is incomplete ({blocked_text}). Current status: {observed_text}. This is an inline mirrored run. Run `sft-label complete-postprocess --input {command_run_dir_arg}` first.",
+                ),
+            )
         return (
             False,
             _start_msg(
@@ -555,6 +611,17 @@ def _auto_publish_pass2_guard(
         )
 
     return True, None
+
+
+def _run_dir_uses_inline_mirrored_layout(run_dir: str | None) -> bool:
+    if not run_dir:
+        return False
+    try:
+        from sft_label.inline_scoring import infer_inline_scoring_target
+
+        return infer_inline_scoring_target(Path(run_dir).expanduser().resolve()) is not None
+    except Exception:
+        return False
 
 
 def _run_dir_has_scoring_dashboard(run_dir: str | None) -> bool:

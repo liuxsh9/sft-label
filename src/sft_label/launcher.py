@@ -673,34 +673,70 @@ def _load_pass2_postprocess_status(root: Path) -> dict | None:
         PASS2_STATS_FILE,
         PASS2_STATS_FILE_LEGACY,
     )
+    payloads: list[dict] = []
+    saw_candidate = False
     for base in (root, root / "meta_label_data"):
         for name in candidate_names:
             path = base / name
             if not path.exists():
                 continue
+            saw_candidate = True
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                continue
+                return {}
             if not isinstance(payload, dict):
-                continue
+                return {}
             postprocess = payload.get("postprocess")
             if isinstance(postprocess, dict):
-                return postprocess
-    return None
+                payloads.append(postprocess)
+    if not payloads:
+        return {} if saw_candidate else None
+    return _merge_postprocess_status_blocks(payloads)
+
+
+def _merge_postprocess_status_blocks(payloads: list[dict]) -> dict:
+    required_keys = ("conversation_scores", "dashboard")
+    merged: dict[str, dict[str, str]] = {}
+    for key in required_keys:
+        statuses: set[str] = set()
+        missing = False
+        for payload in payloads:
+            node = payload.get(key)
+            status = (
+                str((node or {}).get("status") or "").strip().lower()
+                if isinstance(node, dict)
+                else ""
+            )
+            if not status:
+                missing = True
+                continue
+            statuses.add(status)
+        if missing:
+            merged[key] = {"status": "missing"}
+        elif len(statuses) > 1:
+            merged[key] = {"status": "conflict"}
+        elif statuses:
+            merged[key] = {"status": next(iter(statuses))}
+    return merged
 
 
 def _postprocess_requires_completion(postprocess: dict | None) -> tuple[bool, list[str]]:
     if not isinstance(postprocess, dict):
         return False, []
+    if not postprocess:
+        return True, ["conversation_scores=missing", "dashboard=missing"]
 
-    blocked_statuses = {"deferred", "pending", "failed"}
+    safe_statuses = {"completed", "disabled"}
     required_keys = ("conversation_scores", "dashboard")
     failures: list[str] = []
     for key in required_keys:
         node = postprocess.get(key)
         status = str((node or {}).get("status") or "").strip().lower() if isinstance(node, dict) else ""
-        if status in blocked_statuses:
+        if not status:
+            failures.append(f"{key}=missing")
+            continue
+        if status not in safe_statuses:
             failures.append(f"{key}={status}")
     return bool(failures), failures
 

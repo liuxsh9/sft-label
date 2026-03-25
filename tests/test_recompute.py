@@ -642,6 +642,100 @@ class TestRunRecompute:
         assert "summary_stats_value" in written
         assert "conversation_scores" in written
 
+    def test_directory_pass2_recompute_preserves_existing_postprocess_metadata(self, tmp_path):
+        run_dir = tmp_path / "dataset_labeled_20260324_100000"
+        batch = run_dir / "batch_a"
+        batch.mkdir(parents=True)
+
+        samples = _make_multiturn_scored_samples("conv-a", n_turns=2)
+        (batch / "scored.json").write_text(json.dumps(samples), encoding="utf-8")
+
+        file_stats = recompute_value_stats_from_scored(samples)
+        file_stats["postprocess"] = {
+            "conversation_scores": {"status": "failed", "reason": "previous-failure"},
+            "dashboard": {"status": "deferred", "reason": "samples=2>=20000"},
+        }
+        (batch / PASS2_STATS_FILE).write_text(json.dumps(file_stats), encoding="utf-8")
+
+        summary_stats = recompute_value_stats_from_scored(samples)
+        summary_stats["postprocess"] = {
+            "conversation_scores": {"status": "deferred", "reason": "samples=2>=20000"},
+            "dashboard": {"status": "deferred", "reason": "samples=2>=20000"},
+        }
+        (run_dir / PASS2_SUMMARY_STATS_FILE).write_text(json.dumps(summary_stats), encoding="utf-8")
+
+        run_recompute(str(run_dir), pass_num="2")
+
+        recomputed_file_stats = json.loads((batch / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+        recomputed_summary = json.loads((run_dir / PASS2_SUMMARY_STATS_FILE).read_text(encoding="utf-8"))
+
+        assert recomputed_file_stats["postprocess"]["conversation_scores"]["status"] == "failed"
+        assert recomputed_file_stats["postprocess"]["dashboard"]["status"] == "deferred"
+        assert recomputed_summary["postprocess"]["dashboard"]["status"] == "deferred"
+        assert recomputed_summary["postprocess"]["dashboard"]["reason"] == "samples=2>=20000"
+
+    def test_directory_pass2_recompute_reconstructs_summary_postprocess_fail_closed(self, tmp_path):
+        run_dir = tmp_path / "dataset_labeled_20260324_100000"
+        batch_a = run_dir / "batch_a"
+        batch_b = run_dir / "batch_b"
+        batch_a.mkdir(parents=True)
+        batch_b.mkdir(parents=True)
+
+        samples_a = _make_multiturn_scored_samples("conv-a", n_turns=2)
+        samples_b = _make_multiturn_scored_samples("conv-b", n_turns=2)
+        (batch_a / "scored.json").write_text(json.dumps(samples_a), encoding="utf-8")
+        (batch_b / "scored.json").write_text(json.dumps(samples_b), encoding="utf-8")
+
+        stats_a = recompute_value_stats_from_scored(samples_a)
+        stats_a["postprocess"] = {
+            "conversation_scores": {"status": "completed"},
+            "dashboard": {"status": "completed"},
+        }
+        (batch_a / PASS2_STATS_FILE).write_text(json.dumps(stats_a), encoding="utf-8")
+
+        stats_b = recompute_value_stats_from_scored(samples_b)
+        stats_b["postprocess"] = {
+            "conversation_scores": {"status": "pending", "reason": "dashboard-regenerating"},
+            "dashboard": {"status": "pending", "reason": "dashboard-regenerating"},
+        }
+        (batch_b / PASS2_STATS_FILE).write_text(json.dumps(stats_b), encoding="utf-8")
+
+        run_recompute(str(run_dir), pass_num="2")
+
+        recomputed_summary = json.loads((run_dir / PASS2_SUMMARY_STATS_FILE).read_text(encoding="utf-8"))
+
+        assert recomputed_summary["postprocess"]["conversation_scores"]["status"] == "pending"
+        assert recomputed_summary["postprocess"]["dashboard"]["status"] == "pending"
+        assert recomputed_summary["postprocess"]["dashboard"]["reason"] == "dashboard-regenerating"
+
+    def test_directory_pass2_recompute_normalizes_partial_existing_postprocess_blocks(self, tmp_path):
+        run_dir = tmp_path / "dataset_labeled_20260324_100000"
+        batch = run_dir / "batch_a"
+        batch.mkdir(parents=True)
+
+        samples = _make_multiturn_scored_samples("conv-a", n_turns=2)
+        (batch / "scored.json").write_text(json.dumps(samples), encoding="utf-8")
+
+        file_stats = recompute_value_stats_from_scored(samples)
+        file_stats["postprocess"] = {
+            "conversation_scores": {"status": "completed"},
+        }
+        (batch / PASS2_STATS_FILE).write_text(json.dumps(file_stats), encoding="utf-8")
+
+        summary_stats = recompute_value_stats_from_scored(samples)
+        summary_stats["postprocess"] = {
+            "conversation_scores": {"status": "completed"},
+        }
+        (run_dir / PASS2_SUMMARY_STATS_FILE).write_text(json.dumps(summary_stats), encoding="utf-8")
+
+        run_recompute(str(run_dir), pass_num="2")
+
+        recomputed_file_stats = json.loads((batch / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+        recomputed_summary = json.loads((run_dir / PASS2_SUMMARY_STATS_FILE).read_text(encoding="utf-8"))
+
+        assert recomputed_file_stats["postprocess"]["dashboard"]["status"] == "missing"
+        assert recomputed_summary["postprocess"]["dashboard"]["status"] == "missing"
+
     def test_directory_scored_writes_per_file_conversation_scores(self, tmp_path):
         sub_path = tmp_path / "multi_turn" / "part1"
         sub_path.mkdir(parents=True)
@@ -801,6 +895,44 @@ class TestRunRecompute:
 
         with pytest.raises(ValueError, match="Inline recompute writes in-place"):
             run_recompute(str(run_root), pass_num="2", output_dir=str(tmp_path / "elsewhere"))
+
+    def test_inline_recompute_pass2_clears_stale_conversation_scores_when_source_has_no_scores(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260311_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        artifact_dir = run_root / "meta_label_data" / "files" / "sample"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        stale_scored = [_make_scored_sample("stale-turn")]
+        (artifact_dir / "scored.json").write_text(json.dumps(stale_scored), encoding="utf-8")
+        _write_jsonl(artifact_dir / "scored.jsonl", stale_scored)
+        (artifact_dir / "conversation_scores.json").write_text(
+            json.dumps([{"conversation_id": "stale-conv", "conv_value": 6.0}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (artifact_dir / PASS2_STATS_FILE).write_text(
+            json.dumps(recompute_value_stats_from_scored(stale_scored), ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        run_recompute(str(source_file), pass_num="2")
+
+        refreshed_scored = json.loads((artifact_dir / "scored.json").read_text(encoding="utf-8"))
+        refreshed_stats = json.loads((artifact_dir / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+        assert refreshed_scored == []
+        assert refreshed_stats["total_scored"] == 0
+        assert not (artifact_dir / "conversation_scores.json").exists()
 
 
 class TestRefreshRarity:
@@ -1417,7 +1549,7 @@ class TestRegenerateDashboard:
         assert all(Path(path).parent == expected_dir for path in map(Path, generated))
         assert len(list(expected_dir.glob("dashboard_scoring*.html"))) >= 1
 
-    def test_pass2_dashboard_explorer_defaults_to_preview_only_assets(self, tmp_path):
+    def test_pass2_dashboard_explorer_disables_when_postprocess_metadata_missing(self, tmp_path):
         scored = [
             _make_scored_sample("sample-1", value_score=6.0),
             _make_scored_sample("sample-2", value_score=7.0),
@@ -1459,11 +1591,15 @@ class TestRegenerateDashboard:
         data_dir = dashboard_path.with_name(f"{dashboard_path.stem}.data")
         explorer_dir = data_dir / "explorer"
         manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
+        detail = json.loads((data_dir / "scopes" / "global.json").read_text(encoding="utf-8"))
 
-        assert explorer_dir.exists()
-        assert any(path.name.startswith("preview_") for path in explorer_dir.iterdir())
-        assert not any(path.name.startswith("detail_") for path in explorer_dir.iterdir())
-        assert manifest["scopes"]["global"]["explorer"]["detail_chunks"] == []
+        assert not explorer_dir.exists()
+        assert manifest["explorer"]["enabled"] is False
+        assert manifest["explorer"]["mode"] == "missing"
+        assert manifest["explorer"]["reason"] == "dashboard postprocess metadata missing"
+        assert manifest["scopes"]["global"]["has_conversation"] is False
+        assert detail["summary_modes"]["conversation"]["scored_total"] == 0
+        assert "conversation" not in ((detail.get("pass2") or {}).get("modes") or {})
 
     def test_regenerate_dashboard_disables_explorer_bundle_when_summary_marks_heavy_run(self, tmp_path):
         batch = tmp_path / "batch_a"
@@ -1510,6 +1646,7 @@ class TestRegenerateDashboard:
                 ],
             }],
             [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-1_t1"), _inline_value("conv-1_t2")]],
         )
         _write_jsonl(source_file, rows)
 
@@ -1573,6 +1710,7 @@ class TestRegenerateDashboard:
                 ],
             }],
             [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-1_t1"), _inline_value("conv-1_t2")]],
         )
         _write_jsonl(source_file, rows)
 
@@ -1621,6 +1759,52 @@ class TestRegenerateDashboard:
         detail = refreshed[0]["detail"]
         assert detail["quality_overall"] == 7.0
         assert detail["reasoning_overall"] == 6.0
+
+    def test_inline_regenerate_pass2_invalidates_stale_scored_cache_when_source_has_no_scores(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        artifact_dir = run_root / "meta_label_data" / "files" / "sample"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        stale_scored = [_make_scored_sample("stale-turn")]
+        (artifact_dir / "scored.json").write_text(json.dumps(stale_scored), encoding="utf-8")
+        _write_jsonl(artifact_dir / "scored.jsonl", stale_scored)
+        (artifact_dir / "conversation_scores.json").write_text(
+            json.dumps([{"conversation_id": "stale-conv", "conv_value": 6.0}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        stats = recompute_value_stats_from_scored(stale_scored)
+        stats["input_file"] = "dataset/sample.jsonl"
+        (artifact_dir / PASS2_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+
+        run_regenerate_dashboard(str(source_file), pass_num="2")
+
+        refreshed_scored = json.loads((artifact_dir / "scored.json").read_text(encoding="utf-8"))
+        refreshed_stats = json.loads((artifact_dir / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+        assert refreshed_scored == []
+        assert refreshed_stats["total_scored"] == 0
+        assert not (artifact_dir / "conversation_scores.json").exists()
+
+        dashboard_path = run_root / "meta_label_data" / DASHBOARDS_DIRNAME / "dashboard_scoring_sample.html"
+        detail = json.loads(
+            (dashboard_path.with_name(f"{dashboard_path.stem}.data") / "scopes" / "global.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert detail["pass2"]["modes"]["sample"]["overview"]["total_scored"] == 0
+        assert detail["summary_modes"]["sample"]["scored_total"] == 0
 
 
 class TestCompletePostprocess:
@@ -1733,6 +1917,267 @@ class TestCompletePostprocess:
         manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
 
         assert manifest["explorer"]["enabled"] is True
+
+    def test_complete_postprocess_inline_run_rebuilds_from_embedded_metadata(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [
+                {
+                    "id": "conv-single",
+                    "conversations": [
+                        {"from": "human", "value": "q1"},
+                        {"from": "gpt", "value": "a1"},
+                    ],
+                },
+                {
+                    "id": "conv-multi",
+                    "conversations": [
+                        {"from": "human", "value": "q1"},
+                        {"from": "gpt", "value": "a1"},
+                        {"from": "human", "value": "q2"},
+                        {"from": "gpt", "value": "a2"},
+                    ],
+                },
+            ],
+            [
+                [_inline_full_labels("build")],
+                [_inline_full_labels("debug"), _inline_full_labels("modify")],
+            ],
+            [
+                [_inline_value("conv-single_t1")],
+                [_inline_value("conv-multi_t1"), _inline_value("conv-multi_t2")],
+            ],
+        )
+        _write_jsonl(source_file, rows)
+
+        result = run_complete_postprocess(str(run_root), scope="global")
+
+        meta_root = run_root / "meta_label_data"
+        summary = json.loads((meta_root / PASS2_SUMMARY_STATS_FILE).read_text(encoding="utf-8"))
+        conv_records = json.loads((meta_root / "conversation_scores.json").read_text(encoding="utf-8"))
+        artifact_stats = json.loads(
+            (meta_root / "files" / "sample" / PASS2_STATS_FILE).read_text(encoding="utf-8")
+        )
+
+        assert result["scope"] == "global"
+        assert result["files_processed"] == 1
+        assert summary["postprocess"]["conversation_scores"]["status"] == "completed"
+        assert summary["postprocess"]["dashboard"]["status"] == "completed"
+        assert artifact_stats["postprocess"]["conversation_scores"]["status"] == "completed"
+        assert artifact_stats["postprocess"]["dashboard"]["status"] == "deferred"
+        assert len(conv_records) == 2
+        assert {record["turn_count"] for record in conv_records} == {1, 2}
+        assert (meta_root / DASHBOARDS_DIRNAME / "dashboard_scoring_dataset.html").exists()
+
+    def test_complete_postprocess_inline_run_scope_all_generates_per_file_dashboards(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-multi",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("debug"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-multi_t1"), _inline_value("conv-multi_t2")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        result = run_complete_postprocess(str(run_root), scope="all")
+
+        meta_root = run_root / "meta_label_data"
+        artifact_dir = meta_root / "files" / "sample"
+        artifact_stats = json.loads((artifact_dir / PASS2_STATS_FILE).read_text(encoding="utf-8"))
+
+        assert artifact_stats["postprocess"]["dashboard"]["status"] == "completed"
+        assert (meta_root / DASHBOARDS_DIRNAME / "dashboard_scoring_dataset.html").exists()
+        assert (meta_root / DASHBOARDS_DIRNAME / "dashboard_scoring_sample.html").exists()
+        assert len(result["generated_dashboards"]) >= 2
+
+    def test_complete_postprocess_inline_run_tolerates_partially_unscored_turns(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-partial",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("debug"), _inline_full_labels("modify")]],
+            [[_inline_value("conv-partial_t1")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        result = run_complete_postprocess(str(run_root), scope="global")
+
+        conv_records = json.loads(
+            (run_root / "meta_label_data" / "conversation_scores.json").read_text(encoding="utf-8")
+        )
+        assert result["files_processed"] == 1
+        assert len(conv_records) == 1
+        assert conv_records[0]["turn_count"] == 1
+
+    def test_complete_postprocess_inline_run_handles_duplicate_sample_ids(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [
+                {
+                    "id": "conv-a",
+                    "conversations": [
+                        {"from": "human", "value": "q1"},
+                        {"from": "gpt", "value": "a1"},
+                    ],
+                },
+                {
+                    "id": "conv-b",
+                    "conversations": [
+                        {"from": "human", "value": "q1"},
+                        {"from": "gpt", "value": "a1"},
+                    ],
+                },
+            ],
+            [
+                [_inline_full_labels("build")],
+                [_inline_full_labels("debug")],
+            ],
+            [
+                [_inline_value("row-a_t1")],
+                [_inline_value("row-b_t1")],
+            ],
+        )
+        for row in rows:
+            row["extra_info"]["unique_info"]["data_label"]["turns"][0]["sample_id"] = "dup-sample-id"
+        _write_jsonl(source_file, rows)
+
+        result = run_complete_postprocess(str(run_root), scope="global")
+
+        conv_records = json.loads(
+            (run_root / "meta_label_data" / "conversation_scores.json").read_text(encoding="utf-8")
+        )
+        assert result["files_processed"] == 1
+        assert len(conv_records) == 2
+        assert len({record["conversation_key"] for record in conv_records}) == 2
+
+    def test_complete_postprocess_inline_does_not_persist_completed_dashboard_before_generation(self, tmp_path, monkeypatch):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value("conv-1_t1")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        summary_path = run_root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE
+        observed_statuses: list[str] = []
+        original_write_json = recompute_module._write_json
+
+        def _recording_write_json(path, data):
+            if Path(path) == summary_path and isinstance(data, dict):
+                status = ((data.get("postprocess") or {}).get("dashboard") or {}).get("status")
+                if isinstance(status, str):
+                    observed_statuses.append(status)
+            return original_write_json(path, data)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("dashboard generation failed")
+
+        monkeypatch.setattr(recompute_module, "_write_json", _recording_write_json)
+        monkeypatch.setattr("sft_label.tools.visualize_value.generate_value_dashboard", _boom)
+
+        run_complete_postprocess(str(run_root), scope="global")
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary["postprocess"]["dashboard"]["status"] == "failed"
+        assert "completed" not in observed_statuses
+
+    def test_complete_postprocess_inline_rerun_does_not_rewrite_completed_dashboard_before_generation(self, tmp_path, monkeypatch):
+        run_root = tmp_path / "dataset_labeled_20260324_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                ],
+            }],
+            [[_inline_full_labels("build")]],
+            [[_inline_value("conv-1_t1")]],
+        )
+        _write_jsonl(source_file, rows)
+
+        run_complete_postprocess(str(run_root), scope="global")
+
+        summary_path = run_root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE
+        observed_statuses: list[str] = []
+        original_write_json = recompute_module._write_json
+
+        def _recording_write_json(path, data):
+            if Path(path) == summary_path and isinstance(data, dict):
+                status = ((data.get("postprocess") or {}).get("dashboard") or {}).get("status")
+                if isinstance(status, str):
+                    observed_statuses.append(status)
+            return original_write_json(path, data)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("dashboard generation failed")
+
+        monkeypatch.setattr(recompute_module, "_write_json", _recording_write_json)
+        monkeypatch.setattr("sft_label.tools.visualize_value.generate_value_dashboard", _boom)
+
+        run_complete_postprocess(str(run_root), scope="global")
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary["postprocess"]["dashboard"]["status"] == "failed"
+        assert "completed" not in observed_statuses
+
+    def test_complete_postprocess_legacy_does_not_persist_completed_dashboard_before_generation(self, tmp_path, monkeypatch):
+        run_dir = self._setup_deferred_pass2_run(tmp_path)
+        summary_path = run_dir / PASS2_SUMMARY_STATS_FILE
+        observed_statuses: list[str] = []
+        original_write_json = recompute_module._write_json
+
+        def _recording_write_json(path, data):
+            if Path(path) == summary_path and isinstance(data, dict):
+                status = ((data.get("postprocess") or {}).get("dashboard") or {}).get("status")
+                if isinstance(status, str):
+                    observed_statuses.append(status)
+            return original_write_json(path, data)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("dashboard generation failed")
+
+        monkeypatch.setattr(recompute_module, "_write_json", _recording_write_json)
+        monkeypatch.setattr("sft_label.tools.visualize_value.generate_value_dashboard", _boom)
+
+        run_complete_postprocess(str(run_dir), scope="global")
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary["postprocess"]["dashboard"]["status"] == "failed"
+        assert "completed" not in observed_statuses
 
 
 def test_update_pass2_postprocess_status_write_is_atomic(tmp_path, monkeypatch):

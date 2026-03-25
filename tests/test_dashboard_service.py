@@ -524,7 +524,7 @@ def test_publish_run_dashboards_accepts_file_scope_stats_scoring_metadata_withou
     assert Path(published["dashboards"]["scoring"]["path"]).exists()
 
 
-def test_publish_run_dashboards_accepts_legacy_scoring_metadata_without_postprocess_block(tmp_path):
+def test_publish_run_dashboards_rejects_legacy_scoring_metadata_without_postprocess_block(tmp_path):
     config_path = tmp_path / "dashboard_services.json"
     service = init_dashboard_service(
         name="default",
@@ -542,10 +542,8 @@ def test_publish_run_dashboards_accepts_legacy_scoring_metadata_without_postproc
         encoding="utf-8",
     )
 
-    published = publish_run_dashboards(service, run_dir, config_path=config_path)
-
-    assert "scoring" in published["dashboards"]
-    assert Path(published["dashboards"]["scoring"]["path"]).exists()
+    with pytest.raises(ValueError, match="legacy Pass 2 metadata is missing completed postprocess status"):
+        publish_run_dashboards(service, run_dir, config_path=config_path)
 
 
 def test_publish_run_dashboards_prefers_modern_incomplete_postprocess_over_legacy_stats(tmp_path):

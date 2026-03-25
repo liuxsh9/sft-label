@@ -379,7 +379,17 @@ def _scoring_monitor_summary(monitor: dict | None) -> dict | None:
 def _single_turn_conversation_update(sample: dict) -> dict:
     value = sample.get("value") or {}
     metadata = sample.get("metadata") or {}
-    source_id = metadata.get("source_id") or sample.get("id") or ""
+    labels = copy.deepcopy(sample.get("labels") or {})
+    inherited = bool(labels.get("inherited"))
+    flags = [str(flag) for flag in (value.get("flags") or []) if flag]
+    source_id = metadata.get("source_id")
+    if not source_id:
+        data_id = metadata.get("data_id") or sample.get("id") or ""
+        source_row = metadata.get("source_row")
+        if source_row not in (None, ""):
+            source_id = f"{data_id}::row:{source_row}"
+        else:
+            source_id = data_id
     source_file = metadata.get("source_file")
     conversation_uid = metadata.get("conversation_uid")
     conversation_key = build_conversation_key(source_id, source_file, conversation_uid)
@@ -399,6 +409,24 @@ def _single_turn_conversation_update(sample: dict) -> dict:
         "conv_rarity_extension_v2": ((value.get("rarity_extension") or {}).get("score")),
         "trajectory_structure_score": None,
         "thinking_mode": value.get("thinking_mode") or metadata.get("thinking_mode"),
+        "merged_labels": labels,
+        "observed_turn_ratio": 0.0 if inherited else 1.0,
+        "inherited_turn_ratio": 1.0 if inherited else 0.0,
+        "rarity_confidence": value.get("confidence"),
+        "compression_gap": 0.0,
+        "late_turn_gain": 0.0,
+        "tool_turn_ratio": 0.0,
+        "unique_tool_count": 0,
+        "unique_file_count": 0,
+        "detail": {
+            "observed_turns": 0 if inherited else 1,
+            "inherited_turns": 1 if inherited else 0,
+            "score_confidence": value.get("confidence"),
+            "quality_overall": (value.get("quality") or {}).get("overall"),
+            "reasoning_overall": (value.get("reasoning") or {}).get("overall"),
+            "negative_flags": flags,
+            "flags": flags,
+        },
     }
 
 
@@ -417,7 +445,7 @@ def _updated_rows_by_number(
             monitor_lookup=monitor_lookup,
         )
         updated_rows[bundle.row_number] = updated_row
-        if conversation and len(samples_by_bundle[bundle_idx]) >= 2:
+        if conversation:
             conversation_records.append(conversation)
     return updated_rows, conversation_records
 

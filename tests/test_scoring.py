@@ -4143,19 +4143,11 @@ class TestConversationAggregation:
 # ─────────────────────────────────────────────────────────
 
 
-@pytest.mark.skipif(
-    not os.environ.get("LITELLM_BASE") or not os.environ.get("LITELLM_KEY"),
-    reason="LITELLM_BASE and LITELLM_KEY env vars required for integration test",
-)
 class TestIntegrationScoring:
-    """End-to-end scoring of smoke test data via real API calls.
-
-    Run with:
-        LITELLM_BASE="http://..." LITELLM_KEY="sk-..." uv run pytest tests/test_scoring.py::TestIntegrationScoring -v
-    """
+    """Stable end-to-end scoring smoke tests using mocked scoring responses."""
 
     def test_end_to_end_scoring(self, tmp_path):
-        """Score smoke test fixtures via API, verify output structure."""
+        """Score smoke test fixtures through run_scoring, without external quota dependence."""
         from sft_label.config import PipelineConfig
         from sft_label.scoring import run_scoring
 
@@ -4191,12 +4183,53 @@ class TestIntegrationScoring:
             request_timeout=60,
         )
 
-        result = asyncio.run(run_scoring(
-            input_path=str(labeled_path),
-            tag_stats_path=str(stats_path),
-            limit=3,  # Score only first 3 to keep test fast
-            config=config,
-        ))
+        async def mock_score_one(http_client, sample, model, rarity_result,
+                                 sample_idx, total, sem, config=None, rate_limiter=None):
+            sid = sample["id"]
+            value = {
+                "complexity": {
+                    "instruction": 5,
+                    "analytical_depth": 5,
+                    "implementation": 5,
+                    "overall": 5 + (sample_idx % 2),
+                },
+                "quality": {
+                    "correctness": 7,
+                    "code_quality": 7,
+                    "explanation": 7,
+                    "completeness": 7,
+                    "overall": 7 + (sample_idx % 2),
+                },
+                "reasoning": {
+                    "clarity": 6,
+                    "consistency": 6,
+                    "self_correction": False,
+                    "overall": 6 + (sample_idx % 2),
+                },
+                "rarity": rarity_result,
+                "flags": ["incomplete"] if sample_idx == 0 else [],
+                "thinking_mode": "slow" if sample_idx % 2 else "fast",
+                "value_score": 6.0 + sample_idx,
+                "confidence": 0.8,
+            }
+            monitor = {
+                "sample_id": sid,
+                "status": "success",
+                "llm_calls": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "attempts": 1,
+                "validation_issues": [],
+            }
+            return value, monitor
+
+        with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+            result = asyncio.run(run_scoring(
+                input_path=str(labeled_path),
+                tag_stats_path=str(stats_path),
+                limit=3,  # Score only first 3 to keep test fast
+                config=config,
+            ))
 
         # Verify output files exist
         assert (tmp_path / "scored.json").exists()

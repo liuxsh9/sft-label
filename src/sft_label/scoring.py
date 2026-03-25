@@ -4206,21 +4206,45 @@ def _resumed_monitor(sample_id: str) -> dict:
     }
 
 
-def _sync_inline_scored_cache_to_dataset(source_file: Path, artifact_dir: Path, limit: int = 0):
+def _sync_inline_scored_cache_to_dataset(
+    source_file: Path,
+    artifact_dir: Path,
+    limit: int = 0,
+    *,
+    strict: bool = True,
+):
     """Copy scored cache results back into the mirrored inline dataset rows."""
     source_file = Path(source_file)
     artifact_dir = Path(artifact_dir)
     scored_samples = _load_scored_artifact_samples(artifact_dir)
-    bundles, _samples, sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
-    if len(scored_samples) != len(sample_to_bundle):
+    bundles, scoreable_samples, sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
+    if strict and len(scored_samples) != len(sample_to_bundle):
         raise ValueError(
             f"Scored cache/sample mismatch for {source_file}: "
             f"{len(scored_samples)} scored vs {len(sample_to_bundle)} scoreable turns"
         )
 
     samples_by_bundle = [[] for _ in bundles]
-    for sample, bundle_idx in zip(scored_samples, sample_to_bundle):
-        samples_by_bundle[bundle_idx].append(sample)
+    if strict:
+        for sample, bundle_idx in zip(scored_samples, sample_to_bundle):
+            samples_by_bundle[bundle_idx].append(sample)
+    else:
+        bundle_by_sample_id: dict[str, list[int]] = {}
+        for sample, bundle_idx in zip(scoreable_samples, sample_to_bundle):
+            sample_id = sample.get("id")
+            if sample_id:
+                bucket = bundle_by_sample_id.setdefault(sample_id, [])
+                bucket.append(bundle_idx)
+        for sample in scored_samples:
+            sample_id = sample.get("id")
+            bucket = bundle_by_sample_id.get(sample_id) if sample_id else None
+            if not bucket:
+                continue
+            bundle_idx = bucket.pop(0)
+            samples_by_bundle[bundle_idx].append(sample)
+
+    for bucket in samples_by_bundle:
+        bucket.sort(key=lambda item: ((item.get("metadata") or {}).get("turn_index") or 0))
 
     monitor_lookup = _load_monitor_lookup(artifact_dir / "monitor_value.jsonl")
     updated_rows = {}
@@ -4232,7 +4256,7 @@ def _sync_inline_scored_cache_to_dataset(source_file: Path, artifact_dir: Path, 
             monitor_lookup=monitor_lookup,
         )
         updated_rows[bundle.row_number] = updated_row
-        if conversation and len(samples_by_bundle[bundle_idx]) >= 2:
+        if conversation:
             conversation_records.append(conversation)
 
     tmp_path = source_file.with_name(f".{source_file.name}.tmp")
@@ -4348,6 +4372,7 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
     )
 
     corrected_file_stats = []
+    corrected_conv_batches = []
     for source_file in source_files:
         artifact_dir = target.layout.file_artifact_dir(source_file)
         scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
@@ -4365,6 +4390,7 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
             stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
             if conv_records:
                 stats["conversation_records"] = len(conv_records)
+                corrected_conv_batches.append(conv_records)
             _write_json_atomic(
                 artifact_dir / PASS2_STATS_FILE,
                 {k: v for k, v in stats.items() if k != "_raw_scores"},
@@ -4390,20 +4416,58 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
         ):
             if key in summary:
                 corrected_summary[key] = summary[key]
+        corrected_summary["run_dir"] = str(target.layout.run_root)
         corrected_summary["input_path"] = str(target.target_path)
-        _write_json_atomic(target.layout.meta_root / PASS2_SUMMARY_STATS_FILE, corrected_summary)
         summary = corrected_summary
+
+    summary["run_dir"] = str(target.layout.run_root)
+    summary["input_path"] = str(target.target_path)
+    summary["postprocess"] = {
+        "conversation_scores": _postprocess_status("pending"),
+        "dashboard": _postprocess_status("pending"),
+    }
+
+    global_conv_path = target.layout.meta_root / "conversation_scores.json"
+    try:
+        from sft_label.conversation import merge_conversation_record_batches, write_conversation_scores
+
+        merged_conv_records = merge_conversation_record_batches(corrected_conv_batches)
+        if merged_conv_records:
+            write_conversation_scores(merged_conv_records, global_conv_path)
+        elif global_conv_path.exists():
+            global_conv_path.unlink()
+        summary["postprocess"]["conversation_scores"] = _postprocess_status(
+            "completed",
+            mode="inline-score-finalize",
+            artifact=str(global_conv_path) if merged_conv_records else None,
+        )
+    except Exception as e:
+        summary["postprocess"]["conversation_scores"] = _postprocess_status(
+            "failed",
+            str(e),
+            mode="inline-score-finalize",
+        )
 
     try:
         from sft_label.tools.visualize_value import generate_value_dashboard
+        output_file = str(target.layout.dashboard_path(
+            pass2_global_dashboard_filename(target.layout.dataset_root_name)
+        ))
+        dashboard_stats_hint = copy.deepcopy(summary)
+        dashboard_postprocess = dict(dashboard_stats_hint.get("postprocess") or {})
+        dashboard_postprocess["dashboard"] = _postprocess_status(
+            "completed",
+            mode="inline-score-finalize",
+            artifact=output_file,
+        )
+        dashboard_stats_hint["postprocess"] = dashboard_postprocess
         out_path = generate_value_dashboard(
             target.layout.meta_root,
             scored_file=None,
             stats_file=PASS2_SUMMARY_STATS_FILE,
-            output_file=str(target.layout.dashboard_path(
-                pass2_global_dashboard_filename(target.layout.dataset_root_name)
-            )),
+            output_file=output_file,
             quiet=True,
+            stats_hint_override=dashboard_stats_hint,
         )
         prune_dashboard_bundles(
             target.layout.meta_root,
@@ -4411,11 +4475,19 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
             kind="scoring",
             recursive=False,
         )
-    except Exception:
-        pass
+        summary["postprocess"]["dashboard"] = _postprocess_status(
+            "completed",
+            mode="inline-score-finalize",
+            artifact=str(out_path),
+        )
+    except Exception as e:
+        summary["postprocess"]["dashboard"] = _postprocess_status(
+            "failed",
+            str(e),
+            mode="inline-score-finalize",
+        )
 
-    summary["run_dir"] = str(target.layout.run_root)
-    summary["input_path"] = str(target.target_path)
+    _write_json_atomic(target.layout.meta_root / PASS2_SUMMARY_STATS_FILE, summary)
     return summary
 
 def _create_progress():

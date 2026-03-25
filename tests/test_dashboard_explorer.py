@@ -94,6 +94,10 @@ def test_generate_value_dashboard_single_scope_writes_explorer_assets(tmp_path: 
             "total_scored": 2,
             "total_failed": 0,
             "total_tokens": 24,
+            "postprocess": {
+                "conversation_scores": {"status": "completed"},
+                "dashboard": {"status": "completed"},
+            },
             "score_distributions": {
                 "value_score": {"mean": 5.5, "min": 3.5, "max": 7.5},
                 "quality_overall": {"mean": 5.0, "min": 2.0, "max": 8.0},
@@ -192,6 +196,10 @@ def test_generate_value_dashboard_tree_attaches_file_scope_explorer(tmp_path: Pa
             "input_path": str(tmp_path / "dataset"),
             "total_scored": 1,
             "total_failed": 0,
+            "postprocess": {
+                "conversation_scores": {"status": "completed"},
+                "dashboard": {"status": "completed"},
+            },
             "score_distributions": {
                 "value_score": {"mean": 4.0, "min": 4.0, "max": 4.0},
                 "quality_overall": {"mean": 3.0, "min": 3.0, "max": 3.0},

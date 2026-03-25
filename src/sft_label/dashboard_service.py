@@ -985,6 +985,10 @@ def _assert_scoring_publish_eligible(run_dir: Path, dashboards_dir: Path, html_f
     if modern_payload_seen:
         return
     if legacy_payload_seen:
+        if has_scoring_dashboard:
+            raise ValueError(
+                "Scoring dashboards are not publishable yet: legacy Pass 2 metadata is missing completed postprocess status."
+            )
         return
     summary_path, _summary_payload = summary_payloads[0]
     raise ValueError(

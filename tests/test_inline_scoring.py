@@ -433,9 +433,12 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
 
     canonical_conv = json.loads((run_root / "meta_label_data" / "conversation_scores.json").read_text(encoding="utf-8"))
     assert canonical_conv
-    assert canonical_conv[0]["merged_labels"]["intent"] in {"debug", "modify"}
-    assert "slices" in canonical_conv[0]
-    assert canonical_conv[0]["detail"]["conv_intra_class_rank"] is not None
+    multi_turn_record = next(
+        record for record in canonical_conv
+        if (record.get("merged_labels") or {}).get("intent") in {"debug", "modify"}
+    )
+    assert "slices" in multi_turn_record
+    assert multi_turn_record["detail"]["conv_intra_class_rank"] is not None
 
     file_conv = json.loads(
         (run_root / "meta_label_data" / "files" / "multi" / "b" / "conversation_scores.json").read_text(
@@ -448,9 +451,12 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
     scoring_dashboard = dashboards_dir / "dashboard_scoring_dataset.data"
     manifest = json.loads((scoring_dashboard / "manifest.json").read_text(encoding="utf-8"))
     detail = json.loads((scoring_dashboard / "scopes" / "global.json").read_text(encoding="utf-8"))
-    assert manifest["scopes"]["global"]["summary_modes"]["conversation"]["pass1_total"] == 1
-    assert detail["pass1"]["modes"]["conversation"]["distribution_total"] == 1
-    assert detail["pass1"]["modes"]["conversation"]["distributions"]["intent"] in ({"debug": 1}, {"modify": 1})
+    assert manifest["scopes"]["global"]["summary_modes"]["conversation"]["pass1_total"] == 2
+    assert detail["pass1"]["modes"]["conversation"]["distribution_total"] == 2
+    assert detail["pass1"]["modes"]["conversation"]["distributions"]["intent"] in (
+        {"build": 1, "debug": 1},
+        {"build": 1, "modify": 1},
+    )
 
     updated_b = [json.loads(line) for line in file_b.read_text(encoding="utf-8").splitlines()]
     turns = updated_b[0]["extra_info"]["unique_info"]["data_label"]["turns"]
@@ -463,6 +469,159 @@ async def test_run_scoring_inline_run_dir_writes_meta_summary(tmp_path):
         or conversation["conversation_key"].startswith("conversation_uid:")
     )
     assert conversation["detail"]["turn_value_std"] is not None
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_inline_run_dir_repairs_deferred_postprocess_metadata(tmp_path):
+    from sft_label.artifacts import PASS2_SUMMARY_STATS_FILE
+    from sft_label.scoring import run_scoring
+
+    run_root = tmp_path / "dataset_labeled_20260311_120000"
+    source_file = run_root / "dataset" / "sample_1.jsonl"
+
+    rows = _inline_rows_for_file(
+        source_file,
+        [{
+            "id": "conv-1",
+            "conversations": [
+                {"from": "human", "value": "q1"},
+                {"from": "gpt", "value": "a1"},
+                {"from": "human", "value": "q2"},
+                {"from": "gpt", "value": "a2"},
+            ],
+        }],
+        [[_full_labels("build"), _full_labels("debug")]],
+    )
+    _write_jsonl(source_file, rows)
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        return _score_value(sample["id"], rarity_result), {
+            "sample_id": sample["id"],
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        summary = await run_scoring(
+            str(run_root),
+            config=PipelineConfig(
+                scoring_concurrency=1,
+                enable_adaptive_runtime=True,
+                pass2_heavy_postprocess_mode="auto",
+                pass2_heavy_postprocess_sample_threshold=1,
+                pass2_heavy_postprocess_file_bytes_threshold=10**12,
+            ),
+        )
+
+    assert summary["run_dir"] == str(run_root)
+    assert summary["postprocess"]["conversation_scores"]["status"] == "completed"
+    assert summary["postprocess"]["dashboard"]["status"] == "completed"
+    assert (run_root / "meta_label_data" / "conversation_scores.json").exists()
+
+    persisted_summary = json.loads(
+        (run_root / "meta_label_data" / PASS2_SUMMARY_STATS_FILE).read_text(encoding="utf-8")
+    )
+    assert persisted_summary["run_dir"] == str(run_root)
+    assert persisted_summary["postprocess"]["conversation_scores"]["status"] == "completed"
+    assert persisted_summary["postprocess"]["dashboard"]["status"] == "completed"
+
+    dashboard_detail = json.loads(
+        (
+            run_root
+            / "meta_label_data"
+            / "dashboards"
+            / "dashboard_scoring_dataset.data"
+            / "scopes"
+            / "global.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert dashboard_detail["pass2"]["modes"]["sample"]["overview"]["total_scored"] == 2
+    assert dashboard_detail["pass2"]["modes"]["conversation"]["overview"]["total_scored"] == 1
+    assert dashboard_detail["summary_modes"]["conversation"]["scored_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_scoring_inline_run_dir_counts_single_reply_rows_as_conversations(tmp_path):
+    from sft_label.scoring import run_scoring
+
+    run_root = tmp_path / "dataset_labeled_20260311_120000"
+    source_file = run_root / "dataset" / "sample_2.jsonl"
+
+    rows = _inline_rows_for_file(
+        source_file,
+        [
+            {
+                "id": "conv-single",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                ],
+            },
+            {
+                "id": "conv-multi",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            },
+        ],
+        [
+            [_full_labels("build")],
+            [_full_labels("debug"), _full_labels("modify")],
+        ],
+    )
+    _write_jsonl(source_file, rows)
+
+    async def mock_score_one(http_client, sample, model, rarity_result,
+                             sample_idx, total, sem, config=None, rate_limiter=None):
+        return _score_value(sample["id"], rarity_result), {
+            "sample_id": sample["id"],
+            "status": "success",
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "attempts": 1,
+            "validation_issues": [],
+        }
+
+    with patch("sft_label.scoring.score_one", side_effect=mock_score_one):
+        await run_scoring(
+            str(run_root),
+            config=PipelineConfig(
+                scoring_concurrency=1,
+                enable_adaptive_runtime=True,
+                pass2_heavy_postprocess_mode="always",
+            ),
+        )
+
+    conv_records = json.loads(
+        (run_root / "meta_label_data" / "conversation_scores.json").read_text(encoding="utf-8")
+    )
+    assert len(conv_records) == 2
+    assert {record["turn_count"] for record in conv_records} == {1, 2}
+
+    dashboard_detail = json.loads(
+        (
+            run_root
+            / "meta_label_data"
+            / "dashboards"
+            / "dashboard_scoring_dataset.data"
+            / "scopes"
+            / "global.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert dashboard_detail["pass1"]["modes"]["conversation"]["total"] == 2
+    assert dashboard_detail["pass2"]["modes"]["sample"]["overview"]["total_scored"] == 3
+    assert dashboard_detail["pass2"]["modes"]["conversation"]["overview"]["total_scored"] == 2
+    assert dashboard_detail["summary_modes"]["conversation"]["pass1_total"] == 2
+    assert dashboard_detail["summary_modes"]["conversation"]["scored_total"] == 2
 
 
 @pytest.mark.asyncio

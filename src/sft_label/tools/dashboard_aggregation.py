@@ -1011,6 +1011,7 @@ def build_pass2_conversation_units(samples: list[dict], conv_records: list[dict]
 
     groups = group_by_conversation(samples)
     units = []
+    sample_unit_keys: set[str] = set()
     conv_by_key = {
         item.get("conversation_key") or build_conversation_key(item.get("conversation_id"), item.get("source_file")): item
         for item in conv_records
@@ -1023,6 +1024,9 @@ def build_pass2_conversation_units(samples: list[dict], conv_records: list[dict]
         unit = _sample_pass2_unit(sample)
         if unit:
             units.append(unit)
+            sample_key = _group_key_for_sample(sample)
+            if sample_key:
+                sample_unit_keys.add(sample_key)
 
     for conv_key, slices in groups.items():
         rec = conv_by_key.get(conv_key)
@@ -1048,6 +1052,10 @@ def build_pass2_conversation_units(samples: list[dict], conv_records: list[dict]
     for conv_key, rec in conv_by_key.items():
         if conv_key in covered:
             continue
+        if conv_key in sample_unit_keys:
+            turn_count = rec.get("turn_count")
+            if not isinstance(turn_count, int) or turn_count <= 1:
+                continue
         detail = rec.get("detail") or {}
         labels = rec.get("merged_labels")
         if not isinstance(labels, dict):
@@ -1378,10 +1386,10 @@ def infer_scope_turn_kind(samples: list[dict]) -> str | None:
     has_single = False
     has_multi = False
     for sample in samples:
-        source_id = ((sample or {}).get("metadata") or {}).get("source_id")
-        if source_id in (None, ""):
+        kind = _sample_turn_kind(sample)
+        if kind == "single":
             has_single = True
-        else:
+        elif kind == "multi":
             has_multi = True
         if has_single and has_multi:
             return "mixed"
@@ -1396,10 +1404,10 @@ def infer_scope_turn_kind_from_path(path: str | Path | None) -> str | None:
     has_single = False
     has_multi = False
     for sample in iter_data_file(path):
-        source_id = ((sample or {}).get("metadata") or {}).get("source_id")
-        if source_id in (None, ""):
+        kind = _sample_turn_kind(sample)
+        if kind == "single":
             has_single = True
-        else:
+        elif kind == "multi":
             has_multi = True
         if has_single and has_multi:
             return "mixed"
@@ -1429,13 +1437,26 @@ def merge_turn_kinds(kinds: list[str | None]) -> str | None:
     return None
 
 
+def _sample_turn_kind(sample: dict | None) -> str | None:
+    meta = ((sample or {}).get("metadata") or {})
+    source_id = meta.get("source_id")
+    if source_id in (None, ""):
+        return "single"
+    if is_conversation_object(meta):
+        return "multi"
+    total_turns = meta.get("total_turns")
+    if isinstance(total_turns, int):
+        return "single"
+    return "multi"
+
+
 def build_scope_summary(scope: dict) -> dict:
     pass1 = scope.get("pass1") or {}
     pass2 = scope.get("pass2") or {}
     sample_pass1 = (pass1.get("modes") or {}).get("sample", pass1)
     sample_pass2 = (pass2.get("modes") or {}).get("sample", pass2)
-    conv_pass1 = (pass1.get("modes") or {}).get("conversation", sample_pass1)
-    conv_pass2 = (pass2.get("modes") or {}).get("conversation", sample_pass2)
+    conv_pass1 = (pass1.get("modes") or {}).get("conversation") or {}
+    conv_pass2 = (pass2.get("modes") or {}).get("conversation") or {}
     turn_kind = scope.get("turn_kind")
     return {
         "sample": {

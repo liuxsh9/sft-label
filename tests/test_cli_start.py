@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from sft_label.cli import (
+    _auto_publish_pass2_guard,
     _apply_runtime_overrides,
     _suggest_dashboard_share_base_url,
     _format_start_env_lines,
@@ -262,3 +264,153 @@ def test_parser_accepts_analyze_unmapped_flags():
     assert args.top == 15
     assert args.examples == 1
     assert args.stats_only is True
+
+
+def test_auto_publish_pass2_guard_uses_inline_specific_guidance(tmp_path):
+    run_root = tmp_path / "dataset_labeled_20260325_090311"
+    mirrored_file = run_root / "dataset" / "sample.jsonl"
+    mirrored_file.parent.mkdir(parents=True, exist_ok=True)
+    mirrored_file.write_text(json.dumps({"id": "row-1"}) + "\n", encoding="utf-8")
+
+    dashboards_dir = run_root / "meta_label_data" / "dashboards"
+    dashboards_dir.mkdir(parents=True, exist_ok=True)
+    (dashboards_dir / "dashboard_scoring_dataset.html").write_text("<html></html>", encoding="utf-8")
+
+    launched_args = SimpleNamespace(command="score")
+    result = {
+        "postprocess": {
+            "conversation_scores": {"status": "missing"},
+            "dashboard": {"status": "missing"},
+        }
+    }
+
+    can_publish, message = _auto_publish_pass2_guard(
+        launched_args,
+        result,
+        lang="en",
+        run_dir=str(run_root),
+    )
+
+    assert can_publish is False
+    assert message is not None
+    assert "inline mirrored run" in message
+    assert "Run `sft-label complete-postprocess --input" in message
+
+
+def test_auto_publish_pass2_guard_regenerate_dashboard_fail_closed_on_root_meta_conflict(tmp_path):
+    run_root = tmp_path / "demo_run"
+    (run_root / "meta_label_data").mkdir(parents=True, exist_ok=True)
+    (run_root / "summary_stats_scoring.json").write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "completed"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "meta_label_data" / "summary_stats_scoring.json").write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "deferred"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    launched_args = SimpleNamespace(command="regenerate-dashboard", pass_num="both", input=str(run_root))
+    can_publish, message = _auto_publish_pass2_guard(
+        launched_args,
+        result={"command": "regenerate-dashboard"},
+        lang="en",
+        run_dir=str(run_root),
+    )
+
+    assert can_publish is False
+    assert message is not None
+    assert "conflict" in message
+
+
+def test_auto_publish_pass2_guard_regenerate_dashboard_reads_legacy_stats_postprocess(tmp_path):
+    run_root = tmp_path / "demo_run"
+    meta_dir = run_root / "meta_label_data"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "stats_value.json").write_text(
+        json.dumps(
+            {
+                "postprocess": {
+                    "conversation_scores": {"status": "deferred"},
+                    "dashboard": {"status": "completed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    launched_args = SimpleNamespace(command="regenerate-dashboard", pass_num="both", input=str(run_root))
+    can_publish, message = _auto_publish_pass2_guard(
+        launched_args,
+        result={"command": "regenerate-dashboard"},
+        lang="en",
+        run_dir=str(run_root),
+    )
+
+    assert can_publish is False
+    assert message is not None
+    assert "deferred" in message
+
+
+def test_auto_publish_pass2_guard_regenerate_dashboard_fail_closed_when_postprocess_block_missing(tmp_path):
+    run_root = tmp_path / "demo_run"
+    meta_dir = run_root / "meta_label_data"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    dashboards_dir = meta_dir / "dashboards"
+    dashboards_dir.mkdir(parents=True, exist_ok=True)
+    (dashboards_dir / "dashboard_scoring_demo.html").write_text("<html></html>", encoding="utf-8")
+    (meta_dir / "summary_stats_scoring.json").write_text(
+        json.dumps({"total_scored": 1}),
+        encoding="utf-8",
+    )
+
+    launched_args = SimpleNamespace(command="regenerate-dashboard", pass_num="both", input=str(run_root))
+    can_publish, message = _auto_publish_pass2_guard(
+        launched_args,
+        result={"command": "regenerate-dashboard"},
+        lang="en",
+        run_dir=str(run_root),
+    )
+
+    assert can_publish is False
+    assert message is not None
+    assert "conversation_scores=missing" in message
+    assert "dashboard=missing" in message
+
+
+def test_auto_publish_pass2_guard_regenerate_dashboard_pass1_still_blocks_stale_scoring_publish(tmp_path):
+    run_root = tmp_path / "demo_run"
+    meta_dir = run_root / "meta_label_data"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    dashboards_dir = meta_dir / "dashboards"
+    dashboards_dir.mkdir(parents=True, exist_ok=True)
+    (dashboards_dir / "dashboard_scoring_demo.html").write_text("<html></html>", encoding="utf-8")
+    (meta_dir / "summary_stats_scoring.json").write_text(
+        json.dumps({"total_scored": 1}),
+        encoding="utf-8",
+    )
+
+    launched_args = SimpleNamespace(command="regenerate-dashboard", pass_num="1", input=str(run_root))
+    can_publish, message = _auto_publish_pass2_guard(
+        launched_args,
+        result={"command": "regenerate-dashboard"},
+        lang="en",
+        run_dir=str(run_root),
+    )
+
+    assert can_publish is False
+    assert message is not None
+    assert "conversation_scores=missing" in message
