@@ -30,6 +30,7 @@ import socket
 import sys
 import time
 import random
+from collections import deque
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -823,7 +824,10 @@ class _CombinedLLMProgressTracker:
         self.pass1_calls = 0
         self.pass2_calls = 0
         self._start_time = time.time()
-        self._smoothed_cps = 0.0
+        self._avg_cps = 0.0
+        self._recent_cps = 0.0
+        self._recent_window_seconds = 30.0
+        self._recent_samples = deque()
 
     def update(self, delta_calls: int, stage: str) -> str:
         delta = max(int(delta_calls or 0), 0)
@@ -833,24 +837,36 @@ class _CombinedLLMProgressTracker:
         elif stage == "pass2":
             self.pass2_calls += delta
 
-        elapsed = max(time.time() - self._start_time, 1e-6)
-        instant_cps = self.calls_done / elapsed
-        if self._smoothed_cps <= 0:
-            self._smoothed_cps = instant_cps
-        else:
-            self._smoothed_cps = 0.2 * instant_cps + 0.8 * self._smoothed_cps
+        now = time.time()
+        elapsed = max(now - self._start_time, 1e-6)
+        self._avg_cps = self.calls_done / elapsed
+        self._recent_samples.append((now, delta))
+        cutoff = now - self._recent_window_seconds
+        while self._recent_samples and self._recent_samples[0][0] < cutoff:
+            self._recent_samples.popleft()
+        recent_calls = sum(calls for _, calls in self._recent_samples)
+        recent_span = max(min(elapsed, self._recent_window_seconds), 1e-6)
+        self._recent_cps = recent_calls / recent_span
 
         return self.eta_line()
 
     def eta_seconds(self):
-        if self._smoothed_cps <= 0:
+        effective_cps = self._recent_cps if self._recent_cps > 0 else self._avg_cps
+        if effective_cps <= 0:
             return None
         remaining = max(self.planned_total_calls - self.calls_done, 0)
-        return remaining / self._smoothed_cps
+        return remaining / effective_cps
 
     def eta_line(self) -> str:
-        cps = f"{self._smoothed_cps:.1f}/s" if self._smoothed_cps > 0 else "warming"
+        if self._recent_cps > 0:
+            cps = f"{self._recent_cps:.1f}/s"
+        elif self._avg_cps > 0:
+            cps = f"{self._avg_cps:.1f}/s"
+        else:
+            cps = "warming"
         eta = _format_eta(self.eta_seconds())
+        if self._avg_cps > 0 and self._recent_cps > 0:
+            return f"{self.progress_line()} eta {eta} rate {cps} avg {self._avg_cps:.1f}/s"
         return f"{self.progress_line()} eta {eta} rate {cps}"
 
     def summary_line(self) -> str:

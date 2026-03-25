@@ -26,6 +26,7 @@ import random
 import re
 import os
 import sys
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from datetime import datetime
@@ -147,6 +148,35 @@ def format_progress_info(ok_count, fail_count=0, label=None, request_stats=None)
     return " • ".join(parts)
 
 
+def _format_runtime_progress(runtime_snapshot: dict | None) -> str | None:
+    if not runtime_snapshot:
+        return None
+    state = runtime_snapshot.get("state")
+    eff_concurrency = runtime_snapshot.get("effective_concurrency")
+    eff_rps = runtime_snapshot.get("effective_rps")
+    in_flight = runtime_snapshot.get("in_flight")
+    if state is None or eff_concurrency is None or eff_rps is None:
+        return None
+    return (
+        f"runtime {state} "
+        f"c={int(eff_concurrency)} "
+        f"rps={float(eff_rps):.1f} "
+        f"in_flight={int(in_flight or 0)}"
+    )
+
+
+def _decorate_run_info_with_runtime(run_info: str | None, config) -> str | None:
+    runtime = _config_adaptive_runtime(config)
+    if runtime is None:
+        return run_info
+    runtime_info = _format_runtime_progress(runtime.snapshot())
+    if not runtime_info:
+        return run_info
+    if run_info:
+        return f"{run_info} • {runtime_info}"
+    return runtime_info
+
+
 def parse_run_progress(info):
     """Parse 'run <done>/<total> ...' and return (done, total) if available."""
     if not info or not info.startswith("run "):
@@ -165,7 +195,7 @@ def parse_run_progress(info):
     return done, total
 
 
-def _update_llm_task_progress(progress, llm_task, run_info, eta_tracker=None):
+def _update_llm_task_progress(progress, llm_task, run_info, eta_tracker=None, config=None):
     """Refresh the global LLM progress task from tracker info or local ETA fallback."""
     if not progress or llm_task is None:
         return
@@ -182,11 +212,12 @@ def _update_llm_task_progress(progress, llm_task, run_info, eta_tracker=None):
         return
 
     if eta_tracker is not None:
+        info = _decorate_run_info_with_runtime(eta_tracker.info_line(), config)
         progress.update(
             llm_task,
             total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
             completed=eta_tracker.calls_done,
-            info=eta_tracker.info_line(),
+            info=info,
         )
 
 
@@ -1556,6 +1587,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
             return last_run_info
         if llm_progress_cb:
             last_run_info = llm_progress_cb(delta, "pass1")
+            last_run_info = _decorate_run_info_with_runtime(last_run_info, config)
         if progress_event_cb:
             progress_event_cb({
                 "kind": "llm_delta",
@@ -2263,7 +2295,10 @@ class RuntimeEtaEstimator:
         self.calls_per_sec = 0.0
         self.estimated_total_calls = max(int(initial_estimated_calls), 0)
         self._start_time = time.time()
-        self._smoothed_cps = 0.0
+        self._avg_cps = 0.0
+        self._recent_cps = 0.0
+        self._recent_window_seconds = 30.0
+        self._recent_samples = deque()
         self._warmup_samples = min(max(8, self.total_labeled_samples // 50), 30)
 
     @staticmethod
@@ -2294,13 +2329,21 @@ class RuntimeEtaEstimator:
         else:
             self.estimated_total_calls = max(self.estimated_total_calls, self.calls_done)
 
-        elapsed = max(time.time() - self._start_time, 1e-6)
-        instant_cps = self.calls_done / elapsed
-        if self._smoothed_cps <= 0:
-            self._smoothed_cps = instant_cps
-        else:
-            self._smoothed_cps = 0.2 * instant_cps + 0.8 * self._smoothed_cps
-        self.calls_per_sec = self._smoothed_cps
+        self.record_call_delta(calls)
+
+    def record_call_delta(self, calls: int):
+        delta = max(int(calls or 0), 0)
+        now = time.time()
+        elapsed = max(now - self._start_time, 1e-6)
+        self._avg_cps = self.calls_done / elapsed
+        self._recent_samples.append((now, delta))
+        cutoff = now - self._recent_window_seconds
+        while self._recent_samples and self._recent_samples[0][0] < cutoff:
+            self._recent_samples.popleft()
+        recent_calls = sum(item_delta for _, item_delta in self._recent_samples)
+        recent_span = max(min(elapsed, self._recent_window_seconds), 1e-6)
+        self._recent_cps = recent_calls / recent_span
+        self.calls_per_sec = self._recent_cps if self._recent_cps > 0 else self._avg_cps
 
     def eta_seconds(self):
         if self.calls_per_sec <= 0:
@@ -2312,7 +2355,9 @@ class RuntimeEtaEstimator:
         rate = f"{self.calls_per_sec:.1f}/s" if self.calls_per_sec > 0 else "warming"
         eta = self._fmt_duration(self.eta_seconds())
         avg = f"{self.avg_calls_per_sample:.2f}/sample" if self.samples_done > 0 else "n/a"
-        return f"eta {eta} • rate {rate} • avg {avg}"
+        if self._avg_cps > 0 and self.calls_per_sec > 0:
+            return f"eta {eta} • rate {rate} • avg {self._avg_cps:.1f}/s • calls {avg}"
+        return f"eta {eta} • rate {rate} • calls {avg}"
 
 
 def estimate_directory_workload(
@@ -3207,6 +3252,16 @@ def _effective_chunk_row_count(chunk_size: int, watermark: int) -> int:
     return max(1, min(requested, target))
 
 
+def _effective_chunk_parallelism(max_active_chunks: int, *, directory_delegate: bool) -> int:
+    active = max(int(max_active_chunks or 0), 1)
+    if directory_delegate:
+        # Keep one heavyweight file active at the outer scheduler, but still
+        # allow a small amount of chunk overlap within that file so throughput
+        # does not collapse at the tail of a giant chunk.
+        return min(active, 2)
+    return active
+
+
 async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  enable_arbitration=True, limit=0, shuffle=False,
                                  progress=None, sample_task=None, config=None,
@@ -3233,11 +3288,10 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
     requested_chunk_size = config.chunk_size if config else CHUNK_SIZE
     max_active = config.max_active_chunks if config else MAX_ACTIVE_CHUNKS
-    if directory_delegate:
-        # A directory-delegated JSONL file is already a heavyweight producer that
-        # can keep the global semaphore saturated on its own. Limit it to one
-        # active chunk so we do not multiply large-file memory/IO pressure.
-        max_active = min(max_active, 1)
+    max_active = _effective_chunk_parallelism(
+        max_active,
+        directory_delegate=directory_delegate,
+    )
     concurrency = config.concurrency if config else DEFAULT_CONCURRENCY
     watermark = max(
         int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK)),
@@ -3522,6 +3576,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                     )
                     if llm_progress_cb and monitor:
                         run_info = llm_progress_cb(0, "pass1")
+                        run_info = _decorate_run_info_with_runtime(run_info, config)
                         if run_info:
                             info = f"{info} • {run_info}"
                     progress.update(sample_task, advance=1, info=info)
@@ -3742,6 +3797,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                 )
                 if llm_progress_cb and monitor:
                     run_info = llm_progress_cb(0, "pass1")
+                    run_info = _decorate_run_info_with_runtime(run_info, config)
                     if run_info:
                         info = f"{info} • {run_info}"
                 progress.update(sample_task, advance=1, info=info)
@@ -4313,16 +4369,10 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         if eta_tracker and delta > 0:
             eta_tracker.calls_done += delta
             eta_tracker.estimated_total_calls = max(eta_tracker.estimated_total_calls, eta_tracker.calls_done)
-            elapsed = max(time.time() - eta_tracker._start_time, 1e-6)
-            instant_cps = eta_tracker.calls_done / elapsed
-            if eta_tracker._smoothed_cps <= 0:
-                eta_tracker._smoothed_cps = instant_cps
-            else:
-                eta_tracker._smoothed_cps = 0.2 * instant_cps + 0.8 * eta_tracker._smoothed_cps
-            eta_tracker.calls_per_sec = eta_tracker._smoothed_cps
+            eta_tracker.record_call_delta(delta)
         if run_info:
             global_llm_info = run_info
-        _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker)
+        _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker, config=config)
 
     if progress and sample_task is not None:
         initial_sample_total = (
@@ -4387,12 +4437,13 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                     )
                     if llm_progress_cb and monitor:
                         global_llm_info = llm_progress_cb(0, "pass1")
+                        global_llm_info = _decorate_run_info_with_runtime(global_llm_info, config)
                     progress.update(sample_task, advance=1, info=info)
                 if eta_tracker:
                     eta_tracker.samples_done += 1
                     if not llm_progress_cb:
                         eta_tracker.update(monitor.get("llm_calls", 0) if monitor else 0)
-                    _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker)
+                    _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker, config=config)
 
                 # Check if this file is fully done (compare against label_count, not total)
                 if c.done >= c.label_count and not c.completed:
@@ -4446,14 +4497,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                     if eta_tracker.samples_done > 0:
                         eta_tracker.avg_calls_per_sample = eta_tracker.calls_done / eta_tracker.samples_done
                     eta_tracker.estimated_total_calls = max(eta_tracker.estimated_total_calls, eta_tracker.calls_done)
-                    elapsed = max(time.time() - eta_tracker._start_time, 1e-6)
-                    instant_cps = eta_tracker.calls_done / elapsed
-                    if eta_tracker._smoothed_cps <= 0:
-                        eta_tracker._smoothed_cps = instant_cps
-                    else:
-                        eta_tracker._smoothed_cps = 0.2 * instant_cps + 0.8 * eta_tracker._smoothed_cps
-                    eta_tracker.calls_per_sec = eta_tracker._smoothed_cps
-                    _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker)
+                    eta_tracker.record_call_delta(calls_done)
+                    _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker, config=config)
                 if progress and file_task is not None:
                     progress.update(file_task, advance=1)
 

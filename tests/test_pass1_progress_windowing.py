@@ -6,6 +6,8 @@ import pytest
 
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
+    _decorate_run_info_with_runtime,
+    _effective_chunk_parallelism,
     _effective_chunk_row_count,
     run_directory_pipeline,
     run_one_file,
@@ -107,6 +109,26 @@ async def test_run_one_file_limits_inflight_pass1_tasks(monkeypatch, tmp_path):
 def test_effective_chunk_row_count_caps_giant_chunks_for_incremental_flush():
     assert _effective_chunk_row_count(5000, 600) == 1200
     assert _effective_chunk_row_count(64, 600) == 64
+
+
+def test_directory_delegate_keeps_some_chunk_overlap_without_unbounded_fanout():
+    assert _effective_chunk_parallelism(3, directory_delegate=True) == 2
+    assert _effective_chunk_parallelism(1, directory_delegate=True) == 1
+    assert _effective_chunk_parallelism(3, directory_delegate=False) == 3
+
+
+def test_decorate_run_info_with_runtime_snapshot_appends_effective_limits():
+    config = PipelineConfig(enable_adaptive_runtime=True)
+    from sft_label.llm_runtime import AdaptiveLLMRuntime
+
+    runtime = AdaptiveLLMRuntime(base_concurrency=12, base_rps=20.0)
+    runtime._set_effective_limits(8, 12.0)
+    runtime.state = "degraded"
+    runtime.gate._in_flight = 5
+    setattr(config, "_adaptive_runtime", runtime)
+
+    info = _decorate_run_info_with_runtime("run 10/100 (10.0%) eta 10:00 rate 4.1/s", config)
+    assert info.endswith("runtime degraded c=8 rps=12.0 in_flight=5")
 
 
 @pytest.mark.asyncio
