@@ -99,7 +99,7 @@
 
 - 顶层值允许空列表 `[]`，空列表视为合法但无 turn 内容；
 - 同一个 turn 若同时带 `from`/`value` 与 `role`/`content`，优先使用内部字段 `from`/`value`，并将其视为已是内部 schema；
-- 同一列表中允许混合 turn shape（部分 `from/value`、部分 `role/content`），标准化 helper 逐 turn 归一化；
+- 仅 `conversations` top-level 允许混合 turn shape（部分 `from/value`、部分 `role/content`），标准化 helper 逐 turn 归一化；`messages` 与 `data` 仍要求其 turn shape 分别遵守各自声明的 schema，不把夹带 `from/value` 的输入视为新支持范围；
 - 若某个 turn 既没有 `from`/`role`，也没有 `value`/`content`，该 turn 仍可标准化为 `{from: "", value: ""}`，保持当前宽松行为；
 - 若某个 turn 的 `value`/`content` 为 list/dict，则该 top-level schema 视为非法；只有存在更低优先级的非空合法 fallback 时才允许回退，否则直接失败。
 
@@ -205,11 +205,11 @@ raw row
 
 ### Turn 文本字段映射
 
-- `value` 优先保留为内部字段
-- 若不存在 `value`，则读取 `content`
-- `None` 视为空字符串 `""`
-- list / dict / OpenAI 多模态 content blocks 等**非字符串结构本次不支持**；标准化 helper 应显式拒绝，并给出清晰错误，而不是隐式 `str(...)` 强转
-- 若 `value` 与 `content` 都不存在，则回退为空字符串 `""`
+- 若 turn 已包含 `from` 或 `value`，则优先按内部字段 `from/value` 解释；此时同 turn 上额外出现的 `role/content` 仅作冗余字段忽略，不再参与合法性判定
+- 若 turn 不含内部字段，则读取 `role/content`
+- 选中的文本字段为 `None` 时视为空字符串 `""`
+- **仅对被选中的文本字段**执行类型校验：list / dict / OpenAI 多模态 content blocks 等非字符串结构本次不支持；标准化 helper 应显式拒绝，并给出清晰错误，而不是隐式 `str(...)` 强转
+- 若被选中的字段不存在，则回退为空字符串 `""`
 
 ### 未知角色策略
 
@@ -243,11 +243,19 @@ raw row
 | `conversations` | `from/value` | string / `None` | 接受，幂等标准化 | `sharegpt` |
 | `conversations` | `role/content` | string / `None` | 接受，转为 `from/value` | `openai_conversations` |
 | `conversations` | mixed turn shape | string / `None` | 接受，逐 turn 归一化；同 turn 双字段时优先 `from/value` | `sharegpt` 或 `openai_conversations`（按首个**非空且字段完整**的合法 turn shape 记账；前导空/缺字段 turn 不参与 provenance 判定） |
-| `messages` | `role/content` | string / `None` | 接受，转为 `conversations[].from/value` | `openai_messages` |
-| `data` | `role/content` | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
+| `messages` | `role/content`（不接受混入 `from/value` 作为新兼容范围） | string / `None` | 接受，转为 `conversations[].from/value` | `openai_messages` |
+| `data` | `role/content`（不接受混入 `from/value` 作为新兼容范围） | string / `None` | 接受，走 Pangu 归一化 | `pangu` |
 | `conversations` / `messages` | 任意 | list / dict content blocks | 拒绝，显式报错 | 不写入新 metadata |
 | `conversations` + `messages` 同存 | `conversations` 非法、`messages` 合法 | 合法 | 回退到 `messages` | `openai_messages` |
 | 任意 top-level key | 空列表 | n/a | 仅在不存在后续**非空合法**候选且当前也不被更高优先级非法候选阻断时接受；输出 **1 个未切片样本**，其 `conversations == []` | `sharegpt` / `openai_messages` / `pangu`（按胜出的路由值；空 `conversations` provenance 默认记为 `sharegpt`） |
+
+在实现上，建议引入单一决策 helper（例如 `_resolve_turn_source_and_provenance(...)`` 或等价命名），一次性返回：
+
+- routing format
+- provenance / `original_format`
+- normalized turns
+
+从而避免 `detect_format()`、top-level fallback 和 turn 标准化各自重复实现一套规则。
 
 ## 预处理设计
 
