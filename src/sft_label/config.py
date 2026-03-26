@@ -73,6 +73,7 @@ CHUNK_SIZE = 5000              # raw JSONL lines per chunk
 MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
 DIRECTORY_DELEGATE_CHUNK_ROWS_CAP = 512  # hard cap for chunk rows when directory scheduler delegates a giant JSONL
 CHUNK_STALL_TIMEOUT = 180.0    # fail/recover a chunk if it makes no progress for too long
+CHUNK_WATCHDOG_CANCEL_LIMIT = 64  # max stale in-flight samples the watchdog cancels per chunk per pass
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
 SPARSE_FULL_LABEL_COUNT = 8   # first N slices always labeled
@@ -460,6 +461,7 @@ class PipelineConfig:
     max_active_chunks: int = MAX_ACTIVE_CHUNKS
     directory_delegate_chunk_rows_cap: int = DIRECTORY_DELEGATE_CHUNK_ROWS_CAP
     chunk_stall_timeout: float = CHUNK_STALL_TIMEOUT
+    chunk_watchdog_cancel_limit: int = CHUNK_WATCHDOG_CANCEL_LIMIT
     sparse_full_label_count: int = SPARSE_FULL_LABEL_COUNT
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP

@@ -7,6 +7,7 @@ import pytest
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
     ChunkCollector,
+    _chunk_watchdog_actions,
     _run_one_file_chunked,
     _chunk_has_execution_work,
     _decorate_run_info_with_runtime,
@@ -532,6 +533,49 @@ async def test_chunk_watchdog_does_not_fail_completed_future_waiting_to_be_harve
     )
 
     assert flushed == [(1, 0, {"intent": "coding"}, "success")]
+
+
+def test_chunk_watchdog_actions_limits_cancellations_and_hides_zero_cancel_noise():
+    actions = _chunk_watchdog_actions(
+        entries=[
+            {"sample_idx": 0, "submitted_at": 0.0, "done": False},
+            {"sample_idx": 1, "submitted_at": 1.0, "done": False},
+            {"sample_idx": 2, "submitted_at": 2.0, "done": False},
+            {"sample_idx": 3, "submitted_at": 199.5, "done": False},
+            {"sample_idx": 4, "submitted_at": 50.0, "done": True},
+        ],
+        now=200.0,
+        chunk_last_progress_at=0.0,
+        chunk_stall_timeout=100.0,
+        cancel_limit=2,
+    )
+
+    assert actions["harvest_sample_indices"] == [4]
+    assert actions["cancel_sample_indices"] == [0, 1]
+    assert actions["skipped_still_running"] == 2
+    assert actions["should_log"] is True
+    assert "canceled 2 stalled sample(s)" in actions["log_line"]
+    assert "1 completed sample(s) already done" in actions["log_line"]
+    assert "2 still running" in actions["log_line"]
+
+
+def test_chunk_watchdog_actions_skips_zero_cancel_noise_when_only_harvesting_done():
+    actions = _chunk_watchdog_actions(
+        entries=[
+            {"sample_idx": 0, "submitted_at": 0.0, "done": True},
+            {"sample_idx": 1, "submitted_at": 0.0, "done": True},
+        ],
+        now=200.0,
+        chunk_last_progress_at=0.0,
+        chunk_stall_timeout=100.0,
+        cancel_limit=2,
+    )
+
+    assert actions["harvest_sample_indices"] == [0, 1]
+    assert actions["cancel_sample_indices"] == []
+    assert actions["should_log"] is True
+    assert "harvested 2 completed sample(s)" in actions["log_line"]
+    assert "canceled 0" not in actions["log_line"]
 
 
 @pytest.mark.asyncio
