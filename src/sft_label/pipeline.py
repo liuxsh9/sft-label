@@ -68,7 +68,7 @@ from sft_label.config import (
     MAX_CONVERSATION_CHARS, COMPACT_CONVERSATION_CHARS,
     COMPACT_LABELING_REQUEST_BYTES,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
-    CHUNK_SIZE, MAX_ACTIVE_CHUNKS,
+    CHUNK_SIZE, MAX_ACTIVE_CHUNKS, DIRECTORY_DELEGATE_CHUNK_ROWS_CAP,
     PipelineConfig,
 )
 from sft_label.artifacts import (
@@ -771,7 +771,21 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
         try:
             if rate_limiter is not None:
                 await rate_limiter.acquire()
-            resp = await http_client.post(url, json=payload, headers=headers, timeout=attempt_timeout)
+            if float(attempt_timeout or 0) > 0:
+                async with asyncio.timeout(float(attempt_timeout)):
+                    resp = await http_client.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=attempt_timeout,
+                    )
+            else:
+                resp = await http_client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=attempt_timeout,
+                )
             if rate_limiter is not None:
                 rate_limiter.stats.record(resp.status_code)
                 _http_recorded = True
@@ -3245,11 +3259,42 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, out_unma
     chunk.completed = True
 
 
-def _effective_chunk_row_count(chunk_size: int, watermark: int) -> int:
+def _effective_chunk_row_count(
+    chunk_size: int,
+    watermark: int,
+    *,
+    directory_delegate: bool = False,
+    directory_delegate_cap: int = DIRECTORY_DELEGATE_CHUNK_ROWS_CAP,
+) -> int:
     """Cap giant JSONL chunks so large runs flush incrementally."""
     requested = max(int(chunk_size or 0), 1)
     target = max(int(watermark or 0) * 2, 128)
-    return max(1, min(requested, target))
+    effective = min(requested, target)
+    if directory_delegate:
+        effective = min(effective, max(int(directory_delegate_cap or 0), 1))
+    return max(1, effective)
+
+
+def _effective_chunk_parallelism(max_active_chunks: int, *, directory_delegate: bool) -> int:
+    active = max(int(max_active_chunks or 0), 1)
+    if directory_delegate:
+        # Keep one heavyweight file active at the outer scheduler, but still
+        # allow a small amount of chunk overlap within that file so throughput
+        # does not collapse at the tail of a giant chunk.
+        return min(active, 2)
+    return active
+
+
+def _chunk_has_execution_work(chunk: ChunkCollector) -> bool:
+    if chunk.completed:
+        return False
+    if chunk.has_pending_submission():
+        return True
+    return chunk.done < chunk.label_count
+
+
+def _chunk_waiting_flush_only(chunk: ChunkCollector) -> bool:
+    return not chunk.completed and not _chunk_has_execution_work(chunk)
 
 
 def _effective_chunk_parallelism(max_active_chunks: int, *, directory_delegate: bool) -> int:
@@ -3297,7 +3342,16 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         int(concurrency * (config.dir_pipeline_watermark if config else DIR_PIPELINE_WATERMARK)),
         1,
     )
-    chunk_size = _effective_chunk_row_count(requested_chunk_size, watermark)
+    chunk_size = _effective_chunk_row_count(
+        requested_chunk_size,
+        watermark,
+        directory_delegate=directory_delegate,
+        directory_delegate_cap=(
+            getattr(config, "directory_delegate_chunk_rows_cap", DIRECTORY_DELEGATE_CHUNK_ROWS_CAP)
+            if config is not None
+            else DIRECTORY_DELEGATE_CHUNK_ROWS_CAP
+        ),
+    )
 
     _sparse_kw = {}
     if config:
@@ -3445,16 +3499,21 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
         # --- Try to load more chunks if below watermark ---
         def maybe_load_more(pending_futures, collectors):
-            active_count = sum(1 for c in collectors.values() if not c.completed)
+            active_count = sum(1 for c in collectors.values() if _chunk_has_execution_work(c))
+            ready_waiting = sum(1 for c in collectors.values() if _chunk_waiting_flush_only(c))
             loaded = []
             while (len(pending_futures) < watermark
-                   and active_count < max_active):
+                   and active_count < max_active
+                   and ready_waiting < max_active):
                 c = load_next_chunk(pending_futures)
                 if c is None:
                     break
                 collectors[c.chunk_idx] = c
                 loaded.append(c)
-                active_count += 1
+                if _chunk_has_execution_work(c):
+                    active_count += 1
+                else:
+                    ready_waiting += 1
             return loaded
 
         def top_up_submissions(pending_futures, collectors):

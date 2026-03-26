@@ -70,6 +70,7 @@ DIR_PIPELINE_MAX_FILES = 40    # max files loaded in memory simultaneously
 # ─── Chunked JSONL Pipeline ──────────────────────────
 CHUNK_SIZE = 5000              # raw JSONL lines per chunk
 MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
+DIRECTORY_DELEGATE_CHUNK_ROWS_CAP = 512  # hard cap for chunk rows when directory scheduler delegates a giant JSONL
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
 SPARSE_FULL_LABEL_COUNT = 8   # first N slices always labeled
@@ -454,6 +455,7 @@ class PipelineConfig:
     dir_pipeline_max_files: int = DIR_PIPELINE_MAX_FILES
     chunk_size: int = CHUNK_SIZE
     max_active_chunks: int = MAX_ACTIVE_CHUNKS
+    directory_delegate_chunk_rows_cap: int = DIRECTORY_DELEGATE_CHUNK_ROWS_CAP
     sparse_full_label_count: int = SPARSE_FULL_LABEL_COUNT
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP
