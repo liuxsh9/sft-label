@@ -7,9 +7,11 @@ import pytest
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
     ChunkCollector,
+    _run_one_file_chunked,
     _chunk_has_execution_work,
     _effective_chunk_parallelism,
     _effective_chunk_row_count,
+    _flushable_chunk_indices,
     run_directory_pipeline,
     run_one_file,
 )
@@ -138,6 +140,202 @@ def test_finished_unflushed_chunk_does_not_block_new_chunk_admission():
     chunk.done = 1
 
     assert _chunk_has_execution_work(chunk) is False
+
+
+def test_preserve_order_flush_blocks_later_completed_chunks():
+    chunk0 = ChunkCollector(chunk_idx=0, samples=[{"id": "s-0"}], label_count=1)
+    chunk0.submit_order = [0]
+    chunk0.submit_cursor = 1
+    chunk0.done = 0
+
+    chunk1 = ChunkCollector(chunk_idx=1, samples=[{"id": "s-1"}], label_count=1)
+    chunk1.submit_order = [0]
+    chunk1.submit_cursor = 1
+    chunk1.done = 1
+
+    collectors = {
+        0: chunk0,
+        1: chunk1,
+    }
+
+    assert _flushable_chunk_indices(
+        collectors,
+        next_chunk_to_flush=0,
+        preserve_order=True,
+    ) == []
+
+
+def test_directory_delegate_can_flush_completed_chunks_out_of_order():
+    chunk0 = ChunkCollector(chunk_idx=0, samples=[{"id": "s-0"}], label_count=1)
+    chunk0.submit_order = [0]
+    chunk0.submit_cursor = 1
+    chunk0.done = 0
+
+    chunk1 = ChunkCollector(chunk_idx=1, samples=[{"id": "s-1"}], label_count=1)
+    chunk1.submit_order = [0]
+    chunk1.submit_cursor = 1
+    chunk1.done = 1
+
+    collectors = {
+        0: chunk0,
+        1: chunk1,
+    }
+
+    assert _flushable_chunk_indices(
+        collectors,
+        next_chunk_to_flush=0,
+        preserve_order=False,
+    ) == [1]
+
+
+@pytest.mark.asyncio
+async def test_directory_delegate_continues_loading_after_out_of_order_flush(monkeypatch, tmp_path):
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text('{"id":"seed"}\n', encoding="utf-8")
+
+    chunk_ids = [0, 1, 2, 3]
+
+    def fake_iter_row_sample_bundle_chunks_from_jsonl(*args, **kwargs):
+        for chunk_id in chunk_ids:
+            yield [{"chunk_id": chunk_id}]
+
+    def fake_prepare_inline_pass1_batch(row_bundles, **kwargs):
+        chunk_id = row_bundles[0]["chunk_id"]
+        sample = {"id": f"chunk-{chunk_id}", "conversations": []}
+        return SimpleNamespace(
+            samples=[sample],
+            sample_to_bundle=[0],
+            label_indices=[0],
+            inherit_map={},
+            bundles=row_bundles,
+            updated_sample_indices=set(),
+            bundle_plans=[],
+            stats={},
+            labels=[None],
+        )
+
+    started_ids = []
+    chunk0_release = asyncio.Event()
+    chunk3_started = asyncio.Event()
+    flushed_ids = []
+
+    async def fake_label_one(*args, **kwargs):
+        sample = args[1]
+        chunk_id = int(sample["id"].split("-")[-1])
+        started_ids.append(chunk_id)
+        if chunk_id == 3:
+            chunk3_started.set()
+        if chunk_id == 0:
+            await chunk0_release.wait()
+        return 0, {"intent": "coding"}, {"sample_id": sample["id"], "status": "success"}
+
+    def fake_flush_chunk(chunk, *args, **kwargs):
+        flushed_ids.append(chunk.chunk_idx)
+        chunk.completed = True
+
+    monkeypatch.setattr(
+        "sft_label.pipeline.iter_row_sample_bundle_chunks_from_jsonl",
+        fake_iter_row_sample_bundle_chunks_from_jsonl,
+    )
+    monkeypatch.setattr(
+        "sft_label.pipeline.prepare_inline_pass1_batch",
+        fake_prepare_inline_pass1_batch,
+    )
+    monkeypatch.setattr("sft_label.pipeline.label_one", fake_label_one)
+    monkeypatch.setattr("sft_label.pipeline._flush_chunk", fake_flush_chunk)
+
+    task = asyncio.create_task(
+        _run_one_file_chunked(
+            input_path=input_file,
+            output_dir=tmp_path / "out",
+            http_client=None,
+            sem=asyncio.Semaphore(8),
+            model="fake-model",
+            config=PipelineConfig(
+                concurrency=8,
+                chunk_size=1,
+                max_active_chunks=2,
+                dir_pipeline_watermark=1.0,
+                enable_adaptive_runtime=False,
+            ),
+            directory_delegate=True,
+        )
+    )
+
+    await asyncio.wait_for(chunk3_started.wait(), timeout=1.0)
+    assert 0 in started_ids
+    assert 1 in flushed_ids
+    assert 2 in flushed_ids
+
+    chunk0_release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_directory_delegate_zero_work_chunks_flush_all_with_bounded_preload(monkeypatch, tmp_path):
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text('{"id":"seed"}\n', encoding="utf-8")
+
+    chunk_ids = [0, 1, 2, 3]
+    loaded_ids = []
+    flushed_ids = []
+    first_flush_loaded_snapshot = []
+
+    def fake_iter_row_sample_bundle_chunks_from_jsonl(*args, **kwargs):
+        for chunk_id in chunk_ids:
+            yield [{"chunk_id": chunk_id}]
+
+    def fake_prepare_inline_pass1_batch(row_bundles, **kwargs):
+        chunk_id = row_bundles[0]["chunk_id"]
+        loaded_ids.append(chunk_id)
+        sample = {"id": f"chunk-{chunk_id}", "conversations": []}
+        return SimpleNamespace(
+            samples=[sample],
+            sample_to_bundle=[0],
+            label_indices=[],
+            inherit_map={0: 0},
+            bundles=row_bundles,
+            updated_sample_indices=set(),
+            bundle_plans=[],
+            stats={},
+            labels=[{"intent": "coding"}],
+        )
+
+    def fake_flush_chunk(chunk, *args, **kwargs):
+        nonlocal first_flush_loaded_snapshot
+        if not first_flush_loaded_snapshot:
+            first_flush_loaded_snapshot = list(loaded_ids)
+        flushed_ids.append(chunk.chunk_idx)
+        chunk.completed = True
+
+    monkeypatch.setattr(
+        "sft_label.pipeline.iter_row_sample_bundle_chunks_from_jsonl",
+        fake_iter_row_sample_bundle_chunks_from_jsonl,
+    )
+    monkeypatch.setattr(
+        "sft_label.pipeline.prepare_inline_pass1_batch",
+        fake_prepare_inline_pass1_batch,
+    )
+    monkeypatch.setattr("sft_label.pipeline._flush_chunk", fake_flush_chunk)
+
+    await _run_one_file_chunked(
+        input_path=input_file,
+        output_dir=tmp_path / "out-zero-work",
+        http_client=None,
+        sem=asyncio.Semaphore(8),
+        model="fake-model",
+        config=PipelineConfig(
+            concurrency=8,
+            chunk_size=1,
+            max_active_chunks=2,
+            dir_pipeline_watermark=1.0,
+            enable_adaptive_runtime=False,
+        ),
+        directory_delegate=True,
+    )
+
+    assert first_flush_loaded_snapshot == [0, 1]
+    assert flushed_ids == [0, 1, 2, 3]
 
 
 @pytest.mark.asyncio
