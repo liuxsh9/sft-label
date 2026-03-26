@@ -420,3 +420,46 @@ async def test_label_one_returns_after_hard_timeout_instead_of_hanging():
     assert monitor["status"] == "call1_failed"
     assert monitor.get("retryable_infra") is True
     assert monitor.get("error_class") == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_label_one_enforces_total_sample_timeout():
+    class _SlowClient:
+        async def post(self, *args, **kwargs):
+            await asyncio.sleep(1)
+            return None
+
+    config = PipelineConfig(
+        sample_max_retries=3,
+        max_retries=0,
+        enable_adaptive_runtime=False,
+        request_quick_retries=0,
+        request_timeout=1.0,
+        request_timeout_escalation=[1.0],
+        pass1_sample_total_timeout=0.05,
+    )
+
+    sample = {
+        "id": "s-total-timeout",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+    }
+
+    _, labels, monitor = await asyncio.wait_for(
+        label_one(
+            http_client=_SlowClient(),
+            sample=sample,
+            model="mock",
+            sample_idx=0,
+            total=1,
+            sem=asyncio.Semaphore(1),
+            enable_arbitration=False,
+            config=config,
+            rate_limiter=None,
+        ),
+        timeout=1,
+    )
+
+    assert labels is None
+    assert monitor["status"] == "sample_total_timeout"
+    assert monitor.get("retryable_infra") is True
+    assert monitor.get("error_class") == "timeout"

@@ -354,6 +354,171 @@ async def test_directory_delegate_zero_work_chunks_flush_all_with_bounded_preloa
 
 
 @pytest.mark.asyncio
+async def test_chunk_watchdog_cancels_stalled_work_and_allows_flush(monkeypatch, tmp_path):
+    input_file = tmp_path / "input-watchdog.jsonl"
+    input_file.write_text('{"id":"seed"}\n', encoding="utf-8")
+
+    def fake_iter_row_sample_bundle_chunks_from_jsonl(*args, **kwargs):
+        yield [{"chunk_id": 0}]
+
+    def fake_prepare_inline_pass1_batch(row_bundles, **kwargs):
+        return SimpleNamespace(
+            samples=[{"id": "chunk-0-sample", "conversations": []}],
+            sample_to_bundle=[0],
+            label_indices=[0],
+            inherit_map={},
+            bundles=row_bundles,
+            updated_sample_indices=set(),
+            bundle_plans=[],
+            stats={},
+            labels=[None],
+        )
+
+    async def fake_label_one(*args, **kwargs):
+        await asyncio.sleep(3600)
+        raise AssertionError("watchdog should cancel this task before completion")
+
+    recovery_called = False
+    flushed = []
+
+    async def fake_recovery_sweep(*, all_labels, all_monitors, candidate_indices, **kwargs):
+        nonlocal recovery_called
+        recovery_called = True
+        assert candidate_indices == [0]
+        all_labels[0] = {"intent": "coding"}
+        all_monitors[0] = {
+            "sample_id": "chunk-0-sample",
+            "status": "success",
+            "retryable_infra": False,
+        }
+        return 1
+
+    def fake_flush_chunk(chunk, *args, **kwargs):
+        flushed.append(
+            (
+                chunk.chunk_idx,
+                chunk.ok,
+                chunk.fail,
+                chunk.labels[0],
+                chunk.monitors[0]["status"],
+            )
+        )
+        chunk.completed = True
+
+    monkeypatch.setattr(
+        "sft_label.pipeline.iter_row_sample_bundle_chunks_from_jsonl",
+        fake_iter_row_sample_bundle_chunks_from_jsonl,
+    )
+    monkeypatch.setattr(
+        "sft_label.pipeline.prepare_inline_pass1_batch",
+        fake_prepare_inline_pass1_batch,
+    )
+    monkeypatch.setattr("sft_label.pipeline.label_one", fake_label_one)
+    monkeypatch.setattr("sft_label.pipeline._run_pass1_recovery_sweep", fake_recovery_sweep)
+    monkeypatch.setattr("sft_label.pipeline._flush_chunk", fake_flush_chunk)
+
+    await asyncio.wait_for(
+        _run_one_file_chunked(
+            input_path=input_file,
+            output_dir=tmp_path / "out-watchdog",
+            http_client=None,
+            sem=asyncio.Semaphore(4),
+            model="fake-model",
+            config=PipelineConfig(
+                concurrency=4,
+                chunk_size=1,
+                max_active_chunks=2,
+                dir_pipeline_watermark=1.0,
+                enable_adaptive_runtime=False,
+                enable_stage_recovery_sweep=True,
+                chunk_stall_timeout=0.05,
+            ),
+            directory_delegate=True,
+        ),
+        timeout=1.0,
+    )
+
+    assert recovery_called is True
+    assert flushed == [(0, 1, 0, {"intent": "coding"}, "success")]
+
+
+@pytest.mark.asyncio
+async def test_chunk_watchdog_does_not_fail_completed_future_waiting_to_be_harvested(monkeypatch, tmp_path):
+    input_file = tmp_path / "input-watchdog-race.jsonl"
+    input_file.write_text('{"id":"seed"}\n', encoding="utf-8")
+
+    def fake_iter_row_sample_bundle_chunks_from_jsonl(*args, **kwargs):
+        yield [{"chunk_id": 0}]
+
+    def fake_prepare_inline_pass1_batch(row_bundles, **kwargs):
+        return SimpleNamespace(
+            samples=[{"id": "chunk-0-sample", "conversations": []}],
+            sample_to_bundle=[0],
+            label_indices=[0],
+            inherit_map={},
+            bundles=row_bundles,
+            updated_sample_indices=set(),
+            bundle_plans=[],
+            stats={},
+            labels=[None],
+        )
+
+    async def fake_label_one(*args, **kwargs):
+        return 0, {"intent": "coding"}, {"sample_id": "chunk-0-sample", "status": "success"}
+
+    real_wait = asyncio.wait
+    wait_calls = 0
+    flushed = []
+
+    async def fake_wait(fs, **kwargs):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            await asyncio.sleep(0.02)
+            return set(), set(fs)
+        return await real_wait(fs, **kwargs)
+
+    def fake_flush_chunk(chunk, *args, **kwargs):
+        flushed.append((chunk.ok, chunk.fail, chunk.labels[0], chunk.monitors[0]["status"]))
+        chunk.completed = True
+
+    monkeypatch.setattr(
+        "sft_label.pipeline.iter_row_sample_bundle_chunks_from_jsonl",
+        fake_iter_row_sample_bundle_chunks_from_jsonl,
+    )
+    monkeypatch.setattr(
+        "sft_label.pipeline.prepare_inline_pass1_batch",
+        fake_prepare_inline_pass1_batch,
+    )
+    monkeypatch.setattr("sft_label.pipeline.label_one", fake_label_one)
+    monkeypatch.setattr("sft_label.pipeline.asyncio.wait", fake_wait)
+    monkeypatch.setattr("sft_label.pipeline._flush_chunk", fake_flush_chunk)
+
+    await asyncio.wait_for(
+        _run_one_file_chunked(
+            input_path=input_file,
+            output_dir=tmp_path / "out-watchdog-race",
+            http_client=None,
+            sem=asyncio.Semaphore(4),
+            model="fake-model",
+            config=PipelineConfig(
+                concurrency=4,
+                chunk_size=1,
+                max_active_chunks=2,
+                dir_pipeline_watermark=1.0,
+                enable_adaptive_runtime=False,
+                enable_stage_recovery_sweep=False,
+                chunk_stall_timeout=0.01,
+            ),
+            directory_delegate=True,
+        ),
+        timeout=1.0,
+    )
+
+    assert flushed == [(1, 0, {"intent": "coding"}, "success")]
+
+
+@pytest.mark.asyncio
 async def test_directory_chunked_delegate_reports_live_progress(monkeypatch, tmp_path):
     input_file = tmp_path / "sample.jsonl"
     input_file.write_text('{"id":"x"}\n', encoding="utf-8")

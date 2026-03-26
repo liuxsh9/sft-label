@@ -16,6 +16,7 @@ MAX_RETRIES = 3
 SAMPLE_MAX_RETRIES = 3         # sample-level retry on call failure
 REQUEST_TIMEOUT = 90           # seconds per LLM call (first attempt)
 REQUEST_TIMEOUT_ESCALATION = [60, 90, 120]  # per-attempt timeout escalation
+PASS1_SAMPLE_TOTAL_TIMEOUT = 300.0  # hard wall-clock cap per Pass 1 sample across all retries/stages
 DEFAULT_RPS_LIMIT = 20         # max LLM requests/sec (0 = unlimited)
 DEFAULT_RPS_WARMUP = 30        # seconds to ramp from 1 rps to full rps (0 = no warmup)
 ENABLE_ADAPTIVE_RUNTIME = True
@@ -71,6 +72,7 @@ DIR_PIPELINE_MAX_FILES = 40    # max files loaded in memory simultaneously
 CHUNK_SIZE = 5000              # raw JSONL lines per chunk
 MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
 DIRECTORY_DELEGATE_CHUNK_ROWS_CAP = 512  # hard cap for chunk rows when directory scheduler delegates a giant JSONL
+CHUNK_STALL_TIMEOUT = 180.0    # fail/recover a chunk if it makes no progress for too long
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
 SPARSE_FULL_LABEL_COUNT = 8   # first N slices always labeled
@@ -411,6 +413,7 @@ class PipelineConfig:
     sample_max_retries: int = SAMPLE_MAX_RETRIES
     request_timeout: int = REQUEST_TIMEOUT
     request_timeout_escalation: list = None  # defaults to REQUEST_TIMEOUT_ESCALATION
+    pass1_sample_total_timeout: float = PASS1_SAMPLE_TOTAL_TIMEOUT
     rps_limit: float = DEFAULT_RPS_LIMIT
     rps_warmup: float = DEFAULT_RPS_WARMUP
     enable_adaptive_runtime: bool = ENABLE_ADAPTIVE_RUNTIME
@@ -456,6 +459,7 @@ class PipelineConfig:
     chunk_size: int = CHUNK_SIZE
     max_active_chunks: int = MAX_ACTIVE_CHUNKS
     directory_delegate_chunk_rows_cap: int = DIRECTORY_DELEGATE_CHUNK_ROWS_CAP
+    chunk_stall_timeout: float = CHUNK_STALL_TIMEOUT
     sparse_full_label_count: int = SPARSE_FULL_LABEL_COUNT
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP

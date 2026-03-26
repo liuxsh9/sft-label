@@ -64,11 +64,11 @@ from sft_label.run_layout import InlineRunLayout, resolve_run_root
 from sft_label.config import (
     LITELLM_BASE, LITELLM_KEY, CONFIDENCE_THRESHOLD, CONSISTENCY_RULES,
     DEFAULT_LABELING_MODEL, DEFAULT_CONCURRENCY, MAX_RETRIES, SAMPLE_MAX_RETRIES,
-    REQUEST_TIMEOUT, REQUEST_TIMEOUT_ESCALATION,
+    REQUEST_TIMEOUT, REQUEST_TIMEOUT_ESCALATION, PASS1_SAMPLE_TOTAL_TIMEOUT,
     MAX_CONVERSATION_CHARS, COMPACT_CONVERSATION_CHARS,
     COMPACT_LABELING_REQUEST_BYTES,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
-    CHUNK_SIZE, MAX_ACTIVE_CHUNKS, DIRECTORY_DELEGATE_CHUNK_ROWS_CAP,
+    CHUNK_SIZE, MAX_ACTIVE_CHUNKS, DIRECTORY_DELEGATE_CHUNK_ROWS_CAP, CHUNK_STALL_TIMEOUT,
     PipelineConfig,
 )
 from sft_label.artifacts import (
@@ -1577,10 +1577,16 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
     _max_retries = config.max_retries if config else MAX_RETRIES
     _conf_threshold = config.confidence_threshold if config else CONFIDENCE_THRESHOLD
     _compact, _max_chars = _resolved_labeling_prompt_budget(config)
+    _sample_total_timeout = (
+        float(getattr(config, "pass1_sample_total_timeout", PASS1_SAMPLE_TOTAL_TIMEOUT) or 0)
+        if config is not None
+        else float(PASS1_SAMPLE_TOTAL_TIMEOUT)
+    )
     runtime = _config_adaptive_runtime(config)
     if getattr(config, "_force_disable_arbitration", False):
         enable_arbitration = False
     start = time.time()
+    current_sample_attempt = 0
 
     conversations = sample.get("conversations", [])
     truncated_convs, effective_conversations_json, _initial_msgs, was_truncated, assembled_prompt_bytes = _build_labeling_messages_with_budget(
@@ -1595,6 +1601,30 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
     _cached_call1 = None  # Cache successful Call 1 across sample retries
     last_run_info = None
+
+    def _remaining_total_timeout() -> float | None:
+        if _sample_total_timeout <= 0:
+            return None
+        return _sample_total_timeout - (time.time() - start)
+
+    def _build_total_timeout_monitor() -> dict:
+        return {
+            "sample_id": sample.get("id", f"sample-{sample_idx}"),
+            "index": sample_idx,
+            "llm_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "validation_issues": [],
+            "consistency_warnings": [],
+            "low_confidence_dims": [],
+            "arbitrated": False,
+            "sample_attempt": current_sample_attempt,
+            "status": "sample_total_timeout",
+            "error": f"pass1 sample exceeded total timeout of {_sample_total_timeout:.2f}s",
+            "error_class": "timeout",
+            "retryable_infra": True,
+            "elapsed_seconds": round(time.time() - start, 2),
+        }
 
     def _record_llm_progress(delta_calls: int):
         nonlocal last_run_info
@@ -1613,57 +1643,75 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
         return last_run_info
 
     async def _call(stage: str, messages, *, temperature=0.1, max_tokens=1000):
-        if runtime is None:
-            async with sem:
-                parsed, raw, usage = await async_llm_call(
-                    http_client,
-                    messages,
-                    model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    max_retries=_max_retries,
-                    config=config,
-                    rate_limiter=rate_limiter,
-                )
-            return parsed, raw, usage, _outcome_from_usage(usage, default_status=usage.get("status_code"))
+        async def _run_call():
+            if runtime is None:
+                async with sem:
+                    parsed, raw, usage = await async_llm_call(
+                        http_client,
+                        messages,
+                        model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        max_retries=_max_retries,
+                        config=config,
+                        rate_limiter=rate_limiter,
+                    )
+                return parsed, raw, usage, _outcome_from_usage(usage, default_status=usage.get("status_code"))
 
-        quick_retries = int(getattr(config, "request_quick_retries", 0) or 0)
-        last = None
-        for quick_attempt in range(quick_retries + 1):
-            permit = await runtime.acquire(stage=stage, sample_id=sample.get("id", f"sample-{sample_idx}"))
-            try:
-                parsed, raw, usage = await async_llm_call(
-                    http_client,
-                    messages,
-                    model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    max_retries=0,
-                    config=config,
-                    rate_limiter=None,
-                )
-            finally:
-                permit.release()
-            outcome = _outcome_from_usage(usage, default_status=usage.get("status_code"))
-            runtime.observe(outcome)
-            usage = dict(usage)
-            usage["queue_wait_ms"] = permit.queue_wait_ms
-            usage["runtime_state_at_acquire"] = permit.state_at_acquire
-            usage["runtime_state"] = runtime.state
-            last = (parsed, raw, usage, outcome)
-            if parsed is not None:
+            quick_retries = int(getattr(config, "request_quick_retries", 0) or 0)
+            last = None
+            for quick_attempt in range(quick_retries + 1):
+                permit = await runtime.acquire(stage=stage, sample_id=sample.get("id", f"sample-{sample_idx}"))
+                try:
+                    parsed, raw, usage = await async_llm_call(
+                        http_client,
+                        messages,
+                        model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        max_retries=0,
+                        config=config,
+                        rate_limiter=None,
+                    )
+                finally:
+                    permit.release()
+                outcome = _outcome_from_usage(usage, default_status=usage.get("status_code"))
+                runtime.observe(outcome)
+                usage = dict(usage)
+                usage["queue_wait_ms"] = permit.queue_wait_ms
+                usage["runtime_state_at_acquire"] = permit.state_at_acquire
+                usage["runtime_state"] = runtime.state
+                last = (parsed, raw, usage, outcome)
+                if parsed is not None:
+                    break
+                if outcome.classification is OutcomeClass.TRANSIENT_ERROR and quick_attempt < quick_retries:
+                    await asyncio.sleep(0)
+                    continue
                 break
-            if outcome.classification is OutcomeClass.TRANSIENT_ERROR and quick_attempt < quick_retries:
-                await asyncio.sleep(0)
-                continue
-            break
-        return last
+            return last
+
+        remaining = _remaining_total_timeout()
+        if remaining is not None:
+            if remaining <= 0:
+                raise asyncio.TimeoutError("pass1 sample total timeout exceeded")
+            return await asyncio.wait_for(_run_call(), timeout=remaining)
+        return await _run_call()
 
     for sample_attempt in range(_max_retries_sample + 1):
+        current_sample_attempt = sample_attempt
+        remaining = _remaining_total_timeout()
+        if remaining is not None and remaining <= 0:
+            return sample_idx, None, _build_total_timeout_monitor()
         if sample_attempt > 0:
             if runtime is None:
                 base_wait = 2 ** sample_attempt * 2
-                await asyncio.sleep(base_wait + random.uniform(0, base_wait))
+                sleep_for = base_wait + random.uniform(0, base_wait)
+                remaining = _remaining_total_timeout()
+                if remaining is not None:
+                    if remaining <= 0:
+                        return sample_idx, None, _build_total_timeout_monitor()
+                    sleep_for = min(sleep_for, remaining)
+                await asyncio.sleep(sleep_for)
             else:
                 await asyncio.sleep(0)
 
@@ -1964,6 +2012,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
             monitor["elapsed_seconds"] = round(time.time() - start, 2)
             return sample_idx, labels, monitor
 
+        except asyncio.TimeoutError:
+            return sample_idx, None, _build_total_timeout_monitor()
         except Exception as e:
             monitor["status"] = f"error: {str(e)[:100]}"
             if sample_attempt < _max_retries_sample:
@@ -3113,6 +3163,7 @@ class ChunkCollector:
     sample_id_offset: int = 0  # global offset for sample IDs
     submit_order: list[int] = field(default_factory=list)
     submit_cursor: int = 0
+    last_progress_at: float = field(default_factory=time.monotonic)
 
     def __post_init__(self):
         n = len(self.samples)
@@ -3299,14 +3350,29 @@ def _chunk_waiting_flush_only(chunk: ChunkCollector) -> bool:
     return not chunk.completed and not _chunk_has_execution_work(chunk)
 
 
-def _effective_chunk_parallelism(max_active_chunks: int, *, directory_delegate: bool) -> int:
-    active = max(int(max_active_chunks or 0), 1)
-    if directory_delegate:
-        # Keep one heavyweight file active at the outer scheduler, but still
-        # allow a small amount of chunk overlap within that file so throughput
-        # does not collapse at the tail of a giant chunk.
-        return min(active, 2)
-    return active
+def _build_chunk_watchdog_monitor(
+    *,
+    sample: dict,
+    sample_idx: int,
+    stall_timeout: float,
+) -> dict:
+    return {
+        "sample_id": sample.get("id", f"sample-{sample_idx}"),
+        "index": sample_idx,
+        "llm_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "validation_issues": [],
+        "consistency_warnings": [],
+        "low_confidence_dims": [],
+        "arbitrated": False,
+        "sample_attempt": 0,
+        "status": "chunk_watchdog_timeout",
+        "error": f"chunk made no progress for {stall_timeout:.2f}s",
+        "error_class": "timeout",
+        "retryable_infra": True,
+        "watchdog_timeout_seconds": stall_timeout,
+    }
 
 
 def _flushable_chunk_indices(
@@ -3447,6 +3513,9 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     try:
         preserve_chunk_output_order = not directory_delegate
         source_exhausted = False
+        chunk_stall_timeout = float(
+            getattr(config, "chunk_stall_timeout", CHUNK_STALL_TIMEOUT) or 0
+        ) if config is not None else float(CHUNK_STALL_TIMEOUT)
 
         # --- Helper: wrap label_one with chunk tracking ---
         async def _tagged_label(coro, chunk_idx, sample_idx):
@@ -3577,6 +3646,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                     )
                     fut = asyncio.ensure_future(_tagged_label(coro, c.chunk_idx, idx))
                     pending_futures.add(fut)
+                    pending_future_meta[fut] = (c.chunk_idx, idx)
                     submitted += 1
                 if submitted == 0:
                     break
@@ -3588,7 +3658,118 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         # --- Main watermark-driven loop ---
         collectors = {}
         pending_futures = set()
+        pending_future_meta = {}
         next_chunk_to_flush = 0
+
+        def _finish_chunk_sample(c: ChunkCollector, sample_idx: int, labels, monitor, *, info: str | None = None):
+            if 0 <= sample_idx < len(c.labels):
+                c.labels[sample_idx] = labels
+                c.monitors[sample_idx] = monitor
+
+            c.done += 1
+            if labels:
+                c.ok += 1
+            else:
+                c.fail += 1
+            c.last_progress_at = time.monotonic()
+
+            if progress and sample_task is not None:
+                update_info = info or format_progress_info(
+                    c.ok,
+                    c.fail,
+                    label=f"chunk {c.chunk_idx + 1}",
+                    request_stats=rate_limiter.stats if rate_limiter else None,
+                )
+                if llm_progress_cb and monitor and not info:
+                    run_info = llm_progress_cb(0, "pass1")
+                    run_info = _decorate_run_info_with_runtime(run_info, config)
+                    if run_info:
+                        update_info = f"{update_info} • {run_info}"
+                progress.update(sample_task, advance=1, info=update_info)
+            if progress_event_cb:
+                progress_event_cb({
+                    "kind": "sample_complete",
+                    "chunk_idx": c.chunk_idx,
+                    "sample_idx": sample_idx,
+                    "labels": labels,
+                    "monitor": monitor,
+                })
+
+        async def watchdog_stalled_chunks() -> bool:
+            if chunk_stall_timeout <= 0 or not pending_future_meta:
+                return False
+
+            now = time.monotonic()
+            by_chunk: dict[int, list[tuple[asyncio.Future, int]]] = {}
+            for fut, meta in list(pending_future_meta.items()):
+                chunk_idx, sample_idx = meta
+                by_chunk.setdefault(chunk_idx, []).append((fut, sample_idx))
+
+            intervened = False
+            for chunk_idx, entries in by_chunk.items():
+                c = collectors.get(chunk_idx)
+                if c is None or c.completed or c.done >= c.label_count:
+                    continue
+                if now - c.last_progress_at < chunk_stall_timeout:
+                    continue
+
+                intervened = True
+                cancelled = []
+                cancelled_count = 0
+                for fut, sample_idx in entries:
+                    if fut.done():
+                        pending_future_meta.pop(fut, None)
+                        pending_futures.discard(fut)
+                        try:
+                            done_chunk_idx, done_sample_idx, labels, monitor = fut.result()
+                        except asyncio.CancelledError:
+                            monitor = _build_chunk_watchdog_monitor(
+                                sample=c.samples[sample_idx],
+                                sample_idx=sample_idx,
+                                stall_timeout=chunk_stall_timeout,
+                            )
+                            _finish_chunk_sample(c, sample_idx, None, monitor)
+                        except Exception as exc:
+                            monitor = _build_chunk_watchdog_monitor(
+                                sample=c.samples[sample_idx],
+                                sample_idx=sample_idx,
+                                stall_timeout=chunk_stall_timeout,
+                            )
+                            monitor["status"] = "chunk_watchdog_harvest_error"
+                            monitor["error"] = str(exc)[:200]
+                            _finish_chunk_sample(c, sample_idx, None, monitor)
+                        else:
+                            done_chunk = collectors[done_chunk_idx]
+                            _finish_chunk_sample(done_chunk, done_sample_idx, labels, monitor)
+                        continue
+
+                    pending_future_meta.pop(fut, None)
+                    pending_futures.discard(fut)
+                    fut.cancel()
+                    cancelled.append(fut)
+                    cancelled_count += 1
+
+                    if 0 <= sample_idx < len(c.monitors) and c.monitors[sample_idx] is not None:
+                        continue
+                    monitor = _build_chunk_watchdog_monitor(
+                        sample=c.samples[sample_idx],
+                        sample_idx=sample_idx,
+                        stall_timeout=chunk_stall_timeout,
+                    )
+                    info = (
+                        f"chunk {c.chunk_idx + 1} watchdog_timeout "
+                        f"(>{chunk_stall_timeout:.1f}s no progress)"
+                    )
+                    _finish_chunk_sample(c, sample_idx, None, monitor, info=info)
+
+                if cancelled:
+                    await asyncio.gather(*cancelled, return_exceptions=True)
+                pprint(
+                    f"  [chunk {chunk_idx + 1}] ! watchdog canceled {cancelled_count} stalled sample(s) "
+                    f"after {chunk_stall_timeout:.1f}s"
+                )
+
+            return intervened
 
         async def flush_ready_chunks():
             nonlocal next_chunk_to_flush
@@ -3651,44 +3832,24 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
             await flush_ready_chunks()
 
             if pending_futures:
+                if await watchdog_stalled_chunks():
+                    continue
+                wait_timeout = None
+                if chunk_stall_timeout > 0:
+                    wait_timeout = min(max(chunk_stall_timeout / 2.0, 0.05), 1.0)
                 done, pending_futures = await asyncio.wait(
-                    pending_futures, return_when=asyncio.FIRST_COMPLETED)
+                    pending_futures,
+                    timeout=wait_timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
 
                 for fut in done:
+                    pending_future_meta.pop(fut, None)
                     chunk_idx, sample_idx, labels, monitor = fut.result()
                     c = collectors[chunk_idx]
-
-                    if 0 <= sample_idx < len(c.labels):
-                        c.labels[sample_idx] = labels
-                        c.monitors[sample_idx] = monitor
-
-                    c.done += 1
-                    if labels:
-                        c.ok += 1
-                    else:
-                        c.fail += 1
-
-                    if progress and sample_task is not None:
-                        info = format_progress_info(
-                            c.ok,
-                            c.fail,
-                            label=f"chunk {c.chunk_idx + 1}",
-                            request_stats=rate_limiter.stats if rate_limiter else None,
-                        )
-                        if llm_progress_cb and monitor:
-                            run_info = llm_progress_cb(0, "pass1")
-                            run_info = _decorate_run_info_with_runtime(run_info, config)
-                            if run_info:
-                                info = f"{info} • {run_info}"
-                        progress.update(sample_task, advance=1, info=info)
-                    if progress_event_cb:
-                        progress_event_cb({
-                            "kind": "sample_complete",
-                            "chunk_idx": c.chunk_idx,
-                            "sample_idx": sample_idx,
-                            "labels": labels,
-                            "monitor": monitor,
-                        })
+                    _finish_chunk_sample(c, sample_idx, labels, monitor)
 
                 continue
 
