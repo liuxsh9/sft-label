@@ -772,13 +772,15 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
             if rate_limiter is not None:
                 await rate_limiter.acquire()
             if float(attempt_timeout or 0) > 0:
-                async with asyncio.timeout(float(attempt_timeout)):
-                    resp = await http_client.post(
+                resp = await asyncio.wait_for(
+                    http_client.post(
                         url,
                         json=payload,
                         headers=headers,
                         timeout=attempt_timeout,
-                    )
+                    ),
+                    timeout=float(attempt_timeout),
+                )
             else:
                 resp = await http_client.post(
                     url,
