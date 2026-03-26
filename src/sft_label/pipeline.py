@@ -23,6 +23,7 @@ import time
 import asyncio
 import argparse
 import random
+import math
 import re
 import os
 import sys
@@ -157,12 +158,25 @@ def _format_runtime_progress(runtime_snapshot: dict | None) -> str | None:
     in_flight = runtime_snapshot.get("in_flight")
     if state is None or eff_concurrency is None or eff_rps is None:
         return None
-    return (
-        f"runtime {state} "
-        f"c={int(eff_concurrency)} "
-        f"rps={float(eff_rps):.1f} "
-        f"in_flight={int(in_flight or 0)}"
+    parts = [f"runtime {state}"]
+    cooldown_remaining = runtime_snapshot.get("cooldown_remaining_seconds")
+    if cooldown_remaining is None:
+        cooldown_until = runtime_snapshot.get("cooldown_until")
+        if cooldown_until is not None:
+            try:
+                cooldown_remaining = max(float(cooldown_until) - time.monotonic(), 0.0)
+            except (TypeError, ValueError):
+                cooldown_remaining = None
+    if state == "open" and cooldown_remaining and cooldown_remaining > 0:
+        parts.append(f"cooldown={int(math.ceil(cooldown_remaining))}s")
+    parts.extend(
+        [
+            f"c={int(eff_concurrency)}",
+            f"rps={float(eff_rps):.1f}",
+            f"in_flight={int(in_flight or 0)}",
+        ]
     )
+    return " ".join(parts)
 
 
 def _decorate_run_info_with_runtime(run_info: str | None, config) -> str | None:
@@ -1024,11 +1038,11 @@ def _build_adaptive_runtime(config) -> AdaptiveLLMRuntime:
         degrade_abnormal_rate=float(getattr(config, "adaptive_abnormal_rate_degraded", 0.04) or 0.04),
         open_abnormal_rate=float(getattr(config, "adaptive_abnormal_rate_open", 0.60) or 0.60),
         min_observations_degraded=int(getattr(config, "adaptive_min_observations_degraded", 3) or 3),
-        min_observations_open=int(getattr(config, "adaptive_min_observations_open", 5) or 5),
+        min_observations_open=int(getattr(config, "adaptive_min_observations_open", 12) or 12),
         min_failures_degraded=int(getattr(config, "adaptive_min_failures_degraded", 2) or 2),
-        min_failures_open=int(getattr(config, "adaptive_min_failures_open", 2) or 2),
+        min_failures_open=int(getattr(config, "adaptive_min_failures_open", 4) or 4),
         open_base_cooldown=float(getattr(config, "adaptive_open_base_cooldown", 15.0) or 15.0),
-        open_max_cooldown=float(getattr(config, "adaptive_open_max_cooldown", 120.0) or 120.0),
+        open_max_cooldown=float(getattr(config, "adaptive_open_max_cooldown", 60.0) or 60.0),
         degrade_concurrency_factor=float(getattr(config, "adaptive_degrade_concurrency_factor", 0.5) or 0.5),
         degrade_rps_factor=float(getattr(config, "adaptive_degrade_rps_factor", 0.6) or 0.6),
         recovery_concurrency_step=int(getattr(config, "adaptive_recovery_concurrency_step", 2) or 2),
@@ -2363,9 +2377,17 @@ class RuntimeEtaEstimator:
         self._start_time = time.time()
         self._avg_cps = 0.0
         self._recent_cps = 0.0
+        self._eta_cps = 0.0
         self._recent_window_seconds = 30.0
         self._recent_samples = deque()
         self._warmup_samples = min(max(8, self.total_labeled_samples // 50), 30)
+
+    def _effective_eta_cps(self) -> float:
+        if self._avg_cps <= 0:
+            return self._recent_cps
+        if self._recent_cps <= 0:
+            return self._avg_cps
+        return (self._avg_cps * 0.75) + (self._recent_cps * 0.25)
 
     @staticmethod
     def _fmt_duration(seconds):
@@ -2409,21 +2431,74 @@ class RuntimeEtaEstimator:
         recent_calls = sum(item_delta for _, item_delta in self._recent_samples)
         recent_span = max(min(elapsed, self._recent_window_seconds), 1e-6)
         self._recent_cps = recent_calls / recent_span
-        self.calls_per_sec = self._recent_cps if self._recent_cps > 0 else self._avg_cps
+        self._eta_cps = self._effective_eta_cps()
+        self.calls_per_sec = self._eta_cps
 
     def eta_seconds(self):
-        if self.calls_per_sec <= 0:
+        effective_cps = self.calls_per_sec if self.calls_per_sec > 0 else self._effective_eta_cps()
+        if effective_cps <= 0:
             return None
         remaining = max(self.estimated_total_calls - self.calls_done, 0)
-        return remaining / self.calls_per_sec
+        return remaining / effective_cps
 
     def info_line(self):
         rate = f"{self.calls_per_sec:.1f}/s" if self.calls_per_sec > 0 else "warming"
         eta = self._fmt_duration(self.eta_seconds())
         avg = f"{self.avg_calls_per_sample:.2f}/sample" if self.samples_done > 0 else "n/a"
-        if self._avg_cps > 0 and self.calls_per_sec > 0:
-            return f"eta {eta} • rate {rate} • avg {self._avg_cps:.1f}/s • calls {avg}"
-        return f"eta {eta} • rate {rate} • calls {avg}"
+        if self._avg_cps > 0 or self._recent_cps > 0:
+            return (
+                f"eta {eta} • eta_rate {rate} • recent {self._recent_cps:.1f}/s "
+                f"• avg {self._avg_cps:.1f}/s • calls {avg}"
+            )
+        return f"eta {eta} • eta_rate {rate} • calls {avg}"
+
+
+def _make_pass1_postprocess_job(
+    *,
+    output_dir: Path,
+    labeled_path: Path,
+    stats: dict,
+    stats_file: str,
+    dashboard_file: str,
+    dashboard_labeled_file: str | None,
+) -> dict:
+    return {
+        "output_dir": str(output_dir),
+        "labeled_path": str(labeled_path),
+        "stats": dict(stats),
+        "stats_file": stats_file,
+        "dashboard_file": dashboard_file,
+        "dashboard_labeled_file": dashboard_labeled_file,
+    }
+
+
+def _run_pass1_postprocess_job(job: dict, pprint=print) -> None:
+    output_dir = Path(job["output_dir"])
+    labeled_path = Path(job["labeled_path"])
+    stats = dict(job.get("stats") or {})
+    stats_file = str(job.get("stats_file") or PASS1_STATS_FILE)
+    dashboard_file = str(job.get("dashboard_file") or pass1_dashboard_filename())
+    dashboard_labeled_file = job.get("dashboard_labeled_file")
+
+    _safe_write_pass1_conversation_stats(
+        output_dir,
+        labeled_path=labeled_path,
+        stats=stats,
+        pprint=pprint,
+    )
+
+    try:
+        from sft_label.tools.visualize_labels import generate_dashboard
+
+        generate_dashboard(
+            output_dir,
+            labeled_file=dashboard_labeled_file,
+            stats_file=stats_file,
+            output_file=dashboard_file,
+            quiet=True,
+        )
+    except Exception:
+        pass
 
 
 def estimate_directory_workload(
@@ -3904,20 +3979,18 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
     stats_path = output_dir / PASS1_STATS_FILE
     _write_json_atomic(stats_path, stats)
-    _safe_write_pass1_conversation_stats(
-        output_dir,
+    postprocess_job = _make_pass1_postprocess_job(
+        output_dir=output_dir,
         labeled_path=final_labeled_path,
         stats=stats,
-        pprint=pprint,
+        stats_file=PASS1_STATS_FILE,
+        dashboard_file=pass1_dashboard_filename(),
+        dashboard_labeled_file=None,
     )
-
-    # Dashboard (stats-only mode — no labeled.json)
-    try:
-        from sft_label.tools.visualize_labels import generate_dashboard
-        generate_dashboard(output_dir, labeled_file=None,
-                           stats_file=PASS1_STATS_FILE, output_file=pass1_dashboard_filename())
-    except Exception:
-        pass
+    if directory_delegate:
+        stats["_pass1_postprocess_job"] = postprocess_job
+    else:
+        _run_pass1_postprocess_job(postprocess_job, pprint=pprint)
 
     pprint(f"  ✓ {stats['success']}/{stats['total_samples']} success, "
            f"{file_elapsed:.1f}s, {stats['total_tokens']:,} tokens")
@@ -4623,6 +4696,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     collectors = {}  # file_idx -> FileCollector
     pending_futures = set()
     all_file_stats = list(skipped_stats)
+    deferred_postprocess_jobs: list[dict] = []
     file_queue = list(pending_files)
     next_to_load = 0
     eta_tracker = None
@@ -4731,7 +4805,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                     collectors.pop(file_idx, None)
             elif result_kind == "chunked_file":
                 file_idx = result["file_idx"]
-                stats = result["stats"]
+                stats = dict(result["stats"])
+                deferred_job = stats.pop("_pass1_postprocess_job", None)
                 c = collectors.get(file_idx)
                 if c is None:
                     continue
@@ -4747,6 +4822,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
 
                 update_checkpoint(checkpoint_path, str(c.rel_path), success=True)
                 all_file_stats.append(stats)
+                if deferred_job:
+                    deferred_postprocess_jobs.append(deferred_job)
 
                 labeled_done = _labeled_samples_from_stats(stats)
                 if progress and sample_task is not None and labeled_done > 0 and not c.live_progress:
@@ -4797,6 +4874,9 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
             if progress and file_task is not None:
                 progress.update(file_task, advance=1)
             collectors.pop(file_idx, None)
+
+    for job in deferred_postprocess_jobs:
+        await asyncio.to_thread(_run_pass1_postprocess_job, job, pprint)
 
     return all_file_stats
 

@@ -161,7 +161,7 @@ def test_combined_llm_progress_tracker_updates():
     assert "p2=0" in summary
 
 
-def test_combined_llm_progress_tracker_prefers_recent_window_rate(monkeypatch):
+def test_combined_llm_progress_tracker_blends_recent_and_average_rate(monkeypatch):
     now = 1000.0
     monkeypatch.setattr("sft_label.cli.time.time", lambda: now)
 
@@ -170,11 +170,14 @@ def test_combined_llm_progress_tracker_prefers_recent_window_rate(monkeypatch):
 
     now += 10.0
     tracker.update(10, "pass1")
-    assert "rate 5.0/s" in tracker.eta_line()
+    assert "eta_rate 5.0/s" in tracker.eta_line()
+    assert "recent 5.0/s" in tracker.eta_line()
+    assert "avg 5.0/s" in tracker.eta_line()
 
     now += 50.0
     info = tracker.update(10, "pass1")  # recent window now only sees the last two updates
-    assert "rate 0.3/s" in info
+    assert "eta_rate 0.8/s" in info
+    assert "recent 0.3/s" in info
     assert "avg 1.0/s" in info
 
 

@@ -374,11 +374,11 @@ class AdaptiveLLMRuntime:
         degrade_abnormal_rate: float = 0.04,
         open_abnormal_rate: float = 0.60,
         min_observations_degraded: int = 3,
-        min_observations_open: int = 5,
+        min_observations_open: int = 12,
         min_failures_degraded: int = 2,
-        min_failures_open: int = 2,
+        min_failures_open: int = 4,
         open_base_cooldown: float = 15.0,
-        open_max_cooldown: float = 120.0,
+        open_max_cooldown: float = 60.0,
         degrade_concurrency_factor: float = 0.5,
         degrade_rps_factor: float = 0.6,
         recovery_concurrency_step: int = 2,
@@ -438,31 +438,38 @@ class AdaptiveLLMRuntime:
 
     async def acquire(self, *, stage: str = "", sample_id: str = "", probe: bool = False) -> RuntimePermit:
         start = time.perf_counter()
-        while self.state == "open":
-            now = time.monotonic()
-            if now >= self._cooldown_until:
+        while True:
+            local_probe = probe
+            if self.state == "open":
+                now = time.monotonic()
+                if now >= self._cooldown_until:
+                    self._enter_probing(reason="cooldown_elapsed")
+                else:
+                    local_probe = True
+
+            gate_permit = await self.gate.acquire()
+            try:
+                await self.rate_limiter.acquire(probe=local_probe or self.state == "probing")
+            except Exception:
+                gate_permit.release()
+                raise
+
+            if self.state == "open" and time.monotonic() >= self._cooldown_until:
+                gate_permit.release()
                 self._enter_probing(reason="cooldown_elapsed")
-                break
-            await asyncio.sleep(min(self._cooldown_until - now, 0.25))
+                continue
 
-        gate_permit = await self.gate.acquire()
-        try:
-            await self.rate_limiter.acquire(probe=probe or self.state == "probing")
-        except Exception:
-            gate_permit.release()
-            raise
-
-        wait_ms = (time.perf_counter() - start) * 1000.0
-        snap = self.snapshot()
-        return RuntimePermit(
-            runtime=self,
-            gate_permit=gate_permit,
-            stage=stage,
-            sample_id=sample_id,
-            queue_wait_ms=wait_ms,
-            state_at_acquire=self.state,
-            snapshot_at_acquire=snap,
-        )
+            wait_ms = (time.perf_counter() - start) * 1000.0
+            snap = self.snapshot()
+            return RuntimePermit(
+                runtime=self,
+                gate_permit=gate_permit,
+                stage=stage,
+                sample_id=sample_id,
+                queue_wait_ms=wait_ms,
+                state_at_acquire=self.state,
+                snapshot_at_acquire=snap,
+            )
 
     def observe(self, outcome: RequestOutcome) -> None:
         now = time.monotonic()
@@ -545,6 +552,7 @@ class AdaptiveLLMRuntime:
 
     def snapshot(self) -> dict:
         rates = self._window_rates()
+        cooldown_remaining = max(self._cooldown_until - time.monotonic(), 0.0)
         return {
             "state": self.state,
             "base_concurrency": self.base_concurrency,
@@ -554,6 +562,7 @@ class AdaptiveLLMRuntime:
             "in_flight": self.gate.in_flight,
             "gate_paused": self.gate.paused,
             "cooldown_until": self._cooldown_until,
+            "cooldown_remaining_seconds": cooldown_remaining,
             "rates": rates,
             "window_size": len(self._window),
             "events_recorded": len(self._events),
@@ -638,8 +647,7 @@ class AdaptiveLLMRuntime:
         self._open_streak += 1
         cooldown = min(self.open_base_cooldown * (2 ** (self._open_streak - 1)), self.open_max_cooldown)
         self._cooldown_until = time.monotonic() + cooldown
-        self.gate.pause()
-        self.rate_limiter.pause_for(cooldown)
+        self.gate.resume()
         self._set_effective_limits(self.min_concurrency, self.min_rps)
         self._record_event("state", reason, {"state": self.state, "cooldown_seconds": cooldown})
 

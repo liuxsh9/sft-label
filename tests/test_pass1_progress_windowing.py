@@ -144,6 +144,22 @@ def test_decorate_run_info_with_runtime_snapshot_appends_effective_limits():
     assert info.endswith("runtime degraded c=8 rps=12.0 in_flight=5")
 
 
+def test_decorate_run_info_with_runtime_open_cooldown(monkeypatch):
+    config = PipelineConfig(enable_adaptive_runtime=True)
+    from sft_label.llm_runtime import AdaptiveLLMRuntime
+
+    runtime = AdaptiveLLMRuntime(base_concurrency=12, base_rps=20.0)
+    runtime.state = "open"
+    runtime._set_effective_limits(1, 0.5)
+    runtime._cooldown_until = 150.0
+    runtime.gate._in_flight = 0
+    setattr(config, "_adaptive_runtime", runtime)
+    monkeypatch.setattr("sft_label.pipeline.time.monotonic", lambda: 120.2)
+
+    info = _decorate_run_info_with_runtime("run 10/100 (10.0%) eta 10:00 rate 4.1/s", config)
+    assert info.endswith("runtime open cooldown=30s c=1 rps=0.5 in_flight=0")
+
+
 def test_finished_unflushed_chunk_does_not_block_new_chunk_admission():
     chunk = ChunkCollector(
         chunk_idx=0,
@@ -574,3 +590,51 @@ async def test_directory_chunked_delegate_reports_live_progress(monkeypatch, tmp
     assert len(sample_advances) >= 2
     assert llm_updates
     assert stats[0]["total_llm_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_directory_chunked_delegate_defers_postprocess_until_after_next_file_starts(monkeypatch, tmp_path):
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    first.write_text('{"id":"a"}\n', encoding="utf-8")
+    second.write_text('{"id":"b"}\n', encoding="utf-8")
+
+    starts: list[str] = []
+    postprocess_snapshots: list[list[str]] = []
+
+    async def fake_run_one_file_chunked(input_path, *args, **kwargs):
+        starts.append(Path(input_path).name)
+        return {
+            "total_llm_calls": 1,
+            "sparse_labeled": 1,
+            "sparse_inherited": 0,
+            "total_samples": 1,
+            "success": 1,
+            "_pass1_postprocess_job": {
+                "input_name": Path(input_path).name,
+            },
+        }
+
+    def fake_run_pass1_postprocess_job(job, pprint=print):
+        postprocess_snapshots.append(list(starts))
+
+    monkeypatch.setattr("sft_label.pipeline._should_delegate_directory_jsonl_to_chunked", lambda *args, **kwargs: True)
+    monkeypatch.setattr("sft_label.pipeline._run_one_file_chunked", fake_run_one_file_chunked)
+    monkeypatch.setattr("sft_label.pipeline._run_pass1_postprocess_job", fake_run_pass1_postprocess_job)
+    monkeypatch.setattr("sft_label.pipeline.update_checkpoint", lambda *args, **kwargs: None)
+
+    stats = await run_directory_pipeline(
+        dir_files=[(first, Path("a.jsonl")), (second, Path("b.jsonl"))],
+        run_dir=tmp_path / "run",
+        model="fake-model",
+        concurrency=2,
+        checkpoint_path=tmp_path / "checkpoint.json",
+        progress=None,
+        http_client=None,
+        sem=asyncio.Semaphore(2),
+        config=PipelineConfig(enable_adaptive_runtime=False),
+    )
+
+    assert [item["success"] for item in stats] == [1, 1]
+    assert starts == ["a.jsonl", "b.jsonl"]
+    assert postprocess_snapshots == [["a.jsonl", "b.jsonl"], ["a.jsonl", "b.jsonl"]]
