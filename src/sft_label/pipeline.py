@@ -70,6 +70,7 @@ from sft_label.config import (
     COMPACT_LABELING_REQUEST_BYTES,
     DIR_PIPELINE_WATERMARK, DIR_PIPELINE_MAX_FILES,
     CHUNK_SIZE, MAX_ACTIVE_CHUNKS, DIRECTORY_DELEGATE_CHUNK_ROWS_CAP, CHUNK_STALL_TIMEOUT,
+    CHUNK_WATCHDOG_CANCEL_LIMIT,
     PipelineConfig,
 )
 from sft_label.artifacts import (
@@ -3450,6 +3451,61 @@ def _build_chunk_watchdog_monitor(
     }
 
 
+def _chunk_watchdog_actions(
+    *,
+    entries: list[dict],
+    now: float,
+    chunk_last_progress_at: float,
+    chunk_stall_timeout: float,
+    cancel_limit: int,
+) -> dict:
+    if chunk_stall_timeout <= 0 or now - chunk_last_progress_at < chunk_stall_timeout:
+        return {
+            "harvest_sample_indices": [],
+            "cancel_sample_indices": [],
+            "skipped_still_running": 0,
+            "should_log": False,
+            "log_line": "",
+        }
+
+    harvest_sample_indices = sorted(
+        int(entry["sample_idx"])
+        for entry in entries
+        if entry.get("done")
+    )
+    stale_running = [
+        entry for entry in entries
+        if not entry.get("done") and now - float(entry.get("submitted_at", now)) >= chunk_stall_timeout
+    ]
+    stale_running.sort(key=lambda item: (float(item.get("submitted_at", now)), int(item["sample_idx"])))
+    cancel_sample_indices = [
+        int(entry["sample_idx"])
+        for entry in stale_running[:max(int(cancel_limit or 0), 1)]
+    ]
+    skipped_still_running = len(entries) - len(harvest_sample_indices) - len(cancel_sample_indices)
+
+    if harvest_sample_indices and not cancel_sample_indices:
+        log_line = f"watchdog harvested {len(harvest_sample_indices)} completed sample(s)"
+    elif cancel_sample_indices:
+        details = []
+        if harvest_sample_indices:
+            details.append(f"{len(harvest_sample_indices)} completed sample(s) already done")
+        if skipped_still_running > 0:
+            details.append(f"{skipped_still_running} still running")
+        suffix = f" ({', '.join(details)})" if details else ""
+        log_line = f"watchdog canceled {len(cancel_sample_indices)} stalled sample(s){suffix}"
+    else:
+        log_line = ""
+
+    return {
+        "harvest_sample_indices": harvest_sample_indices,
+        "cancel_sample_indices": cancel_sample_indices,
+        "skipped_still_running": skipped_still_running,
+        "should_log": bool(log_line),
+        "log_line": log_line,
+    }
+
+
 def _flushable_chunk_indices(
     collectors: dict[int, ChunkCollector],
     *,
@@ -3591,10 +3647,25 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         chunk_stall_timeout = float(
             getattr(config, "chunk_stall_timeout", CHUNK_STALL_TIMEOUT) or 0
         ) if config is not None else float(CHUNK_STALL_TIMEOUT)
+        chunk_watchdog_cancel_limit = int(
+            getattr(config, "chunk_watchdog_cancel_limit", CHUNK_WATCHDOG_CANCEL_LIMIT) or 0
+        ) if config is not None else int(CHUNK_WATCHDOG_CANCEL_LIMIT)
 
         # --- Helper: wrap label_one with chunk tracking ---
-        async def _tagged_label(coro, chunk_idx, sample_idx):
-            _, labels, monitor = await coro
+        async def _tagged_label(chunk_idx, sample_idx, sample, total):
+            _, labels, monitor = await label_one(
+                http_client,
+                sample,
+                model,
+                sample_idx,
+                total,
+                sem,
+                enable_arbitration=enable_arbitration,
+                config=config,
+                rate_limiter=rate_limiter,
+                llm_progress_cb=llm_progress_cb,
+                progress_event_cb=progress_event_cb,
+            )
             return chunk_idx, sample_idx, labels, monitor
 
         # --- Load a chunk and submit its tasks ---
@@ -3706,22 +3777,15 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                         continue
                     idx = c.submit_order[c.submit_cursor]
                     c.submit_cursor += 1
-                    coro = label_one(
-                        http_client,
-                        c.samples[idx],
-                        model,
-                        idx,
-                        len(c.samples),
-                        sem,
-                        enable_arbitration=enable_arbitration,
-                        config=config,
-                        rate_limiter=rate_limiter,
-                        llm_progress_cb=llm_progress_cb,
-                        progress_event_cb=progress_event_cb,
+                    fut = asyncio.ensure_future(
+                        _tagged_label(c.chunk_idx, idx, c.samples[idx], len(c.samples))
                     )
-                    fut = asyncio.ensure_future(_tagged_label(coro, c.chunk_idx, idx))
                     pending_futures.add(fut)
-                    pending_future_meta[fut] = (c.chunk_idx, idx)
+                    pending_future_meta[fut] = {
+                        "chunk_idx": c.chunk_idx,
+                        "sample_idx": idx,
+                        "submitted_at": time.monotonic(),
+                    }
                     submitted += 1
                 if submitted == 0:
                     break
@@ -3775,24 +3839,40 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                 return False
 
             now = time.monotonic()
-            by_chunk: dict[int, list[tuple[asyncio.Future, int]]] = {}
+            by_chunk: dict[int, list[tuple[asyncio.Future, dict]]] = {}
             for fut, meta in list(pending_future_meta.items()):
-                chunk_idx, sample_idx = meta
-                by_chunk.setdefault(chunk_idx, []).append((fut, sample_idx))
+                chunk_idx = int(meta["chunk_idx"])
+                by_chunk.setdefault(chunk_idx, []).append((fut, meta))
 
             intervened = False
             for chunk_idx, entries in by_chunk.items():
                 c = collectors.get(chunk_idx)
                 if c is None or c.completed or c.done >= c.label_count:
                     continue
-                if now - c.last_progress_at < chunk_stall_timeout:
+                action_plan = _chunk_watchdog_actions(
+                    entries=[
+                        {
+                            "sample_idx": int(meta["sample_idx"]),
+                            "submitted_at": float(meta.get("submitted_at", now)),
+                            "done": fut.done(),
+                        }
+                        for fut, meta in entries
+                    ],
+                    now=now,
+                    chunk_last_progress_at=c.last_progress_at,
+                    chunk_stall_timeout=chunk_stall_timeout,
+                    cancel_limit=chunk_watchdog_cancel_limit,
+                )
+                harvest_targets = set(action_plan["harvest_sample_indices"])
+                cancel_targets = set(action_plan["cancel_sample_indices"])
+                if not harvest_targets and not cancel_targets:
                     continue
 
                 intervened = True
                 cancelled = []
-                cancelled_count = 0
-                for fut, sample_idx in entries:
-                    if fut.done():
+                for fut, meta in entries:
+                    sample_idx = int(meta["sample_idx"])
+                    if sample_idx in harvest_targets:
                         pending_future_meta.pop(fut, None)
                         pending_futures.discard(fut)
                         try:
@@ -3818,11 +3898,13 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                             _finish_chunk_sample(done_chunk, done_sample_idx, labels, monitor)
                         continue
 
+                    if sample_idx not in cancel_targets:
+                        continue
+
                     pending_future_meta.pop(fut, None)
                     pending_futures.discard(fut)
                     fut.cancel()
                     cancelled.append(fut)
-                    cancelled_count += 1
 
                     if 0 <= sample_idx < len(c.monitors) and c.monitors[sample_idx] is not None:
                         continue
@@ -3839,10 +3921,11 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
 
                 if cancelled:
                     await asyncio.gather(*cancelled, return_exceptions=True)
-                pprint(
-                    f"  [chunk {chunk_idx + 1}] ! watchdog canceled {cancelled_count} stalled sample(s) "
-                    f"after {chunk_stall_timeout:.1f}s"
-                )
+                if action_plan["should_log"]:
+                    pprint(
+                        f"  [chunk {chunk_idx + 1}] ! {action_plan['log_line']} "
+                        f"after {chunk_stall_timeout:.1f}s"
+                    )
 
             return intervened
 
