@@ -1383,6 +1383,52 @@ class TestRegenerateDashboard:
         assert len(generated) >= 1
         assert any("dashboard" in str(p) for p in generated)
 
+    def test_inline_pass1_dashboard_lazily_rebuilds_cache_without_leaving_labeled_jsonl(self, tmp_path):
+        run_root = tmp_path / "dataset_labeled_20260326_120000"
+        source_file = run_root / "dataset" / "sample.jsonl"
+        rows = _inline_rows_for_file(
+            source_file,
+            [{
+                "id": "conv-1",
+                "conversations": [
+                    {"from": "human", "value": "q1"},
+                    {"from": "gpt", "value": "a1"},
+                    {"from": "human", "value": "q2"},
+                    {"from": "gpt", "value": "a2"},
+                ],
+            }],
+            [[_inline_full_labels("build"), _inline_full_labels("modify")]],
+            [[None, None]],
+        )
+        _write_jsonl(source_file, rows)
+
+        artifact_dir = run_root / "meta_label_data" / "files" / "sample"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        samples = [
+            {
+                "id": "turn-1",
+                "conversations": [{"from": "human", "value": "q1"}, {"from": "gpt", "value": "a1"}],
+                "metadata": {"source_file": "dataset/sample.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2},
+                "labels": _inline_full_labels("build"),
+            },
+            {
+                "id": "turn-2",
+                "conversations": [{"from": "human", "value": "q2"}, {"from": "gpt", "value": "a2"}],
+                "metadata": {"source_file": "dataset/sample.jsonl", "source_id": "conv-1", "turn_index": 2, "total_turns": 2},
+                "labels": _inline_full_labels("modify"),
+            },
+        ]
+        stats = recompute_stats_from_labeled(samples)
+        stats["input_file"] = "dataset/sample.jsonl"
+        (artifact_dir / PASS1_STATS_FILE).write_text(json.dumps(stats), encoding="utf-8")
+
+        generated = run_regenerate_dashboard(str(source_file), pass_num="1")
+
+        assert len(generated) == 1
+        assert not (artifact_dir / "labeled.jsonl").exists()
+        dashboard_path = run_root / "meta_label_data" / DASHBOARDS_DIRNAME / "dashboard_labeling_sample.html"
+        assert dashboard_path.exists()
+
     def test_pass1_dashboard_logs_progress(self, tmp_path, capsys):
         self._setup_stats_dir(tmp_path)
         generated = run_regenerate_dashboard(str(tmp_path), pass_num="1")

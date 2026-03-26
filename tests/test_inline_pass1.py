@@ -748,7 +748,7 @@ async def test_run_single_jsonl_writes_mirrored_inline_dataset(tmp_path):
     assert dataset_path.exists()
     assert (meta_dir / "stats_labeling.json").exists()
     assert (meta_dir / "monitor.jsonl").exists()
-    assert (meta_dir / "labeled.jsonl").exists()
+    assert not (meta_dir / "labeled.jsonl").exists()
 
     merged_rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines()]
     assert len(merged_rows) == 2
@@ -850,7 +850,7 @@ async def test_inline_chunked_durability_keeps_visible_dataset_path(tmp_path):
     run_dir = Path(stats["run_dir"])
     dataset_path = run_dir / "train" / "train.jsonl"
     assert dataset_path.exists()
-    assert (run_dir / "meta_label_data" / "files" / "train" / "labeled.jsonl").exists()
+    assert not (run_dir / "meta_label_data" / "files" / "train" / "labeled.jsonl").exists()
     assert not (dataset_path.parent / f".{dataset_path.name}.next").exists()
 
 
@@ -907,6 +907,8 @@ async def test_run_directory_jsonl_mirrors_source_tree(tmp_path):
     assert (run_dir / "dataset" / "multi" / "b.jsonl").exists()
     assert (run_dir / "meta_label_data" / "files" / "code" / "a" / "stats_labeling.json").exists()
     assert (run_dir / "meta_label_data" / "files" / "multi" / "b" / "stats_labeling.json").exists()
+    assert not (run_dir / "meta_label_data" / "files" / "code" / "a" / "labeled.jsonl").exists()
+    assert not (run_dir / "meta_label_data" / "files" / "multi" / "b" / "labeled.jsonl").exists()
     assert (run_dir / "meta_label_data" / "checkpoint.json").exists()
     assert (run_dir / "meta_label_data" / "summary_stats_labeling.json").exists()
 

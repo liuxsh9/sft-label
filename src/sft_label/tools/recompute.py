@@ -35,8 +35,10 @@ from sft_label.artifacts import (
     prune_dashboard_bundles,
 )
 from sft_label.inline_scoring import (
+    cleanup_inline_pass1_cache,
     discover_inline_jsonl_files,
     infer_inline_scoring_target,
+    inline_pass1_cache_exists,
     inline_source_has_embedded_scores,
     write_inline_pass1_cache,
     write_inline_scored_cache,
@@ -420,18 +422,22 @@ def _materialize_inline_recompute_artifacts(target, pass_num):
     """Rebuild transient labeled/scored caches from inline rows."""
     source_files = discover_inline_jsonl_files(target)
     selected = source_files if not target.target_path.is_file() else [target.target_path.resolve()]
+    ephemeral_pass1_cache_dirs = []
     for source_file in selected:
         artifact_dir = target.layout.file_artifact_dir(source_file)
         if pass_num in ("1", "both"):
+            had_pass1_cache = inline_pass1_cache_exists(artifact_dir)
             write_inline_pass1_cache(source_file, artifact_dir)
+            if not had_pass1_cache:
+                ephemeral_pass1_cache_dirs.append(artifact_dir)
         if pass_num in ("2", "both"):
             write_inline_scored_cache(source_file, artifact_dir)
-    return selected
+    return selected, ephemeral_pass1_cache_dirs
 
 
 def _run_recompute_inline(target, pass_num="both", workers=1):
     """Run recompute over an inline mirrored dataset via rebuildable caches."""
-    _materialize_inline_recompute_artifacts(target, pass_num)
+    _selected, ephemeral_pass1_cache_dirs = _materialize_inline_recompute_artifacts(target, pass_num)
 
     if target.target_path.is_file():
         artifact_input = target.layout.file_artifact_dir(target.target_path)
@@ -444,6 +450,8 @@ def _run_recompute_inline(target, pass_num="both", workers=1):
         output_dir=artifact_input,
         workers=workers,
     )
+    for artifact_dir in ephemeral_pass1_cache_dirs:
+        cleanup_inline_pass1_cache(artifact_dir)
 
     if target.target_path.is_file():
         if pass_num in ("1", "both"):
@@ -521,7 +529,7 @@ def _sync_inline_scored_artifacts(target, source_files):
 def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=None, workers=1):
     inline_target = infer_inline_scoring_target(input_path)
     if inline_target is not None:
-        selected = _materialize_inline_recompute_artifacts(inline_target, pass_num="2")
+        selected, _ephemeral_pass1_cache_dirs = _materialize_inline_recompute_artifacts(inline_target, pass_num="2")
         if inline_target.target_path.is_file():
             refresh_input = inline_target.layout.file_artifact_dir(inline_target.target_path)
         else:
@@ -1407,6 +1415,7 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
         if pass_num in ("1", "both"):
             pass1_stats_path = artifact_dir / PASS1_STATS_FILE
             if pass1_stats_path.exists():
+                had_pass1_cache = inline_pass1_cache_exists(artifact_dir)
                 write_inline_pass1_cache(source_file, artifact_dir)
                 _log_regenerate_dashboard(
                     f"{rel_label}: generating inline Pass 1 dashboard from {pass1_stats_path.name}"
@@ -1420,6 +1429,8 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
                     )),
                 )
                 generated.append(Path(out) if not isinstance(out, Path) else out)
+                if not had_pass1_cache:
+                    cleanup_inline_pass1_cache(artifact_dir)
 
         if pass_num in ("2", "both"):
             pass2_stats_path = artifact_dir / PASS2_STATS_FILE
@@ -2068,7 +2079,7 @@ def _run_complete_postprocess_inline(target, scope="global", open_browser=False,
     if scope not in {"global", "all"}:
         raise ValueError(f"scope must be 'global' or 'all', got {scope!r}")
 
-    selected = _materialize_inline_recompute_artifacts(target, pass_num="2")
+    selected, _ephemeral_pass1_cache_dirs = _materialize_inline_recompute_artifacts(target, pass_num="2")
     if target.target_path.is_file():
         selected = [target.target_path.resolve()]
 

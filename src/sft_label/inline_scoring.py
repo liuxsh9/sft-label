@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -308,33 +309,111 @@ def inline_source_has_embedded_scores(input_path, limit: int = 1) -> bool:
     return False
 
 
-def write_inline_labeled_cache(source_file, artifact_dir, limit: int = 0):
+def inline_pass1_cache_paths(artifact_dir) -> dict[str, Path]:
+    artifact_dir = Path(artifact_dir)
+    return {
+        "json": artifact_dir / "labeled.json",
+        "jsonl": artifact_dir / "labeled.jsonl",
+    }
+
+
+def inline_pass1_cache_exists(artifact_dir) -> bool:
+    paths = inline_pass1_cache_paths(artifact_dir)
+    return paths["json"].exists() or paths["jsonl"].exists()
+
+
+def cleanup_inline_pass1_cache(artifact_dir) -> list[Path]:
+    removed: list[Path] = []
+    for path in inline_pass1_cache_paths(artifact_dir).values():
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            continue
+    return removed
+
+
+def inline_cache_build_workers(config=None) -> int:
+    cpu_total = max(int(os.cpu_count() or 1), 1)
+    ratio = float(getattr(config, "inline_cache_build_cpu_ratio", 0.8) or 0.8)
+    ratio = min(max(ratio, 0.05), 1.0)
+    return max(1, min(cpu_total, int(cpu_total * ratio) or 1))
+
+
+def write_inline_labeled_cache(
+    source_file,
+    artifact_dir,
+    limit: int = 0,
+    *,
+    include_json: bool = False,
+    include_jsonl: bool = True,
+):
     """Materialize inline embedded Pass 1 labels as rebuildable labeled caches."""
     bundles, samples, _sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    labeled_json = artifact_dir / "labeled.json"
-    labeled_jsonl = artifact_dir / "labeled.jsonl"
-    tmp_json = labeled_json.with_name(f".{labeled_json.name}.tmp")
-    with open(tmp_json, "w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False, indent=2)
-    tmp_json.replace(labeled_json)
+    cache_paths = inline_pass1_cache_paths(artifact_dir)
+    if include_json:
+        labeled_json = cache_paths["json"]
+        tmp_json = labeled_json.with_name(f".{labeled_json.name}.tmp")
+        with open(tmp_json, "w", encoding="utf-8") as f:
+            json.dump(samples, f, ensure_ascii=False, indent=2)
+        tmp_json.replace(labeled_json)
 
-    write_jsonl_atomic(labeled_jsonl, samples)
+    if include_jsonl:
+        write_jsonl_atomic(cache_paths["jsonl"], samples)
     return bundles, samples
 
 
-def write_inline_pass1_cache(source_file, artifact_dir, limit: int = 0):
+def ensure_inline_labeled_cache(
+    source_file,
+    artifact_dir,
+    limit: int = 0,
+    *,
+    include_json: bool = False,
+    include_jsonl: bool = True,
+) -> dict:
+    cache_paths = inline_pass1_cache_paths(artifact_dir)
+    needs_json = include_json and not cache_paths["json"].exists()
+    needs_jsonl = include_jsonl and not cache_paths["jsonl"].exists()
+    if needs_json or needs_jsonl:
+        write_inline_labeled_cache(
+            source_file,
+            artifact_dir,
+            limit=limit,
+            include_json=include_json,
+            include_jsonl=include_jsonl,
+        )
+        generated = True
+    else:
+        generated = False
+    return {
+        "generated": generated,
+        "json_path": cache_paths["json"] if include_json else None,
+        "jsonl_path": cache_paths["jsonl"] if include_jsonl else None,
+    }
+
+
+def write_inline_pass1_cache(
+    source_file,
+    artifact_dir,
+    limit: int = 0,
+    *,
+    include_json: bool = True,
+    include_jsonl: bool = True,
+):
     """Materialize inline embedded Pass 1 labels, including partial/missing turns."""
     bundles, samples, _sample_to_bundle = load_inline_pass1_file(source_file, limit=limit)
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    labeled_json = artifact_dir / "labeled.json"
-    labeled_jsonl = artifact_dir / "labeled.jsonl"
-    write_json_atomic(labeled_json, samples)
-    write_jsonl_atomic(labeled_jsonl, samples)
+    cache_paths = inline_pass1_cache_paths(artifact_dir)
+    if include_json:
+        write_json_atomic(cache_paths["json"], samples)
+    if include_jsonl:
+        write_jsonl_atomic(cache_paths["jsonl"], samples)
     return bundles, samples
 
 

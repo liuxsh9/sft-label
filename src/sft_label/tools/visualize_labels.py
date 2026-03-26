@@ -514,6 +514,50 @@ def _write_dashboard_bundle(
     )
 
 
+def generate_dashboard_from_samples(
+    run_dir: Path,
+    *,
+    samples: list[dict],
+    stats: dict,
+    output_file="dashboard_labeling.html",
+    quiet: bool = False,
+    data_path: str | Path | None = None,
+    static_base_url: str | None = None,
+) -> Path:
+    """Generate an interactive Pass 1 dashboard from already-loaded samples."""
+    run_dir = Path(run_dir)
+    output_path = resolve_dashboard_output(run_dir, output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = _single_scope_payload(
+        run_dir,
+        samples,
+        compute_viz_data(samples, stats),
+        stats,
+        data_path=data_path,
+    )
+    explorer_sources = []
+    if data_path is not None:
+        explorer_sources.append(
+            {
+                "scope_id": "global",
+                "scope_path": payload["scopes"]["global"]["path"],
+                "data_path": str(data_path),
+            }
+        )
+
+    if not quiet:
+        print("  Labeling dashboard: writing dashboard bundle")
+    _write_dashboard_bundle(
+        output_path,
+        payload,
+        explorer_sources,
+        dashboard_type="labeling",
+        static_base_url=static_base_url,
+    )
+    return output_path
+
+
 def generate_dashboard(run_dir: Path, labeled_file="labeled.json",
                        stats_file=PASS1_STATS_FILE, output_file="dashboard_labeling.html",
                        quiet: bool = False,

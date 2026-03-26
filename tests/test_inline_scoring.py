@@ -336,7 +336,7 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
 
     assert stats["total_scored"] == 2
     artifact_dir = run_root / "meta_label_data" / "files" / "train"
-    assert (artifact_dir / "labeled.jsonl").exists()
+    assert not (artifact_dir / "labeled.jsonl").exists()
     assert (artifact_dir / "scored.jsonl").exists()
     assert (artifact_dir / "monitor_value.jsonl").exists()
     assert (artifact_dir / "stats_scoring.json").exists()
@@ -734,6 +734,7 @@ async def test_inline_directory_prefers_chunked_jsonl_scoring(tmp_path):
 
     stats_files = list((run_root / "meta_label_data" / "files").rglob("stats_scoring.json"))
     assert len(stats_files) == 1
+    assert not list((run_root / "meta_label_data" / "files").rglob("labeled.jsonl"))
     per_file_stats = json.loads(stats_files[0].read_text(encoding="utf-8"))
     assert per_file_stats.get("chunked") is True
     assert summary["files_processed"] == 1

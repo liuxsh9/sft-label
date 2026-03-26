@@ -22,6 +22,7 @@ import asyncio
 import random
 import re
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime
@@ -71,11 +72,13 @@ from sft_label.artifacts import (
 )
 from sft_label.inline_scoring import (
     InlineScoringTarget,
+    cleanup_inline_pass1_cache,
     discover_inline_jsonl_files,
+    ensure_inline_labeled_cache,
     infer_inline_scoring_target,
+    inline_cache_build_workers,
     load_inline_scoring_file,
     update_inline_row_with_scored_samples,
-    write_inline_labeled_cache,
 )
 from sft_label.labels import is_partial_labels, is_usable_labels
 from sft_label.label_extensions_stats import aggregate_extension_stats
@@ -4297,13 +4300,46 @@ def _generate_inline_file_dashboard(target: InlineScoringTarget, source_file: Pa
         pass
 
 
+def _should_cleanup_inline_pass1_cache(config) -> bool:
+    return bool(getattr(config, "inline_pass1_cleanup_after_score", True))
+
+
+def _rewrite_inline_file_pass2_stats(
+    *,
+    artifact_dir: Path,
+    source_file: Path,
+    rel_file_label: str,
+    stats: dict,
+    scored_samples: list[dict],
+    conversation_records: list[dict],
+) -> dict:
+    stats["input_file"] = str(source_file)
+    stats["mirrored_file"] = str(source_file)
+    stats["file"] = rel_file_label
+    stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
+    if conversation_records:
+        stats["conversation_records"] = len(conversation_records)
+    _write_json_atomic(artifact_dir / PASS2_STATS_FILE, {k: v for k, v in stats.items() if k != "_raw_scores"})
+    return stats
+
+
 async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Path,
                                    tag_stats_path, limit, config, resume=False,
-                                   llm_progress_cb=None):
+                                   llm_progress_cb=None,
+                                   *,
+                                   cleanup_pass1_cache: bool | None = None):
     """Score one mirrored inline JSONL file via rebuildable meta caches."""
     artifact_dir = target.layout.file_artifact_dir(source_file)
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    _bundles, cached_samples = write_inline_labeled_cache(source_file, artifact_dir, limit=limit)
+    cleanup_after = _should_cleanup_inline_pass1_cache(config) if cleanup_pass1_cache is None else bool(cleanup_pass1_cache)
+    ensure_inline_labeled_cache(
+        source_file,
+        artifact_dir,
+        limit=limit,
+        include_json=False,
+        include_jsonl=True,
+    )
+    rel_file_label = target.layout.relative_source_path(source_file).as_posix()
 
     effective_tag_stats = tag_stats_path
     if effective_tag_stats is None:
@@ -4323,7 +4359,7 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
         config,
         resume=resume,
         llm_progress_cb=llm_progress_cb,
-        file_label=target.layout.relative_source_path(source_file).as_posix(),
+        file_label=rel_file_label,
     )
 
     scored_samples, conversation_records = _sync_inline_scored_cache_to_dataset(
@@ -4333,13 +4369,16 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
     )
     _generate_inline_file_dashboard(target, source_file)
 
-    stats["input_file"] = str(source_file)
-    stats["mirrored_file"] = str(source_file)
-    stats["file"] = target.layout.relative_source_path(source_file).as_posix()
-    stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
-    if conversation_records:
-        stats["conversation_records"] = len(conversation_records)
-    _write_json_atomic(artifact_dir / PASS2_STATS_FILE, {k: v for k, v in stats.items() if k != "_raw_scores"})
+    stats = _rewrite_inline_file_pass2_stats(
+        artifact_dir=artifact_dir,
+        source_file=source_file,
+        rel_file_label=rel_file_label,
+        stats=stats,
+        scored_samples=scored_samples,
+        conversation_records=conversation_records,
+    )
+    if cleanup_after:
+        cleanup_inline_pass1_cache(artifact_dir)
     return stats
 
 
@@ -4348,12 +4387,9 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
                                         llm_progress_cb=None):
     """Score a mirrored inline dataset tree using meta caches under meta_label_data."""
     source_files = discover_inline_jsonl_files(target)
-    for source_file in source_files:
-        write_inline_labeled_cache(
-            source_file,
-            target.layout.file_artifact_dir(source_file),
-            limit=limit,
-        )
+    if not source_files:
+        print(f"No mirrored inline JSONL files found under {target.target_path}")
+        return {}
 
     effective_tag_stats = tag_stats_path
     if effective_tag_stats is None:
@@ -4361,64 +4397,126 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
         if summary_candidate.exists():
             effective_tag_stats = str(summary_candidate)
 
-    summary = await _run_scoring_directory(
-        target.layout.file_meta_root,
-        target.layout.meta_root,
-        effective_tag_stats,
-        limit,
-        config,
-        resume=resume,
-        llm_progress_cb=llm_progress_cb,
+    cache_prefetch_files = max(int(getattr(config, "inline_cache_prefetch_files", 2) or 0), 0)
+    cache_workers = inline_cache_build_workers(config)
+    cleanup_after = _should_cleanup_inline_pass1_cache(config)
+    batch_start = time.time()
+    print(
+        "  Inline cache prefetch: "
+        f"workers={cache_workers} lookahead={cache_prefetch_files} "
+        f"cleanup={'on' if cleanup_after else 'off'}"
     )
-
     corrected_file_stats = []
     corrected_conv_batches = []
-    for source_file in source_files:
-        artifact_dir = target.layout.file_artifact_dir(source_file)
-        scored_samples, conv_records = _sync_inline_scored_cache_to_dataset(
-            source_file,
-            artifact_dir,
-            limit=limit,
-        )
-        _generate_inline_file_dashboard(target, source_file)
+    loop = asyncio.get_running_loop()
+    cache_futures: dict[int, asyncio.Future] = {}
+    cache_executor = ThreadPoolExecutor(
+        max_workers=cache_workers,
+        thread_name_prefix="inline-pass1-cache",
+    )
 
-        stats = _load_existing_pass2_stats(artifact_dir)
-        if stats:
-            stats["input_file"] = str(source_file)
-            stats["mirrored_file"] = str(source_file)
-            stats["file"] = target.layout.relative_source_path(source_file).as_posix()
-            stats["total_scored"] = len([sample for sample in scored_samples if sample.get("value")])
-            if conv_records:
-                stats["conversation_records"] = len(conv_records)
-                corrected_conv_batches.append(conv_records)
-            _write_json_atomic(
-                artifact_dir / PASS2_STATS_FILE,
-                {k: v for k, v in stats.items() if k != "_raw_scores"},
+    def _schedule_cache_build(file_idx: int) -> None:
+        if file_idx >= len(source_files) or file_idx in cache_futures:
+            return
+        source_file = source_files[file_idx]
+        artifact_dir = target.layout.file_artifact_dir(source_file)
+        cache_futures[file_idx] = loop.run_in_executor(
+            cache_executor,
+            lambda sf=source_file, ad=artifact_dir: ensure_inline_labeled_cache(
+                sf,
+                ad,
+                limit=limit,
+                include_json=False,
+                include_jsonl=True,
+            ),
+        )
+
+    def _top_up_prefetch(start_idx: int) -> None:
+        for file_idx in range(start_idx, min(len(source_files), start_idx + cache_prefetch_files + 1)):
+            _schedule_cache_build(file_idx)
+
+    _top_up_prefetch(0)
+    try:
+        for file_idx, source_file in enumerate(source_files):
+            _schedule_cache_build(file_idx)
+            current_future = cache_futures.pop(file_idx)
+            await current_future
+            _top_up_prefetch(file_idx + 1)
+
+            stats = await _run_inline_scoring_file(
+                target,
+                source_file,
+                effective_tag_stats,
+                limit,
+                config,
+                resume=resume,
+                llm_progress_cb=llm_progress_cb,
+                cleanup_pass1_cache=cleanup_after,
             )
             corrected_file_stats.append(stats)
 
+            conv_path = target.layout.file_artifact_path(source_file, "conversation_scores.json")
+            if conv_path.exists():
+                try:
+                    conv_records = json.loads(conv_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    conv_records = []
+                if isinstance(conv_records, list) and conv_records:
+                    corrected_conv_batches.append(conv_records)
+    finally:
+        for file_idx, future in list(cache_futures.items()):
+            if not future.done():
+                future.cancel()
+                continue
+            try:
+                future.result()
+            except Exception:
+                continue
+            if cleanup_after:
+                cleanup_inline_pass1_cache(target.layout.file_artifact_dir(source_files[file_idx]))
+        cache_executor.shutdown(wait=False, cancel_futures=True)
+
     if corrected_file_stats:
-        corrected_summary = _merge_value_stats(corrected_file_stats)
+        summary = _merge_value_stats(corrected_file_stats)
+    else:
+        summary = {
+            "total_scored": 0,
+            "total_failed": 0,
+            "total_estimated": 0,
+            "total_llm_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "per_file_summary": [],
+            "score_distributions": {},
+            "histograms": {},
+            "thinking_mode_stats": {},
+            "flag_counts": {},
+            "flag_value_impact": {},
+            "value_by_tag": {},
+            "selection_by_tag": {},
+            "keep_rates": {},
+            "keep_rate_7": 0,
+            "mean_turns": 0,
+        }
+    summary["files_processed"] = len(corrected_file_stats)
+    summary["model"] = config.scoring_model
+    summary["total_elapsed_seconds"] = round(time.time() - batch_start, 1)
+    summary["timestamp"] = datetime.now().isoformat()
+    summary["planned_files"] = len(source_files)
+    summary["planned_samples"] = sum(int(stats.get("total_estimated", 0) or 0) for stats in corrected_file_stats)
+    if corrected_file_stats:
+        exemplar = corrected_file_stats[0]
         for key in (
-            "elapsed_seconds",
-            "model",
-            "files_processed",
-            "planned_files",
-            "planned_samples",
-            "planned_baseline_llm_calls",
-            "planned_initial_llm_calls",
-            "planning_elapsed_seconds",
             "rarity_config",
-            "http_request_stats",
+            "extension_rarity_config",
             "prompt_mode",
             "compact_prompt",
             "value_truncation_budget",
+            "http_request_stats",
         ):
-            if key in summary:
-                corrected_summary[key] = summary[key]
-        corrected_summary["run_dir"] = str(target.layout.run_root)
-        corrected_summary["input_path"] = str(target.target_path)
-        summary = corrected_summary
+            if key in exemplar:
+                summary[key] = copy.deepcopy(exemplar[key])
 
     summary["run_dir"] = str(target.layout.run_root)
     summary["input_path"] = str(target.target_path)
