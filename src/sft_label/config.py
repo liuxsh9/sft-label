@@ -74,6 +74,10 @@ MAX_ACTIVE_CHUNKS = 3          # max chunks in memory simultaneously
 DIRECTORY_DELEGATE_CHUNK_ROWS_CAP = 512  # hard cap for chunk rows when directory scheduler delegates a giant JSONL
 CHUNK_STALL_TIMEOUT = 180.0    # fail/recover a chunk if it makes no progress for too long
 CHUNK_WATCHDOG_CANCEL_LIMIT = 64  # max stale in-flight samples the watchdog cancels per chunk per pass
+INLINE_PASS1_PERSIST_CACHE = False  # inline mirrored Pass 1 no longer persists large flattened labeled caches by default
+INLINE_PASS1_CLEANUP_AFTER_SCORE = True  # drop rebuildable inline Pass 1 caches after successful Pass 2/rebuild consumers
+INLINE_CACHE_PREFETCH_FILES = 2  # number of next inline files to prebuild pass1 cache for while current file is scoring
+INLINE_CACHE_BUILD_CPU_RATIO = 0.8  # background inline cache builders use about 80% of CPU cores by default
 
 # ─── Sparse Sampling (multi-turn slices) ──────────────
 SPARSE_FULL_LABEL_COUNT = 8   # first N slices always labeled
@@ -462,6 +466,10 @@ class PipelineConfig:
     directory_delegate_chunk_rows_cap: int = DIRECTORY_DELEGATE_CHUNK_ROWS_CAP
     chunk_stall_timeout: float = CHUNK_STALL_TIMEOUT
     chunk_watchdog_cancel_limit: int = CHUNK_WATCHDOG_CANCEL_LIMIT
+    inline_pass1_persist_cache: bool = INLINE_PASS1_PERSIST_CACHE
+    inline_pass1_cleanup_after_score: bool = INLINE_PASS1_CLEANUP_AFTER_SCORE
+    inline_cache_prefetch_files: int = INLINE_CACHE_PREFETCH_FILES
+    inline_cache_build_cpu_ratio: float = INLINE_CACHE_BUILD_CPU_RATIO
     sparse_full_label_count: int = SPARSE_FULL_LABEL_COUNT
     sparse_gap_multiplier: float = SPARSE_GAP_MULTIPLIER
     sparse_min_gap: int = SPARSE_MIN_GAP

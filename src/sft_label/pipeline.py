@@ -2462,6 +2462,7 @@ def _make_pass1_postprocess_job(
     stats_file: str,
     dashboard_file: str,
     dashboard_labeled_file: str | None,
+    cleanup_labeled_path: bool = False,
 ) -> dict:
     return {
         "output_dir": str(output_dir),
@@ -2470,6 +2471,7 @@ def _make_pass1_postprocess_job(
         "stats_file": stats_file,
         "dashboard_file": dashboard_file,
         "dashboard_labeled_file": dashboard_labeled_file,
+        "cleanup_labeled_path": bool(cleanup_labeled_path),
     }
 
 
@@ -2480,6 +2482,7 @@ def _run_pass1_postprocess_job(job: dict, pprint=print) -> None:
     stats_file = str(job.get("stats_file") or PASS1_STATS_FILE)
     dashboard_file = str(job.get("dashboard_file") or pass1_dashboard_filename())
     dashboard_labeled_file = job.get("dashboard_labeled_file")
+    cleanup_labeled_path = bool(job.get("cleanup_labeled_path"))
 
     _safe_write_pass1_conversation_stats(
         output_dir,
@@ -2500,6 +2503,13 @@ def _run_pass1_postprocess_job(job: dict, pprint=print) -> None:
         )
     except Exception:
         pass
+    finally:
+        if cleanup_labeled_path:
+            try:
+                if labeled_path.exists():
+                    labeled_path.unlink()
+            except OSError:
+                pass
 
 
 def estimate_directory_workload(
@@ -2706,6 +2716,10 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
     failed_samples_file = f"failed_samples{suffix}.jsonl"
     unmapped_events_file = f"unmapped_events{suffix}.jsonl"
 
+    persist_inline_pass1_cache = bool(
+        getattr(collector.config, "inline_pass1_persist_cache", False)
+    ) if collector.config is not None else False
+
     if collector.inline_output:
         merge_result = merge_pass1_results(
             collector.row_bundles or [],
@@ -2719,8 +2733,9 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
             updated_sample_indices=collector.updated_sample_indices,
         )
         _write_jsonl_atomic(collector.dataset_output_path, merge_result.rows)
-        _write_json_atomic(output_dir / labeled_json, merge_result.samples)
-        _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
+        if persist_inline_pass1_cache:
+            _write_json_atomic(output_dir / labeled_json, merge_result.samples)
+            _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
         _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
         _write_jsonl_atomic(output_dir / unmapped_events_file, build_unmapped_event_records(merge_result.samples))
         labeled_samples_for_dashboard = merge_result.samples
@@ -2798,10 +2813,22 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
     # Per-file dashboard
     if generate_dashboard:
         try:
-            from sft_label.tools.visualize_labels import generate_dashboard
-            generate_dashboard(output_dir, labeled_file=labeled_json,
-                               stats_file=stats_file, output_file=dashboard_file,
-                               quiet=True)
+            if collector.inline_output and not persist_inline_pass1_cache:
+                from sft_label.tools.visualize_labels import generate_dashboard_from_samples
+
+                generate_dashboard_from_samples(
+                    output_dir,
+                    samples=labeled_samples_for_dashboard,
+                    stats=stats,
+                    output_file=dashboard_file,
+                    quiet=True,
+                )
+            else:
+                from sft_label.tools.visualize_labels import generate_dashboard
+
+                generate_dashboard(output_dir, labeled_file=labeled_json,
+                                   stats_file=stats_file, output_file=dashboard_file,
+                                   quiet=True)
         except Exception:
             pass
 
@@ -3613,6 +3640,9 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     output_dir.mkdir(parents=True, exist_ok=True)
     if dataset_output_path is None:
         dataset_output_path = output_dir / input_path.name
+    persist_inline_pass1_cache = bool(
+        getattr(config, "inline_pass1_persist_cache", False)
+    ) if config is not None else False
     final_dataset_path = Path(dataset_output_path)
     final_labeled_path = output_dir / "labeled.jsonl"
     final_monitor_path = output_dir / "monitor.jsonl"
@@ -4069,6 +4099,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         stats_file=PASS1_STATS_FILE,
         dashboard_file=pass1_dashboard_filename(),
         dashboard_labeled_file=None,
+        cleanup_labeled_path=bool(inline_output and not persist_inline_pass1_cache),
     )
     if directory_delegate:
         stats["_pass1_postprocess_job"] = postprocess_job
@@ -4286,6 +4317,10 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
     failed_samples_file = f"failed_samples{suffix}.jsonl"
     unmapped_events_file = f"unmapped_events{suffix}.jsonl"
 
+    persist_inline_pass1_cache = bool(
+        getattr(config, "inline_pass1_persist_cache", False)
+    ) if config is not None else False
+
     if inline_output:
         merge_result = merge_pass1_results(
             row_bundles or [],
@@ -4299,8 +4334,9 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             updated_sample_indices=prepared_batch.updated_sample_indices if prepared_batch else None,
         )
         _write_jsonl_atomic(dataset_output_path, merge_result.rows)
-        _write_json_atomic(output_dir / labeled_json, merge_result.samples)
-        _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
+        if persist_inline_pass1_cache:
+            _write_json_atomic(output_dir / labeled_json, merge_result.samples)
+            _write_jsonl_atomic(output_dir / labeled_jsonl, merge_result.samples)
         _write_jsonl_atomic(output_dir / monitor_file, merge_result.monitor_records)
         _write_jsonl_atomic(output_dir / unmapped_events_file, build_unmapped_event_records(merge_result.samples))
         labeled_samples_for_dashboard = merge_result.samples
@@ -4386,9 +4422,20 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
 
     # Per-file dashboard
     try:
-        from sft_label.tools.visualize_labels import generate_dashboard
-        generate_dashboard(output_dir, labeled_file=labeled_json,
-                           stats_file=stats_file, output_file=dashboard_file)
+        if inline_output and not persist_inline_pass1_cache:
+            from sft_label.tools.visualize_labels import generate_dashboard_from_samples
+
+            generate_dashboard_from_samples(
+                output_dir,
+                samples=labeled_samples_for_dashboard,
+                stats=stats,
+                output_file=dashboard_file,
+                quiet=True,
+            )
+        else:
+            from sft_label.tools.visualize_labels import generate_dashboard
+            generate_dashboard(output_dir, labeled_file=labeled_json,
+                               stats_file=stats_file, output_file=dashboard_file)
     except Exception:
         pass
 
