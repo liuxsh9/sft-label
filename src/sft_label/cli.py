@@ -828,6 +828,14 @@ class _CombinedLLMProgressTracker:
         self._recent_cps = 0.0
         self._recent_window_seconds = 30.0
         self._recent_samples = deque()
+        self._eta_cps = 0.0
+
+    def _effective_eta_cps(self) -> float:
+        if self._avg_cps <= 0:
+            return self._recent_cps
+        if self._recent_cps <= 0:
+            return self._avg_cps
+        return (self._avg_cps * 0.75) + (self._recent_cps * 0.25)
 
     def update(self, delta_calls: int, stage: str) -> str:
         delta = max(int(delta_calls or 0), 0)
@@ -847,27 +855,36 @@ class _CombinedLLMProgressTracker:
         recent_calls = sum(calls for _, calls in self._recent_samples)
         recent_span = max(min(elapsed, self._recent_window_seconds), 1e-6)
         self._recent_cps = recent_calls / recent_span
+        self._eta_cps = self._effective_eta_cps()
 
         return self.eta_line()
 
     def eta_seconds(self):
-        effective_cps = self._recent_cps if self._recent_cps > 0 else self._avg_cps
+        effective_cps = self._eta_cps if self._eta_cps > 0 else self._effective_eta_cps()
         if effective_cps <= 0:
             return None
         remaining = max(self.planned_total_calls - self.calls_done, 0)
         return remaining / effective_cps
 
     def eta_line(self) -> str:
-        if self._recent_cps > 0:
-            cps = f"{self._recent_cps:.1f}/s"
+        if self._eta_cps > 0:
+            cps = f"{self._eta_cps:.1f}/s"
         elif self._avg_cps > 0:
             cps = f"{self._avg_cps:.1f}/s"
         else:
             cps = "warming"
         eta = _format_eta(self.eta_seconds())
         if self._avg_cps > 0 and self._recent_cps > 0:
-            return f"{self.progress_line()} eta {eta} rate {cps} avg {self._avg_cps:.1f}/s"
-        return f"{self.progress_line()} eta {eta} rate {cps}"
+            return (
+                f"{self.progress_line()} eta {eta} "
+                f"eta_rate {cps} recent {self._recent_cps:.1f}/s avg {self._avg_cps:.1f}/s"
+            )
+        if self._avg_cps > 0:
+            return (
+                f"{self.progress_line()} eta {eta} "
+                f"eta_rate {cps} recent {self._recent_cps:.1f}/s avg {self._avg_cps:.1f}/s"
+            )
+        return f"{self.progress_line()} eta {eta} eta_rate {cps}"
 
     def summary_line(self) -> str:
         return f"{self.eta_line()} p1={self.pass1_calls} p2={self.pass2_calls}"

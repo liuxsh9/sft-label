@@ -290,7 +290,7 @@ async def test_adaptive_runtime_state_transitions_and_snapshot():
     runtime.observe(classify_http_result(429))
     runtime.observe(classify_http_result(429))
     assert runtime.state == "open"
-    assert runtime.snapshot()["gate_paused"] is True
+    assert runtime.snapshot()["gate_paused"] is False
 
     await asyncio.sleep(0.03)
     permit = await runtime.acquire(stage="pass1", sample_id="s-1")
@@ -309,6 +309,66 @@ async def test_adaptive_runtime_state_transitions_and_snapshot():
     assert snap["effective_concurrency"] == 8
     assert snap["effective_rps"] == 20.0
     assert "rates" in snap
+
+
+@pytest.mark.asyncio
+async def test_adaptive_runtime_open_state_keeps_low_flow_instead_of_hard_pause():
+    runtime = AdaptiveLLMRuntime(
+        base_concurrency=4,
+        base_rps=50.0,
+        min_concurrency=1,
+        min_rps=50.0,
+        min_observations_degraded=1,
+        min_observations_open=1,
+        min_failures_degraded=1,
+        min_failures_open=1,
+        open_timeout_rate=0.5,
+        open_base_cooldown=0.2,
+        open_max_cooldown=0.2,
+    )
+
+    runtime.observe(classify_exception(asyncio.TimeoutError("timeout")))
+    assert runtime.state == "open"
+
+    started = time.perf_counter()
+    permit = await asyncio.wait_for(runtime.acquire(stage="pass1", sample_id="keepalive"), timeout=0.1)
+    elapsed = time.perf_counter() - started
+    permit.release()
+
+    assert elapsed < 0.1
+    assert runtime.state == "open"
+
+
+@pytest.mark.asyncio
+async def test_adaptive_runtime_waiters_crossing_cooldown_enter_probing_promptly():
+    runtime = AdaptiveLLMRuntime(
+        base_concurrency=1,
+        base_rps=1000.0,
+        min_concurrency=1,
+        min_rps=1000.0,
+        min_observations_degraded=1,
+        min_observations_open=1,
+        min_failures_degraded=1,
+        min_failures_open=1,
+        open_timeout_rate=0.5,
+        open_base_cooldown=0.02,
+        open_max_cooldown=0.02,
+    )
+
+    runtime.observe(classify_exception(asyncio.TimeoutError("timeout")))
+    assert runtime.state == "open"
+
+    first = await runtime.acquire(stage="pass1", sample_id="first")
+
+    waiter = asyncio.create_task(runtime.acquire(stage="pass1", sample_id="second"))
+    await asyncio.sleep(0.03)
+    first.release()
+
+    second = await asyncio.wait_for(waiter, timeout=0.1)
+
+    assert runtime.state == "probing"
+    assert second.state_at_acquire == "probing"
+    second.release()
 
 
 @pytest.mark.asyncio

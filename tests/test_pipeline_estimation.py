@@ -65,6 +65,30 @@ def test_runtime_eta_estimator_adapts_upward():
     assert tracker.eta_seconds() is not None
 
 
+def test_runtime_eta_estimator_blends_recent_and_average_rate(monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr("sft_label.pipeline.time.time", lambda: now)
+
+    tracker = RuntimeEtaEstimator(total_labeled_samples=200, initial_estimated_calls=200)
+    tracker.calls_done = 40
+    tracker.record_call_delta(40)
+
+    now += 10.0
+    tracker.calls_done = 50
+    tracker.record_call_delta(10)
+    assert tracker.calls_per_sec == pytest.approx(5.0)
+
+    now += 50.0
+    tracker.calls_done = 60
+    tracker.record_call_delta(10)
+
+    assert tracker.calls_per_sec == pytest.approx(0.8333333333, rel=1e-3)
+    info = tracker.info_line()
+    assert "eta_rate 0.8/s" in info
+    assert "recent 0.3/s" in info
+    assert "avg 1.0/s" in info
+
+
 def test_estimate_directory_workload_preserves_rng_state(tmp_path):
     _write_samples(tmp_path / "c.json", 10)
     files = [(a, r) for a, r in discover_input_files(tmp_path) if r is not None]
