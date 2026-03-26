@@ -3309,6 +3309,30 @@ def _effective_chunk_parallelism(max_active_chunks: int, *, directory_delegate: 
     return active
 
 
+def _flushable_chunk_indices(
+    collectors: dict[int, ChunkCollector],
+    *,
+    next_chunk_to_flush: int,
+    preserve_order: bool,
+) -> list[int]:
+    if preserve_order:
+        ready: list[int] = []
+        chunk_idx = next_chunk_to_flush
+        while True:
+            chunk = collectors.get(chunk_idx)
+            if chunk is None or chunk.completed or chunk.done < chunk.label_count:
+                break
+            ready.append(chunk_idx)
+            chunk_idx += 1
+        return ready
+
+    return [
+        chunk_idx
+        for chunk_idx, chunk in sorted(collectors.items())
+        if not chunk.completed and chunk.done >= chunk.label_count
+    ]
+
+
 async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  enable_arbitration=True, limit=0, shuffle=False,
                                  progress=None, sample_task=None, config=None,
@@ -3421,6 +3445,9 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
     out_unmapped = open(output_dir / "unmapped_events.jsonl", "w", encoding="utf-8")
 
     try:
+        preserve_chunk_output_order = not directory_delegate
+        source_exhausted = False
+
         # --- Helper: wrap label_one with chunk tracking ---
         async def _tagged_label(coro, chunk_idx, sample_idx):
             _, labels, monitor = await coro
@@ -3431,10 +3458,11 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         global_sample_offset = 0
 
         def load_next_chunk(pending_futures):
-            nonlocal chunks_loaded, global_sample_offset
+            nonlocal chunks_loaded, global_sample_offset, source_exhausted
             try:
                 row_bundles = next(chunk_gen)
             except StopIteration:
+                source_exhausted = True
                 return None
 
             prepared = prepare_inline_pass1_batch(
@@ -3565,98 +3593,118 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         async def flush_ready_chunks():
             nonlocal next_chunk_to_flush
             while True:
-                c = collectors.get(next_chunk_to_flush)
-                if c is None or c.completed:
+                flushable = _flushable_chunk_indices(
+                    collectors,
+                    next_chunk_to_flush=next_chunk_to_flush,
+                    preserve_order=preserve_chunk_output_order,
+                )
+                if not flushable:
                     break
-                if c.done < c.label_count:
-                    break
-                # Retry infra failures once, within the chunk boundary, so we can
-                # merge/rewrite outputs deterministically.
-                if config and getattr(config, "enable_stage_recovery_sweep", False):
-                    inherited = set(c.inherit_map.keys()) if c.inherit_map else set()
-                    candidate = [
-                        i for i in range(len(c.labels))
-                        if i not in inherited and (c.labels[i] is None or is_partial_labels(c.labels[i]))
-                    ]
-                    recovered = await _run_pass1_recovery_sweep(
-                        samples=c.samples,
-                        all_labels=c.labels,
-                        all_monitors=c.monitors,
-                        candidate_indices=candidate,
-                        http_client=http_client,
-                        model=model,
-                        config=config,
-                        enable_arbitration=enable_arbitration,
-                    )
-                    if recovered:
-                        c.ok = sum(1 for i in range(len(c.labels)) if is_usable_labels(c.labels[i]))
-                        c.fail = sum(
-                            1 for i in range(len(c.labels))
-                            if (c.labels[i] is None or is_partial_labels(c.labels[i])) and i not in inherited
+                for chunk_idx in flushable:
+                    c = collectors.get(chunk_idx)
+                    if c is None or c.completed:
+                        continue
+                    if c.done < c.label_count:
+                        continue
+                    # Retry infra failures once, within the chunk boundary, so we can
+                    # merge/rewrite outputs deterministically.
+                    if config and getattr(config, "enable_stage_recovery_sweep", False):
+                        inherited = set(c.inherit_map.keys()) if c.inherit_map else set()
+                        candidate = [
+                            i for i in range(len(c.labels))
+                            if i not in inherited and (c.labels[i] is None or is_partial_labels(c.labels[i]))
+                        ]
+                        recovered = await _run_pass1_recovery_sweep(
+                            samples=c.samples,
+                            all_labels=c.labels,
+                            all_monitors=c.monitors,
+                            candidate_indices=candidate,
+                            http_client=http_client,
+                            model=model,
+                            config=config,
+                            enable_arbitration=enable_arbitration,
                         )
-                _flush_chunk(c, out_rows, out_labeled, out_monitor, out_failed, out_unmapped,
-                             stats_acc, input_path, pprint=pprint,
-                             run_failure_log_path=run_failure_log_path)
-                pprint(f"  [chunk {c.chunk_idx + 1}] ✓ {c.ok} ok, {c.fail} fail — flushed")
-                next_chunk_to_flush += 1
+                        if recovered:
+                            c.ok = sum(1 for i in range(len(c.labels)) if is_usable_labels(c.labels[i]))
+                            c.fail = sum(
+                                1 for i in range(len(c.labels))
+                                if (c.labels[i] is None or is_partial_labels(c.labels[i])) and i not in inherited
+                            )
+                    _flush_chunk(c, out_rows, out_labeled, out_monitor, out_failed, out_unmapped,
+                                 stats_acc, input_path, pprint=pprint,
+                                 run_failure_log_path=run_failure_log_path)
+                    pprint(f"  [chunk {c.chunk_idx + 1}] ✓ {c.ok} ok, {c.fail} fail — flushed")
+                while True:
+                    next_ready = collectors.get(next_chunk_to_flush)
+                    if next_ready is None or not next_ready.completed:
+                        break
+                    next_chunk_to_flush += 1
 
         if progress and sample_task is not None:
             progress.update(sample_task, total=0, completed=0, visible=True, info="loading...")
 
-        # Initial load
-        maybe_load_more(pending_futures, collectors)
-        top_up_submissions(pending_futures, collectors)
-        await flush_ready_chunks()
-
         file_start = time.time()
 
-        while pending_futures:
-            done, pending_futures = await asyncio.wait(
-                pending_futures, return_when=asyncio.FIRST_COMPLETED)
-
-            for fut in done:
-                chunk_idx, sample_idx, labels, monitor = fut.result()
-                c = collectors[chunk_idx]
-
-                if 0 <= sample_idx < len(c.labels):
-                    c.labels[sample_idx] = labels
-                    c.monitors[sample_idx] = monitor
-
-                c.done += 1
-                if labels:
-                    c.ok += 1
-                else:
-                    c.fail += 1
-
-                if progress and sample_task is not None:
-                    info = format_progress_info(
-                        c.ok,
-                        c.fail,
-                        label=f"chunk {c.chunk_idx + 1}",
-                        request_stats=rate_limiter.stats if rate_limiter else None,
-                    )
-                    if llm_progress_cb and monitor:
-                        run_info = llm_progress_cb(0, "pass1")
-                        run_info = _decorate_run_info_with_runtime(run_info, config)
-                        if run_info:
-                            info = f"{info} • {run_info}"
-                    progress.update(sample_task, advance=1, info=info)
-                if progress_event_cb:
-                    progress_event_cb({
-                        "kind": "sample_complete",
-                        "chunk_idx": c.chunk_idx,
-                        "sample_idx": sample_idx,
-                        "labels": labels,
-                        "monitor": monitor,
-                    })
-
-            await flush_ready_chunks()
-            # After processing batch, check if we should load more chunks
+        while True:
             maybe_load_more(pending_futures, collectors)
             top_up_submissions(pending_futures, collectors)
             await flush_ready_chunks()
 
-        await flush_ready_chunks()
+            if pending_futures:
+                done, pending_futures = await asyncio.wait(
+                    pending_futures, return_when=asyncio.FIRST_COMPLETED)
+
+                for fut in done:
+                    chunk_idx, sample_idx, labels, monitor = fut.result()
+                    c = collectors[chunk_idx]
+
+                    if 0 <= sample_idx < len(c.labels):
+                        c.labels[sample_idx] = labels
+                        c.monitors[sample_idx] = monitor
+
+                    c.done += 1
+                    if labels:
+                        c.ok += 1
+                    else:
+                        c.fail += 1
+
+                    if progress and sample_task is not None:
+                        info = format_progress_info(
+                            c.ok,
+                            c.fail,
+                            label=f"chunk {c.chunk_idx + 1}",
+                            request_stats=rate_limiter.stats if rate_limiter else None,
+                        )
+                        if llm_progress_cb and monitor:
+                            run_info = llm_progress_cb(0, "pass1")
+                            run_info = _decorate_run_info_with_runtime(run_info, config)
+                            if run_info:
+                                info = f"{info} • {run_info}"
+                        progress.update(sample_task, advance=1, info=info)
+                    if progress_event_cb:
+                        progress_event_cb({
+                            "kind": "sample_complete",
+                            "chunk_idx": c.chunk_idx,
+                            "sample_idx": sample_idx,
+                            "labels": labels,
+                            "monitor": monitor,
+                        })
+
+                continue
+
+            if source_exhausted and all(c.completed for c in collectors.values()):
+                break
+
+            stalled_chunks = [
+                c.chunk_idx
+                for c in collectors.values()
+                if not c.completed and not c.has_pending_submission() and c.done < c.label_count
+            ]
+            if source_exhausted and stalled_chunks:
+                raise RuntimeError(
+                    "chunked pass1 stalled with unfinished chunks and no in-flight requests: "
+                    + ",".join(str(idx) for idx in stalled_chunks)
+                )
 
         file_elapsed = time.time() - file_start
 
