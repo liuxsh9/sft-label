@@ -6,6 +6,9 @@ import pytest
 
 from sft_label.config import PipelineConfig
 from sft_label.pipeline import (
+    ChunkCollector,
+    _chunk_has_execution_work,
+    _effective_chunk_parallelism,
     _effective_chunk_row_count,
     run_directory_pipeline,
     run_one_file,
@@ -107,6 +110,34 @@ async def test_run_one_file_limits_inflight_pass1_tasks(monkeypatch, tmp_path):
 def test_effective_chunk_row_count_caps_giant_chunks_for_incremental_flush():
     assert _effective_chunk_row_count(5000, 600) == 1200
     assert _effective_chunk_row_count(64, 600) == 64
+
+
+def test_directory_delegate_chunk_row_count_uses_safe_cap():
+    assert _effective_chunk_row_count(
+        5000,
+        1300,
+        directory_delegate=True,
+        directory_delegate_cap=512,
+    ) == 512
+
+
+def test_directory_delegate_keeps_some_chunk_overlap_without_unbounded_fanout():
+    assert _effective_chunk_parallelism(3, directory_delegate=True) == 2
+    assert _effective_chunk_parallelism(1, directory_delegate=True) == 1
+    assert _effective_chunk_parallelism(3, directory_delegate=False) == 3
+
+
+def test_finished_unflushed_chunk_does_not_block_new_chunk_admission():
+    chunk = ChunkCollector(
+        chunk_idx=0,
+        samples=[{"id": "s-1"}],
+        label_count=1,
+    )
+    chunk.submit_order = [0]
+    chunk.submit_cursor = 1
+    chunk.done = 1
+
+    assert _chunk_has_execution_work(chunk) is False
 
 
 @pytest.mark.asyncio

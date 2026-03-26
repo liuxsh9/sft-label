@@ -9,7 +9,7 @@ import pytest
 
 from sft_label.config import PipelineConfig
 from sft_label.llm_runtime import AdaptiveLLMRuntime, OutcomeClass, RequestOutcome
-from sft_label.pipeline import label_one
+from sft_label.pipeline import async_llm_call, label_one
 
 
 def _sample_row(user_text: str = "q1") -> dict:
@@ -345,3 +345,78 @@ async def test_label_one_adaptive_path_bypasses_shared_semaphore():
 
     assert total_calls == 4
     assert peak_active_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_async_llm_call_enforces_hard_per_attempt_timeout():
+    class _SlowClient:
+        async def post(self, *args, **kwargs):
+            await asyncio.sleep(1)
+            raise AssertionError("hard timeout should cancel before this returns")
+
+    config = PipelineConfig(
+        request_timeout=0.01,
+        request_timeout_escalation=[0.01],
+    )
+
+    parsed, raw, usage = await asyncio.wait_for(
+        async_llm_call(
+            _SlowClient(),
+            [{"role": "user", "content": "q"}],
+            "mock-model",
+            max_retries=0,
+            config=config,
+            rate_limiter=None,
+        ),
+        timeout=1,
+    )
+
+    assert parsed is None
+    assert "TimeoutError" in (usage.get("error") or "")
+    assert usage.get("exception_type") == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_label_one_returns_after_hard_timeout_instead_of_hanging():
+    class _SlowClient:
+        async def post(self, *args, **kwargs):
+            await asyncio.sleep(1)
+            raise AssertionError("hard timeout should cancel before this returns")
+
+    async def _no_sleep(_seconds, *_args, **_kwargs):
+        return None
+
+    config = PipelineConfig(
+        sample_max_retries=1,
+        max_retries=0,
+        enable_adaptive_runtime=False,
+        request_quick_retries=0,
+        request_timeout=0.01,
+        request_timeout_escalation=[0.01],
+    )
+
+    sample = {
+        "id": "s-timeout",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+    }
+
+    with patch("sft_label.pipeline.asyncio.sleep", side_effect=_no_sleep):
+        _, labels, monitor = await asyncio.wait_for(
+            label_one(
+                http_client=_SlowClient(),
+                sample=sample,
+                model="mock",
+                sample_idx=0,
+                total=1,
+                sem=asyncio.Semaphore(1),
+                enable_arbitration=False,
+                config=config,
+                rate_limiter=None,
+            ),
+            timeout=1,
+        )
+
+    assert labels is None
+    assert monitor["status"] == "call1_failed"
+    assert monitor.get("retryable_infra") is True
+    assert monitor.get("error_class") == "timeout"
