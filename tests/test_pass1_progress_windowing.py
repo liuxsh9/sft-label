@@ -637,48 +637,75 @@ async def test_directory_chunked_delegate_reports_live_progress(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_directory_chunked_delegate_defers_postprocess_until_after_next_file_starts(monkeypatch, tmp_path):
+async def test_directory_chunked_delegate_cleans_prior_file_before_directory_completion(monkeypatch, tmp_path):
     first = tmp_path / "a.jsonl"
     second = tmp_path / "b.jsonl"
+    third = tmp_path / "c.jsonl"
     first.write_text('{"id":"a"}\n', encoding="utf-8")
     second.write_text('{"id":"b"}\n', encoding="utf-8")
+    third.write_text('{"id":"c"}\n', encoding="utf-8")
 
     starts: list[str] = []
-    postprocess_snapshots: list[list[str]] = []
+    postprocess_starts: list[str] = []
+    release_second = asyncio.Event()
 
     async def fake_run_one_file_chunked(input_path, *args, **kwargs):
-        starts.append(Path(input_path).name)
+        name = Path(input_path).name
+        starts.append(name)
+        output_dir = Path(args[0])
+        labeled_path = output_dir / "labeled.jsonl"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        labeled_path.write_text(f"{name}\n", encoding="utf-8")
+        if name == "b.jsonl":
+            await release_second.wait()
         return {
             "total_llm_calls": 1,
             "sparse_labeled": 1,
             "sparse_inherited": 0,
             "total_samples": 1,
             "success": 1,
-            "_pass1_postprocess_job": {
-                "input_name": Path(input_path).name,
-            },
-        }
+                "_pass1_postprocess_job": {
+                    "input_name": name,
+                    "labeled_path": str(labeled_path),
+                    "cleanup_labeled_path": True,
+                },
+            }
 
     def fake_run_pass1_postprocess_job(job, pprint=print):
-        postprocess_snapshots.append(list(starts))
+        labeled_path = Path(job["labeled_path"])
+        postprocess_starts.append(job["input_name"])
+        if labeled_path.exists():
+            labeled_path.unlink()
 
     monkeypatch.setattr("sft_label.pipeline._should_delegate_directory_jsonl_to_chunked", lambda *args, **kwargs: True)
     monkeypatch.setattr("sft_label.pipeline._run_one_file_chunked", fake_run_one_file_chunked)
     monkeypatch.setattr("sft_label.pipeline._run_pass1_postprocess_job", fake_run_pass1_postprocess_job)
     monkeypatch.setattr("sft_label.pipeline.update_checkpoint", lambda *args, **kwargs: None)
 
-    stats = await run_directory_pipeline(
-        dir_files=[(first, Path("a.jsonl")), (second, Path("b.jsonl"))],
-        run_dir=tmp_path / "run",
-        model="fake-model",
-        concurrency=2,
-        checkpoint_path=tmp_path / "checkpoint.json",
-        progress=None,
-        http_client=None,
-        sem=asyncio.Semaphore(2),
-        config=PipelineConfig(enable_adaptive_runtime=False),
+    task = asyncio.create_task(
+        run_directory_pipeline(
+            dir_files=[(first, Path("a.jsonl")), (second, Path("b.jsonl")), (third, Path("c.jsonl"))],
+            run_dir=tmp_path / "run",
+            model="fake-model",
+            concurrency=2,
+            checkpoint_path=tmp_path / "checkpoint.json",
+            progress=None,
+            http_client=None,
+            sem=asyncio.Semaphore(2),
+            config=PipelineConfig(enable_adaptive_runtime=False),
+        )
     )
 
-    assert [item["success"] for item in stats] == [1, 1]
-    assert starts == ["a.jsonl", "b.jsonl"]
-    assert postprocess_snapshots == [["a.jsonl", "b.jsonl"], ["a.jsonl", "b.jsonl"]]
+    await asyncio.sleep(0.05)
+
+    assert starts[:2] == ["a.jsonl", "b.jsonl"]
+    assert postprocess_starts == ["a.jsonl"]
+    assert not (tmp_path / "run" / "a" / "labeled.jsonl").exists()
+    assert (tmp_path / "run" / "b" / "labeled.jsonl").exists()
+
+    release_second.set()
+    stats = await task
+
+    assert [item["success"] for item in stats] == [1, 1, 1]
+    assert starts == ["a.jsonl", "b.jsonl", "c.jsonl"]
+    assert postprocess_starts == ["a.jsonl", "b.jsonl", "c.jsonl"]
