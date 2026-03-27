@@ -1116,7 +1116,10 @@ async def test_directory_run_bounds_inflight_submission_by_watermark(tmp_path):
 
     def tracking_ensure_future(coro):
         nonlocal inflight, peak_inflight
+        coro_name = getattr(getattr(coro, "cr_code", None), "co_name", "")
         task = real_ensure_future(coro)
+        if coro_name != "_tagged_label":
+            return task
         inflight += 1
         peak_inflight = max(peak_inflight, inflight)
 
@@ -1822,3 +1825,59 @@ def test_flush_file_output_declares_unmapped_events_filename_once():
 
     source = inspect.getsource(flush_file_output)
     assert source.count('unmapped_events_file = f"unmapped_events{suffix}.jsonl"') == 1
+
+
+def test_run_pass1_postprocess_job_can_skip_dashboard_and_cleanup_labeled_path(monkeypatch, tmp_path):
+    from sft_label.pipeline import _run_pass1_postprocess_job
+
+    artifact_dir = tmp_path / "meta"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    labeled_path = artifact_dir / "labeled.jsonl"
+    labeled_path.write_text(
+        json.dumps(
+            {
+                "id": "turn-1",
+                "metadata": {"source_id": "conv-1", "turn_index": 1, "total_turns": 1},
+                "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": "a"}],
+                "labels": _full_labels("build"),
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stats = {
+        "input_file": "train.jsonl",
+        "total_samples": 1,
+        "success_rate": 1.0,
+        "total_tokens": 0,
+        "arbitrated_rate": 0.0,
+        "tag_distributions": {"intent": {"build": 1}},
+        "confidence_stats": {},
+        "cross_matrix": {},
+        "unmapped_tags": {},
+    }
+    (artifact_dir / "stats_labeling.json").write_text(json.dumps(stats), encoding="utf-8")
+
+    def fail_generate_dashboard(*args, **kwargs):
+        raise AssertionError("dashboard generation should be skipped")
+
+    monkeypatch.setattr("sft_label.tools.visualize_labels.generate_dashboard", fail_generate_dashboard)
+
+    _run_pass1_postprocess_job(
+        {
+            "output_dir": str(artifact_dir),
+            "labeled_path": str(labeled_path),
+            "stats": stats,
+            "stats_file": "stats_labeling.json",
+            "dashboard_file": "dashboard_labeling.html",
+            "dashboard_labeled_file": None,
+            "generate_dashboard": False,
+            "cleanup_labeled_path": True,
+        },
+        pprint=lambda _msg: None,
+    )
+
+    assert (artifact_dir / "conversation_stats_labeling.json").exists()
+    assert not labeled_path.exists()
+    assert not (artifact_dir / "dashboards" / "dashboard_labeling.html").exists()

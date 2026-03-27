@@ -28,7 +28,7 @@ import re
 import os
 import sys
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -2462,6 +2462,7 @@ def _make_pass1_postprocess_job(
     stats_file: str,
     dashboard_file: str,
     dashboard_labeled_file: str | None,
+    generate_dashboard: bool = True,
     cleanup_labeled_path: bool = False,
 ) -> dict:
     return {
@@ -2471,6 +2472,7 @@ def _make_pass1_postprocess_job(
         "stats_file": stats_file,
         "dashboard_file": dashboard_file,
         "dashboard_labeled_file": dashboard_labeled_file,
+        "generate_dashboard": bool(generate_dashboard),
         "cleanup_labeled_path": bool(cleanup_labeled_path),
     }
 
@@ -2482,6 +2484,7 @@ def _run_pass1_postprocess_job(job: dict, pprint=print) -> None:
     stats_file = str(job.get("stats_file") or PASS1_STATS_FILE)
     dashboard_file = str(job.get("dashboard_file") or pass1_dashboard_filename())
     dashboard_labeled_file = job.get("dashboard_labeled_file")
+    generate_dashboard = bool(job.get("generate_dashboard", True))
     cleanup_labeled_path = bool(job.get("cleanup_labeled_path"))
 
     _safe_write_pass1_conversation_stats(
@@ -2492,15 +2495,16 @@ def _run_pass1_postprocess_job(job: dict, pprint=print) -> None:
     )
 
     try:
-        from sft_label.tools.visualize_labels import generate_dashboard
+        if generate_dashboard:
+            from sft_label.tools.visualize_labels import generate_dashboard
 
-        generate_dashboard(
-            output_dir,
-            labeled_file=dashboard_labeled_file,
-            stats_file=stats_file,
-            output_file=dashboard_file,
-            quiet=True,
-        )
+            generate_dashboard(
+                output_dir,
+                labeled_file=dashboard_labeled_file,
+                stats_file=stats_file,
+                output_file=dashboard_file,
+                quiet=True,
+            )
     except Exception:
         pass
     finally:
@@ -4099,6 +4103,7 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
         stats_file=PASS1_STATS_FILE,
         dashboard_file=pass1_dashboard_filename(),
         dashboard_labeled_file=None,
+        generate_dashboard=not (inline_output and not persist_inline_pass1_cache),
         cleanup_labeled_path=bool(inline_output and not persist_inline_pass1_cache),
     )
     if directory_delegate:
@@ -4826,7 +4831,9 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
     collectors = {}  # file_idx -> FileCollector
     pending_futures = set()
     all_file_stats = list(skipped_stats)
-    deferred_postprocess_jobs: list[dict] = []
+    deferred_postprocess_jobs: set[asyncio.Future] = set()
+    deferred_postprocess_backlog: list[dict] = []
+    postprocess_executor: ThreadPoolExecutor | None = None
     file_queue = list(pending_files)
     next_to_load = 0
     eta_tracker = None
@@ -4847,6 +4854,36 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
         if run_info:
             global_llm_info = run_info
         _update_llm_task_progress(progress, llm_task, global_llm_info, eta_tracker=eta_tracker, config=config)
+
+    def _submit_deferred_postprocess_job(job: dict) -> None:
+        nonlocal postprocess_executor
+        if postprocess_executor is None:
+            postprocess_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="pass1-postprocess",
+            )
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(
+            postprocess_executor,
+            lambda: _run_pass1_postprocess_job(job, pprint),
+        )
+        deferred_postprocess_jobs.add(fut)
+
+    async def _harvest_deferred_postprocess_jobs(*, wait: bool) -> None:
+        nonlocal deferred_postprocess_jobs
+        if not deferred_postprocess_jobs:
+            return
+        if wait:
+            done, pending = await asyncio.wait(deferred_postprocess_jobs)
+        else:
+            done, pending = await asyncio.wait(
+                deferred_postprocess_jobs,
+                timeout=0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        deferred_postprocess_jobs = set(pending)
+        for fut in done:
+            fut.result()
 
     if progress and sample_task is not None:
         initial_sample_total = (
@@ -4875,6 +4912,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
 
     # Process results as they complete
     while pending_futures:
+        await _harvest_deferred_postprocess_jobs(wait=False)
         done, pending_futures = await asyncio.wait(
             pending_futures, return_when=asyncio.FIRST_COMPLETED)
 
@@ -4953,7 +4991,10 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 update_checkpoint(checkpoint_path, str(c.rel_path), success=True)
                 all_file_stats.append(stats)
                 if deferred_job:
-                    deferred_postprocess_jobs.append(deferred_job)
+                    if bool(deferred_job.get("cleanup_labeled_path")):
+                        _submit_deferred_postprocess_job(deferred_job)
+                    else:
+                        deferred_postprocess_backlog.append(deferred_job)
 
                 labeled_done = _labeled_samples_from_stats(stats)
                 if progress and sample_task is not None and labeled_done > 0 and not c.live_progress:
@@ -5005,8 +5046,13 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 progress.update(file_task, advance=1)
             collectors.pop(file_idx, None)
 
-    for job in deferred_postprocess_jobs:
-        await asyncio.to_thread(_run_pass1_postprocess_job, job, pprint)
+    try:
+        await _harvest_deferred_postprocess_jobs(wait=True)
+        for job in deferred_postprocess_backlog:
+            await asyncio.to_thread(_run_pass1_postprocess_job, job, pprint)
+    finally:
+        if postprocess_executor is not None:
+            postprocess_executor.shutdown(wait=True, cancel_futures=False)
 
     return all_file_stats
 
