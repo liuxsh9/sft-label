@@ -13,6 +13,7 @@ from sft_label.conversation import (
     build_conversation_key,
     group_by_conversation,
     is_conversation_object,
+    sample_conversation_key,
 )
 from sft_label.label_extensions_stats import build_extension_dashboard_payload
 from sft_label.labels import is_usable_labels
@@ -325,7 +326,7 @@ def build_pass1_conversation_units(samples: list[dict]) -> list[dict]:
 
     for sample in samples:
         meta = sample.get("metadata") or {}
-        key = build_conversation_key(meta.get("source_id"), meta.get("source_file"))
+        key = sample_conversation_key(sample)
         if key and is_conversation_object(meta):
             continue
         units.append(sample)
@@ -438,7 +439,7 @@ def build_pass1_conversation_units_from_iter(samples_iter) -> list[dict]:
 
     for sample in samples_iter:
         meta = sample.get("metadata") or {}
-        conv_key = build_conversation_key(meta.get("source_id"), meta.get("source_file"))
+        conv_key = sample_conversation_key(sample)
         if conv_key and is_conversation_object(meta):
             if conv_key not in grouped:
                 grouped[conv_key] = {
@@ -1012,10 +1013,14 @@ def build_pass2_conversation_units(samples: list[dict], conv_records: list[dict]
     groups = group_by_conversation(samples)
     units = []
     sample_unit_keys: set[str] = set()
-    conv_by_key = {
-        item.get("conversation_key") or build_conversation_key(item.get("conversation_id"), item.get("source_file")): item
-        for item in conv_records
-    }
+    conv_by_key: dict[str, dict] = {}
+    for item in conv_records or []:
+        primary = item.get("conversation_key") or build_conversation_key(item.get("conversation_id"), item.get("source_file"))
+        if primary:
+            conv_by_key[primary] = item
+        uid = item.get("conversation_uid")
+        if uid and uid != primary:
+            conv_by_key.setdefault(uid, item)
 
     for sample in samples:
         meta = sample.get("metadata") or {}
@@ -1440,14 +1445,14 @@ def merge_turn_kinds(kinds: list[str | None]) -> str | None:
 def _sample_turn_kind(sample: dict | None) -> str | None:
     meta = ((sample or {}).get("metadata") or {})
     source_id = meta.get("source_id")
-    if source_id in (None, ""):
-        return "single"
     if is_conversation_object(meta):
         return "multi"
     total_turns = meta.get("total_turns")
     if isinstance(total_turns, int):
         return "single"
-    return "multi"
+    if source_id not in (None, ""):
+        return "multi"
+    return "single"
 
 
 def build_scope_summary(scope: dict) -> dict:

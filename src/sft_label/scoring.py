@@ -4300,6 +4300,19 @@ def _generate_inline_file_dashboard(target: InlineScoringTarget, source_file: Pa
         pass
 
 
+def _cleanup_inline_pass2_cache(artifact_dir: Path) -> list[Path]:
+    removed: list[Path] = []
+    for name in ("scored.json", "scored.jsonl"):
+        path = artifact_dir / name
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            continue
+    return removed
+
+
 def _should_cleanup_inline_pass1_cache(config) -> bool:
     return bool(getattr(config, "inline_pass1_cleanup_after_score", True))
 
@@ -4362,21 +4375,25 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
         file_label=rel_file_label,
     )
 
+    pass2_run_stats = stats
     scored_samples, conversation_records = _sync_inline_scored_cache_to_dataset(
         source_file,
         artifact_dir,
         limit=limit,
     )
-    _generate_inline_file_dashboard(target, source_file)
-
-    stats = _rewrite_inline_file_pass2_stats(
-        artifact_dir=artifact_dir,
-        source_file=source_file,
-        rel_file_label=rel_file_label,
-        stats=stats,
-        scored_samples=scored_samples,
-        conversation_records=conversation_records,
-    )
+    stats = None
+    try:
+        _generate_inline_file_dashboard(target, source_file)
+        stats = _rewrite_inline_file_pass2_stats(
+            artifact_dir=artifact_dir,
+            source_file=source_file,
+            rel_file_label=rel_file_label,
+            stats=pass2_run_stats,
+            scored_samples=scored_samples,
+            conversation_records=conversation_records,
+        )
+    finally:
+        _cleanup_inline_pass2_cache(artifact_dir)
     if cleanup_after:
         cleanup_inline_pass1_cache(artifact_dir)
     return stats

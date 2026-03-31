@@ -87,10 +87,13 @@ def is_trajectory_object(meta):
 def is_conversation_object(meta):
     """Whether metadata should be treated as a conversation-level unit."""
     meta = meta or {}
-    if not meta.get("source_id"):
-        return False
-    if meta.get("total_turns", 1) > 1:
+    total_turns = meta.get("total_turns")
+    if isinstance(total_turns, int) and total_turns > 1:
         return True
+    if meta.get("conversation_uid") and (total_turns is None or total_turns > 1):
+        return True
+    if meta.get("source_id"):
+        return is_trajectory_object(meta)
     return is_trajectory_object(meta)
 
 

@@ -436,6 +436,25 @@ def _single_scope_payload(run_dir: Path, samples: list[dict], pass2_viz: dict, s
     }
 
 
+def _infer_turn_kind_from_conv_records(
+    conv_records: list[dict],
+    pass2_stats: dict | None,
+) -> str | None:
+    if not conv_records:
+        return None
+    has_multi = any(r.get("turn_count", 1) > 1 for r in conv_records)
+    total_scored = (pass2_stats or {}).get("total_scored") or 0
+    conv_turns = sum(r.get("turn_count", 1) for r in conv_records)
+    has_single = total_scored > conv_turns
+    if has_single and has_multi:
+        return "mixed"
+    if has_multi:
+        return "multi"
+    if has_single:
+        return "single"
+    return None
+
+
 def _tree_payload(
     run_dir: Path,
     *,
@@ -456,11 +475,19 @@ def _tree_payload(
         for scope_id, raw_scope in tree["scopes"].items()
         if raw_scope.get("kind") == "file"
     }
-    file_turn_kind = {
-        scope_id: infer_scope_turn_kind_from_path(raw_scope.get("pass2_data_path"))
-        for scope_id, raw_scope in tree["scopes"].items()
-        if raw_scope.get("kind") == "file"
-    }
+    file_turn_kind: dict[str, str | None] = {}
+    for scope_id, raw_scope in tree["scopes"].items():
+        if raw_scope.get("kind") != "file":
+            continue
+        pass1_kind = infer_scope_turn_kind_from_path(raw_scope.get("pass1_data_path"))
+        pass2_kind = infer_scope_turn_kind_from_path(raw_scope.get("pass2_data_path"))
+        kind = merge_turn_kinds([pass1_kind, pass2_kind])
+        if kind is None:
+            kind = _infer_turn_kind_from_conv_records(
+                raw_scope.get("raw_conversations") or [],
+                raw_scope.get("raw_pass2"),
+            )
+        file_turn_kind[scope_id] = kind
     for scope_id, raw_scope in tree["scopes"].items():
         is_file = raw_scope.get("kind") == "file"
         if is_file:
@@ -494,7 +521,7 @@ def _tree_payload(
                 pass1 = _inject_conversation_mode(pass1, [pass1_conversation_mode]) if pass1 else {
                     "modes": {"conversation": pass1_conversation_mode}
                 }
-        elif isinstance((pass1 or {}).get("modes"), dict):
+        if not include_conversations and isinstance((pass1 or {}).get("modes"), dict):
             pass1["modes"].pop("conversation", None)
         pass2 = compute_value_viz_data([], normalized_pass2_stats, conv_records) if normalized_pass2_stats else None
         if not include_conversations or not has_conv_records:
@@ -584,7 +611,7 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
         explorer_policy = _resolve_explorer_policy(stats_hint)
         payload, explorer_sources, root_pass2_stats = _tree_payload(
             run_dir,
-            include_conversations=bool(explorer_policy.get("enabled", True)),
+            include_conversations=True,
         )
         if not stats_hint and isinstance(root_pass2_stats, dict):
             explorer_policy = _resolve_explorer_policy(root_pass2_stats)
@@ -606,14 +633,8 @@ def generate_value_dashboard(run_dir, scored_file="scored.json",
             compute_value_viz_data(samples, normalized_stats, conv_records),
             normalized_stats,
         )
-        if not explorer_policy.get("enabled", True):
-            global_scope = payload.get("scopes", {}).get("global") or {}
-            if isinstance((global_scope.get("pass1") or {}).get("modes"), dict):
-                global_scope["pass1"]["modes"].pop("conversation", None)
-            if isinstance((global_scope.get("pass2") or {}).get("modes"), dict):
-                global_scope["pass2"]["modes"].pop("conversation", None)
-            global_scope["conversation"] = None
-            global_scope["summary"] = _scope_summary(global_scope)
+        # Explorer policy only controls the interactive sample explorer,
+        # not the conversation summary mode – always keep conversation data.
         explorer_sources = []
         data_path = run_dir / scored_file if scored_file else None
         conv_path = run_dir / "conversation_scores.json"
