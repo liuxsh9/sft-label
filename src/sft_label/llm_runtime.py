@@ -671,7 +671,14 @@ class AdaptiveLLMRuntime:
     def _set_effective_limits(self, concurrency: int, rps: float) -> None:
         self._effective_concurrency = int(max(self.min_concurrency, min(concurrency, self.base_concurrency)))
         self._effective_rps = float(max(self.min_rps, min(rps, self.base_rps)))
-        self.gate.set_limit(self._effective_concurrency)
+        # Never set gate limit below current in-flight count: doing so creates
+        # a deadly embrace where the gate blocks ALL new acquisitions because
+        # in_flight >= limit, but existing in-flight requests cannot complete
+        # because the API may be down (which is what triggered the open state).
+        # Use in_flight + 1 so at least one new probe request can enter.
+        # The gate will naturally tighten as in-flight requests drain.
+        gate_limit = max(self._effective_concurrency, self.gate.in_flight + 1)
+        self.gate.set_limit(gate_limit)
         self.rate_limiter.set_target_rps(self._effective_rps)
 
     def _record_event(self, kind: str, reason: str, payload: dict) -> None:

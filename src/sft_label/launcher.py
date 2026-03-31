@@ -8,8 +8,10 @@ import os
 import re
 import select
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -35,6 +37,31 @@ from sft_label.label_extensions_schema import load_extension_spec_file
 
 DEFAULT_LITELLM_BASE = "http://localhost:4000/v1"
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _get_version_info() -> str:
+    """Return a short version string: pkg version + git short hash + mtime."""
+    parts = []
+    try:
+        from importlib.metadata import version as _pkg_version
+        parts.append(f"v{_pkg_version('sft-label')}")
+    except Exception:
+        parts.append("v?.?.?")
+    try:
+        src = Path(__file__).resolve().parent
+        short = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=src, timeout=3,
+        ).stdout.strip()
+        if short:
+            parts.append(f"git:{short}")
+        mtime = datetime.fromtimestamp(src.parent.parent.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        parts.append(f"updated {mtime}")
+    except Exception:
+        pass
+    return "  ".join(parts)
 
 
 InputFn = Callable[[str], str]
@@ -854,7 +881,7 @@ def build_launch_plan(
     set_language(language or DEFAULT_LANGUAGE)
 
     _say(output_fn, SECTION_DIVIDER)
-    _say(output_fn, "交互式任务启动器 / Interactive task launcher")
+    _say(output_fn, f"交互式任务启动器 / Interactive task launcher  [{_get_version_info()}]")
     _say(output_fn, "请选择任务，并只填写必要参数 / Choose a workflow and fill only required options.")
     _say(output_fn, "如果任务中断或报错，且不确定停在哪一阶段，请优先选择“智能续跑” / If a run was interrupted and you're unsure which pass failed, choose 'Smart resume' first.")
     _say(output_fn, "输入 b/back 可返回上一层，输入 0 可取消 / Type b/back to go back, 0 to cancel.")

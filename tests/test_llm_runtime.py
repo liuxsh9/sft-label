@@ -540,3 +540,65 @@ def test_classify_http_result_basics():
     auth = classify_http_result(401)
     assert auth.classification == OutcomeClass.AUTH_ERROR
     assert auth.is_retryable is False
+
+
+@pytest.mark.asyncio
+async def test_adaptive_runtime_no_deadly_embrace_when_inflight_exceeds_reduced_limit():
+    """Regression: gate limit must never drop below current in-flight count.
+
+    Before the fix, entering open/degraded state set the gate limit to
+    min_concurrency (typically 1).  If in_flight was 13 (from requests
+    submitted while healthy), the gate would block ALL new acquisitions
+    because in_flight(13) >= limit(1), creating an unrecoverable deadlock.
+    """
+    runtime = AdaptiveLLMRuntime(
+        base_concurrency=50,
+        base_rps=30.0,
+        min_concurrency=1,
+        min_rps=5.0,
+        min_observations_degraded=2,
+        min_observations_open=3,
+        min_failures_degraded=2,
+        min_failures_open=2,
+        window_requests=8,
+        window_seconds=10.0,
+        degrade_timeout_rate=0.2,
+        open_timeout_rate=0.5,
+        degrade_overload_rate=0.2,
+        open_overload_rate=0.5,
+        degrade_abnormal_rate=0.2,
+        open_abnormal_rate=0.6,
+        open_base_cooldown=0.02,
+        open_max_cooldown=0.05,
+        probe_success_required=1,
+    )
+
+    # Simulate 13 in-flight permits (like 13 concurrent LLM requests)
+    permits = []
+    for _ in range(13):
+        p = await runtime.acquire(stage="pass1")
+        permits.append(p)
+    assert runtime.gate.in_flight == 13
+
+    # Trigger open state with error observations
+    runtime.observe(classify_http_result(429))
+    runtime.observe(classify_http_result(429))
+    runtime.observe(classify_http_result(503))
+    assert runtime.state == "open"
+
+    # Gate limit must be >= 14 (in_flight + 1) to avoid deadlock
+    assert runtime.gate.limit >= 14, (
+        f"gate limit {runtime.gate.limit} < in_flight+1 {runtime.gate.in_flight + 1}: deadlock!"
+    )
+
+    # A new acquisition should NOT hang — it must succeed within a short timeout
+    new_permit = await asyncio.wait_for(
+        runtime.acquire(stage="pass1", probe=True),
+        timeout=2.0,
+    )
+    new_permit.release()
+
+    # Release all permits and verify gate recovers
+    for p in permits:
+        p.release()
+    await asyncio.sleep(0)  # let release tasks run
