@@ -928,9 +928,9 @@ class TestRunRecompute:
 
         run_recompute(str(source_file), pass_num="2")
 
-        refreshed_scored = json.loads((artifact_dir / "scored.json").read_text(encoding="utf-8"))
         refreshed_stats = json.loads((artifact_dir / PASS2_STATS_FILE).read_text(encoding="utf-8"))
-        assert refreshed_scored == []
+        assert not (artifact_dir / "scored.json").exists()
+        assert not (artifact_dir / "scored.jsonl").exists()
         assert refreshed_stats["total_scored"] == 0
         assert not (artifact_dir / "conversation_scores.json").exists()
 
@@ -1738,8 +1738,10 @@ class TestRegenerateDashboard:
         generated = run_regenerate_dashboard(str(source_file), pass_num="2")
 
         assert len(generated) == 1
-        refreshed_cache = json.loads((artifact_dir / "scored.json").read_text(encoding="utf-8"))
-        assert refreshed_cache[0]["value"]["quality"]["overall"] == 7
+        assert not (artifact_dir / "scored.json").exists()
+        assert not (artifact_dir / "scored.jsonl").exists()
+        refreshed_scores = json.loads((artifact_dir / "conversation_scores.json").read_text(encoding="utf-8"))
+        assert refreshed_scores[0]["detail"]["quality_overall"] == 7.0
 
     def test_inline_regenerate_pass2_backfills_stale_conversation_scores(self, tmp_path):
         run_root = tmp_path / "dataset_labeled_20260324_120000"
@@ -1837,9 +1839,9 @@ class TestRegenerateDashboard:
 
         run_regenerate_dashboard(str(source_file), pass_num="2")
 
-        refreshed_scored = json.loads((artifact_dir / "scored.json").read_text(encoding="utf-8"))
         refreshed_stats = json.loads((artifact_dir / PASS2_STATS_FILE).read_text(encoding="utf-8"))
-        assert refreshed_scored == []
+        assert not (artifact_dir / "scored.json").exists()
+        assert not (artifact_dir / "scored.jsonl").exists()
         assert refreshed_stats["total_scored"] == 0
         assert not (artifact_dir / "conversation_scores.json").exists()
 
@@ -2016,6 +2018,8 @@ class TestCompletePostprocess:
         assert len(conv_records) == 2
         assert {record["turn_count"] for record in conv_records} == {1, 2}
         assert (meta_root / DASHBOARDS_DIRNAME / "dashboard_scoring_dataset.html").exists()
+        assert not (meta_root / "files" / "sample" / "scored.json").exists()
+        assert not (meta_root / "files" / "sample" / "scored.jsonl").exists()
 
     def test_complete_postprocess_inline_run_scope_all_generates_per_file_dashboards(self, tmp_path):
         run_root = tmp_path / "dataset_labeled_20260324_120000"

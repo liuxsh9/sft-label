@@ -722,12 +722,17 @@ def normalize_and_slice(sample, *, source_file=None, source_row=None, annotate_p
     results = []
     base_id = normalized.get("id", "")
     reply_cot = list(base_meta.get("assistant_cot_by_reply", []))
+    slice_meta_base = {
+        key: value
+        for key, value in base_meta.items()
+        if key != "assistant_cot_by_reply"
+    }
     for i, conv_slice in enumerate(slices):
         slice_index = i
         slice_position = i + 1
         slice_count = len(slices)
         slice_meta = {
-            **base_meta,
+            **slice_meta_base,
             "source_id": base_id,
             "turn_index": slice_position,
             "total_turns": slice_count,

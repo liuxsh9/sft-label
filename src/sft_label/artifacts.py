@@ -11,6 +11,8 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
+from sft_label.fs_artifacts import is_ignored_fs_artifact
+
 # Shared output directory for runtime-generated dashboards
 DASHBOARDS_DIRNAME = "dashboards"
 DASHBOARD_RUNTIME_DIRNAME = "_dashboard_static"
@@ -136,12 +138,32 @@ def classify_dashboard_kind(filename: str | Path) -> str | None:
 
 def remove_dashboard_bundle(html_path: Path | str) -> None:
     """Delete one dashboard HTML file and its sidecar data directory if present."""
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+
+    def _ignore_rmtree_error(_func, path, exc_info) -> None:
+        exc = exc_info[1]
+        if isinstance(exc, FileNotFoundError):
+            return
+        if is_ignored_fs_artifact(path):
+            return
+        raise exc
+
     html_path = Path(html_path)
     data_dir = html_path.with_name(dashboard_data_dirname(html_path.name))
+    html_sidecar = html_path.with_name(f"._{html_path.name}")
+    data_dir_sidecar = data_dir.with_name(f"._{data_dir.name}")
     if html_path.exists():
-        html_path.unlink()
+        _safe_unlink(html_path)
+    if html_sidecar.exists():
+        _safe_unlink(html_sidecar)
     if data_dir.is_dir():
-        shutil.rmtree(data_dir)
+        shutil.rmtree(data_dir, onerror=_ignore_rmtree_error)
+    if data_dir_sidecar.exists():
+        _safe_unlink(data_dir_sidecar)
 
 
 def prune_dashboard_bundles(

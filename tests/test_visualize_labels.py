@@ -1268,6 +1268,13 @@ def test_infer_scope_turn_kind_distinguishes_single_multi_and_mixed():
     ]) == "mixed"
 
 
+def test_infer_scope_turn_kind_handles_conversation_uid_without_source_id():
+    assert infer_scope_turn_kind([
+        {"metadata": {"conversation_uid": "conv-1", "total_turns": 3}},
+        {"metadata": {"conversation_uid": "conv-1", "total_turns": 3}},
+    ]) == "multi"
+
+
 def test_infer_scope_turn_kind_from_json_path_streams_without_json_load(tmp_path, monkeypatch):
     data_path = tmp_path / "labeled.json"
     data_path.write_text(
@@ -1286,3 +1293,13 @@ def test_infer_scope_turn_kind_from_json_path_streams_without_json_load(tmp_path
     monkeypatch.setattr("sft_label.tools.dashboard_aggregation.json.load", _fail_json_load)
 
     assert infer_scope_turn_kind_from_path(data_path) == "mixed"
+
+
+def test_infer_scope_turn_kind_from_path_uses_conversation_uid(tmp_path):
+    data_path = tmp_path / "labeled.jsonl"
+    data_path.write_text(
+        json.dumps({"metadata": {"conversation_uid": "conv-uid", "total_turns": 4}}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert infer_scope_turn_kind_from_path(data_path) == "multi"

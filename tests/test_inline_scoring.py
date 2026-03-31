@@ -337,7 +337,7 @@ async def test_run_scoring_inline_file_updates_mirrored_rows(tmp_path):
     assert stats["total_scored"] == 2
     artifact_dir = run_root / "meta_label_data" / "files" / "train"
     assert not (artifact_dir / "labeled.jsonl").exists()
-    assert (artifact_dir / "scored.jsonl").exists()
+    assert not (artifact_dir / "scored.jsonl").exists()
     assert (artifact_dir / "monitor_value.jsonl").exists()
     assert (artifact_dir / "stats_scoring.json").exists()
     stats_payload = json.loads((artifact_dir / "stats_scoring.json").read_text(encoding="utf-8"))
@@ -792,12 +792,7 @@ async def test_inline_directory_large_jsonl_chunked_smoke_scores_all_rows(tmp_pa
     stats_files = list((run_root / "meta_label_data" / "files").rglob("stats_scoring.json"))
     assert len(stats_files) == 1
     per_file_stats = json.loads(stats_files[0].read_text(encoding="utf-8"))
-    scored_lines = [
-        line for line in (stats_files[0].parent / "scored.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
     assert per_file_stats["total_scored"] == row_count
-    assert len(scored_lines) == row_count
     assert summary["files_processed"] == 1
 
 

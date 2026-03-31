@@ -423,6 +423,7 @@ def _materialize_inline_recompute_artifacts(target, pass_num):
     source_files = discover_inline_jsonl_files(target)
     selected = source_files if not target.target_path.is_file() else [target.target_path.resolve()]
     ephemeral_pass1_cache_dirs = []
+    ephemeral_pass2_cache_dirs = []
     for source_file in selected:
         artifact_dir = target.layout.file_artifact_dir(source_file)
         if pass_num in ("1", "both"):
@@ -432,12 +433,36 @@ def _materialize_inline_recompute_artifacts(target, pass_num):
                 ephemeral_pass1_cache_dirs.append(artifact_dir)
         if pass_num in ("2", "both"):
             write_inline_scored_cache(source_file, artifact_dir)
-    return selected, ephemeral_pass1_cache_dirs
+            ephemeral_pass2_cache_dirs.append(artifact_dir)
+    return selected, ephemeral_pass1_cache_dirs, ephemeral_pass2_cache_dirs
+
+
+def _cleanup_inline_pass2_cache(artifact_dir: Path) -> None:
+    for name in ("scored.json", "scored.jsonl"):
+        path = Path(artifact_dir) / name
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            continue
+
+
+def _cleanup_inline_pass2_caches(artifact_dirs) -> None:
+    seen: set[Path] = set()
+    for artifact_dir in artifact_dirs:
+        path = Path(artifact_dir)
+        if path in seen:
+            continue
+        seen.add(path)
+        _cleanup_inline_pass2_cache(path)
 
 
 def _run_recompute_inline(target, pass_num="both", workers=1):
     """Run recompute over an inline mirrored dataset via rebuildable caches."""
-    _selected, ephemeral_pass1_cache_dirs = _materialize_inline_recompute_artifacts(target, pass_num)
+    _selected, ephemeral_pass1_cache_dirs, ephemeral_pass2_cache_dirs = _materialize_inline_recompute_artifacts(
+        target,
+        pass_num,
+    )
 
     if target.target_path.is_file():
         artifact_input = target.layout.file_artifact_dir(target.target_path)
@@ -452,6 +477,7 @@ def _run_recompute_inline(target, pass_num="both", workers=1):
     )
     for artifact_dir in ephemeral_pass1_cache_dirs:
         cleanup_inline_pass1_cache(artifact_dir)
+    _cleanup_inline_pass2_caches(ephemeral_pass2_cache_dirs)
 
     if target.target_path.is_file():
         if pass_num in ("1", "both"):
@@ -520,16 +546,21 @@ def _sync_inline_scored_artifacts(target, source_files):
     from sft_label.scoring import _sync_inline_scored_cache_to_dataset
 
     for source_file in source_files:
+        artifact_dir = target.layout.file_artifact_dir(source_file)
         _sync_inline_scored_cache_to_dataset(
             source_file,
-            target.layout.file_artifact_dir(source_file),
+            artifact_dir,
         )
+        _cleanup_inline_pass2_cache(artifact_dir)
 
 
 def run_refresh_rarity(input_path, tag_stats_path=None, output_dir=None, config=None, workers=1):
     inline_target = infer_inline_scoring_target(input_path)
     if inline_target is not None:
-        selected, _ephemeral_pass1_cache_dirs = _materialize_inline_recompute_artifacts(inline_target, pass_num="2")
+        selected, _ephemeral_pass1_cache_dirs, _ephemeral_pass2_cache_dirs = _materialize_inline_recompute_artifacts(
+            inline_target,
+            pass_num="2",
+        )
         if inline_target.target_path.is_file():
             refresh_input = inline_target.layout.file_artifact_dir(inline_target.target_path)
         else:
@@ -1373,6 +1404,7 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
     from sft_label.tools.visualize_value import generate_value_dashboard
 
     generated = []
+    pass2_cache_dirs_to_cleanup: set[Path] = set()
     selected = discover_inline_jsonl_files(target)
     if target.target_path.is_file():
         selected = [target.target_path.resolve()]
@@ -1435,6 +1467,7 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
         if pass_num in ("2", "both"):
             pass2_stats_path = artifact_dir / PASS2_STATS_FILE
             if pass2_stats_path.exists():
+                pass2_cache_dirs_to_cleanup.add(artifact_dir)
                 source_has_scores = inline_source_has_embedded_scores(source_file)
                 cache_has_scores = _artifact_cache_has_scored_values(artifact_dir)
                 if source_has_scores and not cache_has_scores:
@@ -1502,6 +1535,8 @@ def _run_regenerate_dashboard_inline(target, pass_num="both", open_browser=False
                 )
                 if out:
                     generated.append(Path(out) if not isinstance(out, Path) else out)
+
+    _cleanup_inline_pass2_caches(pass2_cache_dirs_to_cleanup)
 
     if open_browser:
         for path in generated:
@@ -2079,7 +2114,10 @@ def _run_complete_postprocess_inline(target, scope="global", open_browser=False,
     if scope not in {"global", "all"}:
         raise ValueError(f"scope must be 'global' or 'all', got {scope!r}")
 
-    selected, _ephemeral_pass1_cache_dirs = _materialize_inline_recompute_artifacts(target, pass_num="2")
+    selected, _ephemeral_pass1_cache_dirs, _ephemeral_pass2_cache_dirs = _materialize_inline_recompute_artifacts(
+        target,
+        pass_num="2",
+    )
     if target.target_path.is_file():
         selected = [target.target_path.resolve()]
 
@@ -2123,6 +2161,7 @@ def _run_complete_postprocess_inline(target, scope="global", open_browser=False,
                 ),
             )
         dashboard_path = _complete_postprocess_inline_dashboard_for_file(target, target.target_path.resolve())
+        _cleanup_inline_pass2_cache(artifact_dir)
         generated_dashboards.append(dashboard_path)
         if open_browser:
             webbrowser.open(dashboard_path.resolve().as_uri())
@@ -2243,6 +2282,10 @@ def _run_complete_postprocess_inline(target, scope="global", open_browser=False,
             _log_complete_postprocess(
                 f"Warning: global inline Pass 2 dashboard failed: {type(e).__name__}: {e}"
             )
+
+    _cleanup_inline_pass2_caches(
+        [target.layout.file_artifact_dir(source_file) for source_file in selected]
+    )
 
     if open_browser and generated_dashboards:
         latest = Path(generated_dashboards[-1]).resolve()

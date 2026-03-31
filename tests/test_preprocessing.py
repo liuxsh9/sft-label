@@ -953,6 +953,29 @@ class TestMultiturnRegressionFixtures:
         slices = normalize_and_slice(sample)
         assert len(slices) == 4
 
+    def test_normalize_and_slice_drops_assistant_cot_list_in_slice_metadata(self):
+        sample = {
+            "id": "cot-slice-test",
+            "conversations": [
+                {"from": "human", "value": "Question"},
+                {"from": "gpt", "value": "Answer A"},
+                {"from": "human", "value": "Follow-up"},
+                {"from": "gpt", "value": "Answer B"},
+            ],
+            "metadata": {
+                "assistant_cot_by_reply": ["Cot for first reply", "Cot for second reply"],
+                "session": "cot-test",
+            },
+        }
+
+        slices = normalize_and_slice(sample)
+
+        assert len(slices) == 2
+        assert all("assistant_cot_by_reply" not in slice_item["metadata"] for slice_item in slices)
+        first_meta = slices[0]["metadata"]
+        second_meta = slices[1]["metadata"]
+        assert first_meta["session"] == "cot-test"
+
 
 class TestLanguageDetection:
     def test_code_fence_python(self):

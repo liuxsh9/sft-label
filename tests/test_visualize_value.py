@@ -565,6 +565,145 @@ def test_generate_value_dashboard_tree_payload_uses_stats_without_preloading_lea
     assert detail["pass2"]["modes"]["conversation"]["thinking_mode_stats"]["fast"]["mean_quality"] == 6.0
 
 
+def test_tree_payload_keeps_pass1_conversation_without_pass2_records(tmp_path, monkeypatch):
+    pass1_data_path = tmp_path / "pass1.jsonl"
+    pass1_data_path.write_text(
+        json.dumps({"metadata": {"conversation_uid": "conv-1", "total_turns": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    pass2_data_path = tmp_path / "pass2.jsonl"
+    pass2_data_path.write_text(
+        json.dumps({"metadata": {"source_id": "inline-1", "total_turns": 1}}) + "\n",
+        encoding="utf-8",
+    )
+
+    leaf_path = "files/sample.jsonl"
+    file_scope_id = f"file:{leaf_path}"
+    conversation_stats = {"_inject_conversation": True}
+
+    def fake_build_scope_tree(*args, **kwargs):
+        return {
+            "root_id": "global",
+            "scopes": {
+                "global": {
+                    "id": "global",
+                    "label": "global",
+                    "kind": "global",
+                    "path": "",
+                    "parent_id": None,
+                    "children": [file_scope_id],
+                    "descendant_files": [leaf_path],
+                    "raw_pass1": conversation_stats,
+                    "raw_pass2": {"total_scored": 1},
+                    "raw_conversations": [],
+                },
+                file_scope_id: {
+                    "id": file_scope_id,
+                    "label": "sample.jsonl",
+                    "kind": "file",
+                    "path": leaf_path,
+                    "parent_id": "global",
+                    "children": [],
+                    "descendant_files": [leaf_path],
+                    "raw_pass1": conversation_stats,
+                    "raw_pass2": {"total_scored": 1},
+                    "raw_conversations": [],
+                    "pass1_data_path": str(pass1_data_path),
+                    "pass2_data_path": str(pass2_data_path),
+                },
+            },
+        }
+
+    original_compute = visualize_value_module.compute_viz_data
+
+    def fake_compute_viz_data(samples, stats, conv_records=None):
+        payload = dict(original_compute(samples, stats))
+        if stats and stats.get("_inject_conversation"):
+            modes = dict(payload.get("modes") or {})
+            modes["conversation"] = {
+                "overview": {"total_scored": 2},
+                "total": 2,
+                "mode_id": "conversation",
+            }
+            payload["modes"] = modes
+        return payload
+
+    monkeypatch.setattr(visualize_value_module, "build_scope_tree", fake_build_scope_tree)
+    def fake_infer(path):
+        if path == str(pass1_data_path):
+            return "multi"
+        if path == str(pass2_data_path):
+            return "single"
+        return None
+
+    monkeypatch.setattr(visualize_value_module, "infer_scope_turn_kind_from_path", fake_infer)
+    monkeypatch.setattr(visualize_value_module, "compute_viz_data", fake_compute_viz_data)
+
+    payload, _, _ = visualize_value_module._tree_payload(tmp_path, include_conversations=True)
+    global_scope = payload["scopes"]["global"]
+    conversation_mode = ((global_scope.get("pass1") or {}).get("modes") or {}).get("conversation")
+
+    assert conversation_mode is not None
+    assert conversation_mode["total"] == 2
+    assert global_scope["summary_modes"]["conversation"]["pass1_total"] == 2
+
+
+def test_tree_payload_merges_pass1_and_pass2_turn_kinds(tmp_path, monkeypatch):
+    pass1_data_path = tmp_path / "pass1.jsonl"
+    pass1_data_path.write_text(
+        json.dumps({"metadata": {"conversation_uid": "conv-1", "total_turns": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    pass2_data_path = tmp_path / "pass2.jsonl"
+    pass2_data_path.write_text(
+        json.dumps({"metadata": {"source_id": "inline-1", "total_turns": 1}}) + "\n",
+        encoding="utf-8",
+    )
+
+    leaf_path = "files/sample.jsonl"
+    file_scope_id = f"file:{leaf_path}"
+
+    def fake_build_scope_tree(*args, **kwargs):
+        return {
+            "root_id": "global",
+            "scopes": {
+                "global": {
+                    "id": "global",
+                    "label": "global",
+                    "kind": "global",
+                    "path": "",
+                    "parent_id": None,
+                    "children": [file_scope_id],
+                    "descendant_files": [leaf_path],
+                    "raw_pass1": {"total_samples": 1},
+                    "raw_pass2": {"total_scored": 1},
+                    "raw_conversations": [],
+                },
+                file_scope_id: {
+                    "id": file_scope_id,
+                    "label": "sample.jsonl",
+                    "kind": "file",
+                    "path": leaf_path,
+                    "parent_id": "global",
+                    "children": [],
+                    "descendant_files": [leaf_path],
+                    "raw_pass1": {"total_samples": 1},
+                    "raw_pass2": {"total_scored": 1},
+                    "raw_conversations": [],
+                    "pass1_data_path": str(pass1_data_path),
+                    "pass2_data_path": str(pass2_data_path),
+                },
+            },
+        }
+
+    monkeypatch.setattr(visualize_value_module, "build_scope_tree", fake_build_scope_tree)
+
+    payload, _, _ = visualize_value_module._tree_payload(tmp_path, include_conversations=False)
+    file_scope = payload["scopes"][file_scope_id]
+
+    assert file_scope["turn_kind"] == "mixed"
+
+
 def test_generate_value_dashboard_tree_resolves_deferred_policy_before_tree_loading(tmp_path, monkeypatch):
     meta_root = tmp_path / "meta_label_data"
     meta_root.mkdir(parents=True, exist_ok=True)
@@ -616,7 +755,7 @@ def test_generate_value_dashboard_tree_resolves_deferred_policy_before_tree_load
 
     generate_value_dashboard(meta_root, scored_file=None, stats_file=PASS2_SUMMARY_STATS_FILE, quiet=True)
 
-    assert captured["include_conversations"] is False
+    assert captured["include_conversations"] is True
 
 
 def test_generate_value_dashboard_tree_fail_closes_when_completed_metadata_has_no_conversation_artifact(tmp_path):
