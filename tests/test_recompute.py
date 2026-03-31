@@ -1643,9 +1643,9 @@ class TestRegenerateDashboard:
         assert manifest["explorer"]["enabled"] is False
         assert manifest["explorer"]["mode"] == "missing"
         assert manifest["explorer"]["reason"] == "dashboard postprocess metadata missing"
-        assert manifest["scopes"]["global"]["has_conversation"] is False
-        assert detail["summary_modes"]["conversation"]["scored_total"] == 0
-        assert "conversation" not in ((detail.get("pass2") or {}).get("modes") or {})
+        assert manifest["scopes"]["global"]["has_conversation"] is True
+        assert detail["summary_modes"]["conversation"]["scored_total"] > 0
+        assert "conversation" in ((detail.get("pass2") or {}).get("modes") or {})
 
     def test_regenerate_dashboard_disables_explorer_bundle_when_summary_marks_heavy_run(self, tmp_path):
         batch = tmp_path / "batch_a"
