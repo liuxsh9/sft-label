@@ -67,6 +67,7 @@ from sft_label.label_extensions_guidance import (
     summarize_extension_specs,
 )
 from sft_label.label_extensions_schema import load_extension_specs
+from sft_label.llm_runtime import PipelineAbortError
 from sft_label.progress_heartbeat import run_with_heartbeat
 
 
@@ -1128,6 +1129,18 @@ def cmd_run(args):
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         sys.exit(1)
+    except PipelineAbortError as e:
+        print(f"\n{'='*60}")
+        print(f"PIPELINE ABORTED: {e.reason}")
+        if e.details:
+            total = e.details.get("total", 0)
+            failed = e.details.get("total_failed", 0)
+            streak = e.details.get("fatal_streak", 0)
+            print(f"  processed={total}  failed={failed}  fatal_streak={streak}")
+        print(f"{'='*60}")
+        print(f"\n修复问题后，使用以下命令续跑：")
+        print(f"  sft-label run --resume <run_dir> [--score]")
+        sys.exit(2)
 
     # Continuous mode: run Pass 2 scoring after Pass 1
     score_summary = None
@@ -1244,6 +1257,18 @@ def cmd_score(args):
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         sys.exit(1)
+    except PipelineAbortError as e:
+        print(f"\n{'='*60}")
+        print(f"PIPELINE ABORTED (Pass 2): {e.reason}")
+        if e.details:
+            total = e.details.get("total", 0)
+            failed = e.details.get("total_failed", 0)
+            streak = e.details.get("fatal_streak", 0)
+            print(f"  processed={total}  failed={failed}  fatal_streak={streak}")
+        print(f"{'='*60}")
+        print(f"\n修复问题后，使用以下命令续跑：")
+        print(f"  sft-label score --input <input_path> --resume")
+        sys.exit(2)
     return summary
 
 

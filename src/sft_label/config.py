@@ -49,6 +49,12 @@ RECOVERY_SWEEP_RPS_FACTOR = 0.25
 RECOVERY_SWEEP_TIMEOUT_MULTIPLIER = 1.5
 RECOVERY_SWEEP_DISABLE_ARBITRATION = True
 
+# ─── Fatal Failure Abort ─────────────────────────────────
+FATAL_ABORT_ENABLED = True
+FATAL_ABORT_STREAK_LIMIT = 5
+FATAL_ABORT_GLOBAL_RATE_LIMIT = 0.95
+FATAL_ABORT_GLOBAL_RATE_MIN_OBS = 20
+
 # ═══════════════════════════════════════════════════════════
 # Pass 1: Tag Labeling
 # ═══════════════════════════════════════════════════════════
@@ -450,6 +456,12 @@ class PipelineConfig:
     recovery_sweep_rps_factor: float = RECOVERY_SWEEP_RPS_FACTOR
     recovery_sweep_timeout_multiplier: float = RECOVERY_SWEEP_TIMEOUT_MULTIPLIER
     recovery_sweep_disable_arbitration: bool = RECOVERY_SWEEP_DISABLE_ARBITRATION
+
+    # Fatal failure abort
+    fatal_abort_enabled: bool = FATAL_ABORT_ENABLED
+    fatal_abort_streak_limit: int = FATAL_ABORT_STREAK_LIMIT
+    fatal_abort_global_rate_limit: float = FATAL_ABORT_GLOBAL_RATE_LIMIT
+    fatal_abort_global_rate_min_obs: int = FATAL_ABORT_GLOBAL_RATE_MIN_OBS
 
     # Pass 1: Tag Labeling
     labeling_model: str = DEFAULT_LABELING_MODEL

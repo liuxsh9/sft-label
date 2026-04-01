@@ -91,9 +91,12 @@ from sft_label.tag_canonicalization import (
 )
 from sft_label.llm_runtime import (
     AdaptiveLLMRuntime,
+    FatalFailureMonitor,
     OutcomeClass,
+    PipelineAbortError,
     RequestOutcome,
     classify_http_result,
+    monitor_to_outcome_class,
 )
 from sft_label.label_extensions import run_label_extensions
 from sft_label.label_extensions_schema import load_extension_specs
@@ -924,6 +927,16 @@ async def async_llm_call(http_client, messages, model, temperature=0.1, max_toke
                     "prompt_tokens": 0, "completion_tokens": 0,
                     "status_code": resp.status_code,
                     "error": f"HTTP 401: {error_text}",
+                    "error_response": resp.text,
+                    "non_retryable": True,
+                }
+            if resp.status_code == 402:
+                # Billing exhausted — not retryable (same as 401)
+                error_text = resp.text[:300]
+                return None, f"HTTP 402: {error_text}", {
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "status_code": resp.status_code,
+                    "error": f"HTTP 402 (billing): {error_text}",
                     "error_response": resp.text,
                     "non_retryable": True,
                 }
@@ -3572,7 +3585,8 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                                  mode: str = "refresh",
                                  migration_index: dict | None = None,
                                  progress_event_cb=None,
-                                 directory_delegate: bool = False):
+                                 directory_delegate: bool = False,
+                                 fatal_monitor: FatalFailureMonitor | None = None):
     """Chunked JSONL labeling: watermark-based processing for large files.
 
     Processes JSONL files in chunks to bound memory usage. Each chunk is
@@ -3847,6 +3861,14 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                 c.fail += 1
             c.last_progress_at = time.monotonic()
 
+            # Record for fatal failure monitor
+            if fatal_monitor is not None:
+                fatal_monitor.record(
+                    monitor_to_outcome_class(monitor),
+                    sample_id=f"chunk{c.chunk_idx}#{sample_idx}",
+                    error=monitor.get("error", "") if monitor else "",
+                )
+
             if progress and sample_task is not None:
                 update_info = info or format_progress_info(
                     c.ok,
@@ -4044,6 +4066,14 @@ async def _run_one_file_chunked(input_path, output_dir, http_client, sem, model,
                     c = collectors[chunk_idx]
                     _finish_chunk_sample(c, sample_idx, labels, monitor)
 
+                # Check fatal failure abort
+                if fatal_monitor is not None and fatal_monitor.should_abort:
+                    for f in pending_futures:
+                        f.cancel()
+                    raise PipelineAbortError(
+                        fatal_monitor.abort_reason, fatal_monitor.to_dict()
+                    )
+
                 continue
 
             if source_exhausted and all(c.completed for c in collectors.values()):
@@ -4124,7 +4154,8 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                        config=None, rate_limiter=None, llm_progress_cb=None,
                        dataset_output_path=None, run_failure_log_path=None,
                        inline_output=False, mode: str = "refresh",
-                       migration_index: dict | None = None):
+                       migration_index: dict | None = None,
+                       fatal_monitor: FatalFailureMonitor | None = None):
     """Label a single file. Writes outputs to output_dir. Returns stats dict.
 
     file_prefix: if set, output files are named e.g. labeled_<prefix>.json
@@ -4142,6 +4173,7 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             inline_output=inline_output,
             mode=mode,
             migration_index=migration_index,
+            fatal_monitor=fatal_monitor,
         )
 
     # Load input — streaming for JSONL
@@ -4251,6 +4283,14 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
             else:
                 fail_count += 1
 
+            # Record for fatal failure monitor
+            if fatal_monitor is not None:
+                fatal_monitor.record(
+                    monitor_to_outcome_class(monitor),
+                    sample_id=monitor.get("sample_id", f"#{sample_idx}"),
+                    error=monitor.get("error", "") if monitor else "",
+                )
+
             if progress and sample_task is not None:
                 info = format_progress_info(
                     ok_count,
@@ -4283,6 +4323,15 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
                     print(f"  [{done_count:4d}/{total}] {sid:20s} | {calls} calls {elapsed:5.1f}s | {intent:6s} {diff:12s} | {langs:20s} | {n_tags:2d} tags{arb}")
                 else:
                     print(f"  [{done_count:4d}/{total}] {sid:20s} | {calls} calls {elapsed:5.1f}s | FAILED: {status}")
+
+        # Check fatal failure abort
+        if fatal_monitor is not None and fatal_monitor.should_abort:
+            for t in pending_tasks:
+                t.cancel()
+            raise PipelineAbortError(
+                fatal_monitor.abort_reason, fatal_monitor.to_dict()
+            )
+
         top_up_submissions()
 
     file_elapsed = time.time() - file_start
@@ -4533,7 +4582,8 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                                  llm_task=None, workload_estimate=None,
                                  llm_progress_cb=None, layout: InlineRunLayout | None = None,
                                  mode: str = "refresh",
-                                 migration_index: dict | None = None):
+                                 migration_index: dict | None = None,
+                                 fatal_monitor: FatalFailureMonitor | None = None):
     """Cross-file pipeline with watermark-based file loading.
 
     Instead of processing files serially, loads new files whenever in-flight
@@ -4686,6 +4736,7 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                         migration_index=migration_index,
                         progress_event_cb=_chunked_progress_event,
                         directory_delegate=True,
+                        fatal_monitor=fatal_monitor,
                     ),
                     orig_idx,
                 )
@@ -4937,6 +4988,14 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                 else:
                     c.fail += 1
 
+                # Record for fatal failure monitor
+                if fatal_monitor is not None:
+                    fatal_monitor.record(
+                        monitor_to_outcome_class(monitor),
+                        sample_id=f"{c.rel_path}#{sample_idx}",
+                        error=monitor.get("error", "") if monitor else "",
+                    )
+
                 # Update samples progress bar
                 if progress and sample_task is not None:
                     label = c.rel_path.name
@@ -5022,6 +5081,14 @@ async def run_directory_pipeline(dir_files, run_dir, model, concurrency,
                     progress.update(file_task, advance=1)
 
                 collectors.pop(file_idx, None)
+
+        # Check fatal failure abort after processing batch
+        if fatal_monitor is not None and fatal_monitor.should_abort:
+            for f in pending_futures:
+                f.cancel()
+            raise PipelineAbortError(
+                fatal_monitor.abort_reason, fatal_monitor.to_dict()
+            )
 
         # After processing batch of completions, check if we should load more files
         next_to_load = maybe_load_more(pending_futures, collectors, file_queue, next_to_load)
@@ -5301,6 +5368,14 @@ async def run(
     if _config_adaptive_runtime(config) is None:
         rate_limiter = AsyncRateLimiter(config.rps_limit, warmup=config.rps_warmup) if config.rps_limit > 0 else None
 
+    # Create fatal failure monitor
+    fatal_monitor = FatalFailureMonitor(
+        fatal_streak_limit=config.fatal_abort_streak_limit,
+        global_failure_rate_limit=config.fatal_abort_global_rate_limit,
+        global_rate_min_observations=config.fatal_abort_global_rate_min_obs,
+        enabled=config.fatal_abort_enabled,
+    )
+
     # ── Resume mode ──────────────────────────────────────
     if resume:
         run_dir = Path(resume).resolve()
@@ -5390,41 +5465,50 @@ async def run(
             ),
             pprint=print,
         )
-        async with httpx.AsyncClient(
-            proxy=None,
-            timeout=config.request_timeout,
-            limits=client_limits,
-        ) as http_client:
-            sem = asyncio.Semaphore(_concurrency)
-            n = len(dir_files)
-            with create_progress() as progress:
-                file_task = progress.add_task("Files", total=n, info="")
-                sample_task = progress.add_task(
-                    "Pass 1",
-                    total=workload_estimate.total_labeled_samples,
-                    visible=workload_estimate.total_labeled_samples > 0,
-                    info="starting...",
-                )
-                llm_task = progress.add_task(
-                    "LLM (P1+P2)",
-                    total=max(workload_estimate.initial_estimated_llm_calls, 1),
-                    visible=workload_estimate.total_labeled_samples > 0,
-                    info="starting...",
-                )
-                all_file_stats = await run_directory_pipeline(
-                    dir_files, run_dir, _model, _concurrency,
-                    checkpoint_path, completed_set=completed,
-                    limit=limit, shuffle=shuffle,
-                    progress=progress, file_task=file_task, sample_task=sample_task,
-                    llm_task=llm_task, workload_estimate=workload_estimate,
-                    http_client=http_client, sem=sem,
-                    enable_arbitration=enable_arbitration,
-                    config=config, rate_limiter=rate_limiter,
-                    llm_progress_cb=llm_progress_cb,
-                    layout=layout,
-                    mode=_mode,
-                    migration_index=migration_index,
-                )
+        try:
+            async with httpx.AsyncClient(
+                proxy=None,
+                timeout=config.request_timeout,
+                limits=client_limits,
+            ) as http_client:
+                sem = asyncio.Semaphore(_concurrency)
+                n = len(dir_files)
+                with create_progress() as progress:
+                    file_task = progress.add_task("Files", total=n, info="")
+                    sample_task = progress.add_task(
+                        "Pass 1",
+                        total=workload_estimate.total_labeled_samples,
+                        visible=workload_estimate.total_labeled_samples > 0,
+                        info="starting...",
+                    )
+                    llm_task = progress.add_task(
+                        "LLM (P1+P2)",
+                        total=max(workload_estimate.initial_estimated_llm_calls, 1),
+                        visible=workload_estimate.total_labeled_samples > 0,
+                        info="starting...",
+                    )
+                    all_file_stats = await run_directory_pipeline(
+                        dir_files, run_dir, _model, _concurrency,
+                        checkpoint_path, completed_set=completed,
+                        limit=limit, shuffle=shuffle,
+                        progress=progress, file_task=file_task, sample_task=sample_task,
+                        llm_task=llm_task, workload_estimate=workload_estimate,
+                        http_client=http_client, sem=sem,
+                        enable_arbitration=enable_arbitration,
+                        config=config, rate_limiter=rate_limiter,
+                        llm_progress_cb=llm_progress_cb,
+                        layout=layout,
+                        mode=_mode,
+                        migration_index=migration_index,
+                        fatal_monitor=fatal_monitor,
+                    )
+        except PipelineAbortError as exc:
+            ckpt = load_checkpoint(checkpoint_path) or {}
+            ckpt["status"] = "aborted"
+            ckpt["abort_reason"] = exc.reason
+            ckpt["abort_details"] = exc.details
+            _write_checkpoint(checkpoint_path, ckpt)
+            raise
 
         # Write global summary
         _write_global_summary(all_file_stats, run_dir, _input_path, _model, _concurrency, batch_start,
@@ -5527,41 +5611,50 @@ async def run(
             ),
             pprint=print,
         )
-        async with httpx.AsyncClient(
-            proxy=None,
-            timeout=config.request_timeout,
-            limits=client_limits,
-        ) as http_client:
-            sem = asyncio.Semaphore(_concurrency)
-            n = len(dir_files)
-            with create_progress() as progress:
-                file_task = progress.add_task("Files", total=n, info="")
-                sample_task = progress.add_task(
-                    "Pass 1",
-                    total=workload_estimate.total_labeled_samples,
-                    visible=workload_estimate.total_labeled_samples > 0,
-                    info="starting...",
-                )
-                llm_task = progress.add_task(
-                    "LLM (P1+P2)",
-                    total=max(workload_estimate.initial_estimated_llm_calls, 1),
-                    visible=workload_estimate.total_labeled_samples > 0,
-                    info="starting...",
-                )
-                all_file_stats = await run_directory_pipeline(
-                    dir_files, run_dir, config.labeling_model, _concurrency,
-                    checkpoint_path,
-                    limit=limit, shuffle=shuffle,
-                    progress=progress, file_task=file_task, sample_task=sample_task,
-                    llm_task=llm_task, workload_estimate=workload_estimate,
-                    http_client=http_client, sem=sem,
-                    enable_arbitration=enable_arbitration,
-                    config=config, rate_limiter=rate_limiter,
-                    llm_progress_cb=llm_progress_cb,
-                    layout=layout,
-                    mode=mode,
-                    migration_index=migration_index,
-                )
+        try:
+            async with httpx.AsyncClient(
+                proxy=None,
+                timeout=config.request_timeout,
+                limits=client_limits,
+            ) as http_client:
+                sem = asyncio.Semaphore(_concurrency)
+                n = len(dir_files)
+                with create_progress() as progress:
+                    file_task = progress.add_task("Files", total=n, info="")
+                    sample_task = progress.add_task(
+                        "Pass 1",
+                        total=workload_estimate.total_labeled_samples,
+                        visible=workload_estimate.total_labeled_samples > 0,
+                        info="starting...",
+                    )
+                    llm_task = progress.add_task(
+                        "LLM (P1+P2)",
+                        total=max(workload_estimate.initial_estimated_llm_calls, 1),
+                        visible=workload_estimate.total_labeled_samples > 0,
+                        info="starting...",
+                    )
+                    all_file_stats = await run_directory_pipeline(
+                        dir_files, run_dir, config.labeling_model, _concurrency,
+                        checkpoint_path,
+                        limit=limit, shuffle=shuffle,
+                        progress=progress, file_task=file_task, sample_task=sample_task,
+                        llm_task=llm_task, workload_estimate=workload_estimate,
+                        http_client=http_client, sem=sem,
+                        enable_arbitration=enable_arbitration,
+                        config=config, rate_limiter=rate_limiter,
+                        llm_progress_cb=llm_progress_cb,
+                        layout=layout,
+                        mode=mode,
+                        migration_index=migration_index,
+                        fatal_monitor=fatal_monitor,
+                    )
+        except PipelineAbortError as exc:
+            ckpt = load_checkpoint(checkpoint_path) or {}
+            ckpt["status"] = "aborted"
+            ckpt["abort_reason"] = exc.reason
+            ckpt["abort_details"] = exc.details
+            _write_checkpoint(checkpoint_path, ckpt)
+            raise
 
         _write_global_summary(all_file_stats, run_dir, _input_path, config.labeling_model, _concurrency, batch_start,
                               rate_limiter=rate_limiter, workload_estimate=workload_estimate,
@@ -5608,6 +5701,7 @@ async def run(
                     inline_output=str(_input_path).endswith(".jsonl"),
                     mode=mode,
                     migration_index=migration_index,
+                    fatal_monitor=fatal_monitor,
                 )
 
         stats["model"] = config.labeling_model

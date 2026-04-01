@@ -113,17 +113,23 @@ def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits
 try:
     from sft_label.llm_runtime import (
         AdaptiveLLMRuntime,
+        FatalFailureMonitor,
         OutcomeClass,
+        PipelineAbortError,
         RequestOutcome,
         classify_exception,
         classify_http_result,
+        monitor_to_outcome_class,
     )
 except Exception:  # pragma: no cover - runtime module lands in parallel task
     AdaptiveLLMRuntime = None
+    FatalFailureMonitor = None
     OutcomeClass = None
+    PipelineAbortError = None
     RequestOutcome = None
     classify_exception = None
     classify_http_result = None
+    monitor_to_outcome_class = None
 
 
 DIRECTORY_JSON_STREAMING_THRESHOLD_BYTES = 64 * 1024 * 1024
@@ -4342,7 +4348,8 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
                                    tag_stats_path, limit, config, resume=False,
                                    llm_progress_cb=None,
                                    *,
-                                   cleanup_pass1_cache: bool | None = None):
+                                   cleanup_pass1_cache: bool | None = None,
+                                   fatal_monitor=None):
     """Score one mirrored inline JSONL file via rebuildable meta caches."""
     artifact_dir = target.layout.file_artifact_dir(source_file)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -4375,6 +4382,7 @@ async def _run_inline_scoring_file(target: InlineScoringTarget, source_file: Pat
         resume=resume,
         llm_progress_cb=llm_progress_cb,
         file_label=rel_file_label,
+        fatal_monitor=fatal_monitor,
     )
 
     pass2_run_stats = stats
@@ -4409,6 +4417,13 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
     if not source_files:
         print(f"No mirrored inline JSONL files found under {target.target_path}")
         return {}
+
+    fatal_monitor = FatalFailureMonitor(
+        fatal_streak_limit=config.fatal_abort_streak_limit,
+        global_failure_rate_limit=config.fatal_abort_global_rate_limit,
+        global_rate_min_observations=config.fatal_abort_global_rate_min_obs,
+        enabled=config.fatal_abort_enabled,
+    ) if FatalFailureMonitor is not None else None
 
     effective_tag_stats = tag_stats_path
     if effective_tag_stats is None:
@@ -4480,8 +4495,11 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
                         resume=resume,
                         llm_progress_cb=llm_progress_cb,
                         cleanup_pass1_cache=cleanup_after,
+                        fatal_monitor=fatal_monitor,
                     )
                     corrected_file_stats.append(stats)
+                except PipelineAbortError:
+                    raise
                 except Exception as exc:
                     failed_files.append((rel_label, str(exc)))
                     if progress is not None:
@@ -4723,7 +4741,8 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                                      progress_hook=None,
                                      print_summary=True,
                                      generate_dashboard=True,
-                                     quiet=False):
+                                     quiet=False,
+                                     fatal_monitor=None):
     """Score a JSONL labeled file in chunks to bound memory.
 
     Two-pass approach:
@@ -5285,6 +5304,14 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                         chunk_data["monitors"][local_idx] = monitor
                         chunk_data["done"] += 1
 
+                        # Record for fatal failure monitor
+                        if fatal_monitor is not None:
+                            fatal_monitor.record(
+                                monitor_to_outcome_class(monitor),
+                                sample_id=f"score_chunk{chunk_idx}#{abs_idx}",
+                                error=monitor.get("error", "") if isinstance(monitor, dict) else "",
+                            )
+
                         if not value and not first_error_logged and monitor:
                             summary = _summarize_first_failure(monitor)
                             if summary:
@@ -5310,6 +5337,17 @@ async def _run_scoring_file_chunked(input_path, output_dir, tag_stats_path,
                             })
                         if progress is not None:
                             progress.update(task, advance=1, info=_info)
+
+                    # Check fatal failure abort
+                    if fatal_monitor is not None and fatal_monitor.should_abort:
+                        for f in pending_futures:
+                            f.cancel()
+                        # Flush whatever we have before raising
+                        flush_ready_scoring_chunks()
+                        raise PipelineAbortError(
+                            fatal_monitor.abort_reason, fatal_monitor.to_dict()
+                        )
+
                     flush_ready_scoring_chunks()
                     resumed_loaded = maybe_load_more_scoring()
                     submit_more_scoring_tasks()
@@ -5690,7 +5728,8 @@ def print_scoring_summary(stats, run_dir, is_batch=False):
 
 
 async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, config, resume=False,
-                            llm_progress_cb=None, file_label=None, generate_dashboard=True):
+                            llm_progress_cb=None, file_label=None, generate_dashboard=True,
+                            fatal_monitor=None):
     """Score a single labeled file."""
     input_path = Path(input_path)
 
@@ -5702,6 +5741,7 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
             llm_progress_cb=llm_progress_cb,
             file_label=file_label,
             generate_dashboard=generate_dashboard,
+            fatal_monitor=fatal_monitor,
         )
 
     if output_dir is None:
@@ -5895,6 +5935,15 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                     if summary:
                         print(summary)
                     first_error_logged = True
+
+            # Record for fatal failure monitor
+            if fatal_monitor is not None:
+                fatal_monitor.record(
+                    monitor_to_outcome_class(monitor),
+                    sample_id=f"score#{idx}",
+                    error=monitor.get("error", "") if isinstance(monitor, dict) else "",
+                )
+
             return idx
 
         with _create_progress() as progress:
@@ -5934,6 +5983,15 @@ async def _run_scoring_file(input_path, output_dir, tag_stats_path, limit, confi
                         if run_info:
                             _info = f"{_info} • {run_info}"
                     progress.update(task, advance=1, info=_info)
+
+                # Check fatal failure abort
+                if fatal_monitor is not None and fatal_monitor.should_abort:
+                    for t in pending_tasks:
+                        t.cancel()
+                    raise PipelineAbortError(
+                        fatal_monitor.abort_reason, fatal_monitor.to_dict()
+                    )
+
                 await asyncio.sleep(0)
                 submit_more_tasks()
 
@@ -6952,6 +7010,13 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
         initial_estimated_calls=workload_estimate.initial_estimated_llm_calls,
     )
 
+    fatal_monitor = FatalFailureMonitor(
+        fatal_streak_limit=config.fatal_abort_streak_limit,
+        global_failure_rate_limit=config.fatal_abort_global_rate_limit,
+        global_rate_min_observations=config.fatal_abort_global_rate_min_obs,
+        enabled=config.fatal_abort_enabled,
+    ) if FatalFailureMonitor is not None else None
+
     try:
         client_limits = _build_http_client_limits(concurrency)
         async with httpx.AsyncClient(
@@ -7116,6 +7181,7 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                         print_summary=False,
                         generate_dashboard=False,
                         quiet=True,
+                        fatal_monitor=fatal_monitor,
                     )
                     stats["file"] = stats.get("file") or _relative_file_label(original_path, input_dir)
                     return stats
@@ -7214,10 +7280,28 @@ async def _run_scoring_directory(input_dir, output_dir, tag_stats_path, limit, c
                                     pprint(summary)
                                 first_error_logged = True
 
+                        # Record for fatal failure monitor
+                        if fatal_monitor is not None:
+                            fatal_monitor.record(
+                                monitor_to_outcome_class(monitor),
+                                sample_id=f"score#{file_idx}:{sample_idx}",
+                                error=monitor.get("error", "") if isinstance(monitor, dict) else "",
+                            )
+
                         _update_sample_progress(
                             advance=1,
                             label=c.labeled_path.name,
                             monitor=monitor,
+                        )
+
+                    # Check fatal failure abort
+                    if fatal_monitor is not None and fatal_monitor.should_abort:
+                        for f in pending_futures:
+                            f.cancel()
+                        for f in active_streaming_tasks:
+                            f.cancel()
+                        raise PipelineAbortError(
+                            fatal_monitor.abort_reason, fatal_monitor.to_dict()
                         )
 
                     await top_up_work()

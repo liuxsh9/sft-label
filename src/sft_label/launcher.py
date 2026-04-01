@@ -817,6 +817,15 @@ def _detect_smart_resume_command(target: Path) -> tuple[list[str], str]:
     checkpoint_status = (checkpoint_payload or {}).get("status")
 
     if checkpoint is not None and checkpoint_status != "done":
+        abort_reason = (checkpoint_payload or {}).get("abort_reason", "")
+        if checkpoint_status == "aborted" and abort_reason:
+            return (
+                ["run", "--resume", str(target)],
+                _msg(
+                    f"检测到 checkpoint 状态为 aborted（原因：{abort_reason}），确认问题已修复后将续跑。",
+                    f"Detected aborted checkpoint (reason: {abort_reason}); will resume after issue is fixed.",
+                ),
+            )
         return (
             ["run", "--resume", str(target)],
             _msg(

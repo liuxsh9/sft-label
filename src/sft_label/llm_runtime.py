@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+class PipelineAbortError(Exception):
+    """Raised when sustained fatal failures make further processing pointless."""
+
+    def __init__(self, reason: str, details: dict | None = None):
+        self.reason = reason
+        self.details = details or {}
+        super().__init__(reason)
+
+
 class OutcomeClass(str, Enum):
     SUCCESS = "success"
     TIMEOUT = "timeout"
@@ -105,7 +114,7 @@ def classify_http_result(
             latency_ms=latency_ms,
         )
 
-    if status_code == 401:
+    if status_code in (401, 402):
         return RequestOutcome(
             classification=OutcomeClass.AUTH_ERROR,
             status_code=status_code,
@@ -188,6 +197,23 @@ def classify_exception(exc: Exception, *, latency_ms: float | None = None) -> Re
         error=message,
         latency_ms=latency_ms,
     )
+
+
+def monitor_to_outcome_class(monitor: dict | None) -> OutcomeClass:
+    """Extract OutcomeClass from a sample monitor dict.
+
+    Works for both Pass 1 and Pass 2 monitors which share the same
+    ``status`` / ``error_class`` schema.
+    """
+    if monitor is None:
+        return OutcomeClass.TRANSIENT_ERROR
+    if monitor.get("status") == "success":
+        return OutcomeClass.SUCCESS
+    error_class = monitor.get("error_class", "")
+    try:
+        return OutcomeClass(error_class)
+    except (ValueError, KeyError):
+        return OutcomeClass.TRANSIENT_ERROR
 
 
 class _GatePermit:
@@ -686,3 +712,140 @@ class AdaptiveLLMRuntime:
                 "payload": payload,
             }
         )
+
+
+# ═══════════════════════════════════════════════════════════
+# Fatal Failure Monitor — abort pipeline on sustained failures
+# ═══════════════════════════════════════════════════════════
+
+
+class FatalFailureMonitor:
+    """Two-signal abort monitor: fatal error streak + global failure rate.
+
+    Signal 1 — **Fatal streak**: N consecutive results whose OutcomeClass is in
+    ``fatal_classes`` triggers immediate abort.  Any success *or* non-fatal
+    failure resets the streak counter, so only truly consecutive fatal errors
+    fire this signal (catches "billing exhausted" in seconds).
+
+    Signal 2 — **Global failure rate**: once at least ``global_rate_min_observations``
+    results have been recorded, if ``failed / total >= global_failure_rate_limit``
+    the monitor fires (catches slow, persistent degradation).
+
+    Either signal → ``should_abort`` becomes True.
+    """
+
+    def __init__(
+        self,
+        *,
+        fatal_streak_limit: int = 5,
+        global_failure_rate_limit: float = 0.95,
+        global_rate_min_observations: int = 20,
+        fatal_classes: frozenset[OutcomeClass] = frozenset({OutcomeClass.AUTH_ERROR}),
+        enabled: bool = True,
+    ):
+        self.fatal_streak_limit = fatal_streak_limit
+        self.global_failure_rate_limit = global_failure_rate_limit
+        self.global_rate_min_observations = global_rate_min_observations
+        self.fatal_classes = fatal_classes
+        self.enabled = enabled
+
+        # Counters
+        self._fatal_streak = 0
+        self._total = 0
+        self._total_failed = 0
+        self._total_success = 0
+        self._last_fatal_error = ""
+        self._last_fatal_sample_id = ""
+
+        # Abort state
+        self._aborted = False
+        self._abort_reason = ""
+
+    # ── Recording ────────────────────────────────────────
+
+    def record(
+        self,
+        outcome_class: OutcomeClass,
+        *,
+        sample_id: str = "",
+        error: str = "",
+    ) -> None:
+        """Record a sample outcome. Call after each sample completes."""
+        if not self.enabled:
+            return
+
+        self._total += 1
+
+        if outcome_class is OutcomeClass.SUCCESS:
+            self._total_success += 1
+            self._fatal_streak = 0
+            return
+
+        # Any non-success is a failure for global rate purposes
+        self._total_failed += 1
+
+        if outcome_class in self.fatal_classes:
+            self._fatal_streak += 1
+            self._last_fatal_error = error
+            self._last_fatal_sample_id = sample_id
+        else:
+            # Non-fatal failure resets the streak
+            self._fatal_streak = 0
+
+        self._check_triggers()
+
+    def _check_triggers(self) -> None:
+        if self._aborted:
+            return
+
+        # Signal 1: fatal streak
+        if self._fatal_streak >= self.fatal_streak_limit:
+            self._aborted = True
+            self._abort_reason = (
+                f"连续 {self._fatal_streak} 个致命错误 "
+                f"({', '.join(c.value for c in self.fatal_classes)}). "
+                f"最后错误: {self._last_fatal_error[:200]}"
+            )
+            return
+
+        # Signal 2: global failure rate
+        if (
+            self._total >= self.global_rate_min_observations
+            and self._total_failed / self._total >= self.global_failure_rate_limit
+        ):
+            rate = self._total_failed / self._total
+            self._aborted = True
+            self._abort_reason = (
+                f"全局失败率 {rate:.1%} ({self._total_failed}/{self._total}) "
+                f"超过阈值 {self.global_failure_rate_limit:.0%}"
+            )
+
+    # ── Query ────────────────────────────────────────────
+
+    @property
+    def should_abort(self) -> bool:
+        return self._aborted
+
+    @property
+    def abort_reason(self) -> str:
+        return self._abort_reason
+
+    def to_dict(self) -> dict:
+        """Serialisable snapshot for checkpoint / diagnostics."""
+        return {
+            "enabled": self.enabled,
+            "aborted": self._aborted,
+            "abort_reason": self._abort_reason,
+            "fatal_streak": self._fatal_streak,
+            "fatal_streak_limit": self.fatal_streak_limit,
+            "total": self._total,
+            "total_failed": self._total_failed,
+            "total_success": self._total_success,
+            "global_failure_rate": (
+                self._total_failed / self._total if self._total > 0 else 0.0
+            ),
+            "global_failure_rate_limit": self.global_failure_rate_limit,
+            "global_rate_min_observations": self.global_rate_min_observations,
+            "last_fatal_error": self._last_fatal_error[:300],
+            "last_fatal_sample_id": self._last_fatal_sample_id,
+        }
