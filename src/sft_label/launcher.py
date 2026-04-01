@@ -882,7 +882,7 @@ def build_launch_plan(
     _ver = _get_version()
     _date = _get_build_date()
     _ver_line = "sft-label v" + _ver + ("  (" + _date + ")" if _date else "")
-    _say(output_fn, "交互式任务启动器 / Interactive task launcher  " + _ver_line)
+    _say(output_fn, "交互式任务启动器 " + _ver_line + " / Interactive task launcher " + _ver_line)
     _say(output_fn, "请选择任务，并只填写必要参数 / Choose a workflow and fill only required options.")
     _say(output_fn, "如果任务中断或报错，且不确定停在哪一阶段，请优先选择\u201c智能续跑\u201d / If a run was interrupted and you're unsure which pass failed, choose 'Smart resume' first.")
     _say(output_fn, "输入 b/back 可返回上一层，输入 0 可取消 / Type b/back to go back, 0 to cancel.")
