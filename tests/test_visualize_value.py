@@ -1294,3 +1294,65 @@ def test_tree_payload_global_conversation_mode_includes_single_turn_samples(tmp_
 
     # summary_modes should also reflect the correct count
     assert global_scope["summary_modes"]["conversation"]["scored_total"] == 2
+
+
+def test_tree_payload_dir_scope_conversation_mode_uses_per_file_aggregation(tmp_path):
+    """Dir scopes have empty raw_conversations, so should fall back to per-file aggregation."""
+    meta_root = tmp_path / "meta_label_data"
+    leaf_a = meta_root / "files" / "subdir" / "file_a"
+    leaf_b = meta_root / "files" / "subdir" / "file_b"
+    leaf_a.mkdir(parents=True, exist_ok=True)
+    leaf_b.mkdir(parents=True, exist_ok=True)
+
+    def _make_multi_turn(source_file, conv_id, v1, v2):
+        return [
+            {
+                "id": f"{conv_id}-1",
+                "metadata": {"source_file": source_file, "source_id": conv_id, "turn_index": 1, "total_turns": 2, "conversation_uid": conv_id},
+                "labels": {"intent": "build"},
+                "value": {"value_score": v1, "selection_score": v1, "thinking_mode": "fast",
+                          "quality": {"overall": v1}, "complexity": {"overall": v1},
+                          "reasoning": {"overall": v1}, "rarity": {"score": v1}, "confidence": 0.8},
+            },
+            {
+                "id": f"{conv_id}-2",
+                "metadata": {"source_file": source_file, "source_id": conv_id, "turn_index": 2, "total_turns": 2, "conversation_uid": conv_id},
+                "labels": {"intent": "debug"},
+                "value": {"value_score": v2, "selection_score": v2, "thinking_mode": "fast",
+                          "quality": {"overall": v2}, "complexity": {"overall": v2},
+                          "reasoning": {"overall": v2}, "rarity": {"score": v2}, "confidence": 0.9},
+            },
+        ]
+
+    rows_a = _make_multi_turn("subdir/file_a.jsonl", "conv-a", 4.0, 8.0)
+    rows_b = _make_multi_turn("subdir/file_b.jsonl", "conv-b", 3.0, 7.0)
+
+    from sft_label.conversation import aggregate_conversations
+    for leaf_dir, rows in [(leaf_a, rows_a), (leaf_b, rows_b)]:
+        (leaf_dir / "scored.jsonl").write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8",
+        )
+        conv = aggregate_conversations(rows)
+        (leaf_dir / "conversation_scores.json").write_text(json.dumps(conv), encoding="utf-8")
+        (leaf_dir / PASS2_STATS_FILE).write_text(json.dumps({
+            "input_file": leaf_dir.name + ".jsonl",
+            "total_scored": 2, "total_failed": 0,
+            "score_distributions": {"value_score": {"mean": 6.0}},
+            "histograms": {}, "flag_counts": {}, "value_by_tag": {}, "selection_by_tag": {},
+        }), encoding="utf-8")
+
+    (meta_root / PASS2_SUMMARY_STATS_FILE).write_text(json.dumps({
+        "input_path": "dataset", "total_scored": 4, "total_failed": 0,
+        "postprocess": {"dashboard": {"status": "completed"}, "conversation_scores": {"status": "completed"}},
+        "score_distributions": {"value_score": {"mean": 5.5}},
+        "histograms": {}, "flag_counts": {},
+        "per_file_summary": [{"file": "subdir/file_a.jsonl", "count": 2}, {"file": "subdir/file_b.jsonl", "count": 2}],
+    }), encoding="utf-8")
+
+    from sft_label.tools.visualize_value import _tree_payload
+    manifest, _, _ = _tree_payload(meta_root)
+    dir_scope = manifest["scopes"]["dir:subdir"]
+    conv_mode = dir_scope["pass2"]["modes"]["conversation"]
+
+    # Dir scope should have 2 conversation units (one per file, aggregated from per-file conv records)
+    assert conv_mode["overview"]["total_scored"] == 2
