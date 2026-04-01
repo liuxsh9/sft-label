@@ -8,8 +8,10 @@ import os
 import re
 import select
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Callable
 
@@ -56,6 +58,29 @@ BACK_TOKENS = {
 
 
 DEFAULT_EXTENSION_SPECS_DIR = Path(__file__).resolve().parents[2] / "extensions"
+
+
+def _get_version() -> str:
+    """Return the installed package version string."""
+    try:
+        return _pkg_version("sft-label")
+    except Exception:
+        return "dev"
+
+
+def _get_build_date() -> str:
+    """Return the date of the latest git commit, or empty string."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cs"],
+            capture_output=True, text=True, timeout=3,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 class BackRequested(Exception):
@@ -854,9 +879,12 @@ def build_launch_plan(
     set_language(language or DEFAULT_LANGUAGE)
 
     _say(output_fn, SECTION_DIVIDER)
-    _say(output_fn, "交互式任务启动器 / Interactive task launcher")
+    _ver = _get_version()
+    _date = _get_build_date()
+    _ver_line = "sft-label v" + _ver + ("  (" + _date + ")" if _date else "")
+    _say(output_fn, "交互式任务启动器 / Interactive task launcher  " + _ver_line)
     _say(output_fn, "请选择任务，并只填写必要参数 / Choose a workflow and fill only required options.")
-    _say(output_fn, "如果任务中断或报错，且不确定停在哪一阶段，请优先选择“智能续跑” / If a run was interrupted and you're unsure which pass failed, choose 'Smart resume' first.")
+    _say(output_fn, "如果任务中断或报错，且不确定停在哪一阶段，请优先选择\u201c智能续跑\u201d / If a run was interrupted and you're unsure which pass failed, choose 'Smart resume' first.")
     _say(output_fn, "输入 b/back 可返回上一层，输入 0 可取消 / Type b/back to go back, 0 to cancel.")
     _say(output_fn, SECTION_DIVIDER)
     _say(output_fn, "")
