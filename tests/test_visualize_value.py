@@ -1172,3 +1172,125 @@ def test_generate_value_dashboard_tree_payload_aggregates_conversation_mode_for_
     assert global_detail["summary_modes"]["conversation"]["scored_total"] == 2
     assert global_detail["conversation"]["total"] == 2
     assert global_detail["conversation"]["mean_conv_value"] == 5.24
+
+
+def test_tree_payload_global_conversation_mode_includes_single_turn_samples(tmp_path):
+    """Global conversation mode should include single-turn samples from root-level conversation_scores.json."""
+    meta_root = tmp_path / "meta_label_data"
+    leaf_dir = meta_root / "files" / "code" / "mixed"
+    leaf_dir.mkdir(parents=True, exist_ok=True)
+
+    # Multi-turn slices (2 slices for conv-1)
+    multi_turn_slices = [
+        {
+            "id": "mt-1",
+            "metadata": {"source_file": "code/mixed.jsonl", "source_id": "conv-1", "turn_index": 1, "total_turns": 2, "conversation_uid": "conv-1"},
+            "labels": {"intent": "build", "difficulty": "intermediate", "context": "snippet"},
+            "value": {
+                "value_score": 5.0, "selection_score": 5.5, "thinking_mode": "fast",
+                "quality": {"overall": 5.0}, "complexity": {"overall": 5.0},
+                "reasoning": {"overall": 5.0}, "rarity": {"score": 5.0}, "confidence": 0.8,
+            },
+        },
+        {
+            "id": "mt-2",
+            "metadata": {"source_file": "code/mixed.jsonl", "source_id": "conv-1", "turn_index": 2, "total_turns": 2, "conversation_uid": "conv-1"},
+            "labels": {"intent": "debug", "difficulty": "advanced", "context": "repository"},
+            "value": {
+                "value_score": 7.0, "selection_score": 7.5, "thinking_mode": "fast",
+                "quality": {"overall": 7.0}, "complexity": {"overall": 7.0},
+                "reasoning": {"overall": 7.0}, "rarity": {"score": 7.0}, "confidence": 0.9,
+            },
+        },
+    ]
+    # Single-turn sample
+    single_turn_sample = {
+        "id": "st-1",
+        "metadata": {"source_file": "code/mixed.jsonl", "source_id": "single-1"},
+        "labels": {"intent": "explain", "difficulty": "beginner", "context": "snippet"},
+        "value": {
+            "value_score": 4.0, "selection_score": 4.5, "thinking_mode": "fast",
+            "quality": {"overall": 4.0}, "complexity": {"overall": 3.0},
+            "reasoning": {"overall": 4.0}, "rarity": {"score": 3.0}, "confidence": 0.7,
+        },
+    }
+    all_samples = multi_turn_slices + [single_turn_sample]
+
+    (leaf_dir / "scored.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in all_samples) + "\n",
+        encoding="utf-8",
+    )
+
+    # Per-file conversation_scores.json: only multi-turn (matches aggregate_conversations behavior)
+    from sft_label.conversation import aggregate_conversations
+    per_file_conv = aggregate_conversations(all_samples)  # only returns multi-turn
+    assert len(per_file_conv) == 1, "aggregate_conversations should only return 1 multi-turn record"
+    (leaf_dir / "conversation_scores.json").write_text(
+        json.dumps(per_file_conv), encoding="utf-8",
+    )
+
+    # Root-level conversation_scores.json: both multi-turn AND single-turn
+    from sft_label.inline_scoring import _single_turn_conversation_update
+    single_turn_conv = _single_turn_conversation_update(single_turn_sample)
+    root_conv = per_file_conv + [single_turn_conv]
+    assert len(root_conv) == 2, "root-level should have both multi-turn and single-turn"
+    (meta_root / "conversation_scores.json").write_text(
+        json.dumps(root_conv), encoding="utf-8",
+    )
+
+    # Stats files
+    (leaf_dir / PASS2_STATS_FILE).write_text(
+        json.dumps({
+            "input_file": "code/mixed.jsonl",
+            "total_scored": 3,
+            "total_failed": 0,
+            "score_distributions": {
+                "value_score": {"mean": 5.33},
+                "selection_score": {"mean": 5.83},
+                "complexity_overall": {"mean": 5.0},
+                "quality_overall": {"mean": 5.33},
+                "reasoning_overall": {"mean": 5.33},
+                "confidence": {"mean": 0.8},
+            },
+            "histograms": {},
+            "flag_counts": {},
+            "value_by_tag": {},
+            "selection_by_tag": {},
+        }),
+        encoding="utf-8",
+    )
+    (meta_root / PASS2_SUMMARY_STATS_FILE).write_text(
+        json.dumps({
+            "input_path": "dataset",
+            "total_scored": 3,
+            "total_failed": 0,
+            "postprocess": {
+                "dashboard": {"status": "completed"},
+                "conversation_scores": {"status": "completed"},
+            },
+            "score_distributions": {
+                "value_score": {"mean": 5.33},
+                "selection_score": {"mean": 5.83},
+                "complexity_overall": {"mean": 5.0},
+                "quality_overall": {"mean": 5.33},
+                "reasoning_overall": {"mean": 5.33},
+                "confidence": {"mean": 0.8},
+            },
+            "histograms": {},
+            "flag_counts": {},
+            "per_file_summary": [{"file": "code/mixed.jsonl", "count": 3, "mean_value": 5.33}],
+        }),
+        encoding="utf-8",
+    )
+
+    from sft_label.tools.visualize_value import _tree_payload
+    manifest, _, _ = _tree_payload(meta_root)
+    global_scope = manifest["scopes"]["global"]
+    conv_mode = global_scope["pass2"]["modes"]["conversation"]
+
+    # BUG: Before fix, this would be 1 (only multi-turn).
+    # After fix, should be 2 (1 multi-turn conv + 1 single-turn unit).
+    assert conv_mode["overview"]["total_scored"] == 2
+
+    # summary_modes should also reflect the correct count
+    assert global_scope["summary_modes"]["conversation"]["scored_total"] == 2

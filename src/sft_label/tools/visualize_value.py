@@ -493,9 +493,13 @@ def _tree_payload(
         if is_file:
             conv_records = list(file_conversations.get(scope_id, []))
         else:
-            conv_records = []
-            for leaf_path in raw_scope.get("descendant_files", []):
-                conv_records.extend(file_conversations.get(f"file:{leaf_path}", []))
+            scope_conv = raw_scope.get("raw_conversations") or []
+            if scope_conv:
+                conv_records = list(scope_conv)
+            else:
+                conv_records = []
+                for leaf_path in raw_scope.get("descendant_files", []):
+                    conv_records.extend(file_conversations.get(f"file:{leaf_path}", []))
         has_conv_records = bool(conv_records)
         normalized_pass1_stats = _normalized_dashboard_stats(
             raw_scope.get("raw_pass1"),
