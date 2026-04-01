@@ -87,6 +87,7 @@ from sft_label.tag_canonicalization import (
     TAG_ALIASES,
     canonicalization_stat_key,
     make_canonicalization_event,
+    resolve_alias,
 )
 from sft_label.llm_runtime import (
     AdaptiveLLMRuntime,
@@ -1184,7 +1185,7 @@ def _resolve_aliases(dim, values, canonicalized=None):
     resolved = []
     for v in values:
         # Only map alias if the raw value is not already valid in this pool
-        canonical = v if v in pool else TAG_ALIASES.get(v, v)
+        canonical = v if v in pool else resolve_alias(v, dim)
         if canonical != v and canonical in pool:
             _append_canonicalization(canonicalized, dim, v, dim, canonical, "alias")
             canonical_for_dim = canonical
@@ -1255,14 +1256,14 @@ def sanitize_conversations_for_content_filter(conversations):
     return sanitized, changed
 
 
-def _candidate_tag_values(value):
+def _candidate_tag_values(value, dim=None):
     """Return raw + alias-resolved candidates for rescue checks."""
     raw = "" if value is None else str(value).strip()
     if not raw or _is_empty_sentinel(raw):
         return []
     candidates = [raw]
-    alias = TAG_ALIASES.get(raw)
-    if alias and alias not in candidates:
+    alias = resolve_alias(raw, dim)
+    if alias != raw and alias not in candidates:
         candidates.append(alias)
     return candidates
 
@@ -1307,7 +1308,7 @@ def _normalize_optional_multi_values(values):
 
 def _find_cross_dim_tag(value, exclude_dim=None):
     """Find a uniquely matching tag in another dimension."""
-    for candidate in _candidate_tag_values(value):
+    for candidate in _candidate_tag_values(value, dim=exclude_dim):
         matched_dims = sorted(
             dim for dim in TAG_DIMENSION_INDEX.get(candidate, set())
             if dim != exclude_dim
@@ -1404,7 +1405,7 @@ def validate_tags(result, call_name="call1"):
             elif not isinstance(raw_val, str):
                 issues.append(f"{dim}: invalid type {type(raw_val).__name__}")
                 raw_val = str(raw_val)
-            val = raw_val if (not raw_val or raw_val in pool) else TAG_ALIASES.get(raw_val, raw_val)
+            val = raw_val if (not raw_val or raw_val in pool) else resolve_alias(raw_val, dim)
             if val and val not in pool:
                 if not _try_rescue_unmapped_value(val, dim, rescued, dims, canonicalized=canonicalized):
                     issues.append(f"{dim}: '{val}' not in pool")
@@ -1431,7 +1432,7 @@ def validate_tags(result, call_name="call1"):
         value = item["value"]
         if dim in dims:
             same_dim_hit = next(
-                (candidate for candidate in _candidate_tag_values(value) if candidate in TAG_POOLS.get(dim, set())),
+                (candidate for candidate in _candidate_tag_values(value, dim=dim) if candidate in TAG_POOLS.get(dim, set())),
                 None,
             )
             if same_dim_hit:

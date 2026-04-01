@@ -52,12 +52,13 @@ Disambiguation:
 ### Language (multi-select)
 What programming languages appear in the conversation?
 Common: python, javascript, typescript, java, go, rust, c, cpp, csharp, ruby, php, swift, kotlin, sql, html, css, shell, dockerfile, yaml, json, markdown, hcl, xml, toml
-Other: ada, apl, assembly, bazel, clojure, cmake, cobol, crystal, dart, dotenv, elixir, erb, erlang, fortran, fsharp, gradle, groovy, handlebars, haskell, ini, jinja, julia, latex, liquid, lisp, lua, makefile, matlab, maven, nginx-config, nim, objective-c, ocaml, perl, powershell, prolog, properties, r, racket, restructuredtext, ruby, scala, scheme, smalltalk, solidity, verilog, vhdl, vyper, zig
+Other: actionscript, ada, apl, applescript, assembly, autohotkey, bazel, clojure, cmake, cobol, crystal, dart, delphi, dotenv, elixir, erb, erlang, fortran, fsharp, gdscript, glsl, gml, gradle, groovy, handlebars, haskell, hlsl, ini, jinja, julia, latex, liquid, lisp, lua, makefile, mathematica, matlab, maven, maxscript, mql5, nginx-config, nim, nix, objective-c, ocaml, pascal, perl, pinescript, powershell, prolog, properties, r, racket, restructuredtext, scala, scheme, smalltalk, solidity, vba, verilog, vhdl, vyper, zig
 Note: "Common" and "Other" groupings are for readability only — all tags have equal status. Choose based on what appears in the conversation.
 Rules:
 - Detect from code blocks, framework mentions (Django→python, React→typescript, Spring Boot→java)
 - Config file formats count (Docker Compose→yaml, Terraform→hcl)
 - If no specific language is involved (pure architecture discussion), leave empty
+- Natural language names (english, chinese, russian, etc.) are NOT programming languages
 
 ### Domain (multi-select)
 What application area does this belong to?
@@ -105,7 +106,7 @@ Rules:
 - A query can span multiple domains (e.g., "SaaS payment" → web-backend + e-commerce + financial-technology)
 - Pure algorithm practice with no application context → empty
 - Prefer the most specific domain tag
-- "algorithm", "data-structure", "documentation", and generic parents like "web"/"database"/"ml" are NOT domains. Algorithm/DS practice → concept:algorithms or concept:data-structures; writing docs → task:documentation.
+- "algorithm", "data-structure", "documentation", and generic parents like "web"/"database"/"systems"/"mobile" are NOT domains — always use the specific tag (web-backend, web-frontend, database-administration, systems-programming, mobile-development). Algorithm/DS practice → concept:algorithms or concept:data-structures; writing docs → task:documentation.
 - **Cardinality norm**: Typically 0-2 domains. More than 2 is rare and should have strong justification.
 
 ### Task (multi-select)
@@ -213,8 +214,8 @@ Disambiguation:
 
 ### Language (multi-select)
 Common: python, javascript, typescript, java, go, rust, c, cpp, csharp, ruby, php, swift, kotlin, sql, html, css, shell, dockerfile, yaml, json, markdown, hcl, xml, toml
-Other: ada, apl, assembly, bazel, clojure, cmake, cobol, crystal, dart, dotenv, elixir, erb, erlang, fortran, fsharp, gradle, groovy, handlebars, haskell, ini, jinja, julia, latex, liquid, lisp, lua, makefile, matlab, maven, nginx-config, nim, objective-c, ocaml, perl, powershell, prolog, properties, r, racket, restructuredtext, ruby, scala, scheme, smalltalk, solidity, verilog, vhdl, vyper, zig
-Rules: Infer from code/framework mentions. Config formats count. No language → empty.
+Other: actionscript, ada, apl, applescript, assembly, autohotkey, bazel, clojure, cmake, cobol, crystal, dart, delphi, dotenv, elixir, erb, erlang, fortran, fsharp, gdscript, glsl, gml, gradle, groovy, handlebars, haskell, hlsl, ini, jinja, julia, latex, liquid, lisp, lua, makefile, mathematica, matlab, maven, maxscript, mql5, nginx-config, nim, nix, objective-c, ocaml, pascal, perl, pinescript, powershell, prolog, properties, r, racket, restructuredtext, ruby, scala, scheme, smalltalk, solidity, vba, verilog, vhdl, vyper, zig
+Rules: Infer from code/framework mentions. Config formats count. No language → empty. Natural language names (english, chinese, etc.) are NOT programming languages.
 
 ### Domain (multi-select)
 - api-development: APIs as PRIMARY deliverable (REST/GraphQL design, OpenAPI). A web app that exposes endpoints as part of its function → web-backend, not this
@@ -253,7 +254,7 @@ Rules:
 - Tag application SCENARIO, not technology. Typically 0-2 domains.
 - Pure algorithm/DS practice with no application or contest context → domain empty
 - Code merely using DB/API/Docker ≠ database-administration/api-development/devops — domain must be PRIMARY focus
-- "algorithm", "data-structure", "documentation", and generic parents like "web"/"database"/"ml" are NOT domains
+- "algorithm", "data-structure", "documentation", and generic parents like "web"/"database"/"systems"/"mobile" are NOT domains — always use the specific tag (web-backend, web-frontend, database-administration, systems-programming, mobile-development)
 
 ### Task (multi-select)
 - api-design: Define endpoints, request/response formats
@@ -628,6 +629,7 @@ What non-functional requirements are EXPLICITLY stated or strongly implied?
 - no-external-dependencies: Standard library only
 - no-recursion: Iterative solutions only
 - observable: Must include logging/metrics/tracing
+- offline-capable: Must work without network connectivity
 - pci-dss-compliant: Payment card data compliance
 - performance-optimized: Specific performance targets (latency, throughput, memory)
 - portable: Cross-platform compatibility
@@ -825,6 +827,7 @@ Non-functional requirements EXPLICITLY stated or strongly implied.
 - no-external-dependencies: Standard library only
 - no-recursion: Iterative solutions only
 - observable: Must include logging/metrics/tracing
+- offline-capable: Must work without network connectivity
 - pci-dss-compliant: Payment card data compliance
 - performance-optimized: Specific performance targets
 - portable: Cross-platform compatibility
@@ -1176,15 +1179,18 @@ TAG_POOLS = {
     "context": {"snippet", "single-function", "single-file", "multi-file", "module",
                 "repository", "monorepo", "greenfield", "legacy-code", "with-dependencies"},
     "language": {
-        "ada", "apl", "arkts", "ascendc", "assembly", "bazel", "c", "clojure", "cmake",
-        "cobol", "cpp", "crystal", "csharp", "css", "dart", "dockerfile", "dotenv", "ejs",
-        "elixir", "erb", "erlang", "fortran", "fsharp", "go", "gradle", "groovy",
-        "handlebars", "haskell", "hcl", "html", "ini", "java", "javascript", "jinja",
-        "json", "julia", "kotlin", "latex", "liquid", "lisp", "lua", "makefile", "markdown",
-        "matlab", "maven", "nginx-config", "nim", "objective-c", "ocaml", "perl", "php",
-        "powershell", "prolog", "properties", "python", "r", "racket", "restructuredtext",
-        "ruby", "rust", "scala", "scheme", "shell", "smalltalk", "solidity", "sql", "swift",
-        "toml", "typescript", "verilog", "vhdl", "vyper", "xml", "yaml", "zig"
+        "ada", "actionscript", "apl", "applescript", "arkts", "ascendc", "assembly",
+        "autohotkey", "bazel", "c", "clojure",
+        "cmake", "cobol", "cpp", "crystal", "csharp", "css", "dart", "delphi", "dockerfile",
+        "dotenv", "ejs", "elixir", "erb", "erlang", "fortran", "fsharp", "gdscript", "glsl",
+        "go", "gradle", "groovy", "gml", "handlebars", "haskell", "hcl", "hlsl", "html",
+        "ini", "java", "javascript", "jinja", "json", "julia", "kotlin", "latex", "liquid",
+        "lisp", "lua", "mql5", "makefile", "markdown", "mathematica", "matlab", "maven",
+        "maxscript", "nginx-config", "nim", "nix", "objective-c", "ocaml", "pascal", "perl",
+        "php", "pinescript", "powershell", "prolog", "properties", "python", "r",
+        "racket", "restructuredtext", "ruby", "rust", "scala", "scheme", "shell", "smalltalk",
+        "solidity", "sql", "swift", "toml", "typescript", "vba", "verilog", "vhdl", "vyper",
+        "xml", "yaml", "zig"
     },
     "domain": {
         "api-development", "automation", "bioinformatics", "blockchain", "cli-tool",
@@ -1227,8 +1233,8 @@ TAG_POOLS = {
         "accessible", "backward-compatible", "deterministic", "fault-tolerant",
         "gdpr-compliant", "hipaa-compliant", "idempotent", "internationalized",
         "lock-free", "no-dynamic-allocation", "no-external-dependencies", "no-recursion",
-        "observable", "pci-dss-compliant", "performance-optimized", "portable",
-        "scalable", "stateless", "thread-safe", "type-safe"
+        "observable", "offline-capable", "pci-dss-compliant", "performance-optimized",
+        "portable", "scalable", "stateless", "thread-safe", "type-safe"
     },
 }
 

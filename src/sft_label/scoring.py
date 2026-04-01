@@ -4222,10 +4222,12 @@ def _sync_inline_scored_cache_to_dataset(
     scored_samples = _load_scored_artifact_samples(artifact_dir)
     bundles, scoreable_samples, sample_to_bundle = load_inline_scoring_file(source_file, limit=limit)
     if strict and len(scored_samples) != len(sample_to_bundle):
-        raise ValueError(
-            f"Scored cache/sample mismatch for {source_file}: "
-            f"{len(scored_samples)} scored vs {len(sample_to_bundle)} scoreable turns"
+        print(
+            f"[warn] Scored cache/sample mismatch for {source_file}: "
+            f"{len(scored_samples)} scored vs {len(sample_to_bundle)} scoreable turns; "
+            f"falling back to sample_id-based matching"
         )
+        strict = False
 
     samples_by_bundle = [[] for _ in bundles]
     if strict:
@@ -4452,46 +4454,64 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
         for file_idx in range(start_idx, min(len(source_files), start_idx + cache_prefetch_files + 1)):
             _schedule_cache_build(file_idx)
 
+    failed_files: list[tuple[str, str]] = []
     _top_up_prefetch(0)
-    try:
-        for file_idx, source_file in enumerate(source_files):
-            _schedule_cache_build(file_idx)
-            current_future = cache_futures.pop(file_idx)
-            await current_future
-            _top_up_prefetch(file_idx + 1)
+    with _create_progress() as progress:
+        file_task = progress.add_task(
+            "Files", total=len(source_files), info=""
+        ) if progress is not None else None
+        try:
+            for file_idx, source_file in enumerate(source_files):
+                _schedule_cache_build(file_idx)
+                current_future = cache_futures.pop(file_idx)
+                await current_future
+                _top_up_prefetch(file_idx + 1)
+                rel_label = _relative_file_label(
+                    source_file, target.layout.run_root
+                ) if hasattr(target.layout, "run_root") else source_file.name
 
-            stats = await _run_inline_scoring_file(
-                target,
-                source_file,
-                effective_tag_stats,
-                limit,
-                config,
-                resume=resume,
-                llm_progress_cb=llm_progress_cb,
-                cleanup_pass1_cache=cleanup_after,
-            )
-            corrected_file_stats.append(stats)
-
-            conv_path = target.layout.file_artifact_path(source_file, "conversation_scores.json")
-            if conv_path.exists():
                 try:
-                    conv_records = json.loads(conv_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    conv_records = []
-                if isinstance(conv_records, list) and conv_records:
-                    corrected_conv_batches.append(conv_records)
-    finally:
-        for file_idx, future in list(cache_futures.items()):
-            if not future.done():
-                future.cancel()
-                continue
-            try:
-                future.result()
-            except Exception:
-                continue
-            if cleanup_after:
-                cleanup_inline_pass1_cache(target.layout.file_artifact_dir(source_files[file_idx]))
-        cache_executor.shutdown(wait=False, cancel_futures=True)
+                    stats = await _run_inline_scoring_file(
+                        target,
+                        source_file,
+                        effective_tag_stats,
+                        limit,
+                        config,
+                        resume=resume,
+                        llm_progress_cb=llm_progress_cb,
+                        cleanup_pass1_cache=cleanup_after,
+                    )
+                    corrected_file_stats.append(stats)
+                except Exception as exc:
+                    failed_files.append((rel_label, str(exc)))
+                    if progress is not None:
+                        progress.console.print(
+                            f"[red]Error scoring {rel_label}: {exc}[/red]"
+                        )
+
+                if progress is not None and file_task is not None:
+                    progress.update(file_task, advance=1, info=rel_label)
+
+                conv_path = target.layout.file_artifact_path(source_file, "conversation_scores.json")
+                if conv_path.exists():
+                    try:
+                        conv_records = json.loads(conv_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        conv_records = []
+                    if isinstance(conv_records, list) and conv_records:
+                        corrected_conv_batches.append(conv_records)
+        finally:
+            for file_idx, future in list(cache_futures.items()):
+                if not future.done():
+                    future.cancel()
+                    continue
+                try:
+                    future.result()
+                except Exception:
+                    continue
+                if cleanup_after:
+                    cleanup_inline_pass1_cache(target.layout.file_artifact_dir(source_files[file_idx]))
+            cache_executor.shutdown(wait=False, cancel_futures=True)
 
     if corrected_file_stats:
         summary = _merge_value_stats(corrected_file_stats)
@@ -4517,11 +4537,16 @@ async def _run_inline_scoring_directory(target: InlineScoringTarget, tag_stats_p
             "mean_turns": 0,
         }
     summary["files_processed"] = len(corrected_file_stats)
+    summary["files_failed"] = len(failed_files)
     summary["model"] = config.scoring_model
     summary["total_elapsed_seconds"] = round(time.time() - batch_start, 1)
     summary["timestamp"] = datetime.now().isoformat()
     summary["planned_files"] = len(source_files)
     summary["planned_samples"] = sum(int(stats.get("total_estimated", 0) or 0) for stats in corrected_file_stats)
+    if failed_files:
+        summary["failed_file_details"] = [
+            {"file": label, "error": err} for label, err in failed_files
+        ]
     if corrected_file_stats:
         exemplar = corrected_file_stats[0]
         for key in (
