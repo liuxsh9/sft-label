@@ -72,12 +72,12 @@ def _get_build_date() -> str:
     """Return the date of the latest git commit, or empty string."""
     try:
         result = subprocess.run(
-            ["git", "log", "-1", "--format=%cs"],
+            ["git", "log", "-1", "--format=%ci"],
             capture_output=True, text=True, timeout=3,
             cwd=Path(__file__).resolve().parents[2],
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            return result.stdout.strip()[:16]
     except Exception:
         pass
     return ""
