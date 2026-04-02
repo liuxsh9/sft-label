@@ -641,7 +641,9 @@ def _run_dir_has_scoring_dashboard(run_dir: str | None) -> bool:
     for candidate in candidates:
         if not candidate.exists():
             continue
-        html_files = sorted(candidate.glob("*.html"))
+        html_files = sorted(
+            p for p in candidate.glob("*.html") if not p.name.startswith("._")
+        )
         if not html_files:
             continue
         return any(("scoring" in path.name.lower() or "value" in path.name.lower()) for path in html_files)

@@ -712,7 +712,9 @@ def _resolve_dashboards_dir(run_dir: str | Path) -> Path:
         run_dir,
     ]
     for candidate in candidates:
-        if candidate.exists() and any(candidate.glob("*.html")):
+        if candidate.exists() and any(
+            p for p in candidate.glob("*.html") if not p.name.startswith("._")
+        ):
             return candidate
     raise FileNotFoundError(f"No dashboard HTML files found under {run_dir}")
 
@@ -1075,7 +1077,9 @@ def publish_run_dashboards(
 
         run_dir = Path(run_dir).expanduser().resolve()
         dashboards_dir = _resolve_dashboards_dir(run_dir)
-        html_files = sorted(dashboards_dir.glob("*.html"))
+        html_files = sorted(
+            p for p in dashboards_dir.glob("*.html") if not p.name.startswith("._")
+        )
         if not html_files:
             raise FileNotFoundError(f"No dashboard HTML files found under {dashboards_dir}")
 
