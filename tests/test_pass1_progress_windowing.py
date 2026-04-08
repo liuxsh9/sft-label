@@ -155,7 +155,7 @@ def test_decorate_run_info_with_runtime_open_cooldown(monkeypatch):
     runtime._cooldown_until = 150.0
     runtime.gate._in_flight = 0
     setattr(config, "_adaptive_runtime", runtime)
-    monkeypatch.setattr("sft_label.pipeline.time.monotonic", lambda: 120.2)
+    monkeypatch.setattr("sft_label.llm.progress.time.monotonic", lambda: 120.2)
 
     info = _decorate_run_info_with_runtime("run 10/100 (10.0%) eta 10:00 rate 4.1/s", config)
     assert info.endswith("runtime open cooldown=30s c=1 rps=0.5 in_flight=0")

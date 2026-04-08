@@ -146,7 +146,8 @@ def validate_schema_compliance(tags: List[Dict[str, Any]], taxonomy: Dict[str, A
     valid_runtimes = ["compiled", "interpreted", "jit", "transpiled", "hybrid"]
     valid_use_cases = [
         "web", "systems", "data-science", "mobile", "embedded", "scripting",
-        "devops", "scientific", "game-dev", "blockchain", "markup", "config", "build"
+        "devops", "scientific", "game-dev", "blockchain", "markup", "config", "build",
+        "automation", "desktop", "graphics", "finance"
     ]
 
     # Get hierarchical categories

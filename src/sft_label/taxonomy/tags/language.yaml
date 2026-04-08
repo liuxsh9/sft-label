@@ -1,3 +1,18 @@
+- id: actionscript
+  name: ActionScript
+  category: Language
+  aliases:
+  - actionscript
+  - as3
+  source: GitHub
+  paradigm:
+  - object-oriented
+  - event-driven
+  typing: dynamic
+  runtime: jit
+  use_cases:
+  - web
+  - game-dev
 - id: ada
   name: Ada
   category: Language
@@ -25,6 +40,19 @@
   use_cases:
   - scientific
   - data-science
+- id: applescript
+  name: AppleScript
+  category: Language
+  aliases:
+  - applescript
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - automation
 - id: arkts
   name: ArkTS
   category: Language
@@ -67,6 +95,20 @@
   use_cases:
   - systems
   - embedded
+- id: autohotkey
+  name: AutoHotkey
+  category: Language
+  aliases:
+  - autohotkey
+  - ahk
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - automation
 - id: bazel
   name: Bazel
   category: Language
@@ -208,6 +250,21 @@
   use_cases:
   - mobile
   - web
+- id: delphi
+  name: Delphi
+  category: Language
+  aliases:
+  - delphi
+  - object-pascal
+  source: TIOBE
+  paradigm:
+  - object-oriented
+  - procedural
+  typing: static
+  runtime: compiled
+  use_cases:
+  - desktop
+  - systems
 - id: dockerfile
   name: Dockerfile
   category: Language
@@ -320,6 +377,47 @@
   use_cases:
   - web
   - data-science
+- id: gdscript
+  name: GDScript
+  category: Language
+  aliases:
+  - gdscript
+  - godot
+  source: GitHub
+  paradigm:
+  - object-oriented
+  - imperative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - game-dev
+- id: glsl
+  name: GLSL
+  category: Language
+  aliases:
+  - glsl
+  - opengl-shading
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: static
+  runtime: compiled
+  use_cases:
+  - graphics
+  - game-dev
+- id: gml
+  name: GML
+  category: Language
+  aliases:
+  - gml
+  - game-maker-language
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - game-dev
 - id: go
   name: Go
   category: Language
@@ -406,6 +504,20 @@
   use_cases:
   - devops
   - config
+- id: hlsl
+  name: HLSL
+  category: Language
+  aliases:
+  - hlsl
+  - directx-shading
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: static
+  runtime: compiled
+  use_cases:
+  - graphics
+  - game-dev
 - id: html
   name: HTML
   category: Language
@@ -604,6 +716,22 @@
   runtime: interpreted
   use_cases:
   - markup
+- id: mathematica
+  name: Mathematica
+  category: Language
+  aliases:
+  - mathematica
+  - wolfram
+  - wolfram-language
+  source: TIOBE
+  paradigm:
+  - functional
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scientific
+  - data-science
 - id: matlab
   name: MATLAB
   category: Language
@@ -631,6 +759,36 @@
   runtime: interpreted
   use_cases:
   - build
+- id: maxscript
+  name: MAXScript
+  category: Language
+  aliases:
+  - maxscript
+  - 3dsmax-script
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - graphics
+  - scripting
+- id: mql5
+  name: MQL5
+  category: Language
+  aliases:
+  - mql5
+  - mql4
+  - metatrader
+  source: GitHub
+  paradigm:
+  - procedural
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - finance
+  - automation
 - id: nginx-config
   name: Nginx Config
   category: Language
@@ -658,6 +816,21 @@
   use_cases:
   - systems
   - web
+- id: nix
+  name: Nix
+  category: Language
+  aliases:
+  - nix
+  - nixos
+  source: GitHub
+  paradigm:
+  - functional
+  - declarative
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - devops
+  - config
 - id: objective-c
   name: Objective-C
   category: Language
@@ -684,6 +857,22 @@
   runtime: compiled
   use_cases:
   - web
+  - systems
+- id: pascal
+  name: Pascal
+  category: Language
+  aliases:
+  - pascal
+  - free-pascal
+  - lazarus
+  source: TIOBE
+  paradigm:
+  - procedural
+  - object-oriented
+  typing: static
+  runtime: compiled
+  use_cases:
+  - desktop
   - systems
 - id: perl
   name: Perl
@@ -713,6 +902,20 @@
   runtime: interpreted
   use_cases:
   - web
+- id: pinescript
+  name: Pine Script
+  category: Language
+  aliases:
+  - pinescript
+  - pine-script
+  - tradingview
+  source: GitHub
+  paradigm:
+  - procedural
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - finance
 - id: powershell
   name: PowerShell
   category: Language
@@ -964,6 +1167,21 @@
   use_cases:
   - web
   - mobile
+- id: vba
+  name: VBA
+  category: Language
+  aliases:
+  - vba
+  - visual-basic-for-applications
+  source: TIOBE
+  paradigm:
+  - procedural
+  - object-oriented
+  typing: dynamic
+  runtime: interpreted
+  use_cases:
+  - scripting
+  - automation
 - id: verilog
   name: Verilog
   category: Language

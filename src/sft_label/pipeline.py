@@ -60,6 +60,7 @@ from sft_label.inline_rows import (
     iter_row_sample_bundles_from_jsonl,
 )
 from sft_label.inline_scoring import infer_inline_scoring_target
+from sft_label.io_utils import _write_json_atomic, _write_jsonl_atomic, _numeric_summary, _message_payload_bytes  # noqa: E501
 from sft_label.progress_heartbeat import run_with_heartbeat
 from sft_label.run_layout import InlineRunLayout, resolve_run_root
 from sft_label.config import (
@@ -89,7 +90,7 @@ from sft_label.tag_canonicalization import (
     make_canonicalization_event,
     resolve_alias,
 )
-from sft_label.llm_runtime import (
+from sft_label.llm.runtime import (
     AdaptiveLLMRuntime,
     FatalFailureMonitor,
     OutcomeClass,
@@ -103,11 +104,6 @@ from sft_label.label_extensions_schema import load_extension_specs
 from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
 from sft_label.http_limits import estimate_pass1_extra_connections, resolve_httpx_connection_limits
 from sft_label.progress_display import create_pipeline_progress
-
-try:
-    from sft_label.llm_runtime import AdaptiveLLMRuntime  # type: ignore
-except Exception:  # pragma: no cover - optional dependency while feature is rolling out
-    AdaptiveLLMRuntime = None
 
 
 INLINE_RUN_MODES = {"incremental", "refresh", "migrate", "recompute"}
@@ -140,138 +136,15 @@ def create_progress():
     return create_pipeline_progress()
 
 
-def format_progress_info(ok_count, fail_count=0, label=None, request_stats=None):
-    """Build a compact progress info string for live terminal updates."""
-    parts = [f"ok={ok_count}"]
-    if fail_count:
-        parts.append(f"fail={fail_count}")
-    if label:
-        parts.append(label)
-    if request_stats is not None:
-        http = request_stats.summary_line()
-        if http:
-            parts.append(http)
-    return " • ".join(parts)
-
-
-def _format_runtime_progress(runtime_snapshot: dict | None) -> str | None:
-    if not runtime_snapshot:
-        return None
-    state = runtime_snapshot.get("state")
-    eff_concurrency = runtime_snapshot.get("effective_concurrency")
-    eff_rps = runtime_snapshot.get("effective_rps")
-    in_flight = runtime_snapshot.get("in_flight")
-    if state is None or eff_concurrency is None or eff_rps is None:
-        return None
-    parts = [f"runtime {state}"]
-    cooldown_remaining = runtime_snapshot.get("cooldown_remaining_seconds")
-    if cooldown_remaining is None:
-        cooldown_until = runtime_snapshot.get("cooldown_until")
-        if cooldown_until is not None:
-            try:
-                cooldown_remaining = max(float(cooldown_until) - time.monotonic(), 0.0)
-            except (TypeError, ValueError):
-                cooldown_remaining = None
-    if state == "open" and cooldown_remaining and cooldown_remaining > 0:
-        parts.append(f"cooldown={int(math.ceil(cooldown_remaining))}s")
-    parts.extend(
-        [
-            f"c={int(eff_concurrency)}",
-            f"rps={float(eff_rps):.1f}",
-            f"in_flight={int(in_flight or 0)}",
-        ]
-    )
-    return " ".join(parts)
-
-
-def _decorate_run_info_with_runtime(run_info: str | None, config) -> str | None:
-    runtime = _config_adaptive_runtime(config)
-    if runtime is None:
-        return run_info
-    runtime_info = _format_runtime_progress(runtime.snapshot())
-    if not runtime_info:
-        return run_info
-    if run_info:
-        return f"{run_info} • {runtime_info}"
-    return runtime_info
-
-
-def parse_run_progress(info):
-    """Parse 'run <done>/<total> ...' and return (done, total) if available."""
-    if not info or not info.startswith("run "):
-        return None
-    token = info.split(" ", 2)[1] if " " in info else ""
-    if "/" not in token:
-        return None
-    done_s, total_s = token.split("/", 1)
-    try:
-        done = max(int(done_s), 0)
-        total = max(int(total_s), 0)
-    except ValueError:
-        return None
-    if total <= 0:
-        return None
-    return done, total
-
-
-def _update_llm_task_progress(progress, llm_task, run_info, eta_tracker=None, config=None):
-    """Refresh the global LLM progress task from tracker info or local ETA fallback."""
-    if not progress or llm_task is None:
-        return
-
-    global_counts = parse_run_progress(run_info) if run_info else None
-    if global_counts:
-        g_done, g_total = global_counts
-        progress.update(
-            llm_task,
-            total=max(g_total, 1),
-            completed=min(g_done, g_total),
-            info=run_info,
-        )
-        return
-
-    if eta_tracker is not None:
-        info = _decorate_run_info_with_runtime(eta_tracker.info_line(), config)
-        progress.update(
-            llm_task,
-            total=max(eta_tracker.estimated_total_calls, eta_tracker.calls_done, 1),
-            completed=eta_tracker.calls_done,
-            info=info,
-        )
-
-
-def _build_http_client_limits(
-    concurrency: int,
-    *,
-    chunked_output_files: int = 0,
-    pprint=print,
-) -> httpx.Limits:
-    extra_connections = estimate_pass1_extra_connections(
-        chunked_output_files=chunked_output_files,
-    )
-    max_connections, max_keepalive, capped = resolve_httpx_connection_limits(
-        requested_concurrency=concurrency,
-        extra_connections=extra_connections,
-    )
-    if capped:
-        pprint(
-            "  [warn] lowering HTTP connection pool to "
-            f"max_connections={max_connections}, keepalive={max_keepalive} "
-            f"for requested concurrency={concurrency} to avoid FD exhaustion"
-        )
-    return httpx.Limits(
-        max_connections=max_connections,
-        max_keepalive_connections=max_keepalive,
-    )
-
-
-def _chunked_output_fd_budget(*, is_directory: bool, input_path: Path | None, config: PipelineConfig | None) -> int:
-    if is_directory:
-        max_files = config.dir_pipeline_max_files if config else DIR_PIPELINE_MAX_FILES
-        return max(int(max_files or 0), 0)
-    if input_path is not None and str(input_path).endswith(".jsonl"):
-        return 1
-    return 0
+# Progress + HTTP client helpers — moved to sft_label.llm.*
+from sft_label.llm.progress import (  # noqa: F401,E402
+    format_progress_info,
+    parse_run_progress,
+    _format_runtime_progress,
+    _decorate_run_info_with_runtime,
+    _update_llm_task_progress,
+)
+from sft_label.llm.http import _build_http_client_limits, _chunked_output_fd_budget  # noqa: F401,E402
 
 
 # ─────────────────────────────────────────────────────────
@@ -338,20 +211,6 @@ def update_checkpoint(checkpoint_path, rel_path_str, success=True, error_msg=Non
 
 def _write_checkpoint(checkpoint_path, ckpt):
     _write_json_atomic(checkpoint_path, ckpt)
-
-
-def _numeric_summary(values):
-    cleaned = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    if not cleaned:
-        return {}
-    total = sum(cleaned)
-    return {
-        "count": len(cleaned),
-        "sum": round(total, 3),
-        "mean": round(total / len(cleaned), 3),
-        "min": round(min(cleaned), 3),
-        "max": round(max(cleaned), 3),
-    }
 
 
 class OnlineNumericSummary:
@@ -612,27 +471,6 @@ def _resolve_mode(mode: str) -> str:
     return resolved
 
 
-def _write_json_atomic(path, payload):
-    """Write JSON via a temp file and atomic replace."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    tmp_path.replace(path)
-
-
-def _write_jsonl_atomic(path, records):
-    """Write JSONL via a temp file and atomic replace."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    tmp_path.replace(path)
-
-
 PASS1_CHUNKED_WORKING_SUFFIX = ".next"
 
 
@@ -652,459 +490,18 @@ def _finalize_pass1_chunked_working_files(path_pairs):
 
 
 # ─────────────────────────────────────────────────────────
-# Rate limiter + HTTP request stats
+# LLM infrastructure — moved to sft_label.llm.*
+# Backward-compatible re-exports below.
 # ─────────────────────────────────────────────────────────
 
-class RequestStats:
-    """Track HTTP request outcomes for real-time display and summary."""
-    __slots__ = ('success', 'errors', 'timeouts')
+from sft_label.llm.transport import RequestStats, AsyncRateLimiter, async_llm_call  # noqa: F401,E402
 
-    def __init__(self):
-        self.success = 0
-        self.errors = {}   # status_code (int) -> count
-        self.timeouts = 0
-
-    def record(self, status_code: int):
-        if 200 <= status_code < 300:
-            self.success += 1
-        else:
-            self.errors[status_code] = self.errors.get(status_code, 0) + 1
-
-    def record_timeout(self):
-        self.timeouts += 1
-
-    @property
-    def total(self):
-        return self.success + sum(self.errors.values()) + self.timeouts
-
-    def summary_line(self):
-        """One-line summary for progress display."""
-        t = self.total
-        if t == 0:
-            return ""
-        parts = [f"✓{self.success}"]
-        for code in sorted(self.errors):
-            parts.append(f"{code}×{self.errors[code]}")
-        if self.timeouts:
-            parts.append(f"timeout×{self.timeouts}")
-        rate = self.success / t * 100
-        return f"http({' '.join(parts)} {rate:.0f}%)"
-
-    def to_dict(self):
-        t = self.total
-        return {
-            "total_http_requests": t,
-            "success": self.success,
-            "errors": {str(k): v for k, v in sorted(self.errors.items())},
-            "timeouts": self.timeouts,
-            "success_rate": round(self.success / t * 100, 1) if t > 0 else 0,
-        }
-
-
-class AsyncRateLimiter:
-    """Token bucket rate limiter for async contexts with warmup support.
-
-    During warmup, effective RPS ramps linearly from 1 to the target RPS.
-    Initial tokens = 1 (cold start) to avoid burst on startup.
-    """
-
-    def __init__(self, rps: float, burst: int | None = None, warmup: float = 0.0):
-        self._rps = rps
-        self._burst = burst if burst is not None else max(int(rps), 1)
-        self._tokens = 1.0  # Cold start: only 1 token initially (no burst)
-        self._last_refill = 0.0
-        self._start_time = 0.0
-        self._warmup = warmup
-        self._lock = asyncio.Lock()
-        self.stats = RequestStats()
-
-    def _effective_rps(self, now):
-        """Current RPS considering warmup ramp."""
-        if self._warmup <= 0 or self._start_time == 0.0:
-            return self._rps
-        elapsed = now - self._start_time
-        if elapsed >= self._warmup:
-            return self._rps
-        # Linear ramp: 1 → rps over warmup seconds
-        progress = elapsed / self._warmup
-        return 1.0 + (self._rps - 1.0) * progress
-
-    async def acquire(self):
-        while True:
-            async with self._lock:
-                now = asyncio.get_event_loop().time()
-                if self._last_refill == 0.0:
-                    self._last_refill = now
-                    self._start_time = now
-                elapsed = now - self._last_refill
-                effective_rps = self._effective_rps(now)
-                self._tokens = min(self._burst, self._tokens + elapsed * effective_rps)
-                self._last_refill = now
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-                wait = (1.0 - self._tokens) / effective_rps
-            await asyncio.sleep(wait)  # Sleep OUTSIDE lock
-
-
-# ─────────────────────────────────────────────────────────
-# Async LLM calls
-# ─────────────────────────────────────────────────────────
-
-async def async_llm_call(http_client, messages, model, temperature=0.1, max_tokens=1000, max_retries=MAX_RETRIES,
-                         config=None, rate_limiter=None):
-    """Async LLM call with retry + jitter. Returns (parsed_json, raw_content, usage)."""
-    _base = config.litellm_base if config else LITELLM_BASE
-    _key = config.litellm_key if config else LITELLM_KEY
-    _timeout = config.request_timeout if config else REQUEST_TIMEOUT
-    _escalation = (config.request_timeout_escalation if config and config.request_timeout_escalation
-                   else REQUEST_TIMEOUT_ESCALATION)
-    url = f"{_base}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {_key}",
-        "Content-Type": "application/json",
-        "User-Agent": "sft-label/0.1.0",
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    # Reasoning models (o1, o3, gpt-5*) don't support temperature or max_tokens
-    _model_lower = model.lower()
-    if any(p in _model_lower for p in ("o1", "o3", "gpt-5")):
-        payload.pop("temperature", None)
-        payload["max_completion_tokens"] = payload.pop("max_tokens")
-    last_error = None
-    last_error_response = None
-
-    runtime = getattr(config, "_adaptive_runtime", None) if config is not None else None
-    adaptive_mode = runtime is not None
-
-    for attempt in range(max_retries + 1):
-        _http_recorded = False
-        # Adaptive timeout: escalate on retries
-        attempt_timeout = (_escalation[attempt] if _escalation and attempt < len(_escalation)
-                           else _timeout)
-        try:
-            if rate_limiter is not None:
-                await rate_limiter.acquire()
-            if float(attempt_timeout or 0) > 0:
-                resp = await asyncio.wait_for(
-                    http_client.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=attempt_timeout,
-                    ),
-                    timeout=float(attempt_timeout),
-                )
-            else:
-                resp = await http_client.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=attempt_timeout,
-                )
-            if rate_limiter is not None:
-                rate_limiter.stats.record(resp.status_code)
-                _http_recorded = True
-            if resp.status_code == 403:
-                # Content filtered by upstream WAF/provider — retry once to rule out transient proxy issues
-                resp_body = resp.text
-                # Capture diagnostic headers to identify which layer returned the 403:
-                #   x-litellm-* → LiteLLM or upstream provider
-                #   via/x-squid/x-cache → corporate proxy
-                #   server → nginx/uvicorn/squid/etc
-                diag_keys = ("server", "via", "x-squid-error", "x-cache",
-                             "content-type", "x-litellm-version",
-                             "x-litellm-model-group", "x-litellm-call-id")
-                diag_headers = {k: resp.headers[k] for k in diag_keys if k in resp.headers}
-                is_html = "text/html" in resp.headers.get("content-type", "")
-                # Build diagnostic hint that flows with the error string everywhere
-                diag_src = ("litellm/upstream" if "x-litellm-version" in diag_headers
-                            else "proxy/WAF" if any(k in diag_headers for k in ("via", "x-squid-error", "x-cache"))
-                            else f"server={diag_headers.get('server', '?')}")
-                diag_hint = f" [source={diag_src}]"
-                if is_html:
-                    diag_hint += " [HTML response — likely WAF/proxy block page]"
-                last_error = f"HTTP 403: {resp_body[:300]}{diag_hint}"
-                if attempt < 1:
-                    await asyncio.sleep(3 + random.uniform(0, 2))
-                    continue
-                return None, last_error, {
-                    "prompt_tokens": 0, "completion_tokens": 0,
-                    "status_code": resp.status_code,
-                    "error": last_error,
-                    "error_response": resp_body,
-                    "error_diag_headers": diag_headers,
-                    "error_is_html": is_html,
-                    "non_retryable": True,
-                }
-            if resp.status_code in (429, 500, 502, 503, 504):
-                resp_text = resp.text[:500]
-                resp_lower = resp_text.lower()
-                # LiteLLM "No deployments available" — all deployments are in cooldown,
-                # often caused by upstream content-filter 400s.  Retrying immediately
-                # only prolongs the cooldown cycle. In adaptive mode, we want the
-                # outer controller to open the circuit and pause; in legacy mode,
-                # treat as non-retryable to avoid local retry storms.
-                if "no deployments available" in resp_lower or "cooldown_list" in resp_lower:
-                    return None, f"HTTP {resp.status_code}: {resp_text[:300]}", {
-                        "prompt_tokens": 0, "completion_tokens": 0,
-                        "status_code": resp.status_code,
-                        "error": f"HTTP {resp.status_code} (deployment cooldown): {resp_text[:300]}",
-                        "error_response": resp.text,
-                        "provider_cooldown": True,
-                        "non_retryable": False if adaptive_mode else True,
-                    }
-                # Rate limited or server error — exponential backoff with jitter
-                if adaptive_mode:
-                    return None, f"HTTP {resp.status_code}: {resp_text[:300]}", {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "status_code": resp.status_code,
-                        "error": f"HTTP {resp.status_code}: {resp_text[:300]}",
-                        "error_response": resp.text,
-                        "non_retryable": False,
-                    }
-                base_wait = min(2 ** attempt * 3 + 2, 60)
-                wait = base_wait + random.uniform(0, base_wait * 0.5)
-                last_error = f"HTTP {resp.status_code}: {resp_text[:200]}"
-                last_error_response = resp.text
-                if attempt < max_retries:
-                    await asyncio.sleep(wait)
-                    continue
-            if resp.status_code == 400:
-                error_text = resp.text[:500]
-                error_lower = error_text.lower()
-                # Genuinely non-retryable: the request content itself is invalid.
-                # Keep this list narrow — in multi-hop proxy chains, broad keywords
-                # like "invalid_request" or "model_not_found" can match transient
-                # supplier routing errors (e.g. "Unknown model: gpt4ominicep").
-                #
-                # Content moderation keywords (Azure + OpenAI + LiteLLM wrappers):
-                #   content_filter / content_policy — Azure RAI filter
-                #   responsibleaipolicyviolation — Azure innererror code
-                #   content_management_policy — Azure alternate wording
-                #   moderation — OpenAI moderation endpoint flag
-                _NON_RETRYABLE_400_KEYWORDS = (
-                    "context_length_exceeded", "maximum context length",
-                    "content_policy", "content_filter",
-                    "responsibleaipolicyviolation", "content_management_policy",
-                    "moderation",
-                )
-                if any(kw in error_lower for kw in _NON_RETRYABLE_400_KEYWORDS):
-                    return None, f"HTTP 400: {error_text[:300]}", {
-                        "prompt_tokens": 0, "completion_tokens": 0,
-                        "status_code": resp.status_code,
-                        "error": f"HTTP 400 (content filtered): {error_text[:300]}",
-                        "error_response": resp.text,
-                        "content_filtered": True,
-                        "non_retryable": True,
-                    }
-                # Likely a transient proxy/supplier error — retry with backoff
-                if adaptive_mode:
-                    return None, f"HTTP 400: {error_text[:300]}", {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "status_code": resp.status_code,
-                        "error": f"HTTP 400 (transient): {error_text[:300]}",
-                        "error_response": resp.text,
-                        "non_retryable": False,
-                    }
-                last_error = f"HTTP 400 (transient): {error_text[:200]}"
-                last_error_response = resp.text
-                if attempt < max_retries:
-                    base_wait = min(2 ** attempt * 3 + 2, 60)
-                    await asyncio.sleep(base_wait + random.uniform(0, base_wait * 0.5))
-                    continue
-            if resp.status_code == 401:
-                # Auth failure — not retryable
-                error_text = resp.text[:300]
-                return None, f"HTTP 401: {error_text}", {
-                    "prompt_tokens": 0, "completion_tokens": 0,
-                    "status_code": resp.status_code,
-                    "error": f"HTTP 401: {error_text}",
-                    "error_response": resp.text,
-                    "non_retryable": True,
-                }
-            if resp.status_code == 402:
-                # Billing exhausted — not retryable (same as 401)
-                error_text = resp.text[:300]
-                return None, f"HTTP 402: {error_text}", {
-                    "prompt_tokens": 0, "completion_tokens": 0,
-                    "status_code": resp.status_code,
-                    "error": f"HTTP 402 (billing): {error_text}",
-                    "error_response": resp.text,
-                    "non_retryable": True,
-                }
-            resp.raise_for_status()
-            data = resp.json()
-
-            content = data["choices"][0]["message"]["content"].strip()
-            usage = data.get("usage", {})
-            usage_dict = {
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
-                "status_code": resp.status_code,
-            }
-
-            # Parse JSON
-            json_str = content
-            if json_str.startswith("```"):
-                lines = json_str.split("\n")
-                json_lines = []
-                in_block = False
-                for line in lines:
-                    if line.startswith("```") and not in_block:
-                        in_block = True
-                        continue
-                    elif line.startswith("```") and in_block:
-                        break
-                    elif in_block:
-                        json_lines.append(line)
-                json_str = "\n".join(json_lines)
-
-            parsed = json.loads(json_str)
-            return parsed, content, usage_dict
-
-        except (json.JSONDecodeError, KeyError) as e:
-            last_error = f"ParseError: {e}"
-            if adaptive_mode:
-                return None, content if 'content' in locals() else "", {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "status_code": 200,
-                    "error": last_error,
-                    "parse_error": True,
-                    "non_retryable": False,
-                }
-            if attempt < max_retries:
-                await asyncio.sleep(2 + random.uniform(0, 2))
-                continue
-            return None, content if 'content' in locals() else "", {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "status_code": 200,
-                "error": last_error,
-                "parse_error": True,
-            }
-        except Exception as e:
-            if rate_limiter is not None and not _http_recorded:
-                rate_limiter.stats.record_timeout()
-            last_error = f"{type(e).__name__}: {e}"
-            if adaptive_mode:
-                return None, str(e), {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "error": last_error,
-                    "exception_type": type(e).__name__,
-                    "non_retryable": False,
-                }
-            if attempt < max_retries:
-                base_wait = min(2 ** attempt * 3 + 2, 60)
-                wait = base_wait + random.uniform(0, base_wait * 0.5)
-                await asyncio.sleep(wait)
-                continue
-            return None, str(e), {"prompt_tokens": 0, "completion_tokens": 0, "error": last_error, "exception_type": type(e).__name__}
-
-    return None, f"max retries exceeded: {last_error}", {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "error": last_error or "max_retries",
-        "error_response": last_error_response,
-    }
-
-def _config_adaptive_runtime(config) -> AdaptiveLLMRuntime | None:
-    """Return the shared adaptive runtime attached to this PipelineConfig, if any."""
-    if config is None:
-        return None
-    if not getattr(config, "enable_adaptive_runtime", False):
-        return None
-    runtime = getattr(config, "_adaptive_runtime", None)
-    return runtime if isinstance(runtime, AdaptiveLLMRuntime) else None
-
-
-def _build_adaptive_runtime(config) -> AdaptiveLLMRuntime:
-    """Build an AdaptiveLLMRuntime from config fields.
-
-    Note: When rps_limit is unset/unlimited (<= 0), we still enable the runtime
-    and treat the runtime RPS limiter as effectively non-binding until it
-    degrades/open-circuits (it will still clamp to min_rps during probe/open).
-    """
-    base_rps = float(getattr(config, "rps_limit", 0.0) or 0.0)
-    if base_rps <= 0:
-        # Avoid disabling adaptive behavior entirely. Concurrency is the main
-        # pressure valve; RPS becomes relevant in probing/open states.
-        base_rps = float(max(getattr(config, "concurrency", 1), 1)) * 1000.0
-    return AdaptiveLLMRuntime(
-        base_concurrency=int(getattr(config, "concurrency", 1) or 1),
-        base_rps=base_rps,
-        min_concurrency=int(getattr(config, "adaptive_min_concurrency", 1) or 1),
-        min_rps=float(getattr(config, "adaptive_min_rps", 0.5) or 0.5),
-        window_requests=int(getattr(config, "adaptive_window_requests", 50) or 50),
-        window_seconds=float(getattr(config, "adaptive_window_seconds", 20.0) or 20.0),
-        degrade_timeout_rate=float(getattr(config, "adaptive_timeout_rate_degraded", 0.05) or 0.05),
-        open_timeout_rate=float(getattr(config, "adaptive_timeout_rate_open", 0.2) or 0.2),
-        degrade_overload_rate=float(getattr(config, "adaptive_overload_rate_degraded", 0.05) or 0.05),
-        open_overload_rate=float(getattr(config, "adaptive_overload_rate_open", 0.15) or 0.15),
-        degrade_abnormal_rate=float(getattr(config, "adaptive_abnormal_rate_degraded", 0.04) or 0.04),
-        open_abnormal_rate=float(getattr(config, "adaptive_abnormal_rate_open", 0.60) or 0.60),
-        min_observations_degraded=int(getattr(config, "adaptive_min_observations_degraded", 3) or 3),
-        min_observations_open=int(getattr(config, "adaptive_min_observations_open", 12) or 12),
-        min_failures_degraded=int(getattr(config, "adaptive_min_failures_degraded", 2) or 2),
-        min_failures_open=int(getattr(config, "adaptive_min_failures_open", 4) or 4),
-        open_base_cooldown=float(getattr(config, "adaptive_open_base_cooldown", 15.0) or 15.0),
-        open_max_cooldown=float(getattr(config, "adaptive_open_max_cooldown", 60.0) or 60.0),
-        degrade_concurrency_factor=float(getattr(config, "adaptive_degrade_concurrency_factor", 0.5) or 0.5),
-        degrade_rps_factor=float(getattr(config, "adaptive_degrade_rps_factor", 0.6) or 0.6),
-        recovery_concurrency_step=int(getattr(config, "adaptive_recovery_concurrency_step", 2) or 2),
-        recovery_rps_step=float(getattr(config, "adaptive_recovery_rps_step", 1.0) or 1.0),
-    )
-
-
-def _make_recovery_config(config):
-    """Build a conservative config for recovery sweeps."""
-    if config is None:
-        return None
-    new_conc = max(1, int(round((config.concurrency or 1) * (config.recovery_sweep_concurrency_factor or 0.25))))
-    new_rps = config.rps_limit
-    if isinstance(new_rps, (int, float)) and new_rps > 0:
-        new_rps = float(new_rps) * float(config.recovery_sweep_rps_factor or 0.25)
-        new_rps = max(new_rps, float(getattr(config, "adaptive_min_rps", 0.5) or 0.5))
-    new_timeout = int(round((config.request_timeout or REQUEST_TIMEOUT) * float(config.recovery_sweep_timeout_multiplier or 1.5)))
-    recovery_config = _dc_replace(
-        config,
-        concurrency=new_conc,
-        request_timeout=new_timeout,
-        rps_limit=new_rps,
-    )
-    # Ensure recovery does not run arbitration unless explicitly allowed.
-    if getattr(config, "recovery_sweep_disable_arbitration", True):
-        setattr(recovery_config, "_force_disable_arbitration", True)
-    return recovery_config
-
-
-def _outcome_from_usage(usage: dict, *, default_status: int | None = None) -> RequestOutcome:
-    status_code = usage.get("status_code", default_status)
-    error_text = usage.get("error_response") or usage.get("error") or ""
-    if status_code is not None:
-        return classify_http_result(
-            int(status_code),
-            error_text=error_text,
-            parse_error=bool(usage.get("parse_error")),
-            validation_error=bool(usage.get("validation_error")),
-            content_filtered=bool(usage.get("content_filtered")),
-        )
-    exc_type = str(usage.get("exception_type") or "")
-    err = str(usage.get("error") or "")
-    low = f"{exc_type} {err}".lower()
-    if "timeout" in low:
-        return RequestOutcome(classification=OutcomeClass.TIMEOUT, error=err)
-    return RequestOutcome(classification=OutcomeClass.TRANSIENT_ERROR, error=err)
-
+from sft_label.llm.factory import (  # noqa: F401,E402
+    _config_adaptive_runtime,
+    _build_adaptive_runtime,
+    _make_recovery_config,
+    _outcome_from_usage,
+)
 
 # ─────────────────────────────────────────────────────────
 # Prompt builders (inline to avoid cross-import issues with async)
@@ -1536,11 +933,6 @@ def _resolved_labeling_prompt_budget(config=None):
     if compact and config and config.max_conversation_chars == MAX_CONVERSATION_CHARS:
         budget = COMPACT_CONVERSATION_CHARS
     return compact, budget
-
-
-def _message_payload_bytes(messages):
-    """Return UTF-8 payload size for the full request body."""
-    return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
 
 
 def _labeling_truncation_kwargs(config=None, *, max_total_chars):
@@ -2379,93 +1771,7 @@ def _safe_write_pass1_conversation_stats(
         pprint(f"  [warn] skipped conversation sidecar: {type(exc).__name__}: {exc}")
 
 
-class RuntimeEtaEstimator:
-    """Adaptive ETA tracker based on observed LLM-call throughput."""
-
-    def __init__(self, total_labeled_samples: int, initial_estimated_calls: int):
-        self.total_labeled_samples = max(int(total_labeled_samples), 0)
-        self.samples_done = 0
-        self.calls_done = 0
-        self.avg_calls_per_sample = 0.0
-        self.calls_per_sec = 0.0
-        self.estimated_total_calls = max(int(initial_estimated_calls), 0)
-        self._start_time = time.time()
-        self._avg_cps = 0.0
-        self._recent_cps = 0.0
-        self._eta_cps = 0.0
-        self._recent_window_seconds = 30.0
-        self._recent_samples = deque()
-        self._warmup_samples = min(max(8, self.total_labeled_samples // 50), 30)
-
-    def _effective_eta_cps(self) -> float:
-        if self._avg_cps <= 0:
-            return self._recent_cps
-        if self._recent_cps <= 0:
-            return self._avg_cps
-        return (self._avg_cps * 0.75) + (self._recent_cps * 0.25)
-
-    @staticmethod
-    def _fmt_duration(seconds):
-        if seconds is None:
-            return "--:--"
-        sec = max(int(seconds), 0)
-        h, rem = divmod(sec, 3600)
-        m, s = divmod(rem, 60)
-        if h > 0:
-            return f"{h:02d}:{m:02d}:{s:02d}"
-        return f"{m:02d}:{s:02d}"
-
-    def update(self, sample_llm_calls: int):
-        calls = max(int(sample_llm_calls or 0), 0)
-        self.samples_done += 1
-        self.calls_done += calls
-
-        if self.samples_done > 0:
-            self.avg_calls_per_sample = self.calls_done / self.samples_done
-
-        if self.total_labeled_samples > 0 and self.samples_done >= self._warmup_samples:
-            target_total = int(round(self.avg_calls_per_sample * self.total_labeled_samples))
-            target_total = max(target_total, self.calls_done)
-            alpha = 0.2
-            blended = int(round((1.0 - alpha) * self.estimated_total_calls + alpha * target_total))
-            self.estimated_total_calls = max(blended, self.calls_done)
-        else:
-            self.estimated_total_calls = max(self.estimated_total_calls, self.calls_done)
-
-        self.record_call_delta(calls)
-
-    def record_call_delta(self, calls: int):
-        delta = max(int(calls or 0), 0)
-        now = time.time()
-        elapsed = max(now - self._start_time, 1e-6)
-        self._avg_cps = self.calls_done / elapsed
-        self._recent_samples.append((now, delta))
-        cutoff = now - self._recent_window_seconds
-        while self._recent_samples and self._recent_samples[0][0] < cutoff:
-            self._recent_samples.popleft()
-        recent_calls = sum(item_delta for _, item_delta in self._recent_samples)
-        recent_span = max(min(elapsed, self._recent_window_seconds), 1e-6)
-        self._recent_cps = recent_calls / recent_span
-        self._eta_cps = self._effective_eta_cps()
-        self.calls_per_sec = self._eta_cps
-
-    def eta_seconds(self):
-        effective_cps = self.calls_per_sec if self.calls_per_sec > 0 else self._effective_eta_cps()
-        if effective_cps <= 0:
-            return None
-        remaining = max(self.estimated_total_calls - self.calls_done, 0)
-        return remaining / effective_cps
-
-    def info_line(self):
-        rate = f"{self.calls_per_sec:.1f}/s" if self.calls_per_sec > 0 else "warming"
-        eta = self._fmt_duration(self.eta_seconds())
-        avg = f"{self.avg_calls_per_sample:.2f}/sample" if self.samples_done > 0 else "n/a"
-        if self._avg_cps > 0 or self._recent_cps > 0:
-            return (
-                f"eta {eta} • eta_rate {rate} • recent {self._recent_cps:.1f}/s "
-                f"• avg {self._avg_cps:.1f}/s • calls {avg}"
-            )
-        return f"eta {eta} • eta_rate {rate} • calls {avg}"
+from sft_label.llm.progress import RuntimeEtaEstimator  # noqa: F401,E402
 
 
 def _make_pass1_postprocess_job(
@@ -3224,42 +2530,7 @@ class StatsAccumulator:
         return result
 
 
-def _normalize_combo_dim(labels, dim, limit):
-    """Normalize one combo-key dimension into a bounded list of string tags."""
-    value = labels.get(dim)
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    cleaned = sorted({item for item in value if isinstance(item, str) and item})
-    if limit > 0:
-        return cleaned[:limit]
-    return cleaned
-
-
-def _combo_key_from_labels(labels):
-    """Build the richer combo key used by Pass 2 rarity baselines."""
-    parts = []
-    for dim in ("intent", "difficulty", "context"):
-        value = labels.get(dim)
-        if isinstance(value, str) and value:
-            parts.append(f"{dim}={value}")
-
-    for dim, limit in (
-        ("language", 2),
-        ("domain", 2),
-        ("task", 2),
-        ("concept", 3),
-        ("agentic", 2),
-        ("constraint", 2),
-    ):
-        values = _normalize_combo_dim(labels, dim, limit)
-        if values:
-            parts.append(f"{dim}={','.join(values)}")
-
-    if not parts:
-        return None
-    return "|".join(parts)
+from sft_label.combo_utils import _normalize_combo_dim, _combo_key_from_labels  # noqa: E402
 
 
 @dataclass

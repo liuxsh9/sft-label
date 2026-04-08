@@ -66,6 +66,15 @@
   - language-tooling
   - interpreter
 
+- id: competitive-programming
+  name: Competitive Programming
+  category: Domain
+  description: Algorithmic problem solving under contest constraints — ACM-ICPC, Codeforces, LeetCode, TopCoder
+  aliases:
+  - competitive-programming
+  - competitive-coding
+  - contest-programming
+
 - id: compliance
   name: Compliance
   category: Domain

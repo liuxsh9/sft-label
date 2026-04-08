@@ -106,6 +106,14 @@
   - instrumented
   - observable
 
+- id: offline-capable
+  name: Offline Capable
+  category: Constraint
+  description: Must function without network connectivity
+  aliases:
+  - offline
+  - offline-first
+
 - id: pci-dss-compliant
   name: PCI-DSS Compliant
   category: Constraint

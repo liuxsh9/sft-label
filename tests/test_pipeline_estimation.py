@@ -67,7 +67,7 @@ def test_runtime_eta_estimator_adapts_upward():
 
 def test_runtime_eta_estimator_blends_recent_and_average_rate(monkeypatch):
     now = 1000.0
-    monkeypatch.setattr("sft_label.pipeline.time.time", lambda: now)
+    monkeypatch.setattr("sft_label.llm.progress.time.time", lambda: now)
 
     tracker = RuntimeEtaEstimator(total_labeled_samples=200, initial_estimated_calls=200)
     tracker.calls_done = 40
@@ -414,7 +414,7 @@ def test_build_http_client_limits_includes_chunked_output_fd_budget(monkeypatch)
         return 64, 63, True
 
     monkeypatch.setattr(
-        "sft_label.pipeline.resolve_httpx_connection_limits",
+        "sft_label.llm.http.resolve_httpx_connection_limits",
         fake_resolve_httpx_connection_limits,
     )
 

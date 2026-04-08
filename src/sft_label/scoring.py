@@ -53,13 +53,9 @@ from sft_label.preprocessing import (
     detect_thinking_mode, extract_cot_content, truncate_for_scoring,
     count_code_blocks,
 )
-from sft_label.pipeline import (
-    async_llm_call,
-    AsyncRateLimiter,
-    RuntimeEtaEstimator,
-    format_progress_info,
-    parse_run_progress,
-)
+from sft_label.llm.transport import async_llm_call, AsyncRateLimiter
+from sft_label.llm.progress import RuntimeEtaEstimator, format_progress_info, parse_run_progress
+from sft_label.io_utils import _write_json_atomic, _write_jsonl_atomic, _numeric_summary, _message_payload_bytes  # noqa: E501
 from sft_label.progress_heartbeat import run_with_heartbeat
 from sft_label.artifacts import (
     PASS1_STATS_FILE,
@@ -84,7 +80,7 @@ from sft_label.labels import is_partial_labels, is_usable_labels
 from sft_label.label_extensions_stats import aggregate_extension_stats
 from sft_label.http_limits import resolve_httpx_connection_limits
 from sft_label.progress_display import create_pipeline_progress
-from sft_label.score_confidence import apply_score_confidence, score_confidence
+from sft_label.score_confidence import apply_score_confidence, score_confidence, _coerce_unit_float
 from sft_label.scoring_large_run import (
     rewrite_directory_global_selection as _large_run_rewrite_directory_global_selection,
     rewrite_scored_jsonl_selection as _large_run_rewrite_scored_jsonl_selection,
@@ -110,26 +106,16 @@ def _build_http_client_limits(concurrency: int, *, pprint=print) -> httpx.Limits
     )
 
 
-try:
-    from sft_label.llm_runtime import (
-        AdaptiveLLMRuntime,
-        FatalFailureMonitor,
-        OutcomeClass,
-        PipelineAbortError,
-        RequestOutcome,
-        classify_exception,
-        classify_http_result,
-        monitor_to_outcome_class,
-    )
-except Exception:  # pragma: no cover - runtime module lands in parallel task
-    AdaptiveLLMRuntime = None
-    FatalFailureMonitor = None
-    OutcomeClass = None
-    PipelineAbortError = None
-    RequestOutcome = None
-    classify_exception = None
-    classify_http_result = None
-    monitor_to_outcome_class = None
+from sft_label.llm.runtime import (
+    AdaptiveLLMRuntime,
+    FatalFailureMonitor,
+    OutcomeClass,
+    PipelineAbortError,
+    RequestOutcome,
+    classify_exception,
+    classify_http_result,
+    monitor_to_outcome_class,
+)
 
 
 DIRECTORY_JSON_STREAMING_THRESHOLD_BYTES = 64 * 1024 * 1024
@@ -1156,16 +1142,6 @@ def _coerce_positive_int(value):
     return 0
 
 
-def _write_json_atomic(path, payload):
-    """Write JSON via a temp file and atomic replace."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
-
-
 def _write_pass2_stats(output_dir: Path, stats: dict) -> Path:
     stats_path = Path(output_dir) / PASS2_STATS_FILE
     _write_json_atomic(stats_path, {k: v for k, v in stats.items() if k != "_raw_scores"})
@@ -1325,17 +1301,6 @@ def _finalize_chunked_outputs(
     return stats
 
 
-def _write_jsonl_atomic(path, records):
-    """Write JSONL via a temp file and atomic replace."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    os.replace(tmp_path, path)
-
-
 def _resolved_scoring_prompt_budget(config=None):
     """Return effective prompt mode metadata for Pass 2 observability."""
     compact = config.prompt_mode == "compact" if config else False
@@ -1427,15 +1392,6 @@ _RARITY_MULTI_TAG_MAX_BLEND = 0.60
 _SELECTION_CONFIDENCE_FLOOR = 0.25
 _EXTENSION_RARITY_BLEND_WEIGHT = 0.10
 _EXTENSION_RARITY_BONUS_CAP = 0.50
-
-
-def _coerce_unit_float(value, default):
-    """Clamp a possibly-invalid float-like value into [0, 1]."""
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, (int, float)):
-        return max(0.0, min(1.0, float(value)))
-    return default
 
 
 def _dimension_label_confidence(labels, dim, default=_RARITY_DEFAULT_CONFIDENCE):
@@ -1966,17 +1922,7 @@ def _normalize_concepts(labels):
     return sorted([c for c in concepts if isinstance(c, str) and c])
 
 
-def _normalize_combo_dim(labels, dim, limit):
-    """Normalize one combo-key dimension into a bounded list of string tags."""
-    value = labels.get(dim)
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    cleaned = sorted({item for item in value if isinstance(item, str) and item})
-    if limit > 0:
-        return cleaned[:limit]
-    return cleaned
+from sft_label.combo_utils import _normalize_combo_dim, _combo_key_from_labels  # noqa: E402
 
 
 def _legacy_combo_key_from_labels(labels):
@@ -1989,31 +1935,6 @@ def _legacy_combo_key_from_labels(labels):
     if not intent and not difficulty and not concepts:
         return None
     return f"{intent}|{difficulty}|{','.join(concepts)}"
-
-
-def _combo_key_from_labels(labels):
-    """Build a richer combo key for multi-turn/code-SFT rarity."""
-    parts = []
-    for dim in ("intent", "difficulty", "context"):
-        value = labels.get(dim)
-        if isinstance(value, str) and value:
-            parts.append(f"{dim}={value}")
-
-    for dim, limit in (
-        ("language", 2),
-        ("domain", 2),
-        ("task", 2),
-        ("concept", 3),
-        ("agentic", 2),
-        ("constraint", 2),
-    ):
-        values = _normalize_combo_dim(labels, dim, limit)
-        if values:
-            parts.append(f"{dim}={','.join(values)}")
-
-    if not parts:
-        return None
-    return "|".join(parts)
 
 
 def _combo_keys_from_labels(labels):
@@ -3243,25 +3164,6 @@ def _resolve_selective_scoring_policy(config=None):
     if not policy or policy in _DISABLED_SELECTIVE_POLICIES:
         return None
     return policy
-
-
-def _message_payload_bytes(messages):
-    """Return UTF-8 payload size for the full request body."""
-    return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-
-
-def _numeric_summary(values):
-    cleaned = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    if not cleaned:
-        return {}
-    total = sum(cleaned)
-    return {
-        "count": len(cleaned),
-        "sum": round(total, 3),
-        "mean": round(total / len(cleaned), 3),
-        "min": round(min(cleaned), 3),
-        "max": round(max(cleaned), 3),
-    }
 
 
 def _prompt_visible_labels(labels):
