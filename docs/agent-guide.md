@@ -62,6 +62,8 @@ uv run sft-label start --lang en
 uv run sft-label start --lang zh
 ```
 
+For a complete parameter reference mapping interactive prompts to CLI flags, see [CLI Reference](guides/cli-reference.md). Agents and scripts should always use direct CLI subcommands (`run`, `score`, etc.), never `start`.
+
 ### Core pipeline commands
 
 ```bash

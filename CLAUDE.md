@@ -15,3 +15,9 @@ Use that shared guide for:
 - maintenance/update instructions.
 
 Keep project facts in the shared guide rather than duplicating them here.
+
+## Quick references
+
+- CLI complete parameter reference & non-interactive usage: `docs/guides/cli-reference.md`
+  - AI agents / scripts should always use direct CLI (`run`, `score`, etc.), never `start`
+  - All interactive launcher defaults are documented with their CLI flag equivalents

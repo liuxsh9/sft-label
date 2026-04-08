@@ -381,6 +381,7 @@ More copy-paste recipes: [Common workflows](docs/guides/common-workflows.md).
 
 - [Getting started](docs/guides/getting-started.md)
 - [How sft-label works](docs/guides/how-sft-label-works.md)
+- [CLI reference](docs/guides/cli-reference.md)
 - [Pass 1 extension labeling](docs/guides/pass1-extension-labeling.md)
 - [Interactive launcher guide](docs/guides/interactive-launcher.md)
 - [Adaptive LLM runtime](docs/guides/adaptive-llm-runtime.md)
