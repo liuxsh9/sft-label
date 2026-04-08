@@ -84,6 +84,8 @@ uv run sft-label run --input data.json --score --prompt-mode full
 uv run sft-label score --input labeled.json
 ```
 
+For the full parameter reference (all flags, defaults, and non-interactive usage), see [CLI reference](docs/guides/cli-reference.md).
+
 ## Default path: `sft-label start`
 
 `uv run sft-label start` is the recommended default entry point.
