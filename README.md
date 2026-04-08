@@ -4,7 +4,7 @@
 
 `sft-label` is a dataset curation pipeline for code-generation SFT data. It can normalize raw conversations, label each assistant reply with a capability taxonomy, score training value, aggregate multi-turn conversations, filter higher-signal subsets, and generate shareable dashboards.
 
-![Pipeline overview](docs/assets/pipeline-overview-v2.svg)
+![Pipeline overview](docs/assets/pipeline-overview-v3.svg)
 
 ## What it does
 

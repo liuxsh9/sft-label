@@ -4,7 +4,7 @@ English version: [`README.md`](README.md)
 
 `sft-label` 是一个面向代码生成 SFT 数据的整理与标注流水线。它可以把原始对话规范化为可处理样本，为每条 assistant 回复打上能力 taxonomy 标签，评估训练价值，聚合多轮会话，筛选高价值子集，并生成可分享的 dashboard。
 
-![Pipeline overview](docs/assets/pipeline-overview-v2.svg)
+![Pipeline overview](docs/assets/pipeline-overview-v3.svg)
 
 ## 这个项目做什么
 

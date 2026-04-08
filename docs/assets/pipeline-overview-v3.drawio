@@ -1,0 +1,99 @@
+<mxfile host="embed.diagrams.net">
+  <diagram id="OJUiRQbC04lnFJVtIEXC" name="第 1 页">
+    <mxGraphModel dx="1417" dy="803" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=14;fontFamily=Inter,Helvetica,Arial;" value="&lt;b style=&quot;font-size:16px;&quot;&gt;sft-label Pipeline Overview&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666;&quot;&gt;Raw SFT data → labeled, scored, filtered training subsets&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="490" x="155" y="8" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;fontColor=#ffffff;strokeColor=#16213e;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=2;" value="&lt;b&gt;INPUT&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;ShareGPT / Pangu&lt;br&gt;JSON · JSONL&lt;/font&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="30" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f3460;fontColor=#ffffff;strokeColor=#16213e;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;" value="&lt;b&gt;PREPROCESS&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Format detect&lt;br&gt;Multi-turn slice&lt;br&gt;Signal extract&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="120" x="185" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a5276;fontColor=#ffffff;strokeColor=#154360;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;" value="&lt;b&gt;PASS 1 · Tag Labeling&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Intent · Domain · Task&lt;br&gt;Concept · Agentic&lt;br&gt;Tag pool validation&lt;br&gt;Canonicalization&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="145" x="340" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6c3483;fontColor=#ffffff;strokeColor=#5b2c6f;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;" value="&lt;b&gt;PASS 2 · Value Scoring&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Rarity (IDF)&lt;br&gt;Complexity · Quality&lt;br&gt;Reasoning · Flags&lt;br&gt;value_score&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="145" x="520" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="badge1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e74c3c;fontColor=#ffffff;strokeColor=none;fontSize=8;fontStyle=1;arcSize=40;" value="LLM ×2" vertex="1">
+          <mxGeometry height="16" width="48" x="438" y="54" as="geometry" />
+        </mxCell>
+        <mxCell id="badge2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e74c3c;fontColor=#ffffff;strokeColor=none;fontSize=8;fontStyle=1;arcSize=40;" value="LLM ×1" vertex="1">
+          <mxGeometry height="16" width="48" x="618" y="54" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="n1" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;curved=1;" target="n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="n2" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;curved=1;" target="n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="n3" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;curved=1;" target="n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="n4" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;edgeStyle=orthogonalEdgeStyle;curved=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=1;entryDx=0;entryDy=0;" target="sec2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="593" y="160" />
+              <mxPoint x="290" y="160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#117864;fontColor=#ffffff;strokeColor=#0e6655;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;" value="&lt;b&gt;PASS 2.5 · Conv. Agg.&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Group by source_id&lt;br&gt;Position weighting&lt;br&gt;conv_value · conv_sel&lt;/font&gt;" vertex="1">
+          <mxGeometry height="76" width="150" x="185" y="194" as="geometry" />
+        </mxCell>
+        <mxCell id="badge3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#27ae60;fontColor=#ffffff;strokeColor=none;fontSize=8;fontStyle=1;arcSize=40;" value="no LLM" vertex="1">
+          <mxGeometry height="16" width="48" x="288" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1e8449;fontColor=#ffffff;strokeColor=#196f3d;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;" value="&lt;b&gt;PASS 3 · Clustering&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Embedding + SemHash&lt;br&gt;ANN clustering&lt;br&gt;Representative select&lt;/font&gt;" vertex="1">
+          <mxGeometry height="76" width="145" x="370" y="194" as="geometry" />
+        </mxCell>
+        <mxCell id="badge4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f39c12;fontColor=#ffffff;strokeColor=none;fontSize=8;fontStyle=1;arcSize=40;" value="optional" vertex="1">
+          <mxGeometry height="16" width="48" x="468" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1c2833;fontColor=#ffffff;strokeColor=#17202a;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;" value="&lt;b&gt;PASS 4 · Filter &amp;amp; Export&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Threshold filtering&lt;br&gt;Tag include/exclude&lt;br&gt;Training-format export&lt;/font&gt;" vertex="1">
+          <mxGeometry height="76" width="145" x="550" y="194" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="n5" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;curved=1;" target="n6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="n6" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;curved=1;" target="n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="n8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2c3e50;fontColor=#f1c40f;strokeColor=#1a252f;fontSize=11;arcSize=14;verticalAlign=middle;spacingTop=0;strokeWidth=2;" value="&lt;b&gt;OUTPUT&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;labeled.json&lt;br&gt;scored.json&lt;br&gt;conv_scores.json&lt;br&gt;HTML dashboards&lt;/font&gt;" vertex="1">
+          <mxGeometry height="76" width="120" x="730" y="194" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="n7" style="endArrow=classic;html=1;strokeColor=#888888;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;curved=1;" target="n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="sec1" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=9;fontFamily=Inter,Helvetica,Arial;" value="&lt;font style=&quot;font-size:9px;color:#999;&quot;&gt;▸ Data Processing&lt;/font&gt;" vertex="1">
+          <mxGeometry height="14" width="120" x="30" y="52" as="geometry" />
+        </mxCell>
+        <mxCell id="sec2" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=9;fontFamily=Inter,Helvetica,Arial;" value="&lt;font style=&quot;font-size:9px;color:#999;&quot;&gt;▸ Aggregation &amp;amp; Export&lt;/font&gt;" vertex="1">
+          <mxGeometry height="14" width="140" x="185" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="infra_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#dee2e6;arcSize=8;strokeWidth=1;dashed=1;" value="" vertex="1">
+          <mxGeometry height="90" width="820" x="30" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="infra_label" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=9;fontFamily=Inter,Helvetica,Arial;" value="&lt;font style=&quot;font-size:9px;color:#999;&quot;&gt;▸ Infrastructure&lt;/font&gt;" vertex="1">
+          <mxGeometry height="14" width="100" x="40" y="292" as="geometry" />
+        </mxCell>
+        <mxCell id="i1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#dee2e6;fontSize=10;arcSize=12;verticalAlign=middle;" value="&lt;b style=&quot;font-size:10px;&quot;&gt;LLM Runtime&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Adaptive concurrency&lt;br&gt;Circuit breaker · Fatal abort&lt;/font&gt;" vertex="1">
+          <mxGeometry height="56" width="175" x="45" y="312" as="geometry" />
+        </mxCell>
+        <mxCell id="i2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#dee2e6;fontSize=10;arcSize=12;verticalAlign=middle;" value="&lt;b style=&quot;font-size:10px;&quot;&gt;Dashboard Service&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Multi-run static hosting&lt;br&gt;Label + Score dashboards&lt;/font&gt;" vertex="1">
+          <mxGeometry height="56" width="175" x="240" y="312" as="geometry" />
+        </mxCell>
+        <mxCell id="i3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#dee2e6;fontSize=10;arcSize=12;verticalAlign=middle;" value="&lt;b style=&quot;font-size:10px;&quot;&gt;Inline JSONL Mode&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;In-place label &amp;amp; score&lt;br&gt;No separate run dir&lt;/font&gt;" vertex="1">
+          <mxGeometry height="56" width="175" x="435" y="312" as="geometry" />
+        </mxCell>
+        <mxCell id="i4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#dee2e6;fontSize=10;arcSize=12;verticalAlign=middle;" value="&lt;b style=&quot;font-size:10px;&quot;&gt;Label Extensions&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Custom schema fields&lt;br&gt;Extra LLM calls&lt;/font&gt;" vertex="1">
+          <mxGeometry height="56" width="175" x="630" y="312" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
