@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Awaitable, Callable, Mapping
 
+from sft_label.labeling_transcript import render_conversation_for_labeling
 from sft_label.label_extensions_schema import ExtensionSpec, SchemaField, match_extension_specs, spec_hash
 
 ExtensionLLMCaller = Callable[[list[dict], ExtensionSpec], Awaitable[dict]]
@@ -16,6 +17,7 @@ def build_extension_messages(
 ) -> list[dict]:
     """Build a deterministic extension-labeling prompt for one spec."""
 
+    conversation_text = render_conversation_for_labeling(conversation_json)
     schema_payload = {
         field_name: {
             "type": field.field_type,
@@ -25,7 +27,7 @@ def build_extension_messages(
         for field_name, field in spec.schema.items()
     }
     user_content = (
-        f"<conversation>\n{conversation_json}\n</conversation>\n\n"
+        f"<conversation>\n{conversation_text}\n</conversation>\n\n"
         f"<core_labels>\n{json.dumps(dict(core_labels), ensure_ascii=False)}\n</core_labels>\n\n"
         f"<preprocessed_signals>\n{preprocessed_signals}\n</preprocessed_signals>\n\n"
         f"<extension_schema>\n{json.dumps(schema_payload, ensure_ascii=False)}\n</extension_schema>"

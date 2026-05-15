@@ -101,6 +101,8 @@ async def test_build_extension_messages_include_context_and_schema() -> None:
     assert len(messages) == 2
     assert "Label UI samples." in messages[0]["content"]
     assert "<conversation>" in messages[1]["content"]
+    assert '"from": "human"' not in messages[1]["content"]
+    assert "[USER REQUEST]" in messages[1]["content"]
     assert "<core_labels>" in messages[1]["content"]
     assert "component_type" in messages[1]["content"]
     assert "languages: [typescript]" in messages[1]["content"]

@@ -100,6 +100,7 @@ from sft_label.llm.runtime import (
     monitor_to_outcome_class,
 )
 from sft_label.label_extensions import run_label_extensions
+from sft_label.labeling_transcript import render_conversation_for_labeling
 from sft_label.label_extensions_schema import load_extension_specs
 from sft_label.label_extensions_stats import aggregate_extension_stats, merge_extension_stats
 from sft_label.http_limits import estimate_pass1_extra_connections, resolve_httpx_connection_limits
@@ -508,8 +509,9 @@ from sft_label.llm.factory import (  # noqa: F401,E402
 # ─────────────────────────────────────────────────────────
 
 def build_call1_messages(conversation_json, preprocessed_signals, compact=False):
+    conversation_text = render_conversation_for_labeling(conversation_json)
     user_content = f"""<conversation>
-{conversation_json}
+{conversation_text}
 </conversation>
 
 <preprocessed_signals>
@@ -525,8 +527,9 @@ def build_call1_messages(conversation_json, preprocessed_signals, compact=False)
 
 def build_call2_messages(conversation_json, preprocessed_signals, call1_result, compact=False):
     call1_str = json.dumps(call1_result, ensure_ascii=False) if isinstance(call1_result, dict) else str(call1_result)
+    conversation_text = render_conversation_for_labeling(conversation_json)
     user_content = f"""<conversation>
-{conversation_json}
+{conversation_text}
 </conversation>
 
 <call1_result>
@@ -987,6 +990,34 @@ def _annotate_labeling_prompt_stats(stats, config=None):
     return stats
 
 
+def _build_pass1_failure_record(sample, monitor, *, source_file, fallback_index: int):
+    metadata = sample.get("metadata") or {}
+    record = {
+        "sample_id": sample.get("id", f"sample-{fallback_index}"),
+        "source_file": str(source_file),
+        "status": monitor.get("status", "no_result") if monitor else "no_result",
+        "error": monitor.get("error", "") if monitor else "no monitor record",
+        "error_response": (monitor.get("error_response", "")[:1000] if monitor else ""),
+        "attempts": monitor.get("sample_attempt", 0) + 1 if monitor else 0,
+        "error_class": monitor.get("error_class") if monitor else None,
+        "retryable_infra": monitor.get("retryable_infra") if monitor else None,
+        "http_status": monitor.get("http_status") if monitor else None,
+        "runtime_state": monitor.get("runtime_state") if monitor else None,
+        "timeout_stage": monitor.get("timeout_stage") if monitor else None,
+        "llm_calls": monitor.get("llm_calls") if monitor else 0,
+        "total_prompt_tokens": monitor.get("total_prompt_tokens") if monitor else 0,
+        "total_completion_tokens": monitor.get("total_completion_tokens") if monitor else 0,
+        "source_id": metadata.get("source_id"),
+        "conversation_uid": metadata.get("conversation_uid"),
+        "turn_index": metadata.get("turn_index"),
+        "total_turns": metadata.get("total_turns"),
+        "slice_index": metadata.get("slice_index"),
+        "slice_count": metadata.get("slice_count"),
+        "source_turn_count": metadata.get("source_turn_count"),
+    }
+    return {key: value for key, value in record.items() if value is not None}
+
+
 # ─────────────────────────────────────────────────────────
 # Per-sample pipeline (async)
 # ─────────────────────────────────────────────────────────
@@ -1022,6 +1053,12 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
 
     _cached_call1 = None  # Cache successful Call 1 across sample retries
     last_run_info = None
+    timeout_context = {
+        "stage": None,
+        "llm_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+    }
 
     def _remaining_total_timeout() -> float | None:
         if _sample_total_timeout <= 0:
@@ -1029,7 +1066,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
         return _sample_total_timeout - (time.time() - start)
 
     def _build_total_timeout_monitor() -> dict:
-        return {
+        monitor = {
             "sample_id": sample.get("id", f"sample-{sample_idx}"),
             "index": sample_idx,
             "llm_calls": 0,
@@ -1046,6 +1083,20 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
             "retryable_infra": True,
             "elapsed_seconds": round(time.time() - start, 2),
         }
+        if timeout_context.get("stage"):
+            monitor["timeout_stage"] = timeout_context["stage"]
+        monitor["llm_calls"] = int(timeout_context.get("llm_calls") or 0)
+        monitor["total_prompt_tokens"] = int(timeout_context.get("prompt_tokens") or 0)
+        monitor["total_completion_tokens"] = int(timeout_context.get("completion_tokens") or 0)
+        if last_run_info is not None:
+            monitor["last_run_info"] = last_run_info
+        return monitor
+
+    def _record_completed_llm_call(usage: dict | None):
+        timeout_context["llm_calls"] = int(timeout_context.get("llm_calls") or 0) + 1
+        if isinstance(usage, dict):
+            timeout_context["prompt_tokens"] = int(timeout_context.get("prompt_tokens") or 0) + int(usage.get("prompt_tokens", 0) or 0)
+            timeout_context["completion_tokens"] = int(timeout_context.get("completion_tokens") or 0) + int(usage.get("completion_tokens", 0) or 0)
 
     def _record_llm_progress(delta_calls: int):
         nonlocal last_run_info
@@ -1064,6 +1115,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
         return last_run_info
 
     async def _call(stage: str, messages, *, temperature=0.1, max_tokens=1000):
+        timeout_context["stage"] = stage
+
         async def _run_call():
             if runtime is None:
                 async with sem:
@@ -1182,6 +1235,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     return sample_idx, None, monitor
                 call1_result, call1_raw, usage1, outcome1 = await _call("pass1.call1", msgs1)
                 monitor["llm_calls"] += 1
+                _record_completed_llm_call(usage1)
                 _record_llm_progress(1)
                 monitor["total_prompt_tokens"] += usage1.get("prompt_tokens", 0)
                 monitor["total_completion_tokens"] += usage1.get("completion_tokens", 0)
@@ -1211,6 +1265,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                             retry_msgs1,
                         )
                         monitor["llm_calls"] += 1
+                        _record_completed_llm_call(retry_usage)
                         _record_llm_progress(1)
                         monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
                         monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
@@ -1263,6 +1318,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 return sample_idx, None, monitor
             call2_result, call2_raw, usage2, outcome2 = await _call("pass1.call2", msgs2)
             monitor["llm_calls"] += 1
+            _record_completed_llm_call(usage2)
             _record_llm_progress(1)
             monitor["total_prompt_tokens"] += usage2.get("prompt_tokens", 0)
             monitor["total_completion_tokens"] += usage2.get("completion_tokens", 0)
@@ -1289,6 +1345,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                         retry_msgs2,
                     )
                     monitor["llm_calls"] += 1
+                    _record_completed_llm_call(retry_usage)
                     _record_llm_progress(1)
                     monitor["total_prompt_tokens"] += retry_usage.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += retry_usage.get("completion_tokens", 0)
@@ -1362,6 +1419,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 if any(d in call1_dims for d, _ in low_conf):
                     re1, _, u1, _ = await _call("pass1.call1.arb", msgs1, temperature=0.3, max_tokens=1000)
                     monitor["llm_calls"] += 1
+                    _record_completed_llm_call(u1)
                     _record_llm_progress(1)
                     monitor["total_prompt_tokens"] += u1.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += u1.get("completion_tokens", 0)
@@ -1375,6 +1433,7 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                 if any(d in call2_dims for d, _ in low_conf):
                     re2, _, u2, _ = await _call("pass1.call2.arb", msgs2, temperature=0.3, max_tokens=1000)
                     monitor["llm_calls"] += 1
+                    _record_completed_llm_call(u2)
                     _record_llm_progress(1)
                     monitor["total_prompt_tokens"] += u2.get("prompt_tokens", 0)
                     monitor["total_completion_tokens"] += u2.get("completion_tokens", 0)
@@ -1415,6 +1474,8 @@ async def label_one(http_client, sample, model, sample_idx, total, sem, enable_a
                     _record_llm_progress(extension_calls)
                     monitor["total_prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
                     monitor["total_completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+                    for _ in range(extension_calls):
+                        _record_completed_llm_call(usage)
                     if isinstance(payload.get("monitor"), dict):
                         payload["monitor"]["prompt_tokens"] = int(usage.get("prompt_tokens", 0) or 0)
                         payload["monitor"]["completion_tokens"] = int(usage.get("completion_tokens", 0) or 0)
@@ -2091,14 +2152,12 @@ def flush_file_output(collector, run_dir, checkpoint_path, pprint=print, generat
     failure_records = []
     for i in failed_indices:
         m = all_monitors[i]
-        record = {
-            "sample_id": samples[i].get("id", f"sample-{i}"),
-            "source_file": str(collector.abs_path),
-            "status": m["status"] if m else "no_result",
-            "error": (m.get("error", "") if m else "no monitor record"),
-            "error_response": (m.get("error_response", "")[:1000] if m else ""),
-            "attempts": (m.get("sample_attempt", 0) + 1 if m else 0),
-        }
+        record = _build_pass1_failure_record(
+            samples[i],
+            m,
+            source_file=collector.abs_path,
+            fallback_index=i,
+        )
         failure_records.append(record)
     if failure_records:
         failure_log_path = collector.run_failure_log_path or (run_dir / "failures.jsonl")
@@ -2674,18 +2733,12 @@ def _flush_chunk(chunk, out_rows, out_labeled, out_monitor, out_failed, out_unma
         with open(run_failure_log_path, "a", encoding="utf-8") as f:
             for idx, failed in enumerate(merge_result.failed_samples):
                 monitor = failed.get("labeling_monitor") or {}
-                f.write(json.dumps({
-                    "sample_id": failed.get("id", f"sample-{idx}"),
-                    "source_file": str(input_path),
-                    "status": monitor.get("status", "no_result"),
-                    "error": monitor.get("error", ""),
-                    "error_response": monitor.get("error_response", ""),
-                    "attempts": monitor.get("sample_attempt", 0) + 1 if monitor else 0,
-                    "error_class": monitor.get("error_class"),
-                    "retryable_infra": monitor.get("retryable_infra"),
-                    "http_status": monitor.get("http_status"),
-                    "runtime_state": monitor.get("runtime_state"),
-                }, ensure_ascii=False) + "\n")
+                f.write(json.dumps(_build_pass1_failure_record(
+                    failed,
+                    monitor,
+                    source_file=input_path,
+                    fallback_index=idx,
+                ), ensure_ascii=False) + "\n")
 
     # Update stats accumulator
     stats_acc.update(all_labels, all_monitors, inherit_map=chunk.inherit_map, samples=samples)
@@ -3705,18 +3758,12 @@ async def run_one_file(input_path, output_dir, http_client, sem, model,
         with open(failure_log_path, "w", encoding="utf-8") as f:
             for i in failed_indices:
                 m = all_monitors[i]
-                record = {
-                    "sample_id": samples[i].get("id", f"sample-{i}"),
-                    "source_file": str(input_path),
-                    "status": m["status"] if m else "timeout",
-                    "error": (m.get("error", "") if m else "exceeded sample timeout"),
-                    "error_response": (m.get("error_response", "")[:1000] if m else ""),
-                    "attempts": (m.get("sample_attempt", 0) + 1 if m else 0),
-                    "error_class": (m.get("error_class") if m else None),
-                    "retryable_infra": (m.get("retryable_infra") if m else None),
-                    "http_status": (m.get("http_status") if m else None),
-                    "runtime_state": (m.get("runtime_state") if m else None),
-                }
+                record = _build_pass1_failure_record(
+                    samples[i],
+                    m,
+                    source_file=input_path,
+                    fallback_index=i,
+                )
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     # Compute and write stats
