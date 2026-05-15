@@ -503,6 +503,26 @@ class TestNormalizeAndSlice:
         ]
         assert result[0]["metadata"]["original_format"] == "openai_messages"
 
+    def test_messages_reasoning_content_maps_to_cot_metadata_without_polluting_response(self):
+        sample = {
+            "id": "oa-msg-reasoning",
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "reasoning_content": "think step", "content": "final"},
+            ],
+        }
+
+        result = normalize_and_slice(sample)
+
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "final"},
+        ]
+        assert result[0]["metadata"]["thinking_mode"] == "slow"
+        assert result[0]["metadata"]["cot_text"] == "think step"
+        assert result[0]["metadata"]["assistant_cot_by_reply"] == ["think step"]
+
     def test_messages_role_content_multi_turn_normalization(self):
         sample = {
             "id": "oa-msg-multi",
@@ -519,6 +539,63 @@ class TestNormalizeAndSlice:
         assert result[0]["conversations"][0] == {"from": "system", "value": "policy"}
         assert result[1]["conversations"][-1] == {"from": "gpt", "value": "a2"}
         assert all(s["metadata"]["original_format"] == "openai_messages" for s in result)
+
+    def test_messages_reasoning_content_is_attributed_to_matching_multi_turn_slice(self):
+        sample = {
+            "id": "oa-msg-reasoning-multi",
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "reasoning_content": "r1", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "reasoning_content": "r2", "content": "a2"},
+            ],
+        }
+
+        result = normalize_and_slice(sample)
+
+        assert len(result) == 2
+        assert result[0]["conversations"][-1] == {"from": "gpt", "value": "a1"}
+        assert result[0]["metadata"]["thinking_mode"] == "slow"
+        assert result[0]["metadata"]["cot_text"] == "r1"
+        assert result[1]["conversations"][-1] == {"from": "gpt", "value": "a2"}
+        assert result[1]["metadata"]["thinking_mode"] == "slow"
+        assert result[1]["metadata"]["cot_text"] == "r2"
+
+    def test_conversations_role_content_reasoning_content_maps_to_cot_metadata(self):
+        sample = {
+            "id": "oa-conv-reasoning",
+            "conversations": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "reasoning_content": "reason", "content": "a"},
+            ],
+        }
+
+        result = normalize_and_slice(sample)
+
+        assert len(result) == 1
+        assert result[0]["conversations"] == [
+            {"from": "human", "value": "q"},
+            {"from": "gpt", "value": "a"},
+        ]
+        assert result[0]["metadata"]["original_format"] == "openai_conversations"
+        assert result[0]["metadata"]["thinking_mode"] == "slow"
+        assert result[0]["metadata"]["cot_text"] == "reason"
+
+    def test_openai_messages_top_level_tools_map_to_tool_definitions_metadata(self):
+        tools = [{"type": "function", "function": {"name": "lookup"}}]
+        sample = {
+            "id": "oa-msg-tools",
+            "tools": tools,
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+        }
+
+        result = normalize_and_slice(sample)
+
+        assert len(result) == 1
+        assert result[0]["metadata"]["tool_definitions"] == tools
 
     def test_invalid_conversations_can_fall_back_to_valid_non_empty_messages_during_normalization(self):
         sample = {
@@ -973,7 +1050,6 @@ class TestMultiturnRegressionFixtures:
         assert len(slices) == 2
         assert all("assistant_cot_by_reply" not in slice_item["metadata"] for slice_item in slices)
         first_meta = slices[0]["metadata"]
-        second_meta = slices[1]["metadata"]
         assert first_meta["session"] == "cot-test"
 
 

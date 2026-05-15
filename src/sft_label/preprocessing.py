@@ -189,6 +189,58 @@ def _coerce_selected_text(value, *, source_name, turn_index, field_name, source_
     return str(value)
 
 
+def _extract_openai_reasoning_text(
+    turn,
+    role,
+    *,
+    source_name,
+    turn_index,
+    source_file=None,
+    source_row=None,
+):
+    """Return OpenAI-style assistant reasoning sidecar text, when present."""
+    if role != "gpt":
+        return ""
+    for field_name in ("reasoning_content", "thinking_content", "cot_content"):
+        if field_name not in turn:
+            continue
+        text = _coerce_selected_text(
+            turn.get(field_name),
+            source_name=source_name,
+            turn_index=turn_index,
+            field_name=field_name,
+            source_file=source_file,
+            source_row=source_row,
+        ).strip()
+        if text:
+            return text
+    return ""
+
+
+def _append_reasoning_cot(
+    reasoning_cot_by_reply,
+    normalized_turn,
+    turn,
+    *,
+    source_name,
+    turn_index,
+    source_file=None,
+    source_row=None,
+):
+    if normalized_turn.get("from") != "gpt":
+        return
+    reasoning_cot_by_reply.append(
+        _extract_openai_reasoning_text(
+            turn,
+            normalized_turn.get("from"),
+            source_name=source_name,
+            turn_index=turn_index,
+            source_file=source_file,
+            source_row=source_row,
+        )
+    )
+
+
 def _normalize_role_content_turn(
     turn,
     *,
@@ -239,6 +291,7 @@ def _normalize_internal_turn(
 
 def _normalize_conversations_turns(turns, *, source_file=None, source_row=None):
     normalized_turns = []
+    reasoning_cot_by_reply = []
     provenance = None
 
     for idx, turn in enumerate(turns):
@@ -278,13 +331,24 @@ def _normalize_conversations_turns(turns, *, source_file=None, source_row=None):
 
         if provenance is None and turn_source and normalized_turn["from"] and normalized_turn["value"]:
             provenance = turn_source
+        if turn_source == "openai_conversations":
+            _append_reasoning_cot(
+                reasoning_cot_by_reply,
+                normalized_turn,
+                turn,
+                source_name="conversations",
+                turn_index=idx,
+                source_file=source_file,
+                source_row=source_row,
+            )
         normalized_turns.append(normalized_turn)
 
-    return normalized_turns, provenance or "sharegpt"
+    return normalized_turns, provenance or "sharegpt", reasoning_cot_by_reply
 
 
 def _normalize_declared_role_content_turns(source_name, turns, *, source_file=None, source_row=None):
     normalized_turns = []
+    reasoning_cot_by_reply = []
     for idx, turn in enumerate(turns):
         if not isinstance(turn, dict):
             raise _build_invalid_turn_error(
@@ -321,16 +385,24 @@ def _normalize_declared_role_content_turns(source_name, turns, *, source_file=No
                 source_row=source_row,
             )
 
-        normalized_turns.append(
-            _normalize_role_content_turn(
-                turn,
-                source_name=source_name,
-                turn_index=idx,
-                source_file=source_file,
-                source_row=source_row,
-            )
+        normalized_turn = _normalize_role_content_turn(
+            turn,
+            source_name=source_name,
+            turn_index=idx,
+            source_file=source_file,
+            source_row=source_row,
         )
-    return normalized_turns
+        _append_reasoning_cot(
+            reasoning_cot_by_reply,
+            normalized_turn,
+            turn,
+            source_name=source_name,
+            turn_index=idx,
+            source_file=source_file,
+            source_row=source_row,
+        )
+        normalized_turns.append(normalized_turn)
+    return normalized_turns, reasoning_cot_by_reply
 
 
 def _has_semantically_non_empty_turns(normalized_turns):
@@ -363,13 +435,13 @@ def _analyze_turn_source(sample, source_name, *, source_file=None, source_row=No
 
     try:
         if source_name == "conversations":
-            normalized_turns, provenance = _normalize_conversations_turns(
+            normalized_turns, provenance, reasoning_cot_by_reply = _normalize_conversations_turns(
                 raw_turns,
                 source_file=source_file,
                 source_row=source_row,
             )
         else:
-            normalized_turns = _normalize_declared_role_content_turns(
+            normalized_turns, reasoning_cot_by_reply = _normalize_declared_role_content_turns(
                 source_name,
                 raw_turns,
                 source_file=source_file,
@@ -391,6 +463,7 @@ def _analyze_turn_source(sample, source_name, *, source_file=None, source_row=No
         "legal": True,
         "non_empty": _has_semantically_non_empty_turns(normalized_turns),
         "normalized_turns": normalized_turns,
+        "reasoning_cot_by_reply": reasoning_cot_by_reply,
     }
 
 
@@ -412,6 +485,7 @@ def _resolve_turn_source_and_provenance(sample, *, source_file=None, source_row=
             "routing_format": non_empty_legal["routing_format"],
             "provenance": non_empty_legal["provenance"],
             "normalized_turns": non_empty_legal["normalized_turns"],
+            "reasoning_cot_by_reply": non_empty_legal.get("reasoning_cot_by_reply", []),
         }
 
     first_legal_empty = next(
@@ -430,6 +504,7 @@ def _resolve_turn_source_and_provenance(sample, *, source_file=None, source_row=
             "routing_format": legal_empty_item["routing_format"],
             "provenance": legal_empty_item["provenance"],
             "normalized_turns": legal_empty_item["normalized_turns"],
+            "reasoning_cot_by_reply": legal_empty_item.get("reasoning_cot_by_reply", []),
         }
 
     first_illegal = next((item for item in analyses if not item["legal"]), None)
@@ -440,6 +515,7 @@ def _resolve_turn_source_and_provenance(sample, *, source_file=None, source_row=
         "routing_format": "unknown",
         "provenance": None,
         "normalized_turns": [],
+        "reasoning_cot_by_reply": [],
     }
 
 
@@ -453,6 +529,11 @@ def _normalize_non_pangu_sample(sample, resolved):
     metadata = dict(sample.get("metadata") or {})
     if resolved.get("provenance"):
         metadata["original_format"] = resolved["provenance"]
+    if "tools" in sample and "tool_definitions" not in metadata:
+        metadata["tool_definitions"] = sample.get("tools")
+    reasoning_cot_by_reply = list(resolved.get("reasoning_cot_by_reply") or [])
+    if any(reasoning_cot_by_reply):
+        metadata["_openai_reasoning_cot_by_reply"] = reasoning_cot_by_reply
     normalized["metadata"] = metadata
     return normalized
 
@@ -478,8 +559,23 @@ def _apply_non_pangu_cot_semantics(normalized):
         if turn.get("value"):
             turn["value"] = strip_cot(turn["value"])
 
+    sidecar_cot = list((normalized.get("metadata") or {}).pop("_openai_reasoning_cot_by_reply", []) or [])
+    if sidecar_cot:
+        reply_count = len(reply_cot)
+        if len(sidecar_cot) > reply_count:
+            reply_cot.extend([""] * (len(sidecar_cot) - reply_count))
+        for idx, cot_text in enumerate(sidecar_cot):
+            if not cot_text:
+                continue
+            existing = reply_cot[idx] if idx < len(reply_cot) else ""
+            reply_cot[idx] = "\n\n".join(part for part in (existing, cot_text) if part)
+
     if reply_cot:
         normalized.setdefault("metadata", {})["assistant_cot_by_reply"] = reply_cot
+    cot_parts = [cot for cot in reply_cot if cot]
+    if cot_parts:
+        normalized.setdefault("metadata", {})["thinking_mode"] = "slow"
+        normalized["metadata"]["cot_text"] = "\n\n".join(cot_parts)
 
     return normalized
 
